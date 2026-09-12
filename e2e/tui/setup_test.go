@@ -86,7 +86,7 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	if gen := rt.TitleGenerator(ctx); gen != nil {
 		appOpts = append(appOpts, app.WithTitleGenerator(gen))
 	}
-	application := app.New(ctx, rt, session.New(), appOpts...)
+	application := app.New(ctx, rt, session.New(), runtime.SessionBinding{}, append([]app.Opt{app.WithRuntimeServices(rt)}, appOpts...)...)
 
 	wd, _ := os.Getwd()
 	model := tui.New(ctx, nil /* no spawner: single tab */, application, wd, func() {}, tuiOpts...)

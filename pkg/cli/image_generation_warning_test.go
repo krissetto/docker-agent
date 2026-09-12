@@ -23,7 +23,7 @@ func TestImageGenerationWarningPreservesTextAndPrintsAfterIt(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, session.New(), []string{"draw an image"})
+	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, cliSessions{rt}, session.New(), []string{"draw an image"})
 	assert.NilError(t, err)
 
 	output := buf.String()

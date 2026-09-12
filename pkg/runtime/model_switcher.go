@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 // ModelChoice represents a model available for selection in the model picker.
@@ -180,15 +181,57 @@ type ModelSwitcherConfig struct {
 	ModelsStore ModelStore
 }
 
-// SetAgentModel implements [Runtime.SetAgentModel] for LocalRuntime.
-func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef string) error {
-	_, err := r.setAgentModelInternal(ctx, agentName, modelRef)
-	return err
+// resolveSessionModelBinding computes the model binding a session runs
+// with: the explicit ref when given, otherwise the session's stored override
+// for its agent; the providers are resolved through the model switcher when
+// one is configured and fall back to the agent's configured models. It is the
+// single resolution rule shared by session creation, lazy initialization and
+// restore, so all three publish identical bindings.
+func (r *LocalRuntime) resolveSessionModelBinding(ctx context.Context, sess *session.Session, modelRef string) (string, []provider.Provider, error) {
+	if modelRef == "" {
+		modelRef = sess.AgentModelOverrides[sess.AgentName]
+	}
+	if modelRef != "" && r.SupportsModelSwitching() {
+		providers, err := r.resolveModelProviders(ctx, sess.AgentName, modelRef)
+		if err != nil {
+			return "", nil, err
+		}
+		return modelRef, providers, nil
+	}
+	a, err := r.team.Agent(sess.AgentName)
+	if err != nil {
+		return "", nil, err
+	}
+	return modelRef, a.ConfiguredModels(), nil
+}
+
+func (r *LocalRuntime) resolveModelProviders(ctx context.Context, agentName, modelRef string) ([]provider.Provider, error) {
+	if r.modelSwitcherCfg == nil {
+		return nil, ErrUnsupported
+	}
+	if modelRef == "" {
+		a, err := r.team.Agent(agentName)
+		if err != nil {
+			return nil, err
+		}
+		return a.ConfiguredModels(), nil
+	}
+	if cfg, ok := r.modelSwitcherCfg.Models[modelRef]; ok && isAlloyModelConfig(cfg) {
+		return r.resolveModelRefs(ctx, cfg.Model)
+	}
+	if isInlineAlloySpec(modelRef) {
+		return r.resolveModelRefs(ctx, modelRef)
+	}
+	p, err := r.resolveModelRef(ctx, modelRef)
+	if err != nil {
+		return nil, err
+	}
+	return []provider.Provider{p}, nil
 }
 
 // SupportsModelSwitching reports whether the runtime was built with a
-// [ModelSwitcherConfig], i.e. whether [SetAgentModel] / [AvailableModels]
-// will return real data instead of the no-config empty path.
+// [ModelSwitcherConfig], i.e. whether sessions can list and change
+// models instead of hitting the no-config empty path.
 func (r *LocalRuntime) SupportsModelSwitching() bool {
 	return r.modelSwitcherCfg != nil
 }
@@ -197,39 +240,21 @@ func (r *LocalRuntime) SupportsModelSwitching() bool {
 // the model picker, bypassing the store's refresh interval. It returns
 // [ErrUnsupported] when the runtime's model store cannot refresh (e.g. an
 // in-memory test store).
+type modelCatalogRefresher interface {
+	Refresh(ctx context.Context) error
+}
+
+func modelStoreCanRefresh(store ModelStore) bool {
+	_, ok := store.(modelCatalogRefresher)
+	return ok
+}
+
 func (r *LocalRuntime) RefreshModelsCatalog(ctx context.Context) error {
-	refresher, ok := r.modelsStore.(interface {
-		Refresh(ctx context.Context) error
-	})
+	refresher, ok := r.modelsStore.(modelCatalogRefresher)
 	if !ok {
 		return ErrUnsupported
 	}
 	return refresher.Refresh(ctx)
-}
-
-// CycleAgentThinkingLevel implements [Runtime.CycleAgentThinkingLevel] for
-// LocalRuntime. It reads the agent's current effective model, advances the
-// thinking-effort level by one step through the levels that specific model
-// supports (see [modelinfo.SupportedThinkingLevels]), re-creates the
-// provider(s) with the new level, and installs them as a runtime override.
-func (r *LocalRuntime) CycleAgentThinkingLevel(ctx context.Context, agentName string) (effort.Level, error) {
-	return r.applyAgentThinkingLevel(ctx, agentName, func(supported []effort.Level, current effort.Level) (effort.Level, error) {
-		// Clamp first so a configured level the model does not support re-enters
-		// the cycle at the nearest supported tier instead of resetting it.
-		return effort.NextSupportedLevel(supported, effort.Clamp(supported, current)), nil
-	})
-}
-
-// SetAgentThinkingLevel implements [Runtime.SetAgentThinkingLevel] for
-// LocalRuntime. The requested level must be one the agent's current model
-// supports; otherwise an error listing the supported levels is returned.
-func (r *LocalRuntime) SetAgentThinkingLevel(ctx context.Context, agentName string, level effort.Level) (effort.Level, error) {
-	return r.applyAgentThinkingLevel(ctx, agentName, func(supported []effort.Level, _ effort.Level) (effort.Level, error) {
-		if !slices.Contains(supported, level) {
-			return "", fmt.Errorf("thinking level %q is not supported by this model (supported: %s)", level, levelNames(supported))
-		}
-		return level, nil
-	})
 }
 
 // levelNames renders levels as a comma-separated list for error messages.
@@ -244,10 +269,10 @@ func levelNames(levels []effort.Level) string {
 // resolveThinkingLevelsForModels returns the thinking-effort levels
 // supported by models[0] (the agent's primary effective model) plus its
 // currently active level. It is the pure resolution step shared by
-// resolveAgentThinkingLevels (the read-only getter path, which snapshots
-// EffectiveModels itself) and applyAgentThinkingLevel (the setter path,
-// which must reuse the exact same snapshot it later re-creates providers
-// from — see resolveAgentThinkingLevels for why that sharing matters).
+// resolveAgentThinkingLevels (the read-only getter path) and the session
+// session's thinking-level setter (which must reuse the exact same snapshot it
+// later re-creates providers from — see resolveAgentThinkingLevels for why
+// that sharing matters).
 func (r *LocalRuntime) resolveThinkingLevelsForModels(ctx context.Context, models []provider.Provider) ([]effort.Level, effort.Level, error) {
 	if len(models) == 0 {
 		return nil, "", errors.New("agent has no model configured")
@@ -263,17 +288,16 @@ func (r *LocalRuntime) resolveThinkingLevelsForModels(ctx context.Context, model
 
 // resolveAgentThinkingLevels resolves agentName's current effective model
 // and returns the thinking-effort levels it supports plus its currently
-// active level. This is the single source of truth shared by
-// applyAgentThinkingLevel (which validates a pick against it) and
-// CurrentAgentThinkingLevels (which exposes it read-only for /effort
-// argument completion), so a level offered by one can never be rejected by
+// active level. It backs CurrentAgentThinkingLevels (read-only, for /effort
+// argument completion) and shares resolveThinkingLevelsForModels with the
+// session's setter, so a level offered by one can never be rejected by
 // the other (#3731).
 //
-// It is read-only, so a single EffectiveModels snapshot is correct here.
-// applyAgentThinkingLevel must NOT call this: it needs the same snapshot
-// for both resolution and provider recreation (a second, later
-// EffectiveModels() call could race a concurrent /model change or scoped
-// override and validate against one model while applying to another).
+// It is read-only, so a single EffectiveModels snapshot is correct here. The
+// setter must NOT call this: it needs the same snapshot for both resolution
+// and provider recreation (a second, later snapshot could race a concurrent
+// /model change or scoped override and validate against one model while
+// applying to another).
 func (r *LocalRuntime) resolveAgentThinkingLevels(ctx context.Context, agentName string) ([]effort.Level, effort.Level, error) {
 	if r.modelSwitcherCfg == nil {
 		return nil, "", ErrUnsupported
@@ -284,7 +308,7 @@ func (r *LocalRuntime) resolveAgentThinkingLevels(ctx context.Context, agentName
 		return nil, "", fmt.Errorf("agent not found: %w", err)
 	}
 
-	return r.resolveThinkingLevelsForModels(ctx, a.EffectiveModels())
+	return r.resolveThinkingLevelsForModels(ctx, a.EffectiveModels(ctx))
 }
 
 // CurrentAgentThinkingLevels returns the thinking-effort levels the current
@@ -292,65 +316,14 @@ func (r *LocalRuntime) resolveAgentThinkingLevels(ctx context.Context, agentName
 // switcher configured, the agent/model can't be resolved, or the model does
 // not support thinking at all. Backs the /effort argument completer
 // (#3731): candidates must come from this resolution, not the static effort
-// vocabulary, because SetAgentThinkingLevel hard-rejects any level outside
-// it.
+// vocabulary, because the thinking-level setter hard-rejects any level
+// outside it.
 func (r *LocalRuntime) CurrentAgentThinkingLevels(ctx context.Context) []effort.Level {
 	supported, _, err := r.resolveAgentThinkingLevels(ctx, r.currentAgentName())
 	if err != nil {
 		return nil
 	}
 	return supported
-}
-
-// applyAgentThinkingLevel resolves the agent's current model, asks pick to
-// choose the target level among the model's supported ones, re-creates the
-// effective provider(s) with that level, and installs them as a runtime
-// override.
-//
-// It snapshots EffectiveModels exactly once and reuses that same snapshot
-// for both capability resolution and provider recreation. Taking a second,
-// later snapshot would let a concurrent /model change or scoped override
-// land in between: the level would be validated against one model but
-// applied to another, and — if the second snapshot came back empty — the
-// override could be silently cleared while still reporting success.
-func (r *LocalRuntime) applyAgentThinkingLevel(ctx context.Context, agentName string, pick func(supported []effort.Level, current effort.Level) (effort.Level, error)) (effort.Level, error) {
-	if r.modelSwitcherCfg == nil {
-		return "", ErrUnsupported
-	}
-
-	a, err := r.team.Agent(agentName)
-	if err != nil {
-		return "", fmt.Errorf("agent not found: %w", err)
-	}
-
-	models := a.EffectiveModels()
-	supported, current, err := r.resolveThinkingLevelsForModels(ctx, models)
-	if err != nil {
-		return "", err
-	}
-
-	next, err := pick(supported, current)
-	if err != nil {
-		return "", err
-	}
-
-	// Re-create each effective provider (alloy models can have several) with
-	// the new thinking level so the override preserves the existing pool.
-	newProviders := make([]provider.Provider, 0, len(models))
-	for _, m := range models {
-		mc := m.BaseConfig().ModelConfig
-		cfg := mc.Clone()
-		cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: string(next)}
-		prov, err := r.createProviderFromConfig(ctx, cfg)
-		if err != nil {
-			return "", fmt.Errorf("failed to apply thinking level: %w", err)
-		}
-		newProviders = append(newProviders, prov)
-	}
-
-	a.SetModelOverride(newProviders...)
-	slog.InfoContext(ctx, "Set agent thinking level", "agent", agentName, "level", next)
-	return next, nil
 }
 
 // modelSupportsThinking reports whether cfg names a model that accepts a
@@ -391,74 +364,34 @@ func currentThinkingLevel(cfg *latest.ModelConfig) effort.Level {
 	return effort.None
 }
 
-// setAgentModelInternal applies modelRef as the agent's model override and
-// returns a snapshot of the value that was just stored. The snapshot is
+// setAgentModelInternal applies modelRef as the shared agent's model override
+// and returns a snapshot of the value that was just stored. The snapshot is
 // captured atomically with the store (it is the pointer returned by
 // SetModelOverride itself), so there is no window where another caller
 // could intervene and the snapshot would refer to a different value.
 //
-// SetAgentModel is a thin wrapper that discards the snapshot; callers that
-// want to do a CAS-based restore (see WithAgentModel) use this method
-// directly to keep the snapshot.
+// This is the runtime-global override used for scoped per-toolset models
+// (see WithAgentModel); user-facing model changes are session-scoped and go
+// through the session instead.
 func (r *LocalRuntime) setAgentModelInternal(ctx context.Context, agentName, modelRef string) (agent.ModelOverrideSnapshot, error) {
 	if r.modelSwitcherCfg == nil {
-		return agent.ModelOverrideSnapshot{}, errors.New("model switching not configured for this runtime")
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("model switching not configured for this runtime: %w", ErrUnsupported)
 	}
-
 	a, err := r.team.Agent(agentName)
 	if err != nil {
 		return agent.ModelOverrideSnapshot{}, fmt.Errorf("agent not found: %w", err)
 	}
-
-	// Empty modelRef means clear the override (use agent's default)
 	if modelRef == "" {
 		snap := a.SetModelOverride()
 		slog.InfoContext(ctx, "Cleared agent model override (using default)", "agent", agentName)
 		return snap, nil
 	}
-
-	// Check if modelRef is a named model from config
-	if modelConfig, exists := r.modelSwitcherCfg.Models[modelRef]; exists {
-		modelConfig.Name = modelRef
-		// Check if this is an alloy model (no provider, comma-separated models)
-		if isAlloyModelConfig(modelConfig) {
-			providers, err := r.resolveModelRefs(ctx, modelConfig.Model)
-			if err != nil {
-				return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create alloy model from config: %w", err)
-			}
-			snap := a.SetModelOverride(providers...)
-			slog.InfoContext(ctx, "Set agent model override (alloy)", "agent", agentName, "config_name", modelRef, "model_count", len(providers))
-			return snap, nil
-		}
-
-		prov, err := r.createProviderFromConfig(ctx, &modelConfig)
-		if err != nil {
-			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create model from config: %w", err)
-		}
-		snap := a.SetModelOverride(prov)
-		slog.InfoContext(ctx, "Set agent model override", "agent", agentName, "model", prov.ID().String(), "config_name", modelRef)
-		return snap, nil
-	}
-
-	// Check if this is an inline alloy spec (comma-separated provider/model specs)
-	// e.g., "openai/gpt-4o,anthropic/claude-sonnet-4-0"
-	if isInlineAlloySpec(modelRef) {
-		providers, err := r.resolveModelRefs(ctx, modelRef)
-		if err != nil {
-			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create inline alloy model: %w", err)
-		}
-		snap := a.SetModelOverride(providers...)
-		slog.InfoContext(ctx, "Set agent model override (inline alloy)", "agent", agentName, "model_count", len(providers))
-		return snap, nil
-	}
-
-	// Try single inline spec (provider/model)
-	prov, err := r.resolveModelRef(ctx, modelRef)
+	providers, err := r.resolveModelProviders(ctx, agentName, modelRef)
 	if err != nil {
-		return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to resolve model %q: %w", modelRef, err)
+		return agent.ModelOverrideSnapshot{}, err
 	}
-	snap := a.SetModelOverride(prov)
-	slog.InfoContext(ctx, "Set agent model override (inline)", "agent", agentName, "model", prov.ID().String())
+	snap := a.SetModelOverride(providers...)
+	slog.InfoContext(ctx, "Set agent model override", "agent", agentName, "model", modelRef, "model_count", len(providers))
 	return snap, nil
 }
 
@@ -584,8 +517,7 @@ func (r *LocalRuntime) resolveModelRefs(ctx context.Context, commaSeparatedRefs 
 	return providers, nil
 }
 
-// AvailableModels implements [Runtime.AvailableModels] for LocalRuntime.
-func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
+func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []ModelChoice {
 	start := time.Now()
 	if r.modelSwitcherCfg == nil {
 		slog.DebugContext(ctx, "Runtime available models skipped; model switching not configured", "duration", time.Since(start))
@@ -595,7 +527,7 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 	// Get the current agent's default model reference
 	currentAgentDefault := ""
 	if r.modelSwitcherCfg.AgentDefaultModels != nil {
-		currentAgentDefault = r.modelSwitcherCfg.AgentDefaultModels[r.currentAgentName()]
+		currentAgentDefault = r.modelSwitcherCfg.AgentDefaultModels[agentName]
 	}
 
 	var choices []ModelChoice
@@ -661,9 +593,13 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 	dmrDuration := time.Since(dmrStart)
 	choices = append(choices, dmrChoices...)
 
-	// Append models.dev catalog entries filtered by available credentials
+	// Append models.dev catalog entries filtered by available credentials.
+	// A directly constructed runtime may intentionally omit a catalog store.
 	catalogStart := time.Now()
-	catalogChoices := r.buildCatalogChoices(ctx)
+	var catalogChoices []ModelChoice
+	if r.modelsStore != nil {
+		catalogChoices = r.buildCatalogChoices(ctx)
+	}
 	catalogDuration := time.Since(catalogStart)
 	choices = append(choices, catalogChoices...)
 

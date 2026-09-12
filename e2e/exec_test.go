@@ -1,9 +1,19 @@
 package e2e_test
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 func TestExec_OpenAI(t *testing.T) {
@@ -133,8 +143,54 @@ func TestExec_Mistral_ToolCall(t *testing.T) {
 }
 
 func TestExec_ToolCallsNeedAcceptance(t *testing.T) {
-	t.Parallel()
-	out := runCLI(t, "run", "--exec", "testdata/file_writer.yaml", "Create a hello.txt file with \"Hello, World!\" content. Try only once. On error, exit without further message.")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 
-	require.Contains(t, out, `Can I run this tool? ([y]es/[b]alanced/[a]ll/[n]o)`)
+	agentSource, err := sources.Resolve("testdata/file_writer.yaml", nil)
+	require.NoError(t, err)
+	_, runConfig := startRecordingAIProxy(t)
+	workingDir := t.TempDir()
+	runConfig.WorkingDir = workingDir
+	loadedTeam, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
+	require.NoError(t, err)
+
+	rt, err := runtime.New(ctx, loadedTeam, runtime.WithWorkingDir(workingDir))
+	require.NoError(t, err)
+	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, supervisor.Shutdown(context.WithoutCancel(t.Context()))) })
+
+	sess := session.New(session.WithAgentName("root"), session.WithWorkingDir(workingDir))
+	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
+
+	submission, err := handle.Submit(ctx, runtime.TurnInput{Content: `Create a hello.txt file with "Hello, World!" content. Try only once. On error, exit without further message.`})
+	require.NoError(t, err)
+
+	var confirmation *runtime.ToolCallConfirmationEvent
+	for envelope := range observation.Events {
+		if envelope.TurnID != submission.TurnID {
+			continue
+		}
+		switch event := envelope.Event.(type) {
+		case *runtime.ToolCallConfirmationEvent:
+			confirmation = event
+			require.Equal(t, sess.ID, event.SessionID)
+			require.NotEmpty(t, event.RequestID)
+			require.NoError(t, handle.Respond(ctx, runtime.InteractionResponse{
+				InteractionID: event.RequestID,
+				Kind:          runtime.InteractionConfirmation,
+				Resume:        runtime.ResumeApprove(),
+			}))
+		case *runtime.StreamStoppedEvent:
+			require.NotNil(t, confirmation, "run stopped before requesting tool confirmation")
+			content, readErr := os.ReadFile(filepath.Join(workingDir, "hello.txt"))
+			require.NoError(t, readErr, "approved tool call must write the file")
+			require.Equal(t, "Hello, World!", string(content))
+			return
+		}
+	}
+	t.Fatal("session observation closed before the submitted run stopped")
 }

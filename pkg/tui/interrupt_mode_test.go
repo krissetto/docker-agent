@@ -30,7 +30,7 @@ func buildPageFromOpts(t *testing.T, m *appModel) chat.Page {
 	t.Helper()
 	sess := session.New()
 	page := chat.New(animation.NewRuntime(), t.Context(),
-		app.New(t.Context(), stubRuntime{}, sess), service.NewSessionState(sess), m.chatPageOpts()...)
+		app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), service.NewSessionState(sess), m.chatPageOpts()...)
 	_, _ = page.Update(runtime.StreamStarted(sess.ID, "root"))
 	t.Cleanup(func() { _, _ = page.Update(messages.StreamCancelledMsg{}) })
 	return page
@@ -163,7 +163,7 @@ func TestNew_AppliesPersistedInterruptModeAtStartup(t *testing.T) {
 			}))
 
 			sess := session.New()
-			m := New(t.Context(), nil, app.New(t.Context(), stubRuntime{}, sess), dir, func() {}).(*appModel)
+			m := New(t.Context(), nil, app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), dir, func() {}).(*appModel)
 			t.Cleanup(m.cleanupManagedResources)
 
 			assert.Equal(t, tt.want, m.interruptMode)

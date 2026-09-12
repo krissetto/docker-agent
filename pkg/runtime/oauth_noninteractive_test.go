@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -75,7 +76,7 @@ func TestRunStream_NonInteractiveSessionDisablesInteractivePrompts(t *testing.T)
 		}
 		sess := session.New(opts...)
 		sess.Title = "Unit Test"
-		for range rt.RunStream(t.Context(), sess) {
+		for range rt.runExecution(t.Context(), sess) {
 		}
 		return probe
 	}
@@ -158,6 +159,13 @@ func (s *oauthGateToolSet) release() {
 	default:
 		close(s.released)
 	}
+}
+
+func TestNonInteractiveSessionDeclinesElicitation(t *testing.T) {
+	rt := &LocalRuntime{}
+	result, err := rt.elicitationHandler(withNonInteractiveSession(t.Context()), &mcp.ElicitParams{Message: "question"})
+	require.NoError(t, err)
+	assert.Equal(t, tools.ElicitationActionDecline, result.Action)
 }
 
 // TestRunAgent_BackgroundOAuthMCP_FailsFastAndNotifiesModel is the regression

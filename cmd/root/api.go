@@ -2,6 +2,7 @@ package root
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,12 +11,15 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
 
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/profiling"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -28,6 +32,7 @@ type apiFlags struct {
 	fakeResponses         string
 	recordPath            string
 	authToken             string
+	corsOrigin            string
 	pprofAddr             string
 	maxRequestSize        int64
 	sessionWorkingDirRoot string
@@ -50,6 +55,7 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().StringVar(&flags.recordPath, "record", "", "Record AI API interactions to cassette file")
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
+	cmd.PersistentFlags().StringVar(&flags.corsOrigin, "cors-origin", "", "Exact browser origin allowed to call the API (empty disables CORS)")
 	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB). Requests exceeding this limit are rejected with HTTP 413.")
 	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
 	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
@@ -73,11 +79,15 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	if err := validateSessionWorkingDirRoot(f.sessionWorkingDirRoot); err != nil {
 		return err
 	}
+	if f.corsOrigin != "" {
+		if err := server.ValidateCORSOrigin(f.corsOrigin); err != nil {
+			return fmt.Errorf("invalid --cors-origin: %w", err)
+		}
+	}
 
 	// Make sure no question is ever asked to the user in api mode.
 	os.Stdin = nil
 
-	// Start fake proxy if --fake is specified
 	cleanup, err := setupFakeProxy(ctx, f.fakeResponses, 0, &f.runConfig)
 	if err != nil {
 		return err
@@ -116,7 +126,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	defer lnCleanup()
 
 	out.Println("Listening on", ln.Addr().String())
-	warnIfNotLoopback(out, ln.Addr())
+	if f.authToken == "" {
+		warnIfNotLoopback(out, ln.Addr())
+	}
 
 	slog.DebugContext(ctx, "Starting server", "agents", agentsPath, "addr", ln.Addr().String())
 
@@ -141,8 +153,17 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		return fmt.Errorf("resolving agent sources: %w", err)
 	}
 
-	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, agentSources, f.authToken, f.maxRequestSize,
-		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
+	// Session runtimes are built by the server on demand — per source, per
+	// session working directory, and again after a source refresh — and shut
+	// down with it. Nothing is loaded before the first session needs it.
+	serverOpts := []server.SessionManagerOpt{
+		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
+		server.WithSessionRuntimeFactory(func(ctx context.Context, source config.Source, workingDir string) (runtime.SessionRuntimeSupervisor, error) {
+			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
+		}),
+	}
+
+	s, err := server.NewWithCORS(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, agentSources, f.authToken, f.maxRequestSize, f.corsOrigin, serverOpts...)
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
 	}

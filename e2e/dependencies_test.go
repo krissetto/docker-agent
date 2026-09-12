@@ -213,7 +213,7 @@ func listImports(t *testing.T, pkg string) map[string]bool {
 
 	fileSet := token.NewFileSet()
 	err := filepath.WalkDir(pkg, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !strings.HasSuffix(path, ".go") || d.IsDir() {
+		if err != nil || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || d.IsDir() {
 			return err
 		}
 

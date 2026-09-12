@@ -23,6 +23,20 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
+func TestReplaceTabUpdatesIdentityWorkingDirAndActiveAtomically(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	require.NoError(t, store.AddTab(ctx, "old", "/old"))
+	require.NoError(t, store.SetActiveTab(ctx, "old"))
+	require.NoError(t, store.ReplaceTab(ctx, "old", "new", "/new"))
+	tabs, active, err := store.GetTabs(ctx)
+	require.NoError(t, err)
+	require.Len(t, tabs, 1)
+	assert.Equal(t, "new", tabs[0].SessionID)
+	assert.Equal(t, "/new", tabs[0].WorkingDir)
+	assert.Equal(t, "new", active)
+}
+
 func TestAddAndGetTabs(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

@@ -47,13 +47,15 @@ func TestReplayPendingEvent_RestoresStashedDialog(t *testing.T) {
 	// has a real runner to read from.
 	m, _ := newTestModel(t)
 	m.supervisor = supervisor.New(nil)
-	require.NotEmpty(t, m.supervisor.AddSession(
+	addedID, err := m.supervisor.AddSession(
 		t.Context(),
 		nil,
 		&session.Session{ID: sessionID},
 		"/tmp",
 		nil,
-	))
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, addedID)
 	m.sessionStates[sessionID] = service.NewSessionState(&session.Session{ID: sessionID})
 
 	// Simulate the pre-conditions of a tab-switch-while-dialog-open:
@@ -98,13 +100,14 @@ func TestReplayPendingEvent_DiscardsStaleStash(t *testing.T) {
 
 	m, _ := newTestModel(t)
 	m.supervisor = supervisor.New(nil)
-	m.supervisor.AddSession(
+	_, err := m.supervisor.AddSession(
 		t.Context(),
 		nil,
 		&session.Session{ID: sessionID},
 		"/tmp",
 		nil,
 	)
+	require.NoError(t, err)
 	m.sessionStates[sessionID] = service.NewSessionState(&session.Session{ID: sessionID})
 
 	// Original event the user was answering when they left the tab.
@@ -150,13 +153,14 @@ func TestReplayPendingEvent_NoPendingEvent_ClearsStash(t *testing.T) {
 
 	m, _ := newTestModel(t)
 	m.supervisor = supervisor.New(nil)
-	m.supervisor.AddSession(
+	_, err := m.supervisor.AddSession(
 		t.Context(),
 		nil,
 		&session.Session{ID: sessionID},
 		"/tmp",
 		nil,
 	)
+	require.NoError(t, err)
 	m.sessionStates[sessionID] = service.NewSessionState(&session.Session{ID: sessionID})
 
 	// Stash exists but the supervisor has no pending event (e.g. the stream
@@ -203,7 +207,7 @@ func drainInOrder(t *testing.T, cmd tea.Cmd) []tea.Msg {
 		v := reflect.ValueOf(msg)
 		var out []tea.Msg
 		for i := range v.Len() {
-			sub, _ := v.Index(i).Interface().(tea.Cmd)
+			sub, _ := reflect.TypeAssert[tea.Cmd](v.Index(i))
 			out = append(out, drainInOrder(t, sub)...)
 		}
 		return out
@@ -230,7 +234,8 @@ func TestReplayPendingEvent_ReplaysConcurrentElicitationsInFIFOOrder(t *testing.
 
 	m, _ := newTestModel(t)
 	m.supervisor = supervisor.New(nil)
-	m.supervisor.AddSession(t.Context(), nil, &session.Session{ID: sessionID}, "/tmp", nil)
+	_, err := m.supervisor.AddSession(t.Context(), nil, &session.Session{ID: sessionID}, "/tmp", nil)
+	require.NoError(t, err)
 	m.sessionStates[sessionID] = service.NewSessionState(&session.Session{ID: sessionID})
 
 	first := &runtime.ElicitationRequestEvent{Message: "worker1 needs input", ElicitationID: "e1"}

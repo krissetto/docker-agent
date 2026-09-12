@@ -483,6 +483,40 @@ func getAllMigrations() []Migration {
 			Description: "Add root_kind to generated_media_manifest so user-confirmed out-of-workspace generated files stay manifest-gated alongside workspace-relative ones",
 			UpSQL:       `ALTER TABLE generated_media_manifest ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'workspace'`,
 		},
+		{
+			ID:          31,
+			Name:        "031_add_actor_pending_message_columns",
+			Description: "Persist actor pending input admission and correlation",
+			UpSQL: `
+				ALTER TABLE session_items ADD COLUMN actor_pending BOOLEAN NOT NULL DEFAULT 0;
+				ALTER TABLE session_items ADD COLUMN actor_accepted BOOLEAN NOT NULL DEFAULT 0;
+				ALTER TABLE session_items ADD COLUMN actor_turn_id TEXT NOT NULL DEFAULT '';
+			`,
+		},
+		{
+			ID:          32,
+			Name:        "032_add_subagent_trees_table",
+			Description: "Persist async subagent topology snapshots",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS subagent_trees (
+					session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+					snapshot TEXT NOT NULL
+				);
+			`,
+			DownSQL: `DROP TABLE IF EXISTS subagent_trees`,
+		},
+		{
+			ID:          33,
+			Name:        "033_add_session_todos_table",
+			Description: "Persist session todo state",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS session_todos (
+					session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+					todos TEXT NOT NULL
+				);
+			`,
+			DownSQL: `DROP TABLE IF EXISTS session_todos`,
+		},
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -27,16 +28,16 @@ import (
 // the configured store. Custom sinks (telemetry, audit, A2A, ...) layer
 // alongside via [WithEventObserver].
 type PersistenceObserver struct {
-	store     session.Store
-	streaming streamingState
+	store session.Store
+
+	mu        sync.Mutex
+	streaming map[string]*streamingState
 }
 
-// streamingState holds the in-flight streaming assistant message
-// across consecutive AgentChoice / AgentChoiceReasoning events. Reset
-// to its zero value on every UserMessageEvent / MessageAddedEvent.
-// Per-RunStream state, not shared across observers, so no mutex is
-// needed: OnEvent runs synchronously from the runtime's forwarding
-// goroutine.
+// streamingState holds the in-flight streaming assistant message for one
+// session across consecutive AgentChoice / AgentChoiceReasoning events. It is
+// keyed by session id in PersistenceObserver so concurrent runs for different
+// sessions on the same runtime cannot corrupt each other's streaming row.
 type streamingState struct {
 	content          strings.Builder
 	reasoningContent strings.Builder
@@ -51,7 +52,7 @@ func newPersistenceObserver(store session.Store) *PersistenceObserver {
 	if store == nil {
 		return nil
 	}
-	return &PersistenceObserver{store: store}
+	return &PersistenceObserver{store: store, streaming: map[string]*streamingState{}}
 }
 
 // OnRunStart persists the session row before the run loop starts.
@@ -81,17 +82,21 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 
 	switch e := event.(type) {
 	case *AgentChoiceEvent:
-		p.streaming.content.WriteString(e.Content)
-		p.streaming.agentName = e.AgentName
-		p.persistStreamingContent(ctx, sess.ID)
+		p.withStreaming(e.SessionID, func(st *streamingState) {
+			st.content.WriteString(e.Content)
+			st.agentName = e.AgentName
+			p.persistStreamingContentLocked(ctx, e.SessionID, st)
+		})
 
 	case *AgentChoiceReasoningEvent:
-		p.streaming.reasoningContent.WriteString(e.Content)
-		p.streaming.agentName = e.AgentName
-		p.persistStreamingContent(ctx, sess.ID)
+		p.withStreaming(e.SessionID, func(st *streamingState) {
+			st.reasoningContent.WriteString(e.Content)
+			st.agentName = e.AgentName
+			p.persistStreamingContentLocked(ctx, e.SessionID, st)
+		})
 
 	case *UserMessageEvent:
-		p.streaming = streamingState{}
+		p.resetStreaming(e.SessionID)
 		if _, err := p.store.AddMessage(ctx, e.SessionID, session.UserMessage(e.Message, e.MultiContent...)); err != nil {
 			slog.WarnContext(ctx, "Failed to persist user message", "session_id", e.SessionID, "error", err)
 		}
@@ -99,17 +104,21 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 	case *MessageAddedEvent:
 		// Finalise the streaming row (if any) with the canonical
 		// MessageAddedEvent payload, then reset for the next stream.
+		st := p.takeStreaming(e.SessionID)
 		var err error
-		if p.streaming.messageID != 0 {
-			err = p.store.UpdateMessage(ctx, e.SessionID, p.streaming.messageID, e.Message)
+		if st != nil && st.messageID != 0 {
+			err = p.store.UpdateMessage(ctx, e.SessionID, st.messageID, e.Message)
 		} else {
 			_, err = p.store.AddMessage(ctx, e.SessionID, e.Message)
 		}
 		if err != nil {
+			var messageID int64
+			if st != nil {
+				messageID = st.messageID
+			}
 			slog.WarnContext(ctx, "Failed to persist message",
-				"session_id", e.SessionID, "message_id", p.streaming.messageID, "error", err)
+				"session_id", e.SessionID, "message_id", messageID, "error", err)
 		}
-		p.streaming = streamingState{}
 
 	case *SubSessionCompletedEvent:
 		if subSess, ok := e.SubSession.(*session.Session); ok {
@@ -149,7 +158,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		// with a shared JSON export for diagnostics. Reset the streaming state
 		// so any in-flight assistant row is finalised in place and the error is
 		// recorded as a distinct trailing item.
-		p.streaming = streamingState{}
+		p.resetStreaming(sess.ID)
 		ts := e.Timestamp
 		if ts.IsZero() {
 			ts = time.Now()
@@ -166,35 +175,68 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 	}
 }
 
-// persistStreamingContent creates or updates the streaming assistant
+// withStreaming locks the observer, retrieves the streaming state for
+// sessionID, and runs fn while holding the lock. The store calls below are
+// synchronous today; keeping the lock across create/update preserves event
+// ordering for one session while allowing independent sessions to keep separate
+// state.
+func (p *PersistenceObserver) withStreaming(sessionID string, fn func(*streamingState)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.streaming == nil {
+		p.streaming = map[string]*streamingState{}
+	}
+	st := p.streaming[sessionID]
+	if st == nil {
+		st = &streamingState{}
+		p.streaming[sessionID] = st
+	}
+	fn(st)
+}
+
+func (p *PersistenceObserver) resetStreaming(sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.streaming, sessionID)
+}
+
+func (p *PersistenceObserver) takeStreaming(sessionID string) *streamingState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.streaming[sessionID]
+	delete(p.streaming, sessionID)
+	return st
+}
+
+// persistStreamingContentLocked creates or updates the streaming assistant
 // message row. The runtime emits one AgentChoice / AgentChoiceReasoning
 // event per delta chunk, so this fires repeatedly during a streaming
 // response; we keep one row open and update it in place rather than
 // creating a row per chunk.
-func (p *PersistenceObserver) persistStreamingContent(ctx context.Context, sessionID string) {
+func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context, sessionID string, st *streamingState) {
 	msg := &session.Message{
-		AgentName: p.streaming.agentName,
+		AgentName: st.agentName,
 		Message: chat.Message{
 			Role:             chat.MessageRoleAssistant,
-			Content:          p.streaming.content.String(),
-			ReasoningContent: p.streaming.reasoningContent.String(),
+			Content:          st.content.String(),
+			ReasoningContent: st.reasoningContent.String(),
 		},
 	}
 
-	if p.streaming.messageID == 0 {
+	if st.messageID == 0 {
 		id, err := p.store.AddMessage(ctx, sessionID, msg)
 		if err != nil {
 			slog.WarnContext(ctx, "Failed to create streaming message", "session_id", sessionID, "error", err)
 			return
 		}
-		p.streaming.messageID = id
+		st.messageID = id
 		slog.DebugContext(ctx, "[PERSIST] Created streaming message",
-			"session_id", sessionID, "message_id", id, "agent", p.streaming.agentName)
+			"session_id", sessionID, "message_id", id, "agent", st.agentName)
 		return
 	}
 
-	if err := p.store.UpdateMessage(ctx, sessionID, p.streaming.messageID, msg); err != nil {
+	if err := p.store.UpdateMessage(ctx, sessionID, st.messageID, msg); err != nil {
 		slog.WarnContext(ctx, "Failed to update streaming message",
-			"session_id", sessionID, "message_id", p.streaming.messageID, "error", err)
+			"session_id", sessionID, "message_id", st.messageID, "error", err)
 	}
 }

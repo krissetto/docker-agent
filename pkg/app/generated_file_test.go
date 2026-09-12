@@ -31,7 +31,7 @@ func (r *resolvingRuntime) ResolveGeneratedFile(_ context.Context, ref runtime.G
 func TestApp_ResolveGeneratedFile_ForwardsToCapableRuntime(t *testing.T) {
 	t.Parallel()
 	rt := &resolvingRuntime{resolved: &runtime.ResolvedGeneratedFile{Data: []byte("png"), Path: "/ws/cat.png"}}
-	app := New(t.Context(), rt, session.New())
+	app := New(t.Context(), nil, session.New(), runtime.SessionBinding{}, WithRuntimeServices(rt))
 	ref := runtime.GeneratedFileRef{OwnerSessionID: "sess", Root: chat.ArtifactRootWorkspace, Path: "cat.png"}
 
 	assert.True(t, app.CanResolveGeneratedFiles())
@@ -47,7 +47,7 @@ func TestApp_ResolveGeneratedFile_ForwardsToCapableRuntime(t *testing.T) {
 // it upfront and resolution fails with runtime.ErrUnsupported.
 func TestApp_ResolveGeneratedFile_UnsupportedWithoutCapability(t *testing.T) {
 	t.Parallel()
-	app := New(t.Context(), &mockRuntime{}, session.New())
+	app := New(t.Context(), nil, session.New(), runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{}))
 
 	assert.False(t, app.CanResolveGeneratedFiles())
 	_, err := app.ResolveGeneratedFile(t.Context(), runtime.GeneratedFileRef{

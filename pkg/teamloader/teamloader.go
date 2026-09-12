@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
@@ -503,6 +504,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		if err != nil {
 			return nil, fmt.Errorf("agent %s: %w", agentConfig.Name, err)
 		}
+		if len(agentConfig.SubAgents) > 0 && len(agentConfig.Subagents) > 0 {
+			warnings = append(warnings, "agent declares both sub_agents and subagents: sub_agents delegates synchronously with transfer_task, while subagents delegates asynchronously; avoid declaring both modes on the same agent")
+		}
 		if len(warnings) > 0 {
 			opts = append(opts, agent.WithLoadTimeWarnings(warnings))
 		}
@@ -533,6 +537,14 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 
 		opts = append(opts, agent.WithToolSets(agentTools...))
+
+		if len(agentConfig.Subagents) > 0 {
+			allowed := allowedSubagents(cfg, agentConfig.Subagents)
+			opts = append(opts,
+				agent.WithAsyncSubagents(agentConfig.Subagents...),
+				agent.WithAsyncHarnessPrompt(subagent.HarnessPrompt(allowed)),
+			)
+		}
 
 		ag := agent.New(agentConfig.Name, expander.Expand(ctx, agentConfig.Instruction, nil), opts...)
 
@@ -896,6 +908,26 @@ func compactionThresholdForAgent(cfg *latest.Config, a *latest.AgentConfig) *flo
 	return a.CompactionThreshold
 }
 
+func allowedSubagents(cfg *latest.Config, refs latest.SubagentRefs) []subagent.AllowedSubagent {
+	allowed := make([]subagent.AllowedSubagent, 0, len(refs))
+	for _, ref := range refs {
+		desc := ref.Description
+		if desc == "" {
+			if cfg != nil {
+				if target, ok := cfg.Agents.Lookup(ref.Agent); ok {
+					desc = target.Description
+				}
+			}
+		}
+		allowed = append(allowed, subagent.AllowedSubagent{
+			Agent:       ref.Agent,
+			Name:        ref.Name,
+			Description: desc,
+		})
+	}
+	return allowed
+}
+
 // getToolsForAgent returns the tool definitions for an agent based on its
 // configuration. Toolset instructions support ${...} JavaScript placeholders
 // (e.g. ${env.X}); they are expanded here using the runtime env provider.
@@ -980,6 +1012,9 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 
 	if len(a.SubAgents) > 0 {
 		toolSets = append(toolSets, transfertask.New())
+	}
+	if len(a.Subagents) > 0 {
+		toolSets = append(toolSets, subagent.NewToolSet())
 	}
 	if len(a.Handoffs) > 0 {
 		toolSets = append(toolSets, handoff.New())

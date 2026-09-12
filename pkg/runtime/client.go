@@ -1,13 +1,11 @@
 package runtime
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -16,7 +14,6 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // Client is an HTTP client for the docker agent server API
@@ -77,45 +74,51 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			Timeout: 30 * time.Second,
 		},
 		registry: map[string]func() Event{
-			"user_message":           func() Event { return &UserMessageEvent{} },
-			"tool_call":              func() Event { return &ToolCallEvent{} },
-			"tool_call_output":       func() Event { return &ToolCallOutputEvent{} },
-			"tool_call_response":     func() Event { return &ToolCallResponseEvent{} },
-			"tool_call_confirmation": func() Event { return &ToolCallConfirmationEvent{} },
-			"token_usage":            func() Event { return &TokenUsageEvent{} },
-			"stream_stopped":         func() Event { return &StreamStoppedEvent{} },
-			"runtime_paused":         func() Event { return &PausedEvent{} },
-			"stream_started":         func() Event { return &StreamStartedEvent{} },
-			"shell":                  func() Event { return &ShellOutputEvent{} },
-			"session_title":          func() Event { return &SessionTitleEvent{} },
-			"plan_changed":           func() Event { return &PlanChangedEvent{} },
-			"session_summary":        func() Event { return &SessionSummaryEvent{} },
-			"session_compaction":     func() Event { return &SessionCompactionEvent{} },
-			"partial_tool_call":      func() Event { return &PartialToolCallEvent{} },
-			"max_iterations_reached": func() Event { return &MaxIterationsReachedEvent{} },
-			"budget_usage":           func() Event { return &BudgetUsageEvent{} },
-			"budget_exceeded":        func() Event { return &BudgetExceededEvent{} },
-			"error":                  func() Event { return &ErrorEvent{} },
-			"elicitation_request":    func() Event { return &ElicitationRequestEvent{} },
-			"authorization_event":    func() Event { return &AuthorizationEvent{} },
-			"agent_choice":           func() Event { return &AgentChoiceEvent{} },
-			"agent_choice_reasoning": func() Event { return &AgentChoiceReasoningEvent{} },
-			"mcp_init_started":       func() Event { return &MCPInitStartedEvent{} },
-			"mcp_init_finished":      func() Event { return &MCPInitFinishedEvent{} },
-			"agent_info":             func() Event { return &AgentInfoEvent{} },
-			"team_info":              func() Event { return &TeamInfoEvent{} },
-			"toolset_info":           func() Event { return &ToolsetInfoEvent{} },
-			"agent_switching":        func() Event { return &AgentSwitchingEvent{} },
-			"warning":                func() Event { return &WarningEvent{} },
-			"hook_blocked":           func() Event { return &HookBlockedEvent{} },
-			"hook_started":           func() Event { return &HookStartedEvent{} },
-			"hook_finished":          func() Event { return &HookFinishedEvent{} },
-			"rag_indexing_started":   func() Event { return &RAGIndexingStartedEvent{} },
-			"rag_indexing_progress":  func() Event { return &RAGIndexingProgressEvent{} },
-			"rag_indexing_completed": func() Event { return &RAGIndexingCompletedEvent{} },
-			"message_added":          func() Event { return &MessageAddedEvent{} },
-			"model_fallback":         func() Event { return &ModelFallbackEvent{} },
-			"sub_session_completed":  func() Event { return &SubSessionCompletedEvent{} },
+			"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
+			"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
+			"pending_user_message_canceled": func() Event { return &PendingUserMessageCanceledEvent{} },
+			"user_message":                  func() Event { return &UserMessageEvent{} },
+			"tool_call":                     func() Event { return &ToolCallEvent{} },
+			"tool_call_output":              func() Event { return &ToolCallOutputEvent{} },
+			"tool_call_response":            func() Event { return &ToolCallResponseEvent{} },
+			"tool_call_confirmation":        func() Event { return &ToolCallConfirmationEvent{} },
+			"token_usage":                   func() Event { return &TokenUsageEvent{} },
+			"stream_stopped":                func() Event { return &StreamStoppedEvent{} },
+			"runtime_paused":                func() Event { return &PausedEvent{} },
+			"runtime_pause_changed":         func() Event { return &PauseChangedEvent{} },
+			"skill_operation":               func() Event { return &SkillOperationEvent{} },
+			"stream_started":                func() Event { return &StreamStartedEvent{} },
+			"subagent_tree":                 func() Event { return &SubagentTreeEvent{} },
+			"shell":                         func() Event { return &ShellOutputEvent{} },
+			"session_title":                 func() Event { return &SessionTitleEvent{} },
+			"plan_changed":                  func() Event { return &PlanChangedEvent{} },
+			"session_summary":               func() Event { return &SessionSummaryEvent{} },
+			"session_compaction":            func() Event { return &SessionCompactionEvent{} },
+			"partial_tool_call":             func() Event { return &PartialToolCallEvent{} },
+			"max_iterations_reached":        func() Event { return &MaxIterationsReachedEvent{} },
+			"budget_usage":                  func() Event { return &BudgetUsageEvent{} },
+			"budget_exceeded":               func() Event { return &BudgetExceededEvent{} },
+			"error":                         func() Event { return &ErrorEvent{} },
+			"elicitation_request":           func() Event { return &ElicitationRequestEvent{} },
+			"authorization_event":           func() Event { return &AuthorizationEvent{} },
+			"agent_choice":                  func() Event { return &AgentChoiceEvent{} },
+			"agent_choice_reasoning":        func() Event { return &AgentChoiceReasoningEvent{} },
+			"mcp_init_started":              func() Event { return &MCPInitStartedEvent{} },
+			"mcp_init_finished":             func() Event { return &MCPInitFinishedEvent{} },
+			"agent_info":                    func() Event { return &AgentInfoEvent{} },
+			"team_info":                     func() Event { return &TeamInfoEvent{} },
+			"toolset_info":                  func() Event { return &ToolsetInfoEvent{} },
+			"agent_switching":               func() Event { return &AgentSwitchingEvent{} },
+			"warning":                       func() Event { return &WarningEvent{} },
+			"hook_blocked":                  func() Event { return &HookBlockedEvent{} },
+			"hook_started":                  func() Event { return &HookStartedEvent{} },
+			"hook_finished":                 func() Event { return &HookFinishedEvent{} },
+			"rag_indexing_started":          func() Event { return &RAGIndexingStartedEvent{} },
+			"rag_indexing_progress":         func() Event { return &RAGIndexingProgressEvent{} },
+			"rag_indexing_completed":        func() Event { return &RAGIndexingCompletedEvent{} },
+			"message_added":                 func() Event { return &MessageAddedEvent{} },
+			"model_fallback":                func() Event { return &ModelFallbackEvent{} },
+			"sub_session_completed":         func() Event { return &SubSessionCompletedEvent{} },
 		},
 	}
 
@@ -281,43 +284,44 @@ func (c *Client) DeleteAgent(ctx context.Context, filePath string) (*api.DeleteA
 	return &resp, err
 }
 
+type sessionResourceResponse struct {
+	SessionID     string                     `json:"session_id"`
+	Title         string                     `json:"title"`
+	CreatedAt     string                     `json:"created_at"`
+	Messages      []session.Message          `json:"messages,omitempty"`
+	ToolsApproved bool                       `json:"tools_approved"`
+	SafetyPolicy  session.SafetyPolicy       `json:"safety_policy,omitempty"`
+	InputTokens   int64                      `json:"input_tokens"`
+	OutputTokens  int64                      `json:"output_tokens"`
+	WorkingDir    string                     `json:"working_dir,omitempty"`
+	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
+}
+
+type sessionCatalogResponse struct {
+	Sessions []sessionResourceResponse `json:"sessions"`
+}
+
 // GetSessions retrieves all sessions
 func (c *Client) GetSessions(ctx context.Context) ([]api.SessionsResponse, error) {
-	var sessions []api.SessionsResponse
-	err := c.doRequest(ctx, http.MethodGet, "/api/sessions", nil, &sessions)
-	return sessions, err
+	var catalog sessionCatalogResponse
+	if err := c.doRequest(ctx, http.MethodGet, "/api/sessions", nil, &catalog); err != nil {
+		return nil, err
+	}
+	out := make([]api.SessionsResponse, len(catalog.Sessions))
+	for i, resource := range catalog.Sessions {
+		out[i] = api.SessionsResponse{ID: resource.SessionID, Title: resource.Title, CreatedAt: resource.CreatedAt, NumMessages: len(resource.Messages)}
+	}
+	return out, nil
 }
 
 // GetSession retrieves a session by ID
 func (c *Client) GetSession(ctx context.Context, id string) (*api.SessionResponse, error) {
-	var sess api.SessionResponse
-	err := c.doRequest(ctx, http.MethodGet, "/api/sessions/"+id, nil, &sess)
-	return &sess, err
-}
-
-// CreateSession creates a new session
-func (c *Client) CreateSession(ctx context.Context, sessTemplate *session.Session) (*session.Session, error) {
-	var sess session.Session
-	err := c.doRequest(ctx, http.MethodPost, "/api/sessions", sessTemplate, &sess)
-	return &sess, err
-}
-
-// ResumeSession resumes a session by ID with optional rejection reason or tool name
-func (c *Client) ResumeSession(ctx context.Context, id, confirmation, reason, toolName string) error {
-	req := api.ResumeSessionRequest{Confirmation: confirmation, Reason: reason, ToolName: toolName}
-	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+id+"/resume", req, nil)
-}
-
-// SteerSession injects user messages into a running session mid-turn.
-func (c *Client) SteerSession(ctx context.Context, sessionID string, messages []api.Message) error {
-	req := api.SteerSessionRequest{Messages: messages}
-	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/steer", req, nil)
-}
-
-// FollowUpSession queues messages for end-of-turn processing.
-func (c *Client) FollowUpSession(ctx context.Context, sessionID string, messages []api.Message) error {
-	req := api.SteerSessionRequest{Messages: messages}
-	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/followup", req, nil)
+	var resource sessionResourceResponse
+	if err := c.doRequest(ctx, http.MethodGet, "/api/sessions/"+id, nil, &resource); err != nil {
+		return nil, err
+	}
+	createdAt, _ := time.Parse(time.RFC3339Nano, resource.CreatedAt)
+	return &api.SessionResponse{ID: resource.SessionID, Title: resource.Title, CreatedAt: createdAt, Messages: resource.Messages, ToolsApproved: resource.ToolsApproved, SafetyPolicy: resource.SafetyPolicy, InputTokens: resource.InputTokens, OutputTokens: resource.OutputTokens, WorkingDir: resource.WorkingDir, Permissions: resource.Permissions}, nil
 }
 
 // DeleteSession deletes a session by ID
@@ -332,144 +336,22 @@ func (c *Client) GetDesktopToken(ctx context.Context) (*api.DesktopTokenResponse
 	return &resp, err
 }
 
-// RunAgent executes an agent and returns a channel of streaming events. The
-// optional model override is persisted on the session's current agent before
-// the user messages are appended; pass an empty string to leave the existing
-// override (if any) untouched.
-func (c *Client) RunAgent(ctx context.Context, sessionID, agent string, messages []api.Message, model string) (<-chan Event, error) {
-	return c.runAgentWithAgentName(ctx, sessionID, agent, "", messages, model)
-}
-
-// RunAgentWithAgentName executes an agent with a specific agent name and
-// returns a channel of streaming events. See [Client.RunAgent] for the
-// semantics of model.
-func (c *Client) RunAgentWithAgentName(ctx context.Context, sessionID, agent, agentName string, messages []api.Message, model string) (<-chan Event, error) {
-	return c.runAgentWithAgentName(ctx, sessionID, agent, agentName, messages, model)
-}
-
-func (c *Client) runAgentWithAgentName(ctx context.Context, sessionID, agent, agentName string, messages []api.Message, model string) (<-chan Event, error) {
-	endpoint := "/api/sessions/" + sessionID + "/agent/" + agent
-	if agentName != "" {
-		endpoint += "/" + agentName
-	}
-
-	jsonBody, err := json.Marshal(api.RunAgentRequest{Messages: messages, Model: model})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling messages: %w", err)
-	}
-
-	u := *c.baseURL
-	u.Path = path.Join(u.Path, endpoint)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
-
-	if c.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.authToken)
-	}
-
-	resp, err := c.httpClient.Do(req) //nolint:bodyclose // body is closed in the goroutine below
-	if err != nil {
-		return nil, fmt.Errorf("performing request: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("reading error response body: %w", err)
-		}
-
-		var errResp ErrorResponse
-		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
-		}
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	eventChan := make(chan Event, defaultEventChannelCapacity)
-
-	go func() {
-		defer close(eventChan)
-		defer resp.Body.Close()
-
-		scanner := bufio.NewScanner(resp.Body)
-		// A single SSE line can carry a large tool response; raise the cap
-		// above bufio's 64 KiB default so an oversized line does not silently
-		// truncate the stream (bufio.ErrTooLong).
-		scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxSSELineBytes)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 || line[0] == ':' {
-				continue
-			}
-
-			after, ok := bytes.CutPrefix(line, []byte("data: "))
-			if !ok {
-				continue
-			}
-
-			slog.DebugContext(ctx, "event", "event", string(after))
-
-			// First unmarshal to get the type
-			var baseEvent struct {
-				Type string `json:"type"`
-			}
-			if err := json.Unmarshal(after, &baseEvent); err != nil {
-				slog.DebugContext(ctx, "event", "error", err)
-				continue
-			}
-
-			// Then unmarshal the full event
-			createEvent, found := c.registry[baseEvent.Type]
-			if !found {
-				slog.DebugContext(ctx, "event", "invalid_type", baseEvent.Type)
-				continue
-			}
-
-			e := createEvent()
-			if err := json.Unmarshal(after, &e); err != nil {
-				slog.DebugContext(ctx, "event", "error", err)
-				continue
-			}
-
-			eventChan <- e
-		}
-
-		// Surface a read failure (e.g. an over-long line) instead of ending
-		// the stream silently — otherwise the run appears to stop with no
-		// error after the last event that fit.
-		if err := scanner.Err(); err != nil {
-			slog.DebugContext(ctx, "event", "scanner_error", err)
-			eventChan <- Error(fmt.Sprintf("reading event stream: %v", err))
-			return
-		}
-	}()
-
-	return eventChan, nil
-}
-
 // GetAllSessions retrieves all sessions from the remote store.
 func (c *Client) GetAllSessions(ctx context.Context) ([]session.Session, error) {
-	var sessions []session.Session
-	err := c.doRequest(ctx, http.MethodGet, "/api/sessions", nil, &sessions)
-	return sessions, err
-}
-
-// DeleteRemoteSession deletes a session from the remote store.
-func (c *Client) DeleteRemoteSession(ctx context.Context, sessionID string) error {
-	return c.doRequest(ctx, http.MethodDelete, "/api/sessions/"+sessionID, nil, nil)
-}
-
-func (c *Client) ResumeElicitation(ctx context.Context, sessionID string, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error {
-	req := api.ResumeElicitationRequest{Action: string(action), Content: content, ElicitationID: firstElicitationID(elicitationID)}
-	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/elicitation", req, nil)
+	var catalog sessionCatalogResponse
+	if err := c.doRequest(ctx, http.MethodGet, "/api/sessions", nil, &catalog); err != nil {
+		return nil, err
+	}
+	out := make([]session.Session, len(catalog.Sessions))
+	for i, resource := range catalog.Sessions {
+		createdAt, _ := time.Parse(time.RFC3339Nano, resource.CreatedAt)
+		out[i] = session.Session{ID: resource.SessionID, Title: resource.Title, CreatedAt: createdAt, ToolsApproved: resource.ToolsApproved, SafetyPolicy: resource.SafetyPolicy, InputTokens: resource.InputTokens, OutputTokens: resource.OutputTokens, WorkingDir: resource.WorkingDir, Permissions: resource.Permissions}
+		for j := range resource.Messages {
+			message := resource.Messages[j]
+			out[i].AddMessage(&message)
+		}
+	}
+	return out, nil
 }
 
 // UpdateSessionTitle updates the title of a session
@@ -492,139 +374,11 @@ func (c *Client) GetAgentToolCount(ctx context.Context, agentFilename, agentName
 	return resp.AvailableTools, nil
 }
 
-// StreamSessionEvents streams events for a session as they occur via Server-Sent Events.
-// The returned channel is closed when ctx is cancelled, the stream's max
-// duration is reached, or the server closes the connection.
-func (c *Client) StreamSessionEvents(ctx context.Context, sessionID string) (<-chan Event, error) {
-	endpoint := fmt.Sprintf("/api/sessions/%s/events", sessionID)
-
-	u := *c.baseURL
-	u.Path = path.Join(u.Path, endpoint)
-
-	// Bound the maximum lifetime of a single SSE connection. The cancel
-	// must be tied to the goroutine consuming the stream, not to this
-	// function's return: cancelling streamCtx kills the in-flight HTTP
-	// request, which would turn the stream into a one-shot read.
-	timeout := c.timeoutFor("streaming")
-	streamCtx, cancel := context.WithTimeout(ctx, timeout)
-
-	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, u.String(), http.NoBody)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Cache-Control", "no-cache")
-
-	if c.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.authToken)
-	}
-
-	resp, err := c.httpClient.Do(req) //nolint:bodyclose // body is closed in the goroutine below
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("performing request: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		defer cancel()
-		defer resp.Body.Close()
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("reading error response body: %w", err)
-		}
-
-		var errResp ErrorResponse
-		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, errResp.Error)
-		}
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	eventChan := make(chan Event, defaultEventChannelCapacity)
-
-	go func() {
-		defer cancel()
-		defer close(eventChan)
-		defer resp.Body.Close()
-
-		scanner := bufio.NewScanner(resp.Body)
-		// A single SSE line can carry a large tool response; raise the cap
-		// above bufio's 64 KiB default so an oversized line does not silently
-		// truncate the stream (bufio.ErrTooLong).
-		scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxSSELineBytes)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 || line[0] == ':' {
-				continue
-			}
-
-			after, ok := bytes.CutPrefix(line, []byte("data: "))
-			if !ok {
-				continue
-			}
-
-			slog.DebugContext(ctx, "received event", "data", string(after))
-
-			// First unmarshal to get the type
-			var baseEvent struct {
-				Type string `json:"type"`
-			}
-			if err := json.Unmarshal(after, &baseEvent); err != nil {
-				slog.DebugContext(ctx, "failed to unmarshal event type", "error", err)
-				continue
-			}
-
-			// Then unmarshal the full event
-			createEvent, found := c.registry[baseEvent.Type]
-			if !found {
-				slog.DebugContext(ctx, "unknown event type", "type", baseEvent.Type)
-				continue
-			}
-
-			e := createEvent()
-			if err := json.Unmarshal(after, &e); err != nil {
-				slog.DebugContext(ctx, "failed to unmarshal event", "error", err)
-				continue
-			}
-
-			eventChan <- e
-		}
-
-		// Surface a read failure (e.g. an over-long line) instead of ending
-		// the stream silently — otherwise the run appears to stop with no
-		// error after the last event that fit.
-		if err := scanner.Err(); err != nil {
-			slog.DebugContext(ctx, "scanner error", "error", err)
-			eventChan <- Error(fmt.Sprintf("reading event stream: %v", err))
-		}
-	}()
-
-	return eventChan, nil
-}
-
-// GetSessionTools retrieves tools available in a session.
-func (c *Client) GetSessionTools(ctx context.Context, sessionID string) ([]tools.Tool, error) {
-	var toolList []tools.Tool
-	endpoint := fmt.Sprintf("/api/sessions/%s/tools", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &toolList)
-	return toolList, err
-}
-
 // GetAvailableModels returns available models for the agent.
 func (c *Client) GetAvailableModels(ctx context.Context) ([]string, error) {
 	var models []string
 	err := c.doRequest(ctx, http.MethodGet, "/api/models", nil, &models)
 	return models, err
-}
-
-// GetSessionMCPPrompts returns available MCP prompts for a session.
-func (c *Client) GetSessionMCPPrompts(ctx context.Context, sessionID string) (map[string]any, error) {
-	var prompts map[string]any
-	endpoint := fmt.Sprintf("/api/sessions/%s/mcp/prompts", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &prompts)
-	return prompts, err
 }
 
 // ExecuteSessionMCPPrompt executes an MCP prompt in a session.
@@ -635,104 +389,6 @@ func (c *Client) ExecuteSessionMCPPrompt(ctx context.Context, sessionID, promptN
 	}
 	err := c.doRequest(ctx, http.MethodPost, endpoint, args, &result)
 	return result.Result, err
-}
-
-// GetSessionSkills returns available skills for a session.
-func (c *Client) GetSessionSkills(ctx context.Context, sessionID string) (map[string]any, error) {
-	var skills map[string]any
-	endpoint := fmt.Sprintf("/api/sessions/%s/skills", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &skills)
-	return skills, err
-}
-
-// CompactSession triggers session compaction on the server.
-func (c *Client) CompactSession(ctx context.Context, sessionID string) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/compact", sessionID)
-	return c.doRequest(ctx, http.MethodPost, endpoint, nil, nil)
-}
-
-// GetSessionToolsets returns toolset statuses for a session.
-func (c *Client) GetSessionToolsets(ctx context.Context, sessionID string) ([]map[string]any, error) {
-	var toolsets []map[string]any
-	endpoint := fmt.Sprintf("/api/sessions/%s/toolsets", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &toolsets)
-	return toolsets, err
-}
-
-// RestartSessionToolset restarts a toolset in a session.
-func (c *Client) RestartSessionToolset(ctx context.Context, sessionID, toolsetName string) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/toolsets/%s/restart", sessionID, toolsetName)
-	return c.doRequest(ctx, http.MethodPost, endpoint, nil, nil)
-}
-
-// PauseSession pauses a session.
-func (c *Client) PauseSession(ctx context.Context, sessionID string) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/pause", sessionID)
-	return c.doRequest(ctx, http.MethodPost, endpoint, nil, nil)
-}
-
-// GetSessionSnapshots retrieves snapshots for a session.
-func (c *Client) GetSessionSnapshots(ctx context.Context, sessionID string) ([]map[string]any, error) {
-	var snapshots []map[string]any
-	endpoint := fmt.Sprintf("/api/sessions/%s/snapshots", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &snapshots)
-	return snapshots, err
-}
-
-// UndoSession reverts a session to the previous snapshot.
-func (c *Client) UndoSession(ctx context.Context, sessionID string) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/undo", sessionID)
-	return c.doRequest(ctx, http.MethodPost, endpoint, nil, nil)
-}
-
-// ResetSession resets a session to initial state.
-func (c *Client) ResetSession(ctx context.Context, sessionID string) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/reset", sessionID)
-	return c.doRequest(ctx, http.MethodPost, endpoint, nil, nil)
-}
-
-// AddMessage adds a message to a session.
-func (c *Client) AddMessage(ctx context.Context, sessionID string, msg *session.Message) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/messages", sessionID)
-	req := api.AddMessageRequest{Message: msg}
-	return c.doRequest(ctx, http.MethodPost, endpoint, req, nil)
-}
-
-// UpdateMessage updates a message in a session.
-func (c *Client) UpdateMessage(ctx context.Context, sessionID, msgID string, msg *session.Message) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/messages/%s", sessionID, msgID)
-	req := api.UpdateMessageRequest{Message: msg}
-	return c.doRequest(ctx, http.MethodPatch, endpoint, req, nil)
-}
-
-// AddSummary adds a summary item to a session.
-func (c *Client) AddSummary(ctx context.Context, sessionID string, item session.Item) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/summaries", sessionID)
-	// Tokens mirrors FirstKeptEntry under its legacy wire name so older
-	// servers keep understanding the request.
-	req := api.AddSummaryRequest{
-		Summary:        item.Summary,
-		Tokens:         item.FirstKeptEntry,
-		FirstKeptEntry: item.FirstKeptEntry,
-		Cost:           item.Cost,
-		Model:          item.Model,
-		Usage:          item.Usage,
-	}
-	return c.doRequest(ctx, http.MethodPost, endpoint, req, nil)
-}
-
-// UpdateSessionTokens updates token counts for a session.
-func (c *Client) UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, cost float64) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/tokens", sessionID)
-	req := api.UpdateSessionTokensRequest{InputTokens: inputTokens, OutputTokens: outputTokens, Cost: cost}
-	return c.doRequest(ctx, http.MethodPatch, endpoint, req, nil)
-}
-
-// SetSessionStarred sets the starred status for a session.
-func (c *Client) SetSessionStarred(ctx context.Context, sessionID string, starred bool) error {
-	endpoint := fmt.Sprintf("/api/sessions/%s/starred", sessionID)
-	req := api.SetSessionStarredRequest{Starred: starred}
-	return c.doRequest(ctx, http.MethodPatch, endpoint, req, nil)
 }
 
 // Health checks the health of the remote server.
@@ -772,12 +428,4 @@ func (c *Client) BatchExportSessions(ctx context.Context, sessionIDs []string, f
 	req := api.BatchExportSessionsRequest{SessionIDs: sessionIDs, Format: format}
 	err := c.doRequest(ctx, http.MethodPost, "/api/sessions/batch/export", req, &resp)
 	return resp, err
-}
-
-// GetSessionQueueStatus retrieves the queue depth and capacity for a session
-func (c *Client) GetSessionQueueStatus(ctx context.Context, sessionID string) (*api.QueueDepthResponse, error) {
-	var resp api.QueueDepthResponse
-	endpoint := fmt.Sprintf("/api/sessions/%s/queue", sessionID)
-	err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &resp)
-	return &resp, err
 }

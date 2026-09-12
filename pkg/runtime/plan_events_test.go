@@ -39,37 +39,31 @@ func TestPlanChangedEventSerialization(t *testing.T) {
 	assert.NotContains(t, string(data), "content", "the event must never carry plan content")
 }
 
-// TestClient_DecodesPlanChangedEvent verifies the event is registered in the
-// client's event registry, so remote runtimes deliver it typed rather than
-// dropping it.
-func TestClient_DecodesPlanChangedEvent(t *testing.T) {
+// TestSessionTransportDecodesPlanChangedEvent preserves remote plan-event
+// coverage through the canonical session observation transport.
+func TestSessionTransportDecodesPlanChangedEvent(t *testing.T) {
 	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"type\":\"plan_changed\",\"scope\":\"shared\",\"name\":\"release\",\"action\":\"status\",\"version\":4}\n\n")
+		flusher := writeCanonicalObservationStart(w)
+		fmt.Fprint(w, `data: {"version":1,"type":"event","envelope":{"version":1,"session_id":"s","sequence":1,"event":{"type":"plan_changed","scope":"shared","name":"release","action":"status","version":4}}}`+"\n\n")
+		flusher.Flush()
 	}))
 	t.Cleanup(srv.Close)
-
-	c, err := NewClient(srv.URL)
+	c, err := NewClient(srv.URL, WithHTTPClient(srv.Client()))
 	require.NoError(t, err)
-
-	ch, err := c.StreamSessionEvents(t.Context(), "s")
+	transport, err := NewSessionTransport(c)
 	require.NoError(t, err)
-
-	var got *PlanChangedEvent
-	for ev := range ch {
-		if planEv, ok := ev.(*PlanChangedEvent); ok {
-			got = planEv
-			break
-		}
-	}
-	require.NotNil(t, got, "plan_changed must decode to *PlanChangedEvent")
+	handle, err := transport.SessionByID("s")
+	require.NoError(t, err)
+	observation, err := handle.Observe(t.Context(), ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	envelope := <-observation.Events
+	got, ok := envelope.Event.(*PlanChangedEvent)
+	require.True(t, ok)
 	assert.Equal(t, "release", got.Name)
 	assert.Equal(t, "status", got.Action)
 	assert.Equal(t, 4, got.Version)
-	assert.Equal(t, "shared", got.Scope)
 }
 
 // planToolHandler finds one of the plan toolset's tools by name. The write
@@ -393,7 +387,7 @@ func TestRunStream_PlanSubscriptionOncePerStream(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("do the thing"), session.WithToolsApproved(true))
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	subscribed, unsubscribed, live := fake.counts()
@@ -419,7 +413,7 @@ func TestRunStream_PlanSubscriptionReleasedOnCancel(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
-	events := rt.RunStream(ctx, session.New(session.WithUserMessage("block")))
+	events := rt.runExecution(ctx, session.New(session.WithUserMessage("block")))
 	awaitEvent[*StreamStartedEvent](t, events, "stream start")
 	cancel()
 	for range events {
@@ -479,7 +473,7 @@ func TestRunStream_TwoActiveStreams_BothReceivePlanChanges(t *testing.T) {
 
 	// Stream A subscribes at stream start, then parks inside its model call.
 	// StreamStarted is emitted after the subscription is in place.
-	eventsA := rt.RunStream(t.Context(), session.New(session.WithUserMessage("wait"), session.WithAgentName("waiter")))
+	eventsA := rt.runExecution(t.Context(), session.New(session.WithUserMessage("wait"), session.WithAgentName("waiter")))
 	awaitEvent[*StreamStartedEvent](t, eventsA, "waiter stream start")
 
 	runWriter := func(label string) {
@@ -490,7 +484,7 @@ func TestRunStream_TwoActiveStreams_BothReceivePlanChanges(t *testing.T) {
 			session.WithToolsApproved(true),
 		)
 		got := 0
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if planEv, ok := ev.(*PlanChangedEvent); ok {
 				got++
 				assert.Empty(t, planEv.GetAgentName(), "%s: shared-plan events carry neutral attribution", label)

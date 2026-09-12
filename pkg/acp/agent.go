@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -39,6 +40,10 @@ type Agent struct {
 	team             *team.Team
 	providerRegistry *provider.Registry
 	mu               sync.Mutex
+	stopping         bool
+	stopped          bool
+	closedSessionIDs map[string]struct{}
+	stopDone         chan struct{}
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -47,7 +52,10 @@ var _ acp.Agent = (*Agent)(nil)
 type Session struct {
 	id             string
 	sess           *session.Session
-	rt             runtime.Runtime
+	rt             runtime.SessionRuntime
+	supervisor     runtime.SessionRuntimeSupervisor
+	session        runtime.SessionHandle
+	activeTurnID   string
 	workingDir     string
 	additionalDirs []string
 
@@ -161,22 +169,62 @@ func (s *Session) clearTurn(generation uint64, cancel context.CancelFunc) {
 // NewAgent creates a new ACP agent.
 func NewAgent(agentSource config.Source, runConfig *config.RuntimeConfig, sessionStore session.Store) *Agent {
 	return &Agent{
-		agentSource:  agentSource,
-		runConfig:    runConfig,
-		sessionStore: sessionStore,
-		sessions:     make(map[string]*Session),
+		agentSource:      agentSource,
+		runConfig:        runConfig,
+		sessionStore:     sessionStore,
+		sessions:         make(map[string]*Session),
+		closedSessionIDs: make(map[string]struct{}),
+		stopDone:         make(chan struct{}),
 	}
 }
 
-// Stop stops the agent and its toolsets.
+// Stop drains all per-session supervisors before stopping shared toolsets.
 func (a *Agent) Stop(ctx context.Context) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.team != nil {
-		if err := a.team.StopToolSets(ctx); err != nil {
+	if a.stopping || a.stopped {
+		done := a.stopDone
+		a.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+		return
+	}
+	a.stopping = true
+	sessions := make([]*Session, 0, len(a.sessions))
+	for id, acpSess := range a.sessions {
+		acpSess.close()
+		sessions = append(sessions, acpSess)
+		delete(a.sessions, id)
+	}
+	t := a.team
+	a.mu.Unlock()
+	for _, acpSess := range sessions {
+		if acpSess.supervisor != nil {
+			if err := acpSess.supervisor.Shutdown(ctx); err != nil {
+				slog.ErrorContext(ctx, "Failed to stop ACP session supervisor", "session_id", acpSess.id, "error", err)
+			}
+		}
+	}
+	if t != nil {
+		if err := t.StopToolSets(ctx); err != nil {
 			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
 		}
 	}
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.stopped = true
+		a.stopping = false
+		close(a.stopDone)
+	}()
+}
+
+func (a *Agent) admissionErrorLocked() error {
+	if a.stopping || a.stopped {
+		return errors.New("ACP agent is stopping")
+	}
+	return nil
 }
 
 // SetAgentConnection sets the ACP connection.
@@ -231,7 +279,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (a
 }
 
 // newRuntime creates a new runtime using the default agent.
-func (a *Agent) newRuntime(ctx context.Context, workingDir string) (runtime.Runtime, *agent.Agent, error) {
+func (a *Agent) newRuntime(ctx context.Context, workingDir string) (runtime.SessionRuntimeSupervisor, *agent.Agent, error) {
 	if a.team == nil {
 		return nil, nil, errors.New("agent not initialized")
 	}
@@ -242,7 +290,6 @@ func (a *Agent) newRuntime(ctx context.Context, workingDir string) (runtime.Runt
 	}
 
 	opts := []runtime.Opt{
-		runtime.WithCurrentAgent(defaultAgent.Name()),
 		runtime.WithSessionStore(a.sessionStore),
 		runtime.WithProviderRegistry(a.providerRegistry),
 		// Match the CLI tracer scope; without this the ACP-mode
@@ -253,18 +300,11 @@ func (a *Agent) newRuntime(ctx context.Context, workingDir string) (runtime.Runt
 		opts = append(opts, runtime.WithWorkingDir(workingDir))
 	}
 
-	rt, err := runtime.New(ctx, a.team, opts...)
+	rt, err := runtime.NewLocalRuntime(ctx, a.team, opts...)
 	if err != nil {
 		return nil, nil, err
 	}
-	return rt, defaultAgent, nil
-}
-
-// registerSession stores a session in the active sessions map.
-func (a *Agent) registerSession(acpSess *Session) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sessions[acpSess.id] = acpSess
+	return runtime.NewSessionRuntimeSupervisor(rt), defaultAgent, nil
 }
 
 // registerSessionIfAbsent stores acpSess only if no session with the same id
@@ -272,19 +312,41 @@ func (a *Agent) registerSession(acpSess *Session) {
 // (either the existing one or acpSess) and a boolean indicating whether
 // acpSess was the one stored. This avoids a TOCTOU race between checking
 // a.sessions and registering a new session.
-func (a *Agent) registerSessionIfAbsent(acpSess *Session) (*Session, bool) {
+type registrationOutcome uint8
+
+const (
+	registrationStored registrationOutcome = iota
+	registrationDuplicate
+	registrationStopping
+	registrationClosed
+)
+
+func (a *Agent) registerSessionIfAbsent(acpSess *Session) registrationOutcome {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if existing, ok := a.sessions[acpSess.id]; ok {
-		return existing, false
+	if a.stopping || a.stopped {
+		return registrationStopping
+	}
+	if _, closed := a.closedSessionIDs[acpSess.id]; closed {
+		return registrationClosed
+	}
+	if _, ok := a.sessions[acpSess.id]; ok {
+		return registrationDuplicate
 	}
 	a.sessions[acpSess.id] = acpSess
-	return acpSess, true
+	return registrationStored
 }
 
 // NewSession implements [acp.Agent].
 func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	slog.DebugContext(ctx, "ACP NewSession called", "cwd", params.Cwd)
+
+	a.mu.Lock()
+	if err := a.admissionErrorLocked(); err != nil {
+		a.mu.Unlock()
+		return acp.NewSessionResponse{}, err
+	}
+	a.mu.Unlock()
 
 	if len(params.McpServers) > 0 {
 		slog.WarnContext(ctx, "MCP servers provided by client are not yet supported", "count", len(params.McpServers))
@@ -309,11 +371,12 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		return acp.NewSessionResponse{}, err
 	}
 
-	rt, defaultAgent, err := a.newRuntime(ctx, workingDir)
+	supervisor, defaultAgent, err := a.newRuntime(ctx, workingDir)
 	if err != nil {
 		return acp.NewSessionResponse{}, err
 	}
 
+	rt := supervisor.Runtime()
 	sess := session.New(
 		session.WithMaxIterations(defaultAgent.MaxIterations()),
 		session.WithMaxConsecutiveToolCalls(defaultAgent.MaxConsecutiveToolCalls()),
@@ -324,18 +387,34 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	sess.SetTitle("ACP Session " + sess.ID)
 
 	if err := a.sessionStore.AddSession(ctx, sess); err != nil {
+		_ = supervisor.Shutdown(ctx)
 		return acp.NewSessionResponse{}, fmt.Errorf("failed to persist session: %w", err)
 	}
 
 	slog.DebugContext(ctx, "ACP session created", "session_id", sess.ID)
 
-	a.registerSession(&Session{
+	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: defaultAgent.Name()})
+	if err != nil {
+		_ = a.sessionStore.DeleteSession(context.WithoutCancel(ctx), sess.ID)
+		_ = supervisor.Shutdown(ctx)
+		return acp.NewSessionResponse{}, fmt.Errorf("bind ACP session: %w", err)
+	}
+
+	candidate := &Session{
 		id:             sess.ID,
 		sess:           sess,
 		rt:             rt,
+		supervisor:     supervisor,
+		session:        handle,
 		workingDir:     workingDir,
 		additionalDirs: additionalDirs,
-	})
+	}
+	outcome := a.registerSessionIfAbsent(candidate)
+	if outcome != registrationStored {
+		_ = supervisor.Shutdown(ctx)
+		_ = a.sessionStore.DeleteSession(context.WithoutCancel(ctx), sess.ID)
+		return acp.NewSessionResponse{}, fmt.Errorf("ACP session registration rejected: %v", outcome)
+	}
 
 	return acp.NewSessionResponse{SessionId: acp.SessionId(sess.ID)}, nil
 }
@@ -359,11 +438,12 @@ func (a *Agent) LoadSession(ctx context.Context, _ acp.LoadSessionRequest) (acp.
 }
 
 // CloseSession implements [acp.Agent].
-func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
 	sid := string(params.SessionId)
-	slog.Debug("ACP CloseSession called", "session_id", sid)
+	slog.DebugContext(ctx, "ACP CloseSession called", "session_id", sid)
 
 	a.mu.Lock()
+	a.closedSessionIDs[sid] = struct{}{}
 	acpSess, ok := a.sessions[sid]
 	if ok {
 		delete(a.sessions, sid)
@@ -372,6 +452,11 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 
 	if ok && acpSess != nil {
 		acpSess.close()
+		if acpSess.supervisor != nil {
+			if err := acpSess.supervisor.Shutdown(ctx); err != nil {
+				return acp.CloseSessionResponse{}, err
+			}
+		}
 	}
 
 	return acp.CloseSessionResponse{}, nil
@@ -413,6 +498,14 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	slog.DebugContext(ctx, "ACP ResumeSession called", "session_id", sid)
 
 	a.mu.Lock()
+	if err := a.admissionErrorLocked(); err != nil {
+		a.mu.Unlock()
+		return acp.ResumeSessionResponse{}, err
+	}
+	if _, closed := a.closedSessionIDs[sid]; closed {
+		a.mu.Unlock()
+		return acp.ResumeSessionResponse{}, fmt.Errorf("session %s is closed", sid)
+	}
 	_, alreadyRegistered := a.sessions[sid]
 	a.mu.Unlock()
 	if alreadyRegistered {
@@ -440,29 +533,48 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	rt, _, err := a.newRuntime(ctx, sess.WorkingDir)
+	supervisor, defaultAgent, err := a.newRuntime(ctx, sess.WorkingDir)
 	if err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
 
-	// Register atomically: if another goroutine raced us and registered
+	rt := supervisor.Runtime()
+	// Re-adopt any persisted subagent swarm so the resumed session's
+	// send_message / read_subagent keep working.
+	if restorer, ok := rt.(runtime.TreeRestorer); ok {
+		if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
+			_ = supervisor.Shutdown(ctx)
+			return acp.ResumeSessionResponse{}, fmt.Errorf("restore subagent tree for session %s: %w", sid, err)
+		}
+	}
+
+	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: defaultAgent.Name()})
+	if err != nil {
+		_ = supervisor.Shutdown(ctx)
+		return acp.ResumeSessionResponse{}, fmt.Errorf("bind ACP session: %w", err)
+	}
 	// the same session id between our initial check and now, drop the
 	// runtime we just built and reuse the existing registration.
-	_, stored := a.registerSessionIfAbsent(&Session{
+	outcome := a.registerSessionIfAbsent(&Session{
 		id:             sid,
 		sess:           sess,
 		rt:             rt,
+		supervisor:     supervisor,
+		session:        handle,
 		workingDir:     sess.WorkingDir,
 		additionalDirs: additionalDirs,
 	})
-	if !stored {
-		slog.DebugContext(ctx, "ACP session already registered, reusing existing", "session_id", sid)
+	switch outcome {
+	case registrationStored:
+		slog.DebugContext(ctx, "ACP session resumed", "session_id", sid)
 		return acp.ResumeSessionResponse{}, nil
+	case registrationDuplicate:
+		_ = supervisor.Shutdown(ctx)
+		return acp.ResumeSessionResponse{}, nil
+	default:
+		_ = supervisor.Shutdown(ctx)
+		return acp.ResumeSessionResponse{}, fmt.Errorf("ACP session resume rejected: %v", outcome)
 	}
-
-	slog.DebugContext(ctx, "ACP session resumed", "session_id", sid)
-
-	return acp.ResumeSessionResponse{}, nil
 }
 
 // SetSessionConfigOption implements [acp.Agent] (optional, not advertised in capabilities).
@@ -480,8 +592,12 @@ func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
 	acpSess, ok := a.sessions[sid]
 	a.mu.Unlock()
 
-	if ok && acpSess != nil {
+	if ok && acpSess != nil && acpSess.session != nil {
 		acpSess.cancelTurn()
+		acpSess.mu.Lock()
+		turnID := acpSess.activeTurnID
+		acpSess.mu.Unlock()
+		_, _ = acpSess.session.Cancel(context.Background(), turnID)
 	}
 
 	return nil
@@ -513,11 +629,13 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	defer finish()
 
 	userMsg := a.buildUserMessage(turnCtx, sid, params.Prompt)
-	if userMsg != nil && (userMsg.Message.Content != "" || len(userMsg.Message.MultiContent) > 0) {
-		acpSess.sess.AddMessage(userMsg)
+	input := runtime.TurnInput{}
+	if userMsg != nil {
+		input.Content = userMsg.Message.Content
+		input.MultiContent = userMsg.Message.MultiContent
 	}
 
-	if err := a.runAgent(turnCtx, acpSess); err != nil {
+	if err := a.runAgent(turnCtx, acpSess, input); err != nil {
 		if turnCtx.Err() != nil {
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
 		}
@@ -525,15 +643,6 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	}
 
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
-}
-
-// buildUserContent constructs user message text from ACP content blocks.
-func (a *Agent) buildUserContent(ctx context.Context, sessionID string, prompt []acp.ContentBlock) string {
-	msg := a.buildUserMessage(ctx, sessionID, prompt)
-	if msg == nil {
-		return ""
-	}
-	return msg.Message.Content
 }
 
 func (a *Agent) buildUserMessage(ctx context.Context, sessionID string, prompt []acp.ContentBlock) *session.Message {
@@ -693,7 +802,11 @@ func (a *Agent) sendUpdate(ctx context.Context, sessionID string, update acp.Ses
 }
 
 // runAgent runs a single agent loop and streams updates to the ACP client.
-func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
+func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtime.TurnInput) error {
+	var input runtime.TurnInput
+	if len(inputs) > 0 {
+		input = inputs[0]
+	}
 	slog.DebugContext(ctx, "Running agent turn", "session_id", acpSess.id)
 
 	ctx = withSessionID(ctx, acpSess.id)
@@ -702,63 +815,93 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 		slog.DebugContext(ctx, "Failed to emit available commands", "error", err)
 	}
 
-	eventsChan := acpSess.rt.RunStream(ctx, acpSess.sess)
+	observation, err := acpSess.session.Observe(context.WithoutCancel(ctx), runtime.ObserveOptions{})
+	if err != nil {
+		return fmt.Errorf("observe ACP session: %w", err)
+	}
+	submission, err := acpSess.session.Submit(ctx, input)
+	if err != nil {
+		observation.Cancel()
+		return fmt.Errorf("submit ACP prompt: %w", err)
+	}
+	acpSess.mu.Lock()
+	acpSess.activeTurnID = submission.TurnID
+	acpSess.mu.Unlock()
+	// ACP prompt replacement/cancellation stops the admitted turn, not just
+	// its observer. Drain the turn before admitting a successor.
+	stopCancel := context.AfterFunc(ctx, func() {
+		_, _ = acpSess.session.Cancel(context.WithoutCancel(ctx), submission.TurnID)
+	})
+	defer stopCancel()
+	defer func() {
+		acpSess.mu.Lock()
+		acpSess.activeTurnID = ""
+		acpSess.mu.Unlock()
+	}()
 	toolCallArgs := map[string]string{}
 
-	for event := range eventsChan {
+	// The shared consumer normally stops on context cancellation. ACP must
+	// instead retain admission ownership until the canceled turn drains.
+	turnCtx := ctx
+	termination := runtimeclient.ConsumeTurn(context.WithoutCancel(ctx), observation, submission.TurnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		ctx := turnCtx
+		event := envelope.Event
 		if ctx.Err() != nil {
-			return ctx.Err()
+			if _, stopped := event.(*runtime.StreamStoppedEvent); stopped {
+				return runtimeclient.TurnTerminate, ctx.Err()
+			}
+			return runtimeclient.TurnContinue, nil
 		}
 
 		switch e := event.(type) {
 		case *runtime.AgentChoiceEvent:
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText(e.Content)); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.AgentChoiceReasoningEvent:
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentThoughtText(e.Content)); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.ToolCallConfirmationEvent:
-			if err := a.handleToolCallConfirmation(ctx, acpSess, e); err != nil {
-				return err
+			if err := a.handleToolCallConfirmation(ctx, acpSess, envelope.InteractionID, e); err != nil {
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.ToolCallEvent:
 			toolCallArgs[e.ToolCall.ID] = e.ToolCall.Function.Arguments
 			if err := a.sendUpdate(ctx, acpSess.id, buildToolCallStart(e.ToolCall, e.ToolDefinition)); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.ToolCallResponseEvent:
 			args, ok := toolCallArgs[e.ToolCallID]
 			if !ok {
-				return fmt.Errorf("missing tool call arguments for tool call ID %s", e.ToolCallID)
+				return runtimeclient.TurnTerminate, fmt.Errorf("missing tool call arguments for tool call ID %s", e.ToolCallID)
 			}
 			delete(toolCallArgs, e.ToolCallID)
 
 			if err := a.sendUpdate(ctx, acpSess.id, buildToolCallComplete(args, e)); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 			if isTodoTool(e.ToolDefinition.Name) && e.Result != nil && e.Result.Meta != nil {
 				if planUpdate := buildPlanUpdateFromTodos(e.Result.Meta); planUpdate != nil {
 					if err := a.sendUpdate(ctx, acpSess.id, *planUpdate); err != nil {
-						return err
+						return runtimeclient.TurnTerminate, err
 					}
 				}
 			}
 
 		case *runtime.ErrorEvent:
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText(fmt.Sprintf("\n\nError: %s\n", e.Error))); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.WarningEvent:
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText(fmt.Sprintf("\nWarning: %s\n", e.Message))); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.SessionTitleEvent:
@@ -768,7 +911,7 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 					Title:         &e.Title,
 				},
 			}); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.TokenUsageEvent:
@@ -785,7 +928,7 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 					}
 				}
 				if err := a.sendUpdate(ctx, acpSess.id, acp.SessionUpdate{UsageUpdate: &usageUpdate}); err != nil {
-					return err
+					return runtimeclient.TurnTerminate, err
 				}
 			}
 
@@ -793,14 +936,21 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText(
 				fmt.Sprintf("\nModel %s failed, falling back to %s (%s)\n", e.FailedModel, e.FallbackModel, e.Reason),
 			)); err != nil {
-				return err
+				return runtimeclient.TurnTerminate, err
 			}
 
 		case *runtime.MaxIterationsReachedEvent:
-			if err := a.handleMaxIterationsReached(ctx, acpSess, e); err != nil {
-				return err
+			if err := a.handleMaxIterationsReached(ctx, acpSess, envelope.InteractionID, e); err != nil {
+				return runtimeclient.TurnTerminate, err
 			}
 		}
+		return runtimeclient.TurnContinue, nil
+	})
+	if termination.Err != nil {
+		if termination.ObservationError {
+			return fmt.Errorf("observe ACP session: %w", termination.Err)
+		}
+		return termination.Err
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -810,7 +960,7 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 }
 
 // handleToolCallConfirmation handles tool call permission requests.
-func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session, e *runtime.ToolCallConfirmationEvent) error {
+func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session, requestID string, e *runtime.ToolCallConfirmationEvent) error {
 	toolCallUpdate := buildToolCallUpdate(e.ToolCall, e.ToolDefinition, acp.ToolCallStatusPending)
 
 	permResp, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{
@@ -838,9 +988,10 @@ func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session
 		return err
 	}
 
+	response := runtime.InteractionResponse{InteractionID: requestID, Kind: runtime.InteractionConfirmation}
 	if permResp.Outcome.Cancelled != nil {
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeReject})
-		return nil
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeReject, RequestID: e.RequestID}
+		return acpSess.session.Respond(ctx, response)
 	}
 
 	if permResp.Outcome.Selected == nil {
@@ -849,20 +1000,20 @@ func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session
 
 	switch string(permResp.Outcome.Selected.OptionId) {
 	case "allow":
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApprove})
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeApprove, RequestID: e.RequestID}
 	case "allow-always":
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApproveAutonomous})
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeApproveAutonomous, RequestID: e.RequestID}
 	case "reject":
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeReject})
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeReject, RequestID: e.RequestID}
 	default:
 		return fmt.Errorf("unexpected permission option: %s", permResp.Outcome.Selected.OptionId)
 	}
 
-	return nil
+	return acpSess.session.Respond(ctx, response)
 }
 
 // handleMaxIterationsReached handles max iterations events.
-func (a *Agent) handleMaxIterationsReached(ctx context.Context, acpSess *Session, e *runtime.MaxIterationsReachedEvent) error {
+func (a *Agent) handleMaxIterationsReached(ctx context.Context, acpSess *Session, requestID string, e *runtime.MaxIterationsReachedEvent) error {
 	title := fmt.Sprintf("Maximum iterations (%d) reached", e.MaxIterations)
 	permResp, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{
 		SessionId: acp.SessionId(acpSess.id),
@@ -889,14 +1040,15 @@ func (a *Agent) handleMaxIterationsReached(ctx context.Context, acpSess *Session
 		return err
 	}
 
+	response := runtime.InteractionResponse{InteractionID: requestID, Kind: runtime.InteractionMaxIterations}
 	if permResp.Outcome.Cancelled != nil || permResp.Outcome.Selected == nil ||
 		string(permResp.Outcome.Selected.OptionId) == "stop" {
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeReject})
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeReject, RequestID: e.RequestID}
 	} else {
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApprove})
+		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeApprove, RequestID: e.RequestID}
 	}
 
-	return nil
+	return acpSess.session.Respond(ctx, response)
 }
 
 // emitAvailableCommands sends the list of available slash commands to the client.

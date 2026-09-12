@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/subagent"
 )
 
 // forkSuffixRe matches a "(fork N)" trailing suffix on a session title,
@@ -79,6 +80,7 @@ func (s *Session) Clone() *Session {
 
 	clone := &Session{
 		ID:                      s.ID,
+		Origin:                  s.Origin,
 		InputID:                 s.InputID,
 		Title:                   s.Title,
 		Evals:                   cloneEvalCriteria(s.Evals),
@@ -112,6 +114,8 @@ func (s *Session) Clone() *Session {
 		ParentID:                s.ParentID,
 		DelegationLineage:       cloneStringSlice(s.DelegationLineage),
 		InstructionContext:      cloneInstructionContext(s.InstructionContext),
+		AsyncSubagent:           s.AsyncSubagent,
+		SubagentTree:            cloneSubagentSnapshot(s.SubagentTree),
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
 	}
 
@@ -143,6 +147,33 @@ func (s *Session) Clone() *Session {
 		}
 	}
 	return clone
+}
+
+// CommitCompactionFrom atomically commits only the mutable conversation state
+// produced by transactional compaction. Immutable identity/configuration fields
+// (ID, origin, agent/parent binding, working directory, permissions) are never
+// rewritten.
+func (s *Session) CommitCompactionFrom(src *Session) {
+	if s == nil || src == nil || s == src || s.ID != src.ID {
+		return
+	}
+	clone := src.Clone()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Messages = clone.Messages
+	s.InputTokens = clone.InputTokens
+	s.OutputTokens = clone.OutputTokens
+	s.Cost = clone.Cost
+	s.MessageUsageHistory = clone.MessageUsageHistory
+}
+
+func cloneSubagentSnapshot(snapshot *subagent.Snapshot) *subagent.Snapshot {
+	if snapshot == nil {
+		return nil
+	}
+	cloned := *snapshot
+	cloned.Nodes = cloneNodeSnapshots(snapshot.Nodes)
+	return &cloned
 }
 
 func cloneSessionItem(item Item) (Item, error) {
@@ -368,6 +399,11 @@ func cloneEvalResultChecks(src EvalResultChecks) EvalResultChecks {
 		cp.Assertions = &assertions
 	}
 	return cp
+}
+
+// ClonePermissionsConfig returns a deep copy of session-scoped permission rules.
+func ClonePermissionsConfig(src *PermissionsConfig) *PermissionsConfig {
+	return src.Clone()
 }
 
 func cloneStringMap(src map[string]string) map[string]string {

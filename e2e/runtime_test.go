@@ -86,9 +86,12 @@ func TestRuntime_MultiAgent_SessionReload(t *testing.T) {
 	require.NotNil(t, reloaded)
 
 	// --- Turn 2: follow-up on the reloaded session ---
-	// Before the fix, this would fail because the reloaded session contained
-	// orphan streaming messages from the sub-agent that corrupt the message
-	// sequence sent to the model.
+	// Session-v2 keeps stable identity while permitting a settled handle to adopt
+	// the just-loaded durable snapshot. This exercises the reload rather than
+	// accidentally continuing against the pre-reload in-memory object.
+	handle, err := rt.SessionByID(sess.ID)
+	require.NoError(t, err)
+	require.True(t, runtime.ReplaceSettledSession(handle, reloaded))
 	reloaded.AddMessage(session.UserMessage("Can you summarize what you found?"))
 	reloaded.SendUserMessage = true
 

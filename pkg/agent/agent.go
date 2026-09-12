@@ -20,6 +20,27 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/structuredoutput"
 )
 
+type (
+	contextModelOverrideKey struct{}
+	contextModelOverrides   map[string][]provider.Provider
+)
+
+// WithContextModels pins provider selection for one agent identity without
+// mutating the shared team Agent. Existing pins for other agents are retained.
+func WithContextModels(ctx context.Context, agentName string, models []provider.Provider) context.Context {
+	if len(models) == 0 {
+		return ctx
+	}
+	all := make(contextModelOverrides)
+	if existing, ok := ctx.Value(contextModelOverrideKey{}).(contextModelOverrides); ok {
+		for name, providers := range existing {
+			all[name] = slices.Clone(providers)
+		}
+	}
+	all[agentName] = slices.Clone(models)
+	return context.WithValue(ctx, contextModelOverrideKey{}, all)
+}
+
 // Agent represents an AI agent
 type Agent struct {
 	name                    string
@@ -37,6 +58,8 @@ type Agent struct {
 	sessionCompactionOff    bool                                // True when the agent opted out of automatic session compaction
 	modelOverrides          atomic.Pointer[[]provider.Provider] // Optional model override(s) set at runtime (supports alloy)
 	subAgents               []*Agent
+	asyncSubagents          []latest.SubagentRef
+	asyncHarnessPrompt      string
 	handoffs                []*Agent
 	forceHandoff            *Agent
 	parents                 []*Agent
@@ -174,6 +197,25 @@ func (a *Agent) SubAgents() []*Agent {
 	return a.subAgents
 }
 
+// AsyncSubagents returns the resolved async subagent references (the `subagents`
+// config key). Each entry maps a model-facing alias to a target agent name and
+// optional description; the async subagent runtime uses this as the spawn
+// allow-list and to build the harness prompt.
+func (a *Agent) AsyncSubagents() []latest.SubagentRef {
+	return a.asyncSubagents
+}
+
+// HasAsyncSubagents reports whether the agent declared any `subagents`.
+func (a *Agent) HasAsyncSubagents() bool {
+	return len(a.asyncSubagents) > 0
+}
+
+// AsyncHarnessPrompt returns the core system prompt prepended for agents that
+// declare async subagents.
+func (a *Agent) AsyncHarnessPrompt() string {
+	return a.asyncHarnessPrompt
+}
+
 // Handoffs returns the list of handoff agents
 func (a *Agent) Handoffs() []*Agent {
 	return a.handoffs
@@ -206,16 +248,21 @@ func (a *Agent) HasSubAgents() bool {
 func (a *Agent) Model(ctx context.Context) provider.Provider {
 	var selected provider.Provider
 	var poolSize int
-	// Check for model override first (set via TUI model switching)
-	if overrides := a.modelOverrides.Load(); overrides != nil && len(*overrides) > 0 {
-		selected = (*overrides)[rand.Intn(len(*overrides))]
-		poolSize = len(*overrides)
-	} else {
-		if len(a.models) == 0 {
-			return nil
+	if scoped := ContextModels(ctx, a.name); len(scoped) > 0 {
+		selected = scoped[rand.Intn(len(scoped))]
+		poolSize = len(scoped)
+	}
+	if selected == nil {
+		if overrides := a.modelOverrides.Load(); overrides != nil && len(*overrides) > 0 {
+			selected = (*overrides)[rand.Intn(len(*overrides))]
+			poolSize = len(*overrides)
+		} else {
+			if len(a.models) == 0 {
+				return nil
+			}
+			selected = a.models[rand.Intn(len(a.models))]
+			poolSize = len(a.models)
 		}
-		selected = a.models[rand.Intn(len(a.models))]
-		poolSize = len(a.models)
 	}
 	slog.InfoContext(ctx, "Model selected", "agent", a.name, "model", selected.ID(), "pool_size", poolSize)
 	return selected
@@ -301,14 +348,33 @@ func (a *Agent) ConfiguredModels() []provider.Provider {
 	return a.models
 }
 
-// EffectiveModels returns the providers currently in effect for this agent:
-// the runtime override(s) when set, otherwise the configured models. The
-// returned slice is a copy and safe for the caller to retain or mutate.
-func (a *Agent) EffectiveModels() []provider.Provider {
+// EffectiveModels returns the providers currently in effect for this agent,
+// with the same precedence [Agent.Model] applies when it picks one of them:
+// models pinned on ctx by [WithContextModels] (a session-scoped override),
+// then the runtime override(s), then the configured models. The returned
+// slice is a copy and safe for the caller to retain or mutate.
+func (a *Agent) EffectiveModels(ctx context.Context) []provider.Provider {
+	if scoped := ContextModels(ctx, a.name); len(scoped) > 0 {
+		return scoped
+	}
 	if overrides := a.modelOverrides.Load(); overrides != nil && len(*overrides) > 0 {
 		return slices.Clone(*overrides)
 	}
 	return slices.Clone(a.models)
+}
+
+// ContextModels returns the providers pinned on ctx for agentName by
+// [WithContextModels], or nil when the context carries no pin for it. The
+// returned slice is a copy.
+func ContextModels(ctx context.Context, agentName string) []provider.Provider {
+	if ctx == nil {
+		return nil
+	}
+	all, ok := ctx.Value(contextModelOverrideKey{}).(contextModelOverrides)
+	if !ok {
+		return nil
+	}
+	return slices.Clone(all[agentName])
 }
 
 // FallbackModels returns the fallback models to try if the primary model fails.

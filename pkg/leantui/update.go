@@ -10,8 +10,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/google/uuid"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
@@ -26,11 +26,7 @@ import (
 
 func (m *model) handleKey(ctx context.Context, k ui.Key) {
 	if m.screen.Confirm != nil {
-		if k.Typ == ui.KeyEsc || k.Typ == ui.KeyCtrlC {
-			m.handleInterrupt()
-		} else {
-			m.handleConfirmKey(k)
-		}
+		m.handleConfirmKey(ctx, k)
 		return
 	}
 
@@ -112,8 +108,8 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 	cancelled := make([]string, 0, len(m.pendingUsers))
 	remaining := make([]ui.PendingUserMessage, 0, len(m.pendingUsers))
 	for _, pending := range m.pendingUsers {
-		followUp := pending.Kind == ui.PendingUserFollowUp
-		if pending.ID == "" || !m.app.CancelPendingMessage(ctx, runtime.QueuedMessage{ID: pending.ID}, followUp) {
+		withdrawn, err := m.app.CancelPendingMessage(ctx, pending.TurnID)
+		if err != nil || !withdrawn {
 			remaining = append(remaining, pending)
 			continue
 		}
@@ -132,6 +128,13 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 func (m *model) handleInterrupt() {
 	switch {
 	case m.busy:
+		outcome := runtime.CancelNotActive
+		if m.app != nil {
+			outcome = m.app.CancelRun()
+		}
+		if outcome == runtime.CancelNotActive && m.runCancel == nil {
+			m.addNotice("⚠ ", "Could not cancel current response", ui.StWarning())
+		}
 		if m.runCancel != nil {
 			m.runCancel()
 		}
@@ -212,8 +215,8 @@ func (m *model) thinkingLevelChangeable() bool {
 	if m.app == nil {
 		return false
 	}
-	if !m.app.SupportsModelSwitching() {
-		m.addNotice("", "Thinking levels can't be changed with remote runtimes", ui.StMuted())
+	if !m.app.SupportsThinkingLevels() {
+		m.addNotice("", "Current model does not support thinking levels", ui.StMuted())
 		return false
 	}
 	return true
@@ -314,6 +317,15 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 	case "sessions":
 		m.handleSessionsCommand(ctx, rest)
 		return true
+	case "load":
+		m.handleLoadSession(ctx, rest)
+		return true
+	case "delete":
+		m.handleDeleteSession(ctx, rest)
+		return true
+	case "star":
+		m.handleStarSession(ctx, rest)
+		return true
 	case "compact":
 		m.addUserEcho(text)
 		m.startCompact(ctx, rest)
@@ -326,14 +338,22 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 		return true
 	}
 
-	if skillName, task, ok := m.app.SkillCommandFork(ctx, text); ok {
+	if skillName, task, ok, err := m.app.SkillCommandForkResult(ctx, text); err != nil {
+		m.addNotice("⚠ ", "Could not resolve skill: "+err.Error(), ui.StWarning())
+		return true
+	} else if ok {
 		m.addUserEcho(text)
 		m.startSkillFork(ctx, skillName, task)
 		return true
 	}
 
 	if _, _, ok := m.app.LookupCommand(ctx, text); ok {
-		m.dispatchUserMessage(ctx, text, m.app.ResolveInput(ctx, text), mode)
+		resolved, err := m.app.ResolveInputOnce(ctx, text)
+		if err != nil {
+			m.addNotice("⚠ ", "Could not resolve input: "+err.Error(), ui.StWarning())
+			return true
+		}
+		m.dispatchUserMessage(ctx, text, resolved.Content, mode)
 		return true
 	}
 
@@ -364,22 +384,28 @@ func (m *model) copyLastResponse() {
 
 var writeClipboard = clipboard.WriteAll
 
+func (m *model) sessionCatalog() (runtime.SessionCatalog, bool) {
+	catalog, ok := m.app.SessionRuntime().(runtime.SessionCatalog)
+	if !ok {
+		m.addNotice("", "Session browsing is not supported for this runtime", ui.StMuted())
+	}
+	return catalog, ok
+}
+
 func (m *model) handleSessionsCommand(ctx context.Context, sessionID string) {
 	if m.busy {
 		m.addNotice("", "Wait for the current response to finish before switching sessions", ui.StMuted())
 		return
 	}
-	if m.app == nil || m.app.SessionStore() == nil {
-		m.addNotice("", "No session store configured", ui.StMuted())
-		return
-	}
-
 	if sessionID != "" {
 		m.resumeSession(ctx, sessionID)
 		return
 	}
-
-	summaries, err := m.app.SessionStore().GetSessionSummaries(ctx)
+	catalog, ok := m.sessionCatalog()
+	if !ok {
+		return
+	}
+	summaries, err := catalog.ListSessions(ctx)
 	if err != nil {
 		m.addNotice("✗ ", "Failed to load sessions: "+err.Error(), ui.StError())
 		return
@@ -389,24 +415,24 @@ func (m *model) handleSessionsCommand(ctx context.Context, sessionID string) {
 	currentID := m.app.Session().ID
 	cmds := make([]ui.Command, 0, len(summaries))
 	for _, summary := range summaries {
-		if summary.ID == currentID || cleanDirectory(summary.WorkingDir) != currentDir {
+		if !summary.Loadable || summary.SessionID == currentID || cleanDirectory(summary.WorkingDir) != currentDir {
 			continue
 		}
 		title := strings.TrimSpace(summary.Title)
 		if title == "" {
 			title = "Untitled"
 		}
-		s := summary
+		row := summary
 		cmds = append(cmds, ui.Command{
 			Name:  title,
-			Desc:  fmt.Sprintf("%s · %d messages", s.CreatedAt.Local().Format("Jan 2 15:04"), s.NumMessages),
-			Value: s.ID,
+			Desc:  fmt.Sprintf("%s · %d messages", row.CreatedAt.Local().Format("Jan 2 15:04"), row.NumMessages),
+			Value: row.SessionID,
 			MatchScore: func(query string) (int, bool) {
 				query = strings.ToLower(strings.TrimSpace(query))
 				if query == "" {
 					return 0, true
 				}
-				if strings.Contains(strings.ToLower(title), query) || strings.Contains(strings.ReplaceAll(strings.ToLower(s.ID), "-", ""), strings.ReplaceAll(query, "-", "")) {
+				if strings.Contains(strings.ToLower(title), query) || strings.Contains(strings.ReplaceAll(strings.ToLower(row.SessionID), "-", ""), strings.ReplaceAll(query, "-", "")) {
 					return 1, true
 				}
 				return 0, false
@@ -418,7 +444,6 @@ func (m *model) handleSessionsCommand(ctx context.Context, sessionID string) {
 		m.addNotice("", "No previous sessions found in this directory", ui.StMuted())
 		return
 	}
-
 	m.screen.Autocomplete.SetScopedCommands("sessions ", cmds)
 	m.screen.Editor.SetText("/sessions ")
 	m.screen.Autocomplete.Sync(m.screen.Editor.Text())
@@ -439,7 +464,36 @@ func cleanDirectory(dir string) string {
 }
 
 func (m *model) resumeSession(ctx context.Context, sessionID string) {
-	sess, err := m.app.SessionStore().GetSession(ctx, sessionID)
+	catalog, ok := m.sessionCatalog()
+	if !ok {
+		return
+	}
+	rows, err := catalog.ListSessions(ctx)
+	if err != nil {
+		m.addNotice("✗ ", "Failed to load sessions: "+err.Error(), ui.StError())
+		return
+	}
+	var selected *runtime.SessionCatalogEntry
+	for i := range rows {
+		if rows[i].SessionID == sessionID {
+			selected = &rows[i]
+			break
+		}
+	}
+	if selected == nil || !selected.Loadable {
+		m.addNotice("✗ ", "Session is not attachable", ui.StError())
+		return
+	}
+	if cleanDirectory(selected.WorkingDir) != cleanDirectory(m.app.Session().WorkingDir) {
+		m.addNotice("✗ ", "Session is not from the current directory", ui.StError())
+		return
+	}
+	loader, ok := m.app.SessionRuntime().(runtime.SessionLoader)
+	if !ok {
+		m.addNotice("✗ ", "Session loading is not supported", ui.StError())
+		return
+	}
+	_, sess, err := loader.LoadSession(ctx, sessionID)
 	if err != nil {
 		m.addNotice("✗ ", "Failed to load session: "+err.Error(), ui.StError())
 		return
@@ -448,13 +502,14 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 		m.addNotice("✗ ", "Session is not from the current directory", ui.StError())
 		return
 	}
-
 	m.app.ReplaceSession(ctx, sess)
 	m.resetConversation()
 	m.screen.Transcript = ui.NewTranscript()
 	m.sessionState = service.NewSessionState(sess)
 	m.loadSessionTranscript(sess)
-	m.refreshCommands(ctx)
+	if m.app.Runtime() != nil {
+		m.refreshCommands(ctx)
+	}
 	title := strings.TrimSpace(sess.Title)
 	if title == "" {
 		title = sess.ID
@@ -469,6 +524,59 @@ func (m *model) loadInitialSessionTranscript() {
 	m.loadSessionTranscript(m.app.Session())
 }
 
+func (m *model) handleLoadSession(ctx context.Context, id string) {
+	if id == "" {
+		m.addNotice("", "Usage: /load <session-id>", ui.StMuted())
+		return
+	}
+	m.resumeSession(ctx, id)
+}
+
+func (m *model) handleDeleteSession(ctx context.Context, id string) {
+	if id == "" {
+		m.addNotice("", "Usage: /delete <session-id>", ui.StMuted())
+		return
+	}
+	if err := m.app.SessionRuntime().DeleteSession(ctx, id); err != nil {
+		m.addNotice("✗ ", err.Error(), ui.StError())
+		return
+	}
+	m.addNotice("", "Deleted session "+id, ui.StMuted())
+}
+
+func (m *model) handleStarSession(ctx context.Context, arg string) {
+	id, value, _ := strings.Cut(arg, " ")
+	if id == "" {
+		id = m.app.Session().ID
+	}
+	loader, ok := m.app.SessionRuntime().(runtime.SessionLoader)
+	if !ok {
+		m.addNotice("", "Session starring is not supported", ui.StMuted())
+		return
+	}
+	handle, _, err := loader.LoadSession(ctx, id)
+	if err != nil {
+		m.addNotice("✗ ", err.Error(), ui.StError())
+		return
+	}
+	if !handle.Metadata().Capabilities.SessionEditing {
+		m.addNotice("", "Session starring is not supported", ui.StMuted())
+		return
+	}
+	starred := value != "off"
+	if value == "" && m.app.Session() != nil && id == m.app.Session().ID {
+		starred = !m.app.Session().Starred
+	}
+	if err := handle.SetStarred(ctx, starred); err != nil {
+		m.addNotice("✗ ", err.Error(), ui.StError())
+		return
+	}
+	if m.app.Session() != nil && id == m.app.Session().ID {
+		m.app.Session().Starred = starred
+	}
+	m.addNotice("", "Updated session star", ui.StMuted())
+}
+
 func (m *model) loadSessionTranscript(sess *session.Session) {
 	storedMessages := sess.OwnMessages()
 	toolResults := make(map[string]chat.Message)
@@ -480,6 +588,10 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 
 	for _, msg := range storedMessages {
 		if msg.Implicit {
+			continue
+		}
+		if msg.Pending {
+			m.addPendingUser(msg.Message.Content, msg.Message.Content, msg.TurnID, ui.PendingUserFollowUp)
 			continue
 		}
 		content := msg.Message.Content
@@ -562,7 +674,9 @@ func (m *model) handleModelCommand(ctx context.Context, modelRef string) {
 		m.addNotice("✗ ", "Failed to change model: "+err.Error(), ui.StError())
 		return
 	}
-	m.refreshCommands(ctx)
+	if m.app.Runtime() != nil {
+		m.refreshCommands(ctx)
+	}
 	if modelRef == "" {
 		m.addNotice("", "Model reset to default", ui.StMuted())
 		return
@@ -579,20 +693,24 @@ func (m *model) dispatchUserMessage(ctx context.Context, display, content string
 	if m.busy {
 		switch mode {
 		case busySubmitSteer:
-			msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
-			if err := m.app.Steer(ctx, msg); err != nil {
+			submission, err := m.app.SteerMessage(ctx, content, nil)
+			if err != nil {
 				m.addNotice("⚠ ", "Could not steer current response: "+err.Error(), ui.StWarning())
 				return
 			}
-			m.addPendingUser(msg.ID, display, content, ui.PendingUserSteer)
+			kind := ui.PendingUserSteer
+			if submission.Disposition == runtime.SubmissionDispositionQueued {
+				kind = ui.PendingUserFollowUp
+			}
+			m.addPendingUser(display, content, submission.TurnID, kind)
 			return
 		case busySubmitFollowUp:
-			msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
-			if err := m.app.FollowUp(ctx, msg); err != nil {
+			submission, err := m.app.FollowUpMessage(ctx, content, nil)
+			if err != nil {
 				m.addNotice("⚠ ", "Could not enqueue follow-up: "+err.Error(), ui.StWarning())
 				return
 			}
-			m.addPendingUser(msg.ID, display, content, ui.PendingUserFollowUp)
+			m.addPendingUser(display, content, submission.TurnID, ui.PendingUserFollowUp)
 			return
 		default:
 			m.enqueueFollowUp(display, content)
@@ -626,8 +744,11 @@ func (m *model) sendFirstMessage(ctx context.Context, msg, attachPath string) {
 
 	content := msg
 	if strings.HasPrefix(trimmed, "/") {
-		if resolved := m.app.ResolveInput(ctx, trimmed); resolved != "" {
-			content = resolved
+		if resolved, err := m.app.ResolveInputOnce(ctx, trimmed); err != nil {
+			m.addNotice("⚠ ", "Could not resolve input: "+err.Error(), ui.StWarning())
+			return
+		} else if resolved.Content != "" {
+			content = resolved.Content
 		}
 	}
 
@@ -659,14 +780,36 @@ func (m *model) startRun(ctx context.Context, message string, attachments []mess
 	m.app.Run(runCtx, cancel, message, attachments)
 }
 
-func (m *model) startCompact(ctx context.Context, prompt string) {
-	runCtx, cancel := m.beginRun(ctx)
-	m.app.CompactSession(runCtx, cancel, prompt)
+func (m *model) startCompact(ctx context.Context, additionalPrompt string) {
+	if m.app == nil {
+		m.addNotice("", "Conversation compaction is not supported for this session", ui.StMuted())
+		return
+	}
+	if err := m.app.CompactSession(ctx, additionalPrompt); err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			m.addNotice("", "Conversation compaction is not supported for this session", ui.StMuted())
+			return
+		}
+		m.addNotice("⚠ ", "Could not compact conversation: "+err.Error(), ui.StWarning())
+	}
 }
 
-func (m *model) startSkillFork(ctx context.Context, name, task string) {
-	runCtx, cancel := m.beginRun(ctx)
-	m.app.RunSkillFork(runCtx, cancel, name, task, nil)
+func (m *model) startSkillFork(ctx context.Context, skillName, task string) {
+	if !m.app.SupportsForkSkills() {
+		m.addNotice("", "Forked skills are not supported for this session", ui.StMuted())
+		return
+	}
+	_, cancel := m.beginRun(ctx)
+	_ = cancel
+	operationID := app.NewSkillOperationID()
+	m.ownedSkillOperation = operationID
+	err := m.app.StartSkillForkOperation(ctx, operationID, skillName, task)
+	if err != nil {
+		m.ownedSkillOperation = ""
+		m.addNotice("⚠ ", "Could not start fork skill: "+err.Error(), ui.StWarning())
+		m.finishBusy(ctx)
+		return
+	}
 }
 
 func (m *model) refreshCommands(ctx context.Context) {
@@ -682,15 +825,19 @@ func (m *model) refreshCommands(ctx context.Context) {
 		}
 		cmds = append(cmds, ui.Command{Name: name, Desc: c.DisplayText(), Kind: ui.CmdAgent})
 	}
-	for _, sk := range m.app.CurrentAgentSkills() {
+	sk, err := m.app.CurrentAgentSkillsContext(ctx)
+	if err != nil {
+		m.addNotice("⚠ ", "Could not discover skills: "+err.Error(), ui.StWarning())
+	}
+	for _, sk := range sk {
 		cmds = append(cmds, ui.Command{Name: sk.Name, Desc: sk.Description, Kind: ui.CmdAgent})
 	}
 	m.screen.Autocomplete.SetCommands(cmds)
 }
 
-func (m *model) handleConfirmKey(k ui.Key) {
+func (m *model) handleConfirmKey(ctx context.Context, k ui.Key) {
 	if k.Typ == ui.KeyEsc {
-		m.resolveConfirm(runtime.ResumeReject("rejected by user"))
+		m.resolveConfirm(ctx, runtime.ResumeReject("rejected by user"))
 		return
 	}
 	if k.Typ != ui.KeyRune || len(k.Runes) == 0 {
@@ -698,21 +845,51 @@ func (m *model) handleConfirmKey(k ui.Key) {
 	}
 	switch k.Runes[0] {
 	case 'y', 'Y':
-		m.resolveConfirm(runtime.ResumeApprove())
+		m.resolveConfirm(ctx, runtime.ResumeApprove())
 	case 'a', 'A':
-		m.resolveConfirm(runtime.ResumeApproveTool(m.screen.Confirm.Tool))
+		m.resolveConfirm(ctx, runtime.ResumeApproveTool(m.screen.Confirm.Tool))
 	case 'b', 'B':
-		m.resolveConfirm(runtime.ResumeApproveBalanced())
+		m.resolveConfirm(ctx, runtime.ResumeApproveBalanced())
 	case 's', 'S':
-		m.resolveConfirm(runtime.ResumeApproveAutonomous())
+		m.resolveConfirm(ctx, runtime.ResumeApproveAutonomous())
 	case 'n', 'N':
-		m.resolveConfirm(runtime.ResumeReject("rejected by user"))
+		m.resolveConfirm(ctx, runtime.ResumeReject("rejected by user"))
 	}
 }
 
-func (m *model) resolveConfirm(req runtime.ResumeRequest) {
-	m.app.Resume(req)
+func (m *model) handleInteractionResponse(ctx context.Context, msg messages.InteractionResponseMsg) {
+	response := msg.Response
+	if msg.SessionID == "" || response.InteractionID == "" || m.app.SessionRuntime() == nil {
+		m.addNotice("⚠ ", "Cannot answer interaction: session correlation is missing", ui.StWarning())
+		return
+	}
+	if response.Kind == runtime.InteractionElicitation && response.ElicitationID == "" {
+		m.addNotice("⚠ ", "Cannot answer interaction: elicitation correlation is missing", ui.StWarning())
+		return
+	}
+	handle, err := m.app.SessionRuntime().SessionByID(msg.SessionID)
+	if err == nil {
+		err = handle.Respond(ctx, response)
+	}
+	if err != nil {
+		m.addNotice("⚠ ", "Could not answer interaction: "+err.Error(), ui.StWarning())
+	}
+}
+
+func (m *model) resolveConfirm(ctx context.Context, req runtime.ResumeRequest) {
+	confirm := m.screen.Confirm
 	m.screen.Confirm = nil
+	if confirm == nil {
+		return
+	}
+	m.handleInteractionResponse(ctx, messages.InteractionResponseMsg{
+		SessionID: confirm.SessionID,
+		Response: runtime.InteractionResponse{
+			InteractionID: confirm.RequestID,
+			Kind:          runtime.InteractionConfirmation,
+			Resume:        req,
+		},
+	})
 }
 
 func (m *model) resetConversation() {
@@ -752,13 +929,13 @@ func (m *model) addUserEcho(text string) {
 	m.screen.Transcript.AddBlock(func(w int) []string { return ui.RenderUserLines(text, w) })
 }
 
-func (m *model) addPendingUser(id, display, content string, kind ui.PendingUserKind) {
-	m.pendingUsers = append(m.pendingUsers, ui.PendingUserMessage{ID: id, Display: display, Content: content, Kind: kind})
+func (m *model) addPendingUser(display, content, turnID string, kind ui.PendingUserKind) {
+	m.pendingUsers = append(m.pendingUsers, ui.PendingUserMessage{Display: display, Content: content, TurnID: turnID, Kind: kind})
 }
 
-func (m *model) consumePendingUser(kind ui.PendingUserKind, content string) (ui.PendingUserMessage, bool) {
+func (m *model) consumePendingUser(kind ui.PendingUserKind, turnID, content string) (ui.PendingUserMessage, bool) {
 	for i, msg := range m.pendingUsers {
-		if msg.Kind != kind || !samePendingUserContent(msg.Content, content) {
+		if msg.Kind != kind || (turnID != "" && msg.TurnID != turnID) || (turnID == "" && !samePendingUserContent(msg.Content, content)) {
 			continue
 		}
 		m.pendingUsers = append(m.pendingUsers[:i], m.pendingUsers[i+1:]...)

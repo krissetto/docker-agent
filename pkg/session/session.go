@@ -18,6 +18,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -385,6 +386,13 @@ type Session struct {
 	// deduplicated and order-preserved.
 	AttachedFiles []string `json:"attached_files,omitempty"`
 
+	// SubagentTree is the latest snapshot of this session's async subagent
+	// swarm, mirrored by the runtime's subagent manager on every state change
+	// and reloaded from the [subagent.Store] on session load. Session stores do
+	// not persist it — subagent data lives in its own table/backend (see
+	// subagent.Store).
+	SubagentTree *subagent.Snapshot `json:"subagent_tree,omitempty"`
+
 	// ExcludedTools lists tool names that should be filtered out of the agent's
 	// tool list for this session. This is used by skill sub-sessions to prevent
 	// recursive run_skill calls.
@@ -434,6 +442,9 @@ type Session struct {
 	// InstructionContext keeps the cache-stable snapshot and chronological
 	// updates for dynamic system context.
 	InstructionContext *InstructionContextState `json:"instruction_context,omitempty"`
+	// AsyncSubagent marks a session created by spawn_subagent. The runtime
+	// reconstructs it from subagent topology rather than a child database column.
+	AsyncSubagent bool `json:"async_subagent,omitempty"`
 
 	// MessageUsageHistory stores per-message usage data for remote mode.
 	// In remote mode, messages are managed server-side, so we track usage separately.
@@ -522,6 +533,11 @@ type Message struct {
 	// like when an agent transfers a task to another agent - new session is created with a default user message, but this shouldn't be shown to the user.
 	// Such messages should be marked as true
 	Implicit bool `json:"implicit,omitempty"`
+	// Pending keeps an accepted user message visible and durable while excluding
+	// it from model input until its session turn is promoted.
+	Pending  bool   `json:"pending,omitempty"`
+	Accepted bool   `json:"actor_accepted,omitempty"`
+	TurnID   string `json:"actor_turn_id,omitempty"`
 }
 
 // UnmarshalJSON accepts both the current "agent_name" key and the legacy
@@ -851,11 +867,8 @@ func cloneSchemaValue(v any) any {
 
 // AddMessage adds a message to the session and returns the index the new
 // item occupies in s.Messages. Callers that need to stamp an event with the
-// message's position (e.g. UserMessageEvent.SessionPosition) must use this
-// return value rather than a separate len(sess.Messages)-1 read: the latter
-// races with concurrent AddMessage/ApplyCompaction calls (e.g. from a live
-// HTTP AddMessage while a stream is running) and can also observe a later,
-// larger length than the one that matched this append.
+// message's position must use this return value rather than a separate length
+// read, which can observe a later concurrent append.
 func (s *Session) AddMessage(msg *Message) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -869,6 +882,81 @@ func (s *Session) AddMessage(msg *Message) int {
 	}
 	s.Messages = append(s.Messages, NewMessageItem(msg))
 	return len(s.Messages) - 1
+}
+
+// AddMessageAt is the positional append name used by runtime event call sites.
+func (s *Session) AddMessageAt(msg *Message) int {
+	return s.AddMessage(msg)
+}
+
+func (s *Session) AcceptPendingUserMessage(content string, multiContent ...chat.MessagePart) int {
+	msg := UserMessage(content, multiContent...)
+	msg.Pending = true
+	msg.Accepted = true
+	return s.AddMessageAt(msg)
+}
+
+func (s *Session) PromotePendingUserMessage(position int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.promotePendingUserMessageLocked(position)
+}
+
+// PromotePendingUserMessageByTurnID promotes the accepted session input with the
+// stable turn correlation. Unlike a remembered slice position, the turn ID
+// remains valid when an earlier FIFO promotion moves pending items.
+func (s *Session) PromotePendingUserMessageByTurnID(turnID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for position, item := range s.Messages {
+		if item.Message != nil && item.Message.Pending && item.Message.TurnID == turnID {
+			return s.promotePendingUserMessageLocked(position)
+		}
+	}
+	return false
+}
+
+func (s *Session) promotePendingUserMessageLocked(position int) bool {
+	if position < 0 || position >= len(s.Messages) || !s.Messages[position].IsMessage() || s.Messages[position].Message == nil || !s.Messages[position].Message.Pending {
+		return false
+	}
+	item := s.Messages[position]
+	item.Message.Pending = false
+	n := len(s.Messages)
+	// Moving an item before a kept-tail boundary shifts that boundary left by
+	// one. Boundary==position already names the next old item after the move;
+	// zero/absent and the n sentinel retain their meanings.
+	for i := range s.Messages {
+		boundary := s.Messages[i].FirstKeptEntry
+		if position < boundary && boundary < n {
+			s.Messages[i].FirstKeptEntry--
+		}
+	}
+	copy(s.Messages[position:], s.Messages[position+1:])
+	s.Messages[len(s.Messages)-1] = item
+	return true
+}
+
+// SetTitle records the session title under s.mu.
+func (s *Session) SetTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Title = title
+}
+
+// GetTitle returns the current session title.
+func (s *Session) GetTitle() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Title
+}
+
+// SafetySettings returns a consistent snapshot of tool-approval settings that
+// child sessions should inherit.
+func (s *Session) SafetySettings() (toolsApproved bool, policy SafetyPolicy, permissions *PermissionsConfig) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ToolsApproved, s.SafetyPolicy, s.Permissions.Clone()
 }
 
 // MarshalJSON takes a consistent snapshot while encoding mutable session
@@ -925,16 +1013,6 @@ func (s *Session) SetTokensAndCost(inputTokens, outputTokens int64, cost float64
 	s.Cost = cost
 }
 
-// SetTitle updates the session title under s.mu. Title writers (title
-// generation, HTTP title updates, granular store updates) run on
-// different goroutines than readers like the UpdateSession snapshot,
-// so direct field writes would race.
-func (s *Session) SetTitle(title string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Title = title
-}
-
 // TitleSnapshot returns the session title under s.mu, the read-side
 // counterpart to SetTitle. Named TitleSnapshot because the Title field
 // and a method cannot share the name.
@@ -944,9 +1022,43 @@ func (s *Session) TitleSnapshot() string {
 	return s.Title
 }
 
+// SetSubagentTree records a copy of the latest subagent swarm snapshot under
+// s.mu. Copying keeps callers from mutating session state after the lock is
+// released.
+func (s *Session) SetSubagentTree(snapshot *subagent.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SubagentTree = cloneSubagentSnapshot(snapshot)
+}
+
+// GetSubagentTree returns a copy of the latest subagent swarm snapshot.
+func (s *Session) GetSubagentTree() *subagent.Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.SubagentTree == nil {
+		return nil
+	}
+	snapshot := *s.SubagentTree
+	snapshot.Nodes = cloneNodeSnapshots(snapshot.Nodes)
+	return &snapshot
+}
+
+func cloneNodeSnapshots(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
+	if nodes == nil {
+		return nil
+	}
+	cloned := make([]subagent.NodeSnapshot, len(nodes))
+	for i := range nodes {
+		cloned[i].Node = nodes[i].Node
+		cloned[i].Children = cloneNodeSnapshots(nodes[i].Children)
+	}
+	return cloned
+}
+
 // ApplyCompaction atomically resets the session's cumulative token counts,
 // derives scalar cost from canonical item history including the new summary,
-// and appends that summary under s.mu.
+// and appends that summary under s.mu. The single critical section also keeps
+// session snapshots and persistence observers from seeing partial compaction.
 func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1131,6 +1243,15 @@ func cloneInstructionContext(state *InstructionContextState) *InstructionContext
 func (s *Session) AddSubSession(subSession *Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Idempotent by sub-session id: persistent sub-sessions (async subagents)
+	// are re-recorded after every finished turn and must not accumulate
+	// duplicate items in the parent's transcript.
+	for i := range s.Messages {
+		if s.Messages[i].SubSession != nil && s.Messages[i].SubSession.ID == subSession.ID {
+			s.Messages[i] = NewSubSessionItem(subSession)
+			return
+		}
+	}
 	s.Messages = append(s.Messages, NewSubSessionItem(subSession))
 }
 
@@ -1582,6 +1703,12 @@ func WithDelegationLineage(names []string) Opt {
 	}
 }
 
+func WithAsyncSubagent(async bool) Opt {
+	return func(s *Session) {
+		s.AsyncSubagent = async
+	}
+}
+
 // WithID sets the session ID. If not set, a UUID will be generated.
 func WithID(id string) Opt {
 	return func(s *Session) {
@@ -1680,23 +1807,22 @@ func (s *Session) MessageCount() int {
 // ItemCount returns the total number of items in s.Messages — messages,
 // sub-sessions, summaries, and recorded errors alike. Unlike MessageCount,
 // it counts every item, matching what len(s.Messages) would return outside
-// the lock. Hot paths that need "the index the next appended item will
-// occupy" (e.g. before calling AddSubSession) should use this instead of
-// reading len(sess.Messages) directly, which races with concurrent
-// AddMessage/ApplyCompaction.
+// the lock. Runtime event positions index into this list, so callers must use
+// this accessor rather than reading Messages directly.
 func (s *Session) ItemCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.Messages)
 }
 
-// MessagesSnapshot returns a lock-safe copy of the session's items, deep-
-// copying each Message so the result cannot alias a concurrent AddMessage /
-// UpdateMessage mutation. It is the exported counterpart of snapshotItems for
-// callers outside this package (e.g. pkg/server's ForkSession) that need to
-// iterate Messages without racing session.mu; in-package callers should keep
-// using snapshotItems directly.
+// MessagesSnapshot returns a lock-safe deep copy of the session's items.
 func (s *Session) MessagesSnapshot() []Item {
+	return s.snapshotItems()
+}
+
+// ItemsSnapshot returns a lock-safe deep copy of the item list together with
+// a consistent length for transcript/live-event reconciliation.
+func (s *Session) ItemsSnapshot() []Item {
 	return s.snapshotItems()
 }
 
@@ -1976,6 +2102,13 @@ func markLastMessageAsCacheControl(messages []chat.Message) {
 func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 	var messages []chat.Message
 
+	if prompt := a.AsyncHarnessPrompt(); a.HasAsyncSubagents() && prompt != "" {
+		messages = append(messages, chat.Message{
+			Role:    chat.MessageRoleSystem,
+			Content: prompt,
+		})
+	}
+
 	if a.HasSubAgents() {
 		subAgents := a.SubAgents()
 
@@ -1993,7 +2126,7 @@ func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 
 		messages = append(messages, chat.Message{
 			Role:    chat.MessageRoleSystem,
-			Content: "You are a multi-agent system, make sure to answer the user query in the most helpful way possible. You have access to these sub-agents:\n" + text.String() + "\nIMPORTANT: You can ONLY transfer tasks to the agents listed above using their ID. The valid agent names are: " + strings.Join(validAgentIDs, ", ") + ". You MUST NOT attempt to transfer to any other agent IDs - doing so will cause system errors.\n\nIf you are the best to answer the question according to your description, you can answer it.\n\nIf another agent is better for answering the question according to its description, call `transfer_task` function to transfer the question to that agent using the agent's ID. When transferring, do not generate any text other than the function call.\n\nWhen the task involves files, always include their absolute paths in the `task` description (never just bare filenames). Sub-agents start in a fresh session and do not see the conversation history or files attached by the user, so a non-absolute path may resolve to the wrong file or force the sub-agent to scan the filesystem.\n\n",
+			Content: "Use transfer_task only with one of the listed agent IDs: " + strings.Join(validAgentIDs, ", ") + ". Delegate when another listed agent is best suited, or answer directly when you are. When delegating, emit only the transfer_task tool call. In task, directly include the relevant context, constraints, absolute file paths, and expected output.\n\nAvailable agents:\n" + text.String(),
 		})
 	}
 
@@ -2131,7 +2264,8 @@ func (s *Session) buildSessionSummaryMessages(items []Item) ([]chat.Message, int
 // the prior summary item itself; subsequent entries are the prior
 // kept-tail and the post-summary conversation, mirroring what
 // buildSessionSummaryMessages produces for the runtime. System
-// messages stored on the session are filtered out (the compactor
+// messages stored on the session and accepted pending messages are filtered
+// out (the latter are durable queue state, not model input); the compactor
 // supplies its own system/user prompt around this list).
 //
 // This method intentionally bypasses GetMessages's agent-level
@@ -2192,7 +2326,7 @@ func (s *Session) CompactionInput() ([]chat.Message, []int, int) {
 	}
 
 	for i := startIndex; i < len(items); i++ {
-		if !items[i].IsMessage() {
+		if !items[i].IsMessage() || items[i].Message.Pending {
 			continue
 		}
 		msg := items[i].Message.Message
@@ -2272,6 +2406,12 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
 	invariantMessages := buildInvariantSystemMessages(a)
+	if s.AsyncSubagent {
+		invariantMessages = append([]chat.Message{{
+			Role:    chat.MessageRoleSystem,
+			Content: subagent.ChildInstructions(),
+		}}, invariantMessages...)
+	}
 	markLastMessageAsCacheControl(invariantMessages)
 
 	// Take a snapshot of Messages under the lock, copying Message structs
@@ -2319,7 +2459,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 			})
 			updateIndex++
 		}
-		if i < len(items) && items[i].IsMessage() {
+		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending {
 			messages = append(messages, items[i].Message.Message)
 		}
 	}

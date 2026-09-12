@@ -17,12 +17,12 @@ import (
 
 func TestNestedStreamStopDoesNotFinalizeScrolledUpParentTail(t *testing.T) {
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(queueTestRuntime{})), service.NewSessionState(sess)).(*chatPage)
 	p.messages.SetSize(60, 8)
 
 	_, _ = p.handleRuntimeEvent(runtime.StreamStarted(sess.ID, "root"))
 	_, _ = p.handleRuntimeEvent(runtime.StreamStarted("child-session", "child"))
-	require.Equal(t, 2, p.streamDepth)
+	require.Equal(t, 2, p.lifecycle.Depth())
 
 	p.messages.AddUserMessage(strings.Repeat("history line\n", 40))
 	p.messages.AddAssistantMessage("root", "")
@@ -33,12 +33,12 @@ func TestNestedStreamStopDoesNotFinalizeScrolledUpParentTail(t *testing.T) {
 	require.Positive(t, deferredTailLen(t, p), "fixture must be scrolled up with a deferred parent tail")
 
 	_, _ = p.handleRuntimeEvent(runtime.StreamStopped("child-session", "child", "normal"))
-	require.Equal(t, 1, p.streamDepth)
+	require.Equal(t, 1, p.lifecycle.Depth())
 	require.Positive(t, deferredTailLen(t, p), "a nested stop must not finalize the still-active parent response")
 	require.True(t, p.working)
 
 	_, _ = p.handleRuntimeEvent(runtime.StreamStopped(sess.ID, "root", "normal"))
-	require.Zero(t, p.streamDepth)
+	require.Zero(t, p.lifecycle.Depth())
 	require.Zero(t, deferredTailLen(t, p), "the outermost stop is the exact-content finalization boundary")
 	require.False(t, p.working)
 }

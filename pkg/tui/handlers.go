@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
@@ -18,11 +17,9 @@ import (
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/evaluation"
-	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
-	"github.com/docker/docker-agent/pkg/tools"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
@@ -139,13 +136,19 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save forked session: %v", err))
 	}
 
-	a, _, cleanup, err := spawner(ctx, forkedSession.WorkingDir)
+	spawned, err := spawner(ctx, forkedSession.WorkingDir)
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to create runtime for fork: %v", err))
 	}
 
-	a.ReplaceSession(ctx, forkedSession)
-	m.supervisor.AddSession(ctx, a, forkedSession, forkedSession.WorkingDir, cleanup)
+	spawned.App.ReplaceSession(ctx, forkedSession)
+	cleanup := spawned.Cleanup
+	if spawned.Ownership == RuntimeBorrowed {
+		cleanup = nil
+	}
+	if _, err := m.supervisor.AddSession(ctx, spawned.App, forkedSession, forkedSession.WorkingDir, cleanup); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to supervise forked session: %v", err))
+	}
 
 	if m.tuiStore != nil {
 		if err := m.tuiStore.AddTab(ctx, forkedSession.ID, forkedSession.WorkingDir); err != nil {
@@ -157,12 +160,23 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
-	store := m.application.SessionStore()
-	if store == nil {
-		return m, notification.ErrorCmd("No session store configured")
-	}
-
 	currentSess := m.application.Session()
+	if currentSess != nil && currentSess.ID == sessionID {
+		if handle := m.application.SessionHandle(); handle != nil {
+			if !handle.Metadata().Capabilities.SessionEditing {
+				return m, notification.InfoCmd("Session editing is not supported for this session")
+			}
+			starred := !currentSess.Starred
+			if err := m.application.SetCurrentSessionStarred(m.ctx(), starred); err != nil {
+				return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
+			}
+			m.chatPage.SetSessionStarred(starred)
+			return m, nil
+		}
+	}
+	store := m.application.SessionStore()
+
+	currentSess = m.application.Session()
 	if currentSess != nil && currentSess.ID == sessionID {
 		currentSess.Starred = !currentSess.Starred
 		m.chatPage.SetSessionStarred(currentSess.Starred)
@@ -170,6 +184,21 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
 		}
 	} else {
+		sessions := m.application.SessionRuntime()
+		if loader, ok := sessions.(runtime.SessionLoader); ok {
+			handle, loaded, err := loader.LoadSession(m.ctx(), sessionID)
+			if err != nil {
+				return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
+			}
+			editor := handle
+			if err := editor.SetStarred(m.ctx(), !loaded.Starred); err != nil {
+				return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
+			}
+			return m, nil
+		}
+		if store == nil {
+			return m, notification.ErrorCmd("No session store configured")
+		}
 		sess, err := store.GetSession(m.ctx(), sessionID)
 		if err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
@@ -210,6 +239,13 @@ func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
+	if sessions := m.application.SessionRuntime(); sessions != nil {
+		if err := sessions.DeleteSession(m.ctx(), sessionID); err != nil {
+			return m, notification.ErrorCmd("Failed to delete session: " + err.Error())
+		}
+		return m, notification.SuccessCmd("Session deleted.")
+	}
+
 	store := m.application.SessionStore()
 	if store == nil {
 		return m, notification.ErrorCmd("No session store configured")
@@ -365,12 +401,45 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if err := m.application.SwitchAgent(agentName); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
+	oldWorkingDir := ""
+	if oldSession := m.application.Session(); oldSession != nil {
+		oldWorkingDir = oldSession.WorkingDir
 	}
-	m.sessionState.SetCurrentAgentName(agentName)
-	cmd := m.updateChatCmd(messages.SessionToggleChangedMsg{})
-	return m, cmd
+	commitApp, rollbackApp, err := m.application.SwitchAgentTransactional(m.ctx(), agentName)
+	if err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			return m, notification.InfoCmd("Switching agents is not supported for this session")
+		}
+		return m, notification.ErrorCmd("Failed to switch agent: " + err.Error())
+	}
+	newSess := m.application.Session()
+	activeID := m.supervisor.ActiveID()
+	oldPersistedID := m.persistedSessionID(activeID)
+	if m.tuiStore != nil {
+		if err := m.tuiStore.ReplaceTab(m.ctx(), oldPersistedID, newSess.ID, newSess.WorkingDir); err != nil {
+			rollbackErr := rollbackApp()
+			if rollbackErr != nil {
+				return m, notification.ErrorCmd(fmt.Sprintf("Failed to persist agent switch: %v; rollback cleanup failed: %v", err, rollbackErr))
+			}
+			return m, notification.ErrorCmd("Failed to persist agent switch: " + err.Error())
+		}
+	}
+	if !m.supervisor.RetargetRunner(m.ctx(), activeID, newSess.ID, newSess.WorkingDir) {
+		var reverseErr error
+		if m.tuiStore != nil {
+			reverseErr = m.tuiStore.ReplaceTab(m.ctx(), newSess.ID, oldPersistedID, oldWorkingDir)
+		}
+		rollbackErr := rollbackApp()
+		if reverseErr != nil || rollbackErr != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to retarget active tab; persistence rollback: %v; session rollback: %v", reverseErr, rollbackErr))
+		}
+		return m, notification.ErrorCmd("Failed to retarget the active tab")
+	}
+	m.initSessionComponents(newSess.ID, m.application, newSess)
+	commitApp()
+	m.dialogMgr = dialog.New()
+	m.persistActiveTab(newSess.ID)
+	return m, tea.Sequence(m.chatPage.Init(), m.resizeAll(), m.editor.Focus())
 }
 
 // handleShowAgentDetails opens the read-only agent-details dialog for the named
@@ -446,21 +515,26 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 // RuntimePausedEvent at the next iteration boundary (flipping it to
 // "Paused"); requesting a pause while idle shows "Paused" immediately.
 func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
-	paused, supported := m.application.TogglePause()
-	switch {
-	case !supported:
-		return m, notification.InfoCmd("Pause is not supported with remote runtimes")
-	case paused:
+	if !m.application.SupportsPause() {
+		return m, notification.InfoCmd("Pause is not supported for this session")
+	}
+	paused, err := m.application.TogglePause(m.ctx())
+	if err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			return m, notification.InfoCmd("Pause is not supported for this session")
+		}
+		return m, notification.ErrorCmd("Failed to toggle pause: " + err.Error())
+	}
+	if paused {
 		if m.chatPage.IsWorking() {
 			m.sessionState.SetPauseState(service.PausePausing)
-			return m, notification.InfoCmd("Pausing after the current request — /pause again to resume")
+		} else {
+			m.sessionState.SetPauseState(service.PausePaused)
 		}
-		m.sessionState.SetPauseState(service.PausePaused)
-		return m, notification.InfoCmd("Runtime paused — /pause again to resume")
-	default:
-		m.sessionState.SetPauseState(service.PauseNone)
-		return m, notification.SuccessCmd("Runtime resumed")
+		return m, nil
 	}
+	m.sessionState.SetPauseState(service.PauseNone)
+	return m, notification.SuccessCmd("Resumed")
 }
 
 func (m *appModel) handleToggleHideToolResults() (tea.Model, tea.Cmd) {
@@ -519,7 +593,7 @@ func (m *appModel) handleShowContextDialog() (tea.Model, tea.Cmd) {
 		switch {
 		case errors.Is(err, runtime.ErrUnsupported):
 			return notification.ShowMsg{
-				Text: "Context breakdown is not supported with remote runtimes",
+				Text: "Context breakdown is not supported for this session",
 				Type: notification.TypeInfo,
 			}
 		case err != nil:
@@ -566,8 +640,12 @@ func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
+	skills, err := m.application.CurrentAgentSkillsContext(m.ctx())
+	if err != nil {
+		return m, notification.ErrorCmd("Failed to discover skills: " + err.Error())
+	}
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
+		Model: dialog.NewSkillsDialog(skills),
 	})
 }
 
@@ -620,49 +698,37 @@ func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]strin
 // --- Model picker ---
 
 func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
-	start := time.Now()
-	defer func() {
-		slog.Debug("TUI model picker open handled", "duration", time.Since(start))
-	}()
 	if !m.application.SupportsModelSwitching() {
-		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
+		return m, notification.InfoCmd("Model switching is unavailable for this session")
 	}
-	loadStart := time.Now()
 	models := m.application.AvailableModels(m.ctx())
-	slog.Debug("TUI model picker available models loaded", "duration", time.Since(loadStart), "models", len(models))
 	if len(models) == 0 {
 		return m, notification.InfoCmd("No models available for selection")
 	}
-	dialogStart := time.Now()
-	modelDialog := dialog.NewModelPickerDialog(models)
-	slog.Debug("TUI model picker dialog built", "duration", time.Since(dialogStart), "models", len(models))
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: modelDialog,
-	})
+	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: dialog.NewModelPickerDialog(models)})
 }
 
 func (m *appModel) handleRefreshModelPicker(query string) (tea.Model, tea.Cmd) {
 	if !m.application.SupportsModelSwitching() {
-		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
+		return m, notification.InfoCmd("Model switching is unavailable for this session")
 	}
-
 	ctx := m.ctx()
 	return m, tea.Batch(
 		notification.InfoCmd("Refreshing models…"),
 		func() tea.Msg {
-			err := m.application.RefreshModelsCatalog(ctx)
-			catalogRefreshed := err == nil
+			catalogRefreshed := false
+			var err error
+			if m.application.SupportsModelCatalogRefresh() {
+				err = m.application.RefreshModelsCatalog(ctx)
+				catalogRefreshed = err == nil
+			}
 			if errors.Is(err, runtime.ErrUnsupported) {
 				err = nil
 			}
 			if err != nil {
 				return messages.ModelPickerRefreshedMsg{Query: query, Err: err}
 			}
-			return messages.ModelPickerRefreshedMsg{
-				Models:           m.application.AvailableModels(ctx),
-				Query:            query,
-				CatalogRefreshed: catalogRefreshed,
-			}
+			return messages.ModelPickerRefreshedMsg{Models: m.application.AvailableModels(ctx), Query: query, CatalogRefreshed: catalogRefreshed}
 		},
 	)
 }
@@ -690,8 +756,8 @@ func (m *appModel) handleModelPickerRefreshed(msg messages.ModelPickerRefreshedM
 // (shift+tab). On success the new level is reflected in the sidebar via the
 // re-emitted agent info; only failures surface a notification.
 func (m *appModel) handleCycleThinkingLevel() (tea.Model, tea.Cmd) {
-	if !m.application.SupportsModelSwitching() {
-		return m, notification.InfoCmd("Thinking levels can't be changed with remote runtimes")
+	if !m.application.SupportsThinkingLevels() {
+		return m, notification.InfoCmd("Current model does not support thinking levels")
 	}
 	if _, err := m.application.CycleAgentThinkingLevel(m.ctx()); err != nil {
 		if errors.Is(err, runtime.ErrUnsupported) {
@@ -707,8 +773,8 @@ func (m *appModel) handleCycleThinkingLevel() (tea.Model, tea.Cmd) {
 // opens the effort picker dialog; unsupported levels surface the model's
 // supported list via the runtime error.
 func (m *appModel) handleSetThinkingLevel(level string) (tea.Model, tea.Cmd) {
-	if !m.application.SupportsModelSwitching() {
-		return m, notification.InfoCmd("Thinking levels can't be changed with remote runtimes")
+	if !m.application.SupportsThinkingLevels() {
+		return m, notification.InfoCmd("Current model does not support thinking levels")
 	}
 	if level == "" {
 		return m.openEffortPicker()
@@ -732,16 +798,11 @@ func (m *appModel) handleSetThinkingLevel(level string) (tea.Model, tea.Cmd) {
 // The sidebar's thinking label doubles as the support signal: it is empty
 // exactly when the runtime reports no selectable thinking configuration.
 func (m *appModel) openEffortPicker() (tea.Model, tea.Cmd) {
-	agent := m.sessionState.GetCurrentAgent()
-	if agent.Thinking == "" {
+	levels := m.application.CurrentAgentThinkingLevels(m.ctx())
+	if len(levels) == 0 {
 		return m, notification.InfoCmd("Current model does not support thinking levels")
 	}
-	levels := modelinfo.SupportedThinkingLevels(agent.Provider, agent.Model)
-	// "off" maps onto none; adaptive/token labels leave no level marked current.
-	current, ok := effort.Parse(agent.Thinking)
-	if !ok && agent.Thinking == "off" {
-		current = effort.None
-	}
+	current := m.application.CurrentAgentThinkingLevel(m.ctx())
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewEffortPickerDialog(levels, current),
 	})
@@ -749,6 +810,9 @@ func (m *appModel) openEffortPicker() (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
 	if err := m.application.SetCurrentAgentModel(m.ctx(), modelRef); err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			return m, notification.InfoCmd("Model switching is unavailable for this session")
+		}
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to change model: %v", err))
 	}
 	if modelRef == "" {
@@ -1062,23 +1126,6 @@ func boolPreference(value, defaultValue bool) *bool {
 	return &value
 }
 
-// saveSettingsToUserConfig remains as a narrow compatibility helper for callers
-// that only update layout and send mode.
-func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.SendMode) error {
-	settings := userconfig.Get()
-	return savePreferences(messages.Preferences{
-		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
-		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
-		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
-		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
-		CacheStablePrompts: settings.CacheStablePromptsEnabled(),
-		WarnOnCacheMiss:    settings.CacheMissWarningsEnabled(),
-		Lean:               settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
-		Sound: settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
-		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
-	})
-}
-
 // handleColorSchemeChange reacts to a terminal light/dark report (a DEC mode
 // 2031 event or an OSC 11 response). The polarity is always recorded so a
 // later switch to the auto theme starts from the freshest value; the theme
@@ -1265,10 +1312,20 @@ func (m *appModel) closeTranscriptCh() {
 	}
 }
 
-func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any, elicitationID string) (tea.Model, tea.Cmd) {
-	if err := m.application.ResumeElicitation(m.ctx(), action, content, elicitationID); err != nil {
-		slog.Error("Failed to resume elicitation", "action", action, "error", err)
-		return m, notification.ErrorCmd("Failed to complete server request: " + err.Error())
+func (m *appModel) handleInteractionResponse(msg messages.InteractionResponseMsg) (tea.Model, tea.Cmd) {
+	response := msg.Response
+	if msg.SessionID == "" || response.InteractionID == "" || m.application == nil || m.application.SessionRuntime() == nil {
+		return m, notification.ErrorCmd("Failed to answer interaction: missing session correlation")
+	}
+	if response.Kind == runtime.InteractionElicitation && response.ElicitationID == "" {
+		return m, notification.ErrorCmd("Failed to answer interaction: missing elicitation correlation")
+	}
+	handle, err := m.application.SessionRuntime().SessionByID(msg.SessionID)
+	if err == nil {
+		err = handle.Respond(m.ctx(), response)
+	}
+	if err != nil {
+		return m, notification.ErrorCmd("Failed to answer interaction: " + err.Error())
 	}
 	return m, nil
 }

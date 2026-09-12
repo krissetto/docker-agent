@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -35,6 +36,44 @@ func (a AgentContext) GetAgentName() string { return a.AgentName }
 func newAgentContext(agentName string) AgentContext {
 	return AgentContext{AgentName: agentName, Timestamp: time.Now()}
 }
+
+// PendingUserMessageAcceptedEvent is the canonical admission transition for an
+// input that is durable but excluded from model context until FIFO promotion.
+type PendingUserMessageAcceptedEvent struct {
+	AgentContext
+
+	Type            string             `json:"type"`
+	SessionID       string             `json:"session_id"`
+	TurnID          string             `json:"turn_id"`
+	Message         string             `json:"message"`
+	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
+	SessionPosition int                `json:"session_position"`
+}
+
+func PendingUserMessageAccepted(sessionID, turnID, message string, multiContent []chat.MessagePart, position int) Event {
+	return &PendingUserMessageAcceptedEvent{Type: "pending_user_message_accepted", SessionID: sessionID, TurnID: turnID, Message: message, MultiContent: multiContent, SessionPosition: position, AgentContext: newAgentContext("")}
+}
+
+func (e *PendingUserMessageAcceptedEvent) GetSessionID() string { return e.SessionID }
+
+// PendingUserMessagePromotedEvent atomically removes an admitted input from
+// the pending FIFO and makes it part of the next model turn.
+type PendingUserMessagePromotedEvent struct {
+	AgentContext
+
+	Type            string             `json:"type"`
+	SessionID       string             `json:"session_id"`
+	TurnID          string             `json:"turn_id"`
+	Message         string             `json:"message"`
+	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
+	SessionPosition int                `json:"session_position"`
+}
+
+func PendingUserMessagePromoted(sessionID, turnID, message string, multiContent []chat.MessagePart, position int) Event {
+	return &PendingUserMessagePromotedEvent{Type: "pending_user_message_promoted", SessionID: sessionID, TurnID: turnID, Message: message, MultiContent: multiContent, SessionPosition: position, AgentContext: newAgentContext("")}
+}
+
+func (e *PendingUserMessagePromotedEvent) GetSessionID() string { return e.SessionID }
 
 // UserMessageEvent is sent when a user message is received
 type UserMessageEvent struct {
@@ -115,8 +154,12 @@ type ToolCallConfirmationEvent struct {
 	// confirmation prompt. Toolsets contribute static metadata via
 	// [tools.Tool.Metadata]; a permission_request hook can enrich it per
 	// call. nil when neither source supplied any.
-	Metadata map[string]string `json:"metadata,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	SessionID string            `json:"session_id,omitempty"`
+	RequestID string            `json:"request_id,omitempty"`
 }
+
+func (e *ToolCallConfirmationEvent) GetSessionID() string { return e.SessionID }
 
 func ToolCallConfirmation(toolCall tools.ToolCall, toolDefinition tools.Tool, agentName string, metadata map[string]string) Event {
 	return &ToolCallConfirmationEvent{
@@ -589,6 +632,25 @@ func StreamStopped(sessionID, agentName, reason string) Event {
 
 func (e *StreamStoppedEvent) GetSessionID() string { return e.SessionID }
 
+// SubagentTreeEvent carries a snapshot of the async subagent swarm for a
+// runtime. It is emitted outside of any RunStream (a subagent's state can
+// change while the parent is idle), so the app forwards it through its event
+// bus for the sidebar to render a live tree.
+type SubagentTreeEvent struct {
+	AgentContext
+
+	Type     string            `json:"type"`
+	Snapshot subagent.Snapshot `json:"snapshot"`
+}
+
+// SubagentTree builds a SubagentTreeEvent from a swarm snapshot.
+func SubagentTree(snapshot subagent.Snapshot) Event {
+	return &SubagentTreeEvent{
+		Type:     "subagent_tree",
+		Snapshot: snapshot,
+	}
+}
+
 // PausedEvent reports that the run loop has reached an iteration
 // boundary and is now blocked because /pause was toggled on. It is emitted
 // once the in-flight LLM request and its tool calls have finished — i.e. the
@@ -612,37 +674,57 @@ func Paused(sessionID, agentName string) Event {
 
 func (e *PausedEvent) GetSessionID() string { return e.SessionID }
 
+// SkillOperationEvent records one accepted asynchronous fork-skill operation
+// and its terminal outcome in the canonical session journal.
+type SkillOperationEvent struct {
+	AgentContext
+
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id"`
+	OperationID string `json:"operation_id"`
+	Skill       string `json:"skill"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+}
+
+func SkillOperation(sessionID, agentName, operationID, skill, status, failure string) Event {
+	return &SkillOperationEvent{Type: "skill_operation", AgentContext: newAgentContext(agentName), SessionID: sessionID, OperationID: operationID, Skill: skill, Status: status, Error: failure}
+}
+func (e *SkillOperationEvent) GetSessionID() string { return e.SessionID }
+
+// PauseChangedEvent records session pause arm/resume transitions. PausedEvent is
+// still the boundary/idle acknowledgement used by UIs for Pausing → Paused.
+type PauseChangedEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Paused    bool   `json:"paused"`
+}
+
+func PauseChanged(sessionID, agentName string, paused bool) Event {
+	return &PauseChangedEvent{Type: "runtime_pause_changed", SessionID: sessionID, AgentContext: newAgentContext(agentName), Paused: paused}
+}
+
+func (e *PauseChangedEvent) GetSessionID() string { return e.SessionID }
+
 // ElicitationRequestEvent is sent when an elicitation request is received from an MCP server
 type ElicitationRequestEvent struct {
 	AgentContext
 
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Mode    string `json:"mode,omitempty"` // "form" or "url"
-	Schema  any    `json:"schema,omitempty"`
-	URL     string `json:"url,omitempty"`
-	// ElicitationID is the internally-generated correlation ID used to route
-	// a ResumeElicitation response back to this specific request (see
-	// elicitationHandler). It is always set and always unique, regardless of
-	// whether the originating MCP server supplied its own wire ID: two
-	// independent servers can coincidentally reuse the same wire ID, so that
-	// value is never used for routing (#3584).
-	ElicitationID string `json:"elicitation_id,omitempty"`
-	// ServerElicitationID is the MCP wire-protocol elicitationId as supplied
-	// by the originating server, if any (URL-mode elicitations only; form
-	// elicitations leave it empty). It is informational only — useful for
-	// correlating with server-side logs — and must never be used as a
-	// routing key.
-	ServerElicitationID string `json:"server_elicitation_id,omitempty"`
-	// SessionID is the session (or sub-session) on whose behalf this
-	// elicitation was raised. A detached background job's sub-session ID
-	// differs from its parent/foreground session, which lets consumers (see
-	// the TUI supervisor) tell apart a foreground stream's own elicitation
-	// from a still-live background job's when the foreground stream stops
-	// (#3584 review item 4).
-	SessionID string         `json:"session_id,omitempty"`
-	Meta      map[string]any `json:"meta,omitempty"`
+	Type                string         `json:"type"`
+	Message             string         `json:"message"`
+	Mode                string         `json:"mode,omitempty"`
+	Schema              any            `json:"schema,omitempty"`
+	URL                 string         `json:"url,omitempty"`
+	ElicitationID       string         `json:"elicitation_id,omitempty"`
+	ServerElicitationID string         `json:"server_elicitation_id,omitempty"`
+	SessionID           string         `json:"session_id,omitempty"`
+	RequestID           string         `json:"request_id,omitempty"`
+	Meta                map[string]any `json:"meta,omitempty"`
 }
+
+func (e *ElicitationRequestEvent) GetSessionID() string { return e.SessionID }
 
 func ElicitationRequest(message, mode string, schema any, url, elicitationID, serverElicitationID, sessionID string, meta map[string]any, agentName string) Event {
 	return &ElicitationRequestEvent{
@@ -658,9 +740,6 @@ func ElicitationRequest(message, mode string, schema any, url, elicitationID, se
 		AgentContext:        newAgentContext(agentName),
 	}
 }
-
-// GetSessionID makes ElicitationRequestEvent satisfy [SessionScoped].
-func (e *ElicitationRequestEvent) GetSessionID() string { return e.SessionID }
 
 type AuthorizationEvent struct {
 	AgentContext
@@ -682,13 +761,23 @@ type MaxIterationsReachedEvent struct {
 
 	Type          string `json:"type"`
 	MaxIterations int    `json:"max_iterations"`
+	SessionID     string `json:"session_id,omitempty"`
+	RequestID     string `json:"request_id,omitempty"`
 }
 
-func MaxIterationsReached(maxIterations int) Event {
+func (e *MaxIterationsReachedEvent) GetSessionID() string { return e.SessionID }
+
+func MaxIterationsReachedForSession(maxIterations int, sessionID, requestID string) Event {
 	return &MaxIterationsReachedEvent{
 		Type:          "max_iterations_reached",
 		MaxIterations: maxIterations,
+		SessionID:     sessionID,
+		RequestID:     requestID,
 	}
+}
+
+func MaxIterationsReached(maxIterations int) Event {
+	return MaxIterationsReachedForSession(maxIterations, "", "")
 }
 
 // BudgetUsageEvent reports a run's spend against its configured budget.
@@ -1131,16 +1220,28 @@ type MessageAddedEvent struct {
 	Type      string           `json:"type"`
 	SessionID string           `json:"session_id"`
 	Message   *session.Message `json:"-"`
+	// SessionPosition is the index in session.Messages the message was
+	// committed at, -1 when unknown. Emission happens synchronously after
+	// the commit and the event stream preserves order, so viewers merging a
+	// transcript snapshot with the live stream use it as an exact
+	// reconciliation anchor (see the attach protocol notes).
+	SessionPosition int `json:"session_position"`
 }
 
 func (e *MessageAddedEvent) GetSessionID() string { return e.SessionID }
 
 func MessageAdded(sessionID string, msg *session.Message, agentName string) Event {
+	return MessageAddedAt(sessionID, msg, agentName, -1)
+}
+
+// MessageAddedAt is MessageAdded with the commit position stamp.
+func MessageAddedAt(sessionID string, msg *session.Message, agentName string, position int) Event {
 	return &MessageAddedEvent{
-		Type:         "message_added",
-		SessionID:    sessionID,
-		Message:      msg,
-		AgentContext: newAgentContext(agentName),
+		Type:            "message_added",
+		SessionID:       sessionID,
+		Message:         msg,
+		SessionPosition: position,
+		AgentContext:    newAgentContext(agentName),
 	}
 }
 

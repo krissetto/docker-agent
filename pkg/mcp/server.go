@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -269,7 +270,18 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			return nil, ToolOutput{}, fmt.Errorf("failed to get agent: %w", err)
 		}
 
-		sess := newToolCallSession(ag, input.Message, safety, workingDir)
+		sessionOptions := []session.Opt{
+			session.WithAgentName(agentName),
+			session.WithWorkingDir(workingDir),
+			session.WithTitle("MCP tool call"),
+			session.WithMaxIterations(ag.MaxIterations()),
+			session.WithMaxConsecutiveToolCalls(ag.MaxConsecutiveToolCalls()),
+			session.WithMaxOldToolCallTokens(ag.MaxOldToolCallTokens()),
+			session.WithMaxToolResultTokens(ag.MaxToolResultTokens()),
+			session.WithNonInteractive(true),
+			session.WithSafetyPolicy(safety),
+		}
+		sess := session.New(sessionOptions...)
 
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
@@ -283,10 +295,36 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			return nil, ToolOutput{}, fmt.Errorf("failed to create runtime: %w", err)
 		}
 
-		_, err = rt.Run(ctx, sess)
+		supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+		defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+		handle, err := supervisor.Runtime().CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
 		if err != nil {
-			slog.ErrorContext(ctx, "Agent execution failed", "agent", agentName, "error", err)
-			return nil, ToolOutput{}, fmt.Errorf("agent execution failed: %w", err)
+			return nil, ToolOutput{}, fmt.Errorf("bind MCP session: %w", err)
+		}
+		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		if err != nil {
+			return nil, ToolOutput{}, fmt.Errorf("attach MCP session: %w", err)
+		}
+		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: input.Message})
+		if err != nil {
+			observation.Cancel()
+			return nil, ToolOutput{}, fmt.Errorf("submit MCP session turn: %w", err)
+		}
+		termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+			switch event := envelope.Event.(type) {
+			case *runtime.ToolCallConfirmationEvent:
+				return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeReject("MCP agent tools are non-interactive")})
+			case *runtime.ElicitationRequestEvent:
+				return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionElicitation, ElicitationID: event.ElicitationID, Elicitation: runtime.ElicitationResult{Action: tools.ElicitationActionDecline}})
+			case *runtime.MaxIterationsReachedEvent:
+				return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
+			case *runtime.ErrorEvent:
+				return runtimeclient.TurnTerminate, errors.New(event.Error)
+			}
+			return runtimeclient.TurnContinue, nil
+		})
+		if termination.Err != nil {
+			return nil, ToolOutput{}, fmt.Errorf("agent execution failed: %w", termination.Err)
 		}
 
 		response := cmp.Or(sess.GetLastAssistantMessageContent(), "No response from agent")

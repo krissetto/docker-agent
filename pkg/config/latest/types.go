@@ -727,6 +727,13 @@ type AgentConfig struct {
 	// over to the target agent.
 	ForceHandoff string `json:"force_handoff,omitempty" yaml:"force_handoff,omitempty"`
 
+	// Subagents declares the agents this agent may delegate to and
+	// communicate with asynchronously (the async session model in
+	// pkg/subagent), as opposed to the synchronous SubAgents delegation.
+	// Each entry is either a bare agent name or a {agent,name,description}
+	// object; see SubagentRef.
+	Subagents SubagentRefs `json:"subagents,omitempty" yaml:"subagents,omitempty"`
+
 	AddDate            bool `json:"add_date,omitempty"`
 	AddEnvironmentInfo bool `json:"add_environment_info,omitempty"`
 	// ReadOnly makes every one of the agent's toolsets read-only: only
@@ -812,6 +819,103 @@ type AgentConfig struct {
 	UseToolsets []string     `json:"use_toolsets,omitempty"`
 	Hooks       *HooksConfig `json:"hooks,omitempty"`
 	Cache       *CacheConfig `json:"cache,omitempty"`
+}
+
+// SubagentRef references an agent this agent may delegate to and message
+// asynchronously. It accepts either a bare string (the target agent's name)
+// or an object giving an alias name and/or description that the delegating
+// model sees instead of the target agent's own.
+type SubagentRef struct {
+	// Agent is the name of the target agent to delegate to. Required.
+	Agent string `json:"agent" yaml:"agent"`
+	// Name is an optional alias the delegating model uses to address this
+	// subagent. Defaults to Agent when empty.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	// Description overrides the target agent's own description in the
+	// delegating model's harness prompt. Optional.
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// ResolvedName returns the alias the delegating model addresses, falling back
+// to the target agent name when no alias was given.
+func (r SubagentRef) ResolvedName() string {
+	return cmp.Or(r.Name, r.Agent)
+}
+
+func (r *SubagentRef) validate() error {
+	if strings.TrimSpace(r.Agent) == "" {
+		return errors.New("subagent entry must name a target agent")
+	}
+	return nil
+}
+
+// UnmarshalYAML accepts either a scalar agent name or a full object.
+func (r *SubagentRef) UnmarshalYAML(unmarshal func(any) error) error {
+	var name string
+	if err := unmarshal(&name); err == nil {
+		r.Agent, r.Name, r.Description = name, "", ""
+		return r.validate()
+	}
+	type alias SubagentRef
+	var tmp alias
+	if err := unmarshal(&tmp); err != nil {
+		return errors.New("subagent entry must be an agent name string or a {agent,name,description} object")
+	}
+	*r = SubagentRef(tmp)
+	return r.validate()
+}
+
+// MarshalYAML emits the scalar shorthand when only Agent is set, otherwise the
+// full object, so a round-trip preserves the authored form.
+func (r SubagentRef) MarshalYAML() (any, error) {
+	if r.Name == "" && r.Description == "" {
+		return r.Agent, nil
+	}
+	type alias SubagentRef
+	return alias(r), nil
+}
+
+// UnmarshalJSON mirrors UnmarshalYAML: accepts a scalar string or an object.
+func (r *SubagentRef) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		r.Agent, r.Name, r.Description = name, "", ""
+		return r.validate()
+	}
+	type alias SubagentRef
+	var tmp alias
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return errors.New("subagent entry must be an agent name string or a {agent,name,description} object")
+	}
+	*r = SubagentRef(tmp)
+	return r.validate()
+}
+
+// MarshalJSON mirrors MarshalYAML: scalar shorthand when only Agent is set.
+func (r SubagentRef) MarshalJSON() ([]byte, error) {
+	if r.Name == "" && r.Description == "" {
+		return json.Marshal(r.Agent)
+	}
+	type alias SubagentRef
+	return json.Marshal(alias(r))
+}
+
+// SubagentRefs is a list of async subagent references.
+type SubagentRefs []SubagentRef
+
+// AgentNames returns the distinct target agent names referenced by the list,
+// in declaration order.
+func (s SubagentRefs) AgentNames() []string {
+	seen := make(map[string]struct{}, len(s))
+	var out []string
+	for _, ref := range s {
+		if _, dup := seen[ref.Agent]; dup {
+			continue
+		}
+		seen[ref.Agent] = struct{}{}
+		out = append(out, ref.Agent)
+	}
+	return out
 }
 
 // CacheConfig configures the agent's response cache. When set and Enabled

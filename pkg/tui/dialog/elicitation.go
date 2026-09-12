@@ -59,7 +59,7 @@ type ElicitationDialog struct {
 
 	title         string
 	message       string
-	elicitationID string
+	ref           ElicitationRef
 	fields        []ElicitationField
 	inputs        []textinput.Model
 	boolValues    map[int]bool
@@ -119,25 +119,9 @@ func (d *ElicitationDialog) hasFreeFormInput() bool {
 	return len(d.fields) == 0
 }
 
-// firstElicitationID extracts the (at most one meaningful) elicitation ID
-// from a variadic parameter. Shared by the elicitation dialog constructors
-// in this package, whose elicitationID parameter is variadic rather than a
-// required positional string purely so pre-#3584 3-arg call sites keep
-// compiling unchanged (mirrors pkg/runtime.firstElicitationID).
-func firstElicitationID(elicitationID []string) string {
-	if len(elicitationID) == 0 {
-		return ""
-	}
-	return elicitationID[0]
-}
-
-// NewElicitationDialog creates a new elicitation dialog. elicitationID is
-// variadic purely so pre-existing 3-arg callers keep compiling unchanged
-// (see firstElicitationID for the same #3584 precedent); at most the first
-// value is meaningful.
-func NewElicitationDialog(message string, schema any, meta map[string]any, elicitationID ...string) Dialog {
+// NewElicitationDialog creates a new elicitation dialog answering ref.
+func NewElicitationDialog(message string, schema any, meta map[string]any, ref ElicitationRef) Dialog {
 	fields := parseElicitationSchema(schema)
-	id := firstElicitationID(elicitationID)
 
 	// Determine dialog title from meta, defaulting to "Question"
 	title := "Question"
@@ -148,14 +132,14 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, elici
 	}
 
 	d := &ElicitationDialog{
-		title:         title,
-		message:       message,
-		elicitationID: id,
-		fields:        fields,
-		inputs:        make([]textinput.Model, len(fields)),
-		boolValues:    make(map[int]bool),
-		enumIndexes:   make(map[int]int),
-		fieldErrors:   make(map[int]string),
+		title:       title,
+		message:     message,
+		ref:         ref,
+		fields:      fields,
+		inputs:      make([]textinput.Model, len(fields)),
+		boolValues:  make(map[int]bool),
+		enumIndexes: make(map[int]int),
+		fieldErrors: make(map[int]string),
 		keyMap: elicitationKeyMap{
 			Up:       key.NewBinding(key.WithKeys("up")),
 			Down:     key.NewBinding(key.WithKeys("down")),
@@ -402,7 +386,7 @@ func (d *ElicitationDialog) isTextInputField() bool {
 }
 
 func (d *ElicitationDialog) close(action tools.ElicitationAction, content map[string]any) tea.Cmd {
-	return CloseWithElicitationResponse(action, content, d.elicitationID)
+	return CloseWithElicitationResponse(action, content, d.ref)
 }
 
 // collectAndValidate validates all fields and returns the collected values.

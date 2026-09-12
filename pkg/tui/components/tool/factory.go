@@ -8,6 +8,7 @@ package tool
 import (
 	"sync"
 
+	subagentpkg "github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 	handofftool "github.com/docker/docker-agent/pkg/tools/builtin/handoff"
@@ -28,12 +29,14 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/readmultiplefiles"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/searchfilescontent"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/shell"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/userprompt"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/writefile"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -94,6 +97,13 @@ func Register(key string, b Builder) {
 	custom[key] = b
 }
 
+func customBuilder(key string) (Builder, bool) {
+	customMu.RLock()
+	defer customMu.RUnlock()
+	b, ok := custom[key]
+	return b, ok
+}
+
 // resolve returns the renderer for key, preferring a registered custom renderer
 // over the built-in one.
 func resolve(key string) (Builder, bool) {
@@ -110,7 +120,25 @@ func resolve(key string) (Builder, bool) {
 // New returns the appropriate tool view for the given message.
 // Lookup order: exact tool name, then "category:<category>", then default.
 // At each tier a registered custom renderer wins over the built-in one.
-func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader) layout.Model {
+func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) layout.Model {
+	var lookup subagenttool.NameLookup
+	if len(indexes) > 0 && indexes[0] != nil {
+		lookup = indexes[0].Name
+	}
+	name := msg.ToolCall.Function.Name
+	if b, ok := customBuilder(name); ok {
+		return withInlineImages(b(ar, msg, sessionState), msg.Images, sessionState)
+	}
+	switch name {
+	case subagentpkg.ToolSpawnSubagent:
+		return withInlineImages(subagenttool.NewSpawn(ar, msg, sessionState, lookup), msg.Images, sessionState)
+	case subagentpkg.ToolSendMessage:
+		return withInlineImages(subagenttool.NewSend(ar, msg, sessionState, lookup), msg.Images, sessionState)
+	case subagentpkg.ToolReadSubagent:
+		return withInlineImages(subagenttool.NewRead(ar, msg, sessionState, lookup), msg.Images, sessionState)
+	case subagentpkg.ToolStopSubagent:
+		return withInlineImages(subagenttool.NewStop(ar, msg, sessionState, lookup), msg.Images, sessionState)
+	}
 	var view layout.Model
 	if b, ok := resolve(msg.ToolCall.Function.Name); ok {
 		view = b(ar, msg, sessionState)

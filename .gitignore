@@ -29,3 +29,4 @@ docker-agent
 /wasm
 cmd/wasm/web/docker-agent.wasm
 cmd/wasm/web/wasm_exec.js
+__pycache__/

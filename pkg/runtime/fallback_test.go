@@ -122,7 +122,7 @@ func TestFallbackOrder(t *testing.T) {
 		sess.Title = "Fallback Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success from fallback2" {
 				gotContent = true
 			}
@@ -155,7 +155,7 @@ func TestFallbackNoRetryOnNonRetryableError(t *testing.T) {
 		sess.Title = "Non-Retryable Test"
 
 		var gotError, gotFallbackContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if _, ok := ev.(*ErrorEvent); ok {
 				gotError = true
 			}
@@ -195,7 +195,7 @@ func TestFallbackRetriesWithBackoff(t *testing.T) {
 		sess.Title = "Retry Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success after retries" {
 				gotContent = true
 			}
@@ -237,7 +237,7 @@ func TestPrimaryRetriesWithBackoff(t *testing.T) {
 		sess.Title = "Primary Retry Test"
 
 		var gotPrimaryContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Primary success after retries" {
 				gotPrimaryContent = true
 			}
@@ -276,7 +276,7 @@ func TestNoFallbackWhenPrimarySucceeds(t *testing.T) {
 		sess.Title = "Primary Success Test"
 
 		var gotPrimaryContent, fallbackCalled bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok {
 				if choice.Content == "Primary success" {
 					gotPrimaryContent = true
@@ -320,7 +320,7 @@ func TestFallback429SkipsToNextModel(t *testing.T) {
 		sess.Title = "429 Skip Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success from fallback" {
 				gotContent = true
 			}
@@ -428,7 +428,7 @@ func TestFallback429WithFallbacksSkipsToNextModel(t *testing.T) {
 		sess.Title = "429 With Fallback Skip Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success from fallback" {
 				gotContent = true
 			}
@@ -469,7 +469,7 @@ func TestFallback429WithoutFallbacksRetriesSameModel(t *testing.T) {
 		sess.Title = "429 No Fallback Retry Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success after rate limit" {
 				gotContent = true
 			}
@@ -503,7 +503,7 @@ func TestFallback429WithoutFallbacksExhaustsRetries(t *testing.T) {
 		sess.Title = "429 No Fallback Exhaust Test"
 
 		var gotError bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if _, ok := ev.(*ErrorEvent); ok {
 				gotError = true
 			}
@@ -542,7 +542,7 @@ func TestFallback500RetryableWithBackoff(t *testing.T) {
 		sess.Title = "500 Retry Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success after 500" {
 				gotContent = true
 			}
@@ -581,7 +581,7 @@ func TestRateLimitGate_DisabledNoFallbacks_FailsImmediately(t *testing.T) {
 		sess.Title = "429 Gate Disabled Test"
 
 		var gotError bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if _, ok := ev.(*ErrorEvent); ok {
 				gotError = true
 			}
@@ -622,7 +622,7 @@ func TestRateLimitGate_EnabledNoFallbacks_RetriesSameModel(t *testing.T) {
 		sess.Title = "429 Gate Enabled No Fallbacks Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success after rate limit" {
 				gotContent = true
 			}
@@ -664,7 +664,7 @@ func TestRateLimitGate_EnabledWithFallbacks_SkipsToFallback(t *testing.T) {
 		sess.Title = "429 Gate Enabled With Fallbacks Test"
 
 		var gotContent bool
-		for ev := range rt.RunStream(t.Context(), sess) {
+		for ev := range rt.runExecution(t.Context(), sess) {
 			if choice, ok := ev.(*AgentChoiceEvent); ok && choice.Content == "Success from fallback" {
 				gotContent = true
 			}

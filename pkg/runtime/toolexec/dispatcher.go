@@ -110,6 +110,14 @@ type Emitter interface {
 	EmitMessageAdded(sessionID string, msg *session.Message, agentName string)
 }
 
+// PositionalEmitter is an optional extension of [Emitter]: emitters that also
+// implement it receive the message's session commit position, which viewers
+// merging a transcript snapshot with the live event stream use as an exact
+// reconciliation anchor. Emitters without it get the plain EmitMessageAdded.
+type PositionalEmitter interface {
+	EmitMessageAddedAt(sessionID string, msg *session.Message, agentName string, position int)
+}
+
 // HookDispatcher abstracts pre/post tool-use hook dispatch and the
 // "user is being prompted" notification.
 type HookDispatcher interface {
@@ -147,9 +155,11 @@ type ToolHandler func(ctx context.Context, sess *session.Session, tc tools.ToolC
 // The runtime aliases this type publicly via runtime.ResumeRequest so the
 // dispatcher and the runtime share one definition.
 type ResumeRequest struct {
-	Type     ResumeType
-	Reason   string // Optional; primarily used with [ResumeTypeReject]
-	ToolName string // Optional; used with [ResumeTypeApproveTool]
+	Type      ResumeType
+	Reason    string // Optional; primarily used with [ResumeTypeReject]
+	ToolName  string // Optional; used with [ResumeTypeApproveTool]
+	SessionID string // Optional session identity for concurrent runtimes.
+	RequestID string // Optional interaction identity for stale-response rejection.
 }
 
 // ResumeType identifies the kind of confirmation a user responded with.
@@ -1262,10 +1272,15 @@ func (c *call) errorResponse(ctx context.Context, errorMsg string) {
 	})
 }
 
-// addMessage records msg in the session and emits MessageAdded.
+// addMessage records msg in the session and emits MessageAdded (with the
+// commit position when the emitter supports it).
 func (c *call) addMessage(msg *chat.Message) {
 	agentMsg := session.NewAgentMessage(c.a.Name(), msg)
-	c.sess.AddMessage(agentMsg)
+	pos := c.sess.AddMessageAt(agentMsg)
+	if em, ok := c.em.(PositionalEmitter); ok {
+		em.EmitMessageAddedAt(c.sess.ID, agentMsg, c.a.Name(), pos)
+		return
+	}
 	c.em.EmitMessageAdded(c.sess.ID, agentMsg, c.a.Name())
 }
 

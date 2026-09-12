@@ -135,6 +135,21 @@ func (s *Store) UpdateTabSessionID(ctx context.Context, oldID, newID string) err
 	return err
 }
 
+func (s *Store) ReplaceTab(ctx context.Context, oldID, newID, workingDir string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is harmless; transaction outcome is already checked
+	if _, err := tx.ExecContext(ctx, `UPDATE tabs SET session_id = ?, working_dir = ? WHERE session_id = ?`, newID, workingDir, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE active_tab SET session_id = ? WHERE session_id = ?`, newID, oldID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ReorderTab persists a new tab order. sessionIDs must contain every tab's
 // persisted session ID in the desired order; positions are assigned 0..N-1.
 func (s *Store) ReorderTab(ctx context.Context, sessionIDs []string) error {
@@ -142,7 +157,7 @@ func (s *Store) ReorderTab(ctx context.Context, sessionIDs []string) error {
 	if err != nil {
 		return fmt.Errorf("starting reorder transaction: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // rollback after commit is a no-op
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is harmless; transaction outcome is already checked // rollback after commit is a no-op
 
 	stmt, err := tx.PrepareContext(ctx, `UPDATE tabs SET position = ? WHERE session_id = ?`)
 	if err != nil {

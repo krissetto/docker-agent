@@ -3,10 +3,12 @@ package chat
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	chatmsg "github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -57,8 +59,31 @@ import (
 //
 // The switch is organized by event category for clarity.
 func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
+	seed := false
+	if bridged, ok := msg.(msgtypes.SessionRuntimeEventMsg); ok {
+		msg = bridged.Event
+		seed = bridged.Seed
+	}
 	switch msg := msg.(type) {
 	// ===== Error and Warning Events =====
+	case *runtime.SkillOperationEvent:
+		if msg.OperationID != p.ownedSkillOperation {
+			return true, nil
+		}
+		switch msg.Status {
+		case "completed", "failed":
+			p.ownedSkillOperation = ""
+			started := p.ownedSkillStream
+			p.ownedSkillStream = false
+			var errCmd tea.Cmd
+			if msg.Status == "failed" && msg.Error != "" {
+				errCmd = p.messages.AddErrorMessage(msg.Error)
+			}
+			if !started && p.lifecycle.Depth() == 0 {
+				return true, tea.Batch(errCmd, p.finishSkillOperation())
+			}
+			return true, errCmd
+		}
 	case *runtime.ErrorEvent:
 		if userconfig.Get().GetSound() {
 			sound.Play(p.ctx(), sound.Failure)
@@ -77,25 +102,73 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Stream Lifecycle Events =====
 	case *runtime.StreamStartedEvent:
-		return true, p.handleStreamStarted(msg)
+		return true, p.handleStreamStarted(msg, seed)
 
 	case *runtime.StreamStoppedEvent:
 		return true, p.handleStreamStopped(msg)
 
 	// ===== Content Events =====
+	case *runtime.PendingUserMessageAcceptedEvent:
+		for _, queued := range p.messageQueue {
+			if queued.turnID == msg.TurnID {
+				return true, nil
+			}
+		}
+		p.lifecycle, _ = p.lifecycle.Apply(msg)
+		p.messageQueue = append(p.messageQueue, queuedMessage{turnID: msg.TurnID, content: msg.Message})
+		p.syncQueueToSidebar()
+		return true, nil
+
+	case *runtime.PendingUserMessageCanceledEvent:
+		p.messages.RemovePendingSessionPosition(msg.SessionPosition)
+		if msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+			p.snapshotEnd--
+		}
+		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
+		p.syncQueueToSidebar()
+		return true, nil
+
+	case *runtime.PendingUserMessagePromotedEvent:
+		p.lifecycle, _ = p.lifecycle.Apply(msg)
+		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
+		p.syncQueueToSidebar()
+		p.showStartupBanner = false
+		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+
 	case *runtime.UserMessageEvent:
 		p.showStartupBanner = false
-		p.consumePendingMessage(msg.Message)
+		// Attach protocol: a position inside the transcript snapshot is already
+		// on screen — the buffered event would duplicate it.
+		if p.snapshotEnd > 0 && msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+			return true, nil
+		}
 		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+
+	case *runtime.MessageAddedEvent:
+		// Attach protocol: each committed assistant message settles the
+		// streamed tail exactly. A commit inside the snapshot means the
+		// streamed bubbles duplicate a message already on screen; a commit
+		// after it finalizes them in place with the canonical content. Emitted
+		// synchronously after the session commit and delivered in order, so
+		// this is exact with no timing assumptions. Root tabs render from
+		// their own run stream and need none of this.
+		if p.app.AttachedSubagent() == nil || msg.Message == nil || msg.Message.Message.Role != chatmsg.MessageRoleAssistant {
+			return true, p.handleMessageAdded(msg)
+		}
+		alreadyShown := msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd
+		finalized := p.messages.FinalizeStreamedAssistant(
+			msg.GetAgentName(), msg.Message.Message.Content, msg.Message.Message.ReasoningContent, alreadyShown,
+		)
+		if alreadyShown {
+			return true, finalized
+		}
+		return true, tea.Batch(finalized, p.handleMessageAdded(msg))
 
 	case *runtime.AgentChoiceEvent:
 		return true, p.handleAgentChoice(msg)
 
 	case *runtime.AgentChoiceReasoningEvent:
 		return true, p.handleAgentChoiceReasoning(msg)
-
-	case *runtime.MessageAddedEvent:
-		return true, p.handleMessageAdded(msg)
 
 	case *runtime.ShellOutputEvent:
 		return true, p.messages.AddShellOutputMessage(msg.Output)
@@ -131,19 +204,41 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.TeamInfoEvent:
 		p.sidebar.SetTeamInfo(msg.AvailableAgents)
+		// The appModel already updated the agent-color registry from this event.
+		// A transcript restored before the event (session reload) was rendered
+		// and cached with fallback colors; re-render it once the roster changes.
+		names := make([]string, len(msg.AvailableAgents))
+		for i, a := range msg.AvailableAgents {
+			names[i] = a.Name
+		}
+		if !slices.Equal(names, p.teamAgentNames) {
+			p.teamAgentNames = names
+			p.messages.InvalidateRenderCaches()
+		}
 		return true, nil
 
 	case *runtime.AgentSwitchingEvent:
 		return true, p.handleAgentSwitching(msg)
 
 	case *runtime.ToolsetInfoEvent:
-		p.sidebar.SetSkillsInfo(len(p.app.CurrentAgentSkills()))
-		return true, p.forwardToSidebar(msg)
+		if skills, err := p.app.CurrentAgentSkillsContext(p.ctx()); err == nil {
+			p.sidebar.SetSkillsInfo(len(skills))
+			return true, p.forwardToSidebar(msg)
+		} else {
+			return true, tea.Batch(p.forwardToSidebar(msg), notification.ErrorCmd("Failed to discover skills: "+err.Error()))
+		}
 
 	case *runtime.SessionTitleEvent:
 		return true, p.forwardToSidebar(msg)
 
+	case *runtime.SubagentTreeEvent:
+		// Keep the id → name index fresh so subagent tool calls can be
+		// attributed by name while still running.
+		p.subagents.Reset(msg.Snapshot)
+		return true, p.forwardToSidebar(msg)
+
 	case *runtime.SessionCompactionEvent:
+		p.lifecycle, _ = p.lifecycle.Apply(msg)
 		// The sidebar tracks the started/completed pair to drive its
 		// "compacting…" gauge state (it ignores sessions it is not
 		// currently displaying).
@@ -155,9 +250,12 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			// clearing of msgCancel, no spinner flip, no queue processing.
 			return true, tea.Batch(sidebarCmd, subSessionCompactionNotice(msg))
 		}
+		if msg.Status == "started" && p.lifecycle.Depth() == 0 {
+			return true, tea.Batch(sidebarCmd, p.setWorking(true), p.setPendingResponse(true))
+		}
 		if msg.Status == "completed" {
 			noticeCmd := rootCompactionNotice(msg)
-			if p.streamDepth > 0 {
+			if p.lifecycle.Depth() > 0 {
 				// Automatic compaction nested in a live stream (the threshold
 				// fires after StreamStarted): update presentation only.
 				// Clearing msgCancel/working/queue here would break Esc and
@@ -172,7 +270,6 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 				sidebarCmd,
 				p.setWorking(false),
 				p.setPendingResponse(false),
-				p.processNextQueuedMessage(),
 				p.messages.ScrollToBottom(),
 				noticeCmd,
 			)
@@ -291,14 +388,18 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 	}
 }
 
-func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {
+func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed bool) tea.Cmd {
+	p.ownedSkillStream = p.ownedSkillOperation != ""
+
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
 	p.streamCancelled = false
-	p.streamDepth++
-	p.agentStack = append(p.agentStack, msg.AgentName)
+	p.lifecycle, _ = p.lifecycle.Apply(msg)
 	p.streamStartTime = time.Now()
 	spinnerCmd := p.setWorking(true)
-	pendingCmd := p.setPendingResponse(true)
+	var pendingCmd tea.Cmd
+	if p.app == nil || p.app.AttachedSubagent() == nil || !seed {
+		pendingCmd = p.setPendingResponse(true)
+	}
 	sidebarCmd := p.forwardToSidebar(msg)
 	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd)
 }
@@ -349,6 +450,13 @@ func (p *chatPage) handleAgentSwitching(msg *runtime.AgentSwitchingEvent) tea.Cm
 	return tea.Batch(cmd, returnCmd, p.messages.ScrollToBottom())
 }
 
+func (p *chatPage) finishSkillOperation() tea.Cmd {
+	p.msgCancel = nil
+	p.streamCancelled = false
+	p.setPendingResponse(false)
+	return tea.Batch(p.setWorking(false), p.messages.ScrollToBottom())
+}
+
 func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd {
 	slog.Debug("handleStreamStopped called",
 		"agent", msg.AgentName,
@@ -356,17 +464,9 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		"reason", msg.Reason,
 		"should_exit", p.app != nil && p.app.ShouldExitAfterFirstResponse(),
 		"has_content", p.hasReceivedAssistantContent,
-		"stream_depth", p.streamDepth)
+		"stream_depth", p.lifecycle.Depth())
 
-	if p.streamDepth > 0 {
-		p.streamDepth--
-		// Keep agentStack in sync: only pop when there was a depth to decrement,
-		// so spurious/duplicate StreamStopped events at depth 0 cannot cause
-		// the two slices to diverge.
-		if n := len(p.agentStack); n > 0 {
-			p.agentStack = p.agentStack[:n-1]
-		}
-	}
+	p.lifecycle, _ = p.lifecycle.Apply(msg)
 
 	sidebarCmd := p.forwardToSidebar(msg)
 
@@ -377,7 +477,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// Also clear the now-stale "parent → child" labeled spinner and
 	// replace it with a plain parent spinner so the UI reflects the
 	// updated delegation state.
-	if p.streamDepth > 0 {
+	if p.lifecycle.Depth() > 0 {
 		p.setPendingResponse(false)
 		return tea.Batch(p.messages.ScrollToBottom(), sidebarCmd, p.setPendingResponse(true))
 	}
@@ -400,8 +500,6 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	p.streamCancelled = false
 	spinnerCmd := p.setWorking(false)
 	p.setPendingResponse(false)
-	queueCmd := p.processNextQueuedMessage()
-
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
 		slog.Debug("Exit after first response triggered, scheduling delayed exit")
@@ -410,7 +508,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
+	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each
@@ -487,7 +585,7 @@ func (p *chatPage) handleBudgetExceeded(msg *runtime.BudgetExceededEvent) tea.Cm
 func (p *chatPage) handleMaxIterationsReached(msg *runtime.MaxIterationsReachedEvent) tea.Cmd {
 	spinnerCmd := p.setWorking(false)
 	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewMaxIterationsDialog(msg.MaxIterations, p.app),
+		Model:            dialog.NewMaxIterationsDialog(msg.MaxIterations, msg.SessionID, msg.RequestID),
 		OriginatingEvent: msg,
 	})
 	return tea.Batch(spinnerCmd, dialogCmd)
@@ -506,7 +604,7 @@ func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent
 				serverURL = url
 			}
 			dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(p.ctx(), serverURL, p.app, msg.ElicitationID),
+				Model:            dialog.NewOAuthAuthorizationDialog(serverURL, dialog.ElicitationRefFor(msg)),
 				OriginatingEvent: msg,
 			})
 			return tea.Batch(spinnerCmd, dialogCmd)
@@ -518,7 +616,7 @@ func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent
 	case "url":
 		// URL-based elicitation - show URL dialog
 		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(p.ctx(), msg.Message, msg.URL, msg.ElicitationID),
+			Model:            dialog.NewURLElicitationDialog(p.ctx(), msg.Message, msg.URL, dialog.ElicitationRefFor(msg)),
 			OriginatingEvent: msg,
 		})
 		return tea.Batch(spinnerCmd, dialogCmd)
@@ -526,7 +624,7 @@ func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent
 	default:
 		// Form-based elicitation (default) - show form dialog
 		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(msg.Message, msg.Schema, msg.Meta, msg.ElicitationID),
+			Model:            dialog.NewElicitationDialog(msg.Message, msg.Schema, msg.Meta, dialog.ElicitationRefFor(msg)),
 			OriginatingEvent: msg,
 		})
 		return tea.Batch(spinnerCmd, dialogCmd)

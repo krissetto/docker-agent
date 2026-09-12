@@ -84,7 +84,7 @@ func TestAfterLLMCallHook_PopulatesModelID(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	got := captured.Load()
@@ -140,7 +140,7 @@ func captureAfterLLMCall(t *testing.T, store ModelStore) (*hooks.Input, *session
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	got := captured.Load()
@@ -290,7 +290,7 @@ func TestAfterLLMCallHook_HarnessUsageWithoutCostIsUnpriced(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("do the task"))
 	sess.Title = "Harness Unit Test"
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	in := captured.Load()

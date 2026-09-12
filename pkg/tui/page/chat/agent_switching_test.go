@@ -56,7 +56,10 @@ func (r *recordingSidebar) SetAgentActivity(agentName string) tea.Cmd {
 func newSwitchingTestPage(t *testing.T) (*chatPage, *recordingSidebar) {
 	t.Helper()
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(queueTestRuntime{})), service.NewSessionState(sess)).(*chatPage)
+	// A tall layout keeps every sidebar section on screen regardless of how
+	// long the checkout path and git branch rendered above them happen to be.
+	_ = p.SetSize(160, 80)
 	rec := &recordingSidebar{Model: p.sidebar}
 	p.sidebar = rec
 	// Tests start transfers without always stopping them; the cancel clears

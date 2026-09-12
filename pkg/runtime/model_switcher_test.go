@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,9 +18,64 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+// sessionSessionFor returns a driver-backed session handle pinned to agentName on
+// r, without requiring the full runtime constructor. Handles for the same
+// runtime and agent share one driver, so consecutive calls observe each other
+// exactly like one live session would.
+var (
+	sessionSessionsMu sync.Mutex
+	sessionSessions   = map[*LocalRuntime]map[string]*sessionHandle{}
+)
+
+func sessionSessionFor(t *testing.T, r *LocalRuntime, agentName string) *sessionHandle {
+	t.Helper()
+	sessionSessionsMu.Lock()
+	defer sessionSessionsMu.Unlock()
+	if h := sessionSessions[r][agentName]; h != nil {
+		return h
+	}
+	sess := session.New(session.WithAgentName(agentName))
+	d := newSessionDriver(r, sess)
+	if a, err := r.team.Agent(agentName); err == nil && a != nil {
+		d.SetModelBinding("", a.EffectiveModels(t.Context()))
+	}
+	h := &sessionHandle{runtime: r, driver: d, sessionID: sess.ID, agentName: agentName}
+	if sessionSessions[r] == nil {
+		sessionSessions[r] = map[string]*sessionHandle{}
+	}
+	sessionSessions[r][agentName] = h
+	return h
+}
+
+// sessionModel returns the session's primary model.
+func sessionModel(t *testing.T, h *sessionHandle) provider.Provider {
+	t.Helper()
+	_, models := h.driver.ModelSnapshot()
+	require.NotEmpty(t, models, "session has no model bound")
+	return models[0]
+}
+
+// sessionKeepsConfiguredModels reports whether the session still runs on
+// the agent's configured models, i.e. no session override was installed.
+func sessionKeepsConfiguredModels(t *testing.T, h *sessionHandle, a *agent.Agent) bool {
+	t.Helper()
+	_, models := h.driver.ModelSnapshot()
+	configured := a.ConfiguredModels()
+	if len(models) != len(configured) {
+		return false
+	}
+	for i := range models {
+		if models[i] != configured[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // mockCatalogStore implements ModelStore for testing
 type mockCatalogStore struct {
@@ -30,6 +86,19 @@ type mockCatalogStore struct {
 
 func (m *mockCatalogStore) GetDatabase(_ context.Context) (*modelsdev.Database, error) {
 	return m.db, nil
+}
+
+// emptyCatalogStore is a ModelStore with no catalog entries and no metadata:
+// GetModel reports every model as unknown and GetDatabase yields an empty
+// database, so runtimes built with it exercise the switcher without models.dev.
+type emptyCatalogStore struct{ ModelStore }
+
+func (emptyCatalogStore) GetModel(context.Context, modelsdev.ID) (*modelsdev.Model, error) {
+	return nil, nil
+}
+
+func (emptyCatalogStore) GetDatabase(context.Context) (*modelsdev.Database, error) {
+	return &modelsdev.Database{}, nil
 }
 
 // configProvider is a provider.Provider whose BaseConfig is fully controlled
@@ -126,7 +195,7 @@ func TestCycleAgentThinkingLevel_Errors(t *testing.T) {
 		root := agent.New("root", "test")
 		r := &LocalRuntime{team: team.New(team.WithAgents(root))}
 
-		_, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		_, err := sessionSessionFor(t, r, "root").CycleThinkingLevel(t.Context())
 		require.ErrorIs(t, err, ErrUnsupported)
 	})
 
@@ -138,7 +207,7 @@ func TestCycleAgentThinkingLevel_Errors(t *testing.T) {
 			modelSwitcherCfg: &ModelSwitcherConfig{},
 		}
 
-		_, err := r.CycleAgentThinkingLevel(t.Context(), "missing")
+		_, err := sessionSessionFor(t, r, "missing").CycleThinkingLevel(t.Context())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "agent not found")
 	})
@@ -152,9 +221,10 @@ func TestCycleAgentThinkingLevel_Errors(t *testing.T) {
 			modelSwitcherCfg: &ModelSwitcherConfig{},
 		}
 
-		_, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		h := sessionSessionFor(t, r, "root")
+		_, err := h.CycleThinkingLevel(t.Context())
 		require.ErrorIs(t, err, ErrUnsupported)
-		assert.False(t, root.HasModelOverride(), "no override should be set when cycling is unsupported")
+		assert.True(t, sessionKeepsConfiguredModels(t, h, root), "no override should be set when cycling is unsupported")
 	})
 }
 
@@ -185,6 +255,71 @@ func TestAgentThinkingLabel(t *testing.T) {
 	}
 }
 
+// newPinnedWorkerHandle builds a runtime with a root and a worker agent and
+// returns a driver-backed session handle pinned to the worker, mirroring how
+// production hands out handles (never without a driver).
+func newPinnedWorkerHandle(t *testing.T, cfg *ModelSwitcherConfig) (*sessionHandle, *agent.Agent, *agent.Agent) {
+	t.Helper()
+	root := agent.New("root", "test", agent.WithModel(newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5"})))
+	worker := agent.New("worker", "test", agent.WithModel(newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5"})))
+	opts := []Opt{WithSessionCompaction(false), WithModelStore(emptyCatalogStore{})}
+	if cfg != nil {
+		opts = append(opts, WithModelSwitcherConfig(cfg))
+	}
+	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker)), opts...)
+	require.NoError(t, err)
+	handle, err := r.CreateSession(t.Context(), session.New(session.WithAgentName("worker")), SessionBinding{AgentName: "worker"})
+	require.NoError(t, err)
+	return handle.(*sessionHandle), root, worker
+}
+
+func TestModelSwitcherUsesPinnedAgent(t *testing.T) {
+	t.Parallel()
+
+	handle, root, worker := newPinnedWorkerHandle(t, &ModelSwitcherConfig{
+		Models:             map[string]latest.ModelConfig{"worker-model": {Provider: "openai", Model: "gpt-4o"}},
+		AgentDefaultModels: map[string]string{"root": "root-model", "worker": "worker-model"},
+		ProviderRegistry:   testProviderRegistry(),
+		EnvProvider:        environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
+	})
+
+	choices := handle.AvailableModels(t.Context())
+	require.NotEmpty(t, choices)
+	assert.True(t, choices[0].IsDefault, "defaults must be resolved for the pinned worker")
+	require.NoError(t, handle.SetModel(t.Context(), "worker-model"))
+	assert.False(t, root.HasModelOverride(), "session model mutation must not touch root/global selection")
+	assert.False(t, worker.HasModelOverride(), "the override is owned by the session, not the shared agent")
+	_, models := handle.driver.ModelSnapshot()
+	require.Len(t, models, 1)
+	assert.Equal(t, "gpt-4o", models[0].BaseConfig().ModelConfig.Model)
+	assert.Equal(t, "gpt-4o", worker.Model(handle.driver.scopeModels(t.Context())).BaseConfig().ModelConfig.Model)
+}
+
+func TestModelSwitcherWithoutConfigIsUnsupported(t *testing.T) {
+	t.Parallel()
+
+	handle, _, _ := newPinnedWorkerHandle(t, nil)
+	assert.False(t, handle.Metadata().Capabilities.ModelSwitching)
+	require.ErrorIs(t, handle.SetModel(t.Context(), "openai/gpt-4o"), ErrUnsupported)
+	assert.Nil(t, handle.AvailableModels(t.Context()))
+}
+
+func TestThinkingLevelControllerUsesPinnedAgent(t *testing.T) {
+	t.Parallel()
+
+	handle, root, worker := newPinnedWorkerHandle(t, &ModelSwitcherConfig{
+		ProviderRegistry: testProviderRegistry(),
+		EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
+	})
+
+	applied, err := handle.SetThinkingLevel(t.Context(), effort.High)
+	require.NoError(t, err)
+	assert.Equal(t, effort.High, applied)
+	assert.False(t, root.HasModelOverride(), "the session command must not mutate a different current/global agent")
+	assert.False(t, worker.HasModelOverride(), "the level is owned by the session, not the shared agent")
+	assert.Equal(t, "high", worker.Model(handle.driver.scopeModels(t.Context())).BaseConfig().ModelConfig.ThinkingBudget.Effort)
+}
+
 func TestCycleAgentThinkingLevel_AdvancesAndOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -200,19 +335,19 @@ func TestCycleAgentThinkingLevel_AdvancesAndOverrides(t *testing.T) {
 
 	// gpt-5 has no thinking budget configured → current is None, so the first
 	// cycle step lands on Minimal (the OpenAI cycle is none→minimal→…).
-	level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+	h := sessionSessionFor(t, r, "root")
+	level, err := h.CycleThinkingLevel(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, effort.Minimal, level)
-	require.True(t, root.HasModelOverride(), "cycling must install a runtime override")
+	assert.False(t, sessionKeepsConfiguredModels(t, h, root), "cycling must install a session override")
+	assert.False(t, root.HasModelOverride(), "the shared agent must stay untouched")
 
-	override := root.Model(t.Context())
-	require.NotNil(t, override)
-	budget := override.BaseConfig().ModelConfig.ThinkingBudget
+	budget := sessionModel(t, h).BaseConfig().ModelConfig.ThinkingBudget
 	require.NotNil(t, budget)
 	assert.Equal(t, "minimal", budget.Effort)
 
 	// Next step: minimal → low.
-	level, err = r.CycleAgentThinkingLevel(t.Context(), "root")
+	level, err = h.CycleThinkingLevel(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, effort.Low, level)
 }
@@ -239,14 +374,13 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 			map[string]string{"OPENAI_API_KEY": "sk-test"},
 		)
 
-		level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.High)
+		h := sessionSessionFor(t, r, "root")
+		level, err := h.SetThinkingLevel(t.Context(), effort.High)
 		require.NoError(t, err)
 		assert.Equal(t, effort.High, level)
-		require.True(t, root.HasModelOverride(), "setting a level must install a runtime override")
+		assert.False(t, sessionKeepsConfiguredModels(t, h, root), "setting a level must install a session override")
 
-		override := root.Model(t.Context())
-		require.NotNil(t, override)
-		budget := override.BaseConfig().ModelConfig.ThinkingBudget
+		budget := sessionModel(t, h).BaseConfig().ModelConfig.ThinkingBudget
 		require.NotNil(t, budget)
 		assert.Equal(t, "high", budget.Effort)
 	})
@@ -259,11 +393,12 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 		)
 
 		// gpt-5 tops out at high: max must be rejected, not clamped.
-		_, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.Max)
+		h := sessionSessionFor(t, r, "root")
+		_, err := h.SetThinkingLevel(t.Context(), effort.Max)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not supported")
 		assert.Contains(t, err.Error(), "high")
-		assert.False(t, root.HasModelOverride(), "no override should be set on rejection")
+		assert.True(t, sessionKeepsConfiguredModels(t, h, root), "no override should be set on rejection")
 	})
 
 	t.Run("non-reasoning model is unsupported", func(t *testing.T) {
@@ -273,9 +408,10 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 			map[string]string{"OPENAI_API_KEY": "sk-test"},
 		)
 
-		_, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.High)
+		h := sessionSessionFor(t, r, "root")
+		_, err := h.SetThinkingLevel(t.Context(), effort.High)
 		require.ErrorIs(t, err, ErrUnsupported)
-		assert.False(t, root.HasModelOverride())
+		assert.True(t, sessionKeepsConfiguredModels(t, h, root))
 	})
 
 	t.Run("nil modelSwitcherCfg is unsupported", func(t *testing.T) {
@@ -283,7 +419,7 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 		root := agent.New("root", "test")
 		r := &LocalRuntime{team: team.New(team.WithAgents(root))}
 
-		_, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.High)
+		_, err := sessionSessionFor(t, r, "root").SetThinkingLevel(t.Context(), effort.High)
 		require.ErrorIs(t, err, ErrUnsupported)
 	})
 
@@ -294,7 +430,7 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 			map[string]string{"ANTHROPIC_API_KEY": "sk-test"},
 		)
 
-		level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.Max)
+		level, err := sessionSessionFor(t, r, "root").SetThinkingLevel(t.Context(), effort.Max)
 		require.NoError(t, err)
 		assert.Equal(t, effort.Max, level)
 	})
@@ -335,16 +471,16 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 		// pick runs after the snapshot is resolved but before providers are
 		// re-created; a concurrent /model change landing here is exactly the
 		// race the bug exposed.
-		level, err := r.applyAgentThinkingLevel(t.Context(), "root", func(supported []effort.Level, _ effort.Level) (effort.Level, error) {
+		h := sessionSessionFor(t, r, "root")
+		level, err := h.applyThinkingLevel(t.Context(), func(supported []effort.Level, _ effort.Level) (effort.Level, error) {
 			require.NotContains(t, supported, effort.Max, "resolution must see model A (gpt-5), which tops out at high")
-			root.SetModelOverride(modelB)
+			h.driver.SetModelBinding("", []provider.Provider{modelB})
 			return effort.High, nil
 		})
 		require.NoError(t, err)
 		assert.Equal(t, effort.High, level)
 
-		override := root.Model(t.Context())
-		require.NotNil(t, override)
+		override := sessionModel(t, h)
 		assert.Equal(t, "openai", override.BaseConfig().ModelConfig.Provider,
 			"the applied provider must be re-created from the model validated against (A), not the one swapped in mid-flight (B)")
 		budget := override.BaseConfig().ModelConfig.ThinkingBudget
@@ -355,9 +491,9 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 	t.Run("override cleared mid-flight does not install an empty override", func(t *testing.T) {
 		t.Parallel()
 
-		// No configured models: the agent's only model comes from the runtime
-		// override, so clearing it mid-flight reproduces the empty second-snapshot
-		// case the bug allowed through.
+		// No configured models: the session's only model comes from its
+		// binding, so clearing it mid-flight reproduces the empty
+		// second-snapshot case the bug allowed through.
 		modelA := newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5"})
 		root := agent.New("root", "test")
 		root.SetModelOverride(modelA)
@@ -370,18 +506,18 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 			},
 		}
 
-		level, err := r.applyAgentThinkingLevel(t.Context(), "root", func(_ []effort.Level, _ effort.Level) (effort.Level, error) {
+		h := sessionSessionFor(t, r, "root")
+		level, err := h.applyThinkingLevel(t.Context(), func(_ []effort.Level, _ effort.Level) (effort.Level, error) {
 			// Simulate a concurrent override reset (e.g. /model default) landing
 			// between resolution and provider recreation.
-			root.SetModelOverride()
+			h.driver.SetModelBinding("", nil)
 			return effort.High, nil
 		})
 		require.NoError(t, err)
 		assert.Equal(t, effort.High, level)
 
-		override := root.Model(t.Context())
-		require.NotNil(t, override, "must not silently install an empty override while reporting success")
-		assert.Equal(t, "openai", override.BaseConfig().ModelConfig.Provider)
+		override := sessionModel(t, h)
+		assert.Equal(t, "openai", override.BaseConfig().ModelConfig.Provider, "must not silently install an empty override while reporting success")
 	})
 }
 
@@ -447,7 +583,7 @@ func TestCurrentAgentThinkingLevels(t *testing.T) {
 		// SetAgentThinkingLevel actually accepts -- the single-source-of-truth
 		// guarantee #3731 depends on.
 		for _, level := range levels {
-			_, err := r.SetAgentThinkingLevel(t.Context(), "root", level)
+			_, err := sessionSessionFor(t, r, "root").SetThinkingLevel(t.Context(), level)
 			assert.NoError(t, err, "level %q reported as supported but rejected", level)
 		}
 	})
@@ -475,13 +611,12 @@ func TestSetAgentThinkingLevel_NoneSurvivesOnGPT56(t *testing.T) {
 			},
 		}
 
-		level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.None)
+		h := sessionSessionFor(t, r, "root")
+		level, err := h.SetThinkingLevel(t.Context(), effort.None)
 		require.NoError(t, err)
 		assert.Equal(t, effort.None, level)
 
-		override := root.Model(t.Context())
-		require.NotNil(t, override)
-		budget := override.BaseConfig().ModelConfig.ThinkingBudget
+		budget := sessionModel(t, h).BaseConfig().ModelConfig.ThinkingBudget
 		require.NotNil(t, budget, "gpt-5.6 has a real API none effort; the budget must survive provider construction")
 		assert.Equal(t, "none", budget.Effort)
 	})
@@ -498,13 +633,12 @@ func TestSetAgentThinkingLevel_NoneSurvivesOnGPT56(t *testing.T) {
 			},
 		}
 
-		level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.None)
+		h := sessionSessionFor(t, r, "root")
+		level, err := h.SetThinkingLevel(t.Context(), effort.None)
 		require.NoError(t, err)
 		assert.Equal(t, effort.None, level)
 
-		override := root.Model(t.Context())
-		require.NotNil(t, override)
-		assert.Nil(t, override.BaseConfig().ModelConfig.ThinkingBudget, "gpt-5.2 has no API none effort; it must keep the nil-normalize behavior")
+		assert.Nil(t, sessionModel(t, h).BaseConfig().ModelConfig.ThinkingBudget, "gpt-5.2 has no API none effort; it must keep the nil-normalize behavior")
 	})
 }
 
@@ -580,9 +714,10 @@ func TestCycleAgentThinkingLevel_PerModelTopTier(t *testing.T) {
 			}
 
 			// Walk one full cycle starting from None and record every level.
+			h := sessionSessionFor(t, r, "root")
 			var got []effort.Level
 			for range tt.wantCycle {
-				level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+				level, err := h.CycleThinkingLevel(t.Context())
 				require.NoError(t, err)
 				got = append(got, level)
 			}
@@ -611,9 +746,10 @@ func TestCycleAgentThinkingLevel_VercelQualifiedGPT56(t *testing.T) {
 	}
 
 	wantCycle := []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max, effort.None}
+	h := sessionSessionFor(t, r, "root")
 	var got []effort.Level
 	for range wantCycle {
-		level, err := r.CycleAgentThinkingLevel(t.Context(), "root")
+		level, err := h.CycleThinkingLevel(t.Context())
 		require.NoError(t, err)
 		got = append(got, level)
 	}
@@ -637,13 +773,12 @@ func TestSetAgentThinkingLevel_VercelQualifiedGPT56Max(t *testing.T) {
 		},
 	}
 
-	level, err := r.SetAgentThinkingLevel(t.Context(), "root", effort.Max)
+	h := sessionSessionFor(t, r, "root")
+	level, err := h.SetThinkingLevel(t.Context(), effort.Max)
 	require.NoError(t, err)
 	assert.Equal(t, effort.Max, level)
 
-	override := root.Model(t.Context())
-	require.NotNil(t, override)
-	cfg := override.BaseConfig().ModelConfig
+	cfg := sessionModel(t, h).BaseConfig().ModelConfig
 	assert.Equal(t, "vercel", cfg.Provider)
 	assert.Equal(t, "openai/gpt-5.6-sol", cfg.Model)
 	require.NotNil(t, cfg.ThinkingBudget)

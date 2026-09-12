@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	subagentpkg "github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
@@ -53,7 +54,15 @@ import (
 
 // SessionSpawner creates new sessions with their own runtime.
 // This is an alias to the supervisor package's SessionSpawner type.
-type SessionSpawner = supervisor.SessionSpawner
+type (
+	SessionSpawner = supervisor.SessionSpawner
+	SpawnedSession = supervisor.SpawnedSession
+)
+
+const (
+	RuntimeBorrowed = supervisor.RuntimeBorrowed
+	RuntimeOwned    = supervisor.RuntimeOwned
+)
 
 // FocusedPanel represents which panel is currently focused
 type FocusedPanel string
@@ -73,6 +82,10 @@ type appModel struct {
 	ar           *animation.Runtime
 	shutdownDone <-chan struct{}
 	cleanupOnce  sync.Once
+	// runCleanup releases the resources the whole run owns — the shared local
+	// runtime and its toolsets, which every borrowed tab depends on. It runs
+	// once when the TUI shuts down, never when an individual tab closes.
+	runCleanup func()
 
 	// cleanupAllOnce guards the full cleanupAll shutdown sequence so repeat
 	// invocations (ExitSessionMsg followed by ExitConfirmedMsg, …) are no-ops:
@@ -580,8 +593,13 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Initialize status bar (pass m as help provider)
 	m.statusBar = statusbar.New(m, statusbar.WithTitle(m.appName+" "+m.appVersion))
 
-	// Add the initial session to the supervisor
-	sv.AddSession(ctx, initialApp, initialApp.Session(), initialWorkingDir, cleanup)
+	// Add the initial session to the supervisor. It borrows the run's
+	// runtime like every other tab: closing it must not tear that runtime
+	// down under the tabs that still use it, so cleanup is kept at run scope.
+	m.runCleanup = cleanup
+	if _, err := sv.AddSession(ctx, initialApp, initialApp.Session(), initialWorkingDir, nil); err != nil {
+		slog.ErrorContext(ctx, "Failed to supervise initial session", "error", err)
+	}
 
 	// Restore persisted tabs or persist the initial one.
 	m.restoreTabs(ctx, ts, sv, spawner, initialApp, sessID, initialWorkingDir)
@@ -737,6 +755,7 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 // the active chat page and editor, then resizes everything.
 func (m *appModel) initAndFocusComponents() tea.Cmd {
 	m.reapplyKeyboardEnhancements()
+
 	return tea.Batch(
 		m.chatPage.Init(),
 		chat.WatchGitBranch(m.chatPage),
@@ -805,6 +824,11 @@ func (m *appModel) tourStartupCmd() tea.Cmd {
 
 func (m *appModel) init() tea.Cmd {
 	shutdownCmd := m.contextShutdownCmd()
+	initialCommands := m.application.InitialEventCommands()
+	teaInitialCommands := make([]tea.Cmd, 0, len(initialCommands))
+	for _, command := range initialCommands {
+		teaInitialCommands = append(teaInitialCommands, func() tea.Msg { return command() })
+	}
 	// If a different tab should be active on startup, switch to it directly.
 	// The initial tab's pending restore stays lazy — it will be loaded via
 	// handleSwitchTab when the user eventually opens it, just like every
@@ -846,7 +870,7 @@ func (m *appModel) init() tea.Cmd {
 		chat.WatchGitBranch(m.chatPage),
 		m.editor.Init(),
 		m.editor.Focus(),
-		m.application.SendFirstMessage(),
+		tea.Sequence(teaInitialCommands...),
 	)
 }
 
@@ -895,6 +919,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.(type) {
 		case messages.SpawnSessionMsg, messages.SwitchTabMsg,
 			messages.CloseTabMsg, messages.ReorderTabMsg,
+			messages.OpenSubagentMsg,
 			messages.ToggleSidebarMsg, messages.OpenSettingsDialogMsg,
 			messages.ShowPlanBrowserMsg:
 			return m, nil
@@ -964,6 +989,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.CloseTabMsg:
 		return m.handleCloseTab(msg.SessionID)
+
+	case messages.OpenSubagentMsg:
+		return m.handleOpenSubagent(msg)
 
 	case messages.ReorderTabMsg:
 		m.handleReorderTab(msg)
@@ -1130,16 +1158,19 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		quit := m.quitCmd()
 		return m, quit
 
-	case dialog.RuntimeResumeMsg:
-		m.application.Resume(msg.Request)
-		return m, nil
+	case dialog.CloseRootWithSubagentsConfirmedMsg:
+		return m.closeTabWithCascade(msg.SessionID)
+
+	case messages.InteractionResponseMsg:
+		return m.handleInteractionResponse(msg)
 
 	case dialog.MultiChoiceResultMsg:
 		if msg.DialogID == dialog.ToolRejectionDialogID {
 			if msg.Result.IsCancelled {
 				return m, nil
 			}
-			resumeMsg := dialog.HandleToolRejectionResult(msg.Result)
+			correlation, _ := msg.Context.(messages.InteractionResponseMsg)
+			resumeMsg := dialog.HandleToolRejectionResult(msg.Result, correlation)
 			if resumeMsg != nil {
 				return m, tea.Sequence(
 					core.CmdHandler(dialog.CloseDialogMsg{}),
@@ -1182,17 +1213,15 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Runtime event specializations ---
 
 	case *runtime.TeamInfoEvent:
-		m.sessionState.SetAvailableAgents(msg.AvailableAgents)
-		m.sessionState.SetCurrentAgentName(msg.CurrentAgent)
+		m.applyActiveRuntimeEvent(msg)
 		return m.forwardChat(msg)
 
 	case *runtime.AgentInfoEvent:
-		m.sessionState.SetCurrentAgentName(msg.AgentName)
-		m.application.TrackCurrentAgentModel(msg.Model)
+		m.applyActiveRuntimeEvent(msg)
 		return m.forwardChat(msg)
 
 	case *runtime.SessionTitleEvent:
-		m.sessionState.SetSessionTitle(msg.Title)
+		m.applyActiveRuntimeEvent(msg)
 		return m.forwardChat(msg)
 
 	case *runtime.PlanChangedEvent:
@@ -1232,8 +1261,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.editor.Focus()
 
 	case messages.SendMsg:
-		// Forward send messages to the active content view
-		if m.history != nil && !msg.BypassQueue {
+		// Forward send messages to the active content view.
+		// Runtime-authored notes (subagent turn reports, agent-to-agent
+		// relays) can reach this path — e.g. inline-editing a system_info
+		// bubble resends its content — and must never pollute the user's
+		// prompt history.
+		if m.history != nil && !msg.BypassQueue && !subagentpkg.IsSystemInfo(msg.Content) {
 			_ = m.history.Add(msg.Content)
 		}
 		return m.forwardChat(msg)
@@ -1282,9 +1315,6 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.ToggleSplitDiffMsg:
 		return m.handleToggleSplitDiff()
-
-	case messages.ClearQueueMsg:
-		return m.forwardChat(msg)
 
 	case messages.CompactSessionMsg:
 		return m.handleCompactSession(msg)
@@ -1509,10 +1539,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.OpenURLMsg:
 		return m.handleOpenURL(msg.URL)
 
-	// --- Elicitation ---
-
-	case messages.ElicitationResponseMsg:
-		return m.handleElicitationResponse(msg.Action, msg.Content, msg.ElicitationID)
+	case messages.SessionRuntimeEventMsg:
+		m.applyActiveRuntimeEvent(msg.Event)
+		return m.forwardChat(msg)
 
 	// --- Errors ---
 
@@ -1523,10 +1552,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		// Handle runtime events for active session
 		if event, isRuntimeEvent := msg.(runtime.Event); isRuntimeEvent {
-			if agentName := event.GetAgentName(); agentName != "" {
-				m.sessionState.SetCurrentAgentName(agentName)
-			}
-			m.applyPauseEvent(m.sessionState, msg)
+			m.applyActiveRuntimeEvent(event)
 			return m.forwardChat(msg)
 		}
 
@@ -1540,8 +1566,31 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// applyActiveRuntimeEvent applies model-level runtime side effects exactly once
+// before the raw event or metadata envelope is forwarded to the chat page.
+func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
+	switch event := event.(type) {
+	case *runtime.TeamInfoEvent:
+		m.sessionState.SetAvailableAgents(event.AvailableAgents)
+		m.sessionState.SetCurrentAgentName(event.CurrentAgent)
+	case *runtime.AgentInfoEvent:
+		m.sessionState.SetCurrentAgentName(event.AgentName)
+		m.application.TrackCurrentAgentModel(event.Model)
+	case *runtime.SessionTitleEvent:
+		m.sessionState.SetSessionTitle(event.Title)
+	default:
+		if agentName := event.GetAgentName(); agentName != "" {
+			m.sessionState.SetCurrentAgentName(agentName)
+		}
+	}
+	m.applyPauseEvent(m.sessionState, event)
+}
+
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
+	if generation, ok := m.supervisor.RouteGeneration(msg.SessionID); !ok || (msg.RouteGeneration != 0 && msg.RouteGeneration != generation) {
+		return m, nil
+	}
 	activeID := m.supervisor.ActiveID()
 
 	if msg.SessionID == activeID {
@@ -1556,18 +1605,24 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 
-	// Update session state for inactive sessions
-	if event, isRuntimeEvent := msg.Inner.(runtime.Event); isRuntimeEvent {
+	inner := msg.Inner
+	var runtimeEvent runtime.Event
+	if bridged, ok := inner.(messages.SessionRuntimeEventMsg); ok {
+		runtimeEvent = bridged.Event
+	} else {
+		runtimeEvent, _ = inner.(runtime.Event)
+	}
+	if runtimeEvent != nil {
 		if sessionState, ok := m.sessionStates[msg.SessionID]; ok {
 			// Token-usage events are accounting, not agent-switch signals: a
 			// background agent task's usage can arrive while the tab is idle
 			// and must not move the current-agent marker to that agent.
-			if _, isUsage := msg.Inner.(*runtime.TokenUsageEvent); !isUsage {
-				if agentName := event.GetAgentName(); agentName != "" {
+			if _, isUsage := runtimeEvent.(*runtime.TokenUsageEvent); !isUsage {
+				if agentName := runtimeEvent.GetAgentName(); agentName != "" {
 					sessionState.SetCurrentAgentName(agentName)
 				}
 			}
-			m.applyPauseEvent(sessionState, msg.Inner)
+			m.applyPauseEvent(sessionState, runtimeEvent)
 		}
 	}
 
@@ -1598,7 +1653,15 @@ func (m *appModel) applyPauseEvent(ss *service.SessionState, msg tea.Msg) {
 	if ss == nil {
 		return
 	}
-	switch msg.(type) {
+	switch event := msg.(type) {
+	case *runtime.PauseChangedEvent:
+		if event.Paused {
+			if ss.PauseState() == service.PauseNone {
+				ss.SetPauseState(service.PausePausing)
+			}
+		} else {
+			ss.SetPauseState(service.PauseNone)
+		}
 	case *runtime.PausedEvent:
 		if ss.PauseState() != service.PauseNone {
 			ss.SetPauseState(service.PausePaused)
@@ -1629,13 +1692,25 @@ func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg
 
 // handleOpenSessionBrowser opens the session browser dialog.
 func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
-	store := m.application.SessionStore()
-	if store == nil {
-		return m, notification.InfoCmd("No session store configured")
-	}
-	sessions, err := store.GetSessionSummaries(m.ctx())
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
+	var sessions []session.Summary
+	if catalog, ok := m.application.SessionRuntime().(runtime.SessionCatalog); ok {
+		rows, err := catalog.ListSessions(m.ctx())
+		if err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
+		}
+		for _, row := range rows {
+			sessions = append(sessions, session.Summary{ID: row.SessionID, Title: row.Title, CreatedAt: row.CreatedAt, Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir})
+		}
+	} else {
+		store := m.application.SessionStore()
+		if store == nil {
+			return m, notification.InfoCmd("No session store configured")
+		}
+		var err error
+		sessions, err = store.GetSessionSummaries(m.ctx())
+		if err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
+		}
 	}
 	if len(sessions) == 0 {
 		return m, notification.InfoCmd("No previous sessions found")
@@ -1659,13 +1734,34 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 
 // handleLoadSession loads a saved session into the current tab (if empty) or a new tab.
 func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
-	store := m.application.SessionStore()
-	if store == nil {
-		return m, notification.ErrorCmd("No session store configured")
+	var sess *session.Session
+	sessions := m.application.SessionRuntime()
+	loader, sessionCatalog := sessions.(runtime.SessionLoader)
+	if sessionCatalog {
+		_, loaded, err := loader.LoadSession(m.ctx(), sessionID)
+		if err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
+		}
+		sess = loaded
+		if sess == nil {
+			return m, notification.ErrorCmd("Session snapshot unavailable")
+		}
+	} else {
+		store := m.application.SessionStore()
+		if store == nil {
+			return m, notification.ErrorCmd("No session store configured")
+		}
+		var err error
+		sess, err = store.GetSession(m.ctx(), sessionID)
+		if err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
+		}
 	}
-	sess, err := store.GetSession(m.ctx(), sessionID)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
+
+	// Remote catalogs are backed by one borrowed transport and may not have a
+	// tab spawner. Replace the active tab for every remote load.
+	if _, remote := sessions.(*runtime.SessionTransport); remote {
+		return m.replaceActiveSession(m.ctx(), sess)
 	}
 
 	// Check if this session is already open in another tab — switch instead of duplicating.
@@ -1728,7 +1824,7 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	m.initSessionComponents(newSessionID, m.application, sess)
 
 	if sess.Title != "" {
-		m.supervisor.SetRunnerTitle(newSessionID, sess.Title)
+		m.supervisor.SeedTitle(newSessionID, sess.Title)
 	}
 
 	m.persistActiveTab(sess.ID)
@@ -1740,8 +1836,10 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 }
 
 // replaceActiveSession replaces the current (empty) tab's session with a loaded one in-place.
-// If the loaded session's working directory differs from the runner's current one,
-// a fresh runtime is spawned via the supervisor so that tools operate in the correct directory.
+// If the loaded session's working directory differs, the spawner may return
+// either a distinctly-owned backend (non-nil cleanup) or an App borrowing the
+// current shared SessionRuntime (nil cleanup); Supervisor preserves ownership in
+// the latter case.
 func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Session) (tea.Model, tea.Cmd) {
 	activeID := m.supervisor.ActiveID()
 
@@ -1752,19 +1850,27 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 		ed.Cleanup()
 	}
 
-	// If the loaded session's working directory differs from the runner's,
-	// we need a fresh runtime whose tools operate in the correct directory.
+	// A working-directory mismatch asks the spawner for an appropriately bound
+	// App. Local shared-runtime spawners return nil cleanup, explicitly
+	// transferring the current runner's ownership; remote/distinct spawners may
+	// return their own cleanup and retire the old backend.
 	runner := m.supervisor.GetRunner(activeID)
 	sessWorkingDir := sess.WorkingDir
-	if sessWorkingDir != "" && runner != nil && sessWorkingDir != runner.WorkingDir {
-		newApp, _, spawnCleanup, err := m.supervisor.Spawner()(ctx, sessWorkingDir)
+	if sessWorkingDir != "" && runner != nil && sessWorkingDir != runner.WorkingDir && m.supervisor.Spawner() != nil {
+		spawned, err := m.supervisor.Spawner()(ctx, sessWorkingDir)
 		if err == nil {
+			if transient := spawned.App.SessionHandle(); transient != nil {
+				if err := transient.Release(ctx); err != nil {
+					slog.WarnContext(ctx, "Failed to release transient replacement session", "session_id", transient.ID(), "error", err)
+				}
+			}
 			slog.DebugContext(ctx, "Respawning runtime for working dir mismatch",
 				"tab_id", activeID,
 				"old_dir", runner.WorkingDir,
-				"new_dir", sessWorkingDir)
-			m.supervisor.ReplaceRunnerApp(ctx, activeID, newApp, sessWorkingDir, spawnCleanup)
-			m.application = newApp
+				"new_dir", sessWorkingDir,
+				"owns_runtime", spawned.Ownership == RuntimeOwned)
+			m.supervisor.ReplaceRunnerApp(ctx, activeID, spawned, sessWorkingDir)
+			m.application = spawned.App
 		} else {
 			slog.WarnContext(ctx, "Failed to respawn runtime for working dir, using existing",
 				"working_dir", sessWorkingDir, "error", err)
@@ -1773,10 +1879,11 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 
 	// Replace the session in the app and rebuild all per-session components.
 	m.application.ReplaceSession(ctx, sess)
+	m.supervisor.RefreshProjection(ctx, activeID)
 	m.initSessionComponents(activeID, m.application, sess)
 
 	if sess.Title != "" {
-		m.supervisor.SetRunnerTitle(activeID, sess.Title)
+		m.supervisor.SeedTitle(activeID, sess.Title)
 	}
 
 	cmd := m.initAndFocusComponents()
@@ -1796,11 +1903,12 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 	// Create a fresh session in the same app, preserving the working dir.
 	m.application.NewSession()
 	newSess := m.application.Session()
+	m.supervisor.RefreshProjection(m.ctx(), activeID)
 
 	// Rebuild all per-session UI components.
 	m.initSessionComponents(activeID, m.application, newSess)
 	m.dialogMgr = dialog.New()
-	m.supervisor.SetRunnerTitle(activeID, "")
+	m.supervisor.SeedTitle(activeID, "")
 	m.sessionState.SetSessionTitle("")
 	m.sessionState.SetPreviousMessage(nil)
 
@@ -1934,6 +2042,60 @@ type stashedDialog struct {
 	event  tea.Msg
 }
 
+// subagentSessionLookup is implemented by runtimes that can attach a live
+// viewer to an async subagent's sub-session (the local runtime).
+type subagentSessionLookup interface {
+	SubagentAttachInfo(id subagentpkg.NodeID) (runtime.SubagentAttachInfo, bool)
+	SubagentNodeForSession(sessionID string) (subagentpkg.NodeID, bool)
+}
+
+// handleOpenSubagent opens (or focuses) a tab attached to a subagent's
+// sub-session. The tab shares the spawning tab's runtime: the subagent
+// manager keeps driving the session, the new tab watches it live and can
+// message it. Attached tabs are not persisted — on restart the subagent is
+// re-adopted under its parent's session instead.
+func (m *appModel) handleOpenSubagent(msg messages.OpenSubagentMsg) (tea.Model, tea.Cmd) {
+	runner := m.supervisor.ActiveRunner()
+	if runner == nil || runner.App == nil {
+		return m, nil
+	}
+	rt, ok := runner.App.Runtime().(subagentSessionLookup)
+	if !ok {
+		return m, notification.WarningCmd("Subagent sessions can only be opened on a local runtime")
+	}
+	info, ok := rt.SubagentAttachInfo(subagentpkg.NodeID(msg.NodeID))
+	if !ok {
+		return m, notification.WarningCmd("This subagent has no session to open")
+	}
+
+	// Already open? Just focus its tab.
+	if open := m.supervisor.FindBySession(info.Session.ID); open != nil {
+		return m.handleSwitchTab(open.ID)
+	}
+
+	services := runner.App.Runtime()
+	sessions := runner.App.SessionRuntime()
+	if sessions == nil {
+		return m, notification.WarningCmd("Subagent sessions can only be opened on a session runtime")
+	}
+	binding := runtime.SessionBinding{
+		AgentName: info.Agent,
+		Model:     info.Session.AgentModelOverrides[info.Agent],
+	}
+	a := newAttachedSubagentApp(m.ctx(), sessions, services, info, binding)
+	if _, err := m.supervisor.AddSession(m.ctx(), a, info.Session, runner.WorkingDir, nil); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to open subagent session: %v", err))
+	}
+	return m.handleSwitchTab(info.Session.ID)
+}
+
+func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime, services app.Services, info runtime.SubagentAttachInfo, binding runtime.SessionBinding) *app.App {
+	return app.New(ctx, sessions, info.Session, binding,
+		app.WithRuntimeServices(services),
+		app.WithSubagentAttach(info),
+	)
+}
+
 // handleSwitchTab switches to a different session.
 // Existing chat pages and editors are preserved (not recreated) so that in-flight streaming
 // content and draft text are retained when switching back to a tab.
@@ -1961,6 +2123,23 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 
 	runner := m.supervisor.SwitchTo(sessionID)
 	if runner == nil {
+		// The id may be a session driven by a tab under another runner key
+		// (restored tabs keep their original key). Match by current session so
+		// e.g. an attached subagent tab's "parent" link still resolves.
+		if bySess := m.supervisor.FindBySession(sessionID); bySess != nil && bySess.ID != sessionID {
+			return m.handleSwitchTab(bySess.ID)
+		}
+		// No open tab — but the id may be a subagent sub-session of the active
+		// tab's runtime (e.g. the "parent" link of a nested subagent tab whose
+		// parent is itself a subagent). Open an attached tab for it so session
+		// links always work.
+		if active := m.supervisor.ActiveRunner(); active != nil && active.App != nil {
+			if rt, ok := active.App.Runtime().(subagentSessionLookup); ok {
+				if node, ok := rt.SubagentNodeForSession(sessionID); ok {
+					return m.handleOpenSubagent(messages.OpenSubagentMsg{NodeID: string(node)})
+				}
+			}
+		}
 		return m, notification.ErrorCmd("Session not found")
 	}
 
@@ -2145,7 +2324,7 @@ func (m *appModel) dialogCmdForPendingEvent(pendingEvent tea.Msg, sessionState *
 
 	case *runtime.MaxIterationsReachedEvent:
 		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewMaxIterationsDialog(ev.MaxIterations, m.application),
+			Model:            dialog.NewMaxIterationsDialog(ev.MaxIterations, ev.SessionID, ev.RequestID),
 			OriginatingEvent: ev,
 		})
 
@@ -2166,7 +2345,7 @@ func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) t
 				serverURL = url
 			}
 			return core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(m.ctx(), serverURL, m.application, ev.ElicitationID),
+				Model:            dialog.NewOAuthAuthorizationDialog(serverURL, dialog.ElicitationRefFor(ev)),
 				OriginatingEvent: ev,
 			})
 		}
@@ -2175,12 +2354,12 @@ func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) t
 	switch ev.Mode {
 	case "url":
 		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(m.ctx(), ev.Message, ev.URL, ev.ElicitationID),
+			Model:            dialog.NewURLElicitationDialog(m.ctx(), ev.Message, ev.URL, dialog.ElicitationRefFor(ev)),
 			OriginatingEvent: ev,
 		})
 	default:
 		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(ev.Message, ev.Schema, ev.Meta, ev.ElicitationID),
+			Model:            dialog.NewElicitationDialog(ev.Message, ev.Schema, ev.Meta, dialog.ElicitationRefFor(ev)),
 			OriginatingEvent: ev,
 		})
 	}
@@ -2202,8 +2381,70 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) {
 	}
 }
 
-// handleCloseTab closes a session tab.
+// dependentAttachedTabs returns the ids of attached subagent tabs sharing the
+// given tab's runtime. Empty when that tab is itself an attached viewer:
+// viewers don't own the runtime, so closing one never cascades.
+func (m *appModel) dependentAttachedTabs(sessionID string) []string {
+	runner := m.supervisor.GetRunner(sessionID)
+	if runner == nil || runner.App == nil || runner.App.AttachedSubagent() != nil {
+		return nil
+	}
+	rt := runner.App.Runtime()
+	var deps []string
+	tabs, _ := m.supervisor.GetTabs()
+	for _, tab := range tabs {
+		if tab.SessionID == sessionID {
+			continue
+		}
+		if r := m.supervisor.GetRunner(tab.SessionID); r != nil && r.App != nil &&
+			r.App.AttachedSubagent() != nil && r.App.Runtime() == rt {
+			deps = append(deps, tab.SessionID)
+		}
+	}
+	return deps
+}
+
+// handleCloseTab closes a session tab, confirming first when the root owns
+// running subagents that will be interrupted.
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
+	if m.tabHasRunningSubagents(sessionID) {
+		return m, core.CmdHandler(dialog.OpenDialogMsg{
+			Model: dialog.NewCloseRootWithSubagentsDialog(sessionID),
+		})
+	}
+	return m.closeTabWithCascade(sessionID)
+}
+
+func (m *appModel) tabHasRunningSubagents(sessionID string) bool {
+	runner := m.supervisor.GetRunner(sessionID)
+	if runner == nil || runner.App == nil || runner.App.AttachedSubagent() != nil {
+		return false
+	}
+	rt, ok := runner.App.Runtime().(interface {
+		HasRunningSubagents(sessionID string) bool
+	})
+	if !ok {
+		return false
+	}
+	trackedSessionID := sessionID
+	if sess := runner.App.Session(); sess != nil {
+		trackedSessionID = sess.ID
+	}
+	return rt.HasRunningSubagents(trackedSessionID)
+}
+
+func (m *appModel) closeTabWithCascade(sessionID string) (tea.Model, tea.Cmd) {
+	// Attached subagent tabs are views into the closing tab's runtime; its
+	// cleanup stops the shared toolsets, so they cannot outlive it. Close
+	// them first (before capturing active-tab state — a cascaded close may
+	// itself switch tabs). Closing an attached tab has no cleanup and never
+	// cascades.
+	var cascadeCmds []tea.Cmd
+	for _, dep := range m.dependentAttachedTabs(sessionID) {
+		_, cmd := m.closeTabWithCascade(dep)
+		cascadeCmds = append(cascadeCmds, cmd)
+	}
+
 	wasActive := sessionID == m.supervisor.ActiveID()
 
 	// Capture the working dir before closing so we can reuse it if this is the last tab.
@@ -2253,15 +2494,17 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 		if workingDir == "" {
 			workingDir = "."
 		}
-		return m.handleSpawnSession(workingDir)
+		model, cmd := m.handleSpawnSession(workingDir)
+		return model, tea.Batch(append(cascadeCmds, cmd)...)
 	}
 
 	// If the closed tab was active, switch to the next one
 	if wasActive && nextActiveID != "" {
-		return m.handleSwitchTab(nextActiveID)
+		model, cmd := m.handleSwitchTab(nextActiveID)
+		return model, tea.Batch(append(cascadeCmds, cmd)...)
 	}
 
-	return m, tea.Batch(cmds...)
+	return m, tea.Batch(append(cascadeCmds, cmds...)...)
 }
 
 // handleWindowResize handles window resize.
@@ -2358,7 +2601,6 @@ func (m *appModel) AllBindings() []key.Binding {
 		keys.ToggleHideToolResults,
 		keys.CycleAgent,
 		keys.ModelPicker,
-		keys.ClearQueue,
 		keys.Suspend,
 		key.NewBinding(
 			key.WithKeys("shift+tab"),
@@ -2532,9 +2774,6 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.ModelPicker):
 		return m.handleOpenModelPicker()
-
-	case key.Matches(msg, keys.ClearQueue):
-		return m, core.CmdHandler(messages.ClearQueueMsg{})
 
 	case key.Matches(msg, keys.Help):
 		// Show contextual help dialog with ALL available key bindings
@@ -3259,6 +3498,9 @@ func (m *appModel) cleanupManagedResources() {
 		}
 		if m.supervisor != nil {
 			m.supervisor.Shutdown()
+		}
+		if m.runCleanup != nil {
+			m.runCleanup()
 		}
 	})
 }

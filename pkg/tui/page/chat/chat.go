@@ -1,11 +1,10 @@
 package chat
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -29,6 +29,7 @@ import (
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 )
 
 const (
@@ -190,16 +191,9 @@ func (p *chatPage) SidebarVisualGeneration() uint64 {
 }
 
 type queuedMessage struct {
-	id             string
-	content        string
-	runtimeContent string
-	attachments    []msgtypes.Attachment
-	followUp       bool
-	order          uint64
+	turnID  string
+	content string
 }
-
-// maxQueuedMessages is the maximum number of messages that can be queued
-const maxQueuedMessages = 5
 
 // chatPage implements Page
 //
@@ -209,8 +203,9 @@ type chatPage struct {
 	width, height int
 
 	// Components
-	sidebar  sidebar.Model
-	messages messages.Model
+	sidebar   sidebar.Model
+	messages  messages.Model
+	subagents *subagentindex.Index
 
 	sessionState *service.SessionState
 
@@ -224,12 +219,14 @@ type chatPage struct {
 	msgCancel       context.CancelFunc
 	cancel          context.CancelFunc
 	streamCancelled bool
-	// streamDepth is the nesting depth of active streams (StreamStarted++,
-	// StreamStopped--). >0 during a root compaction marks it as automatic
-	// (nested mid-run); standalone /compact emits no StreamStarted.
-	streamDepth     int
-	agentStack      []string // agent per active stream level; len(agentStack)==streamDepth
-	streamStartTime time.Time
+	// lifecycle owns nested stream and pending-turn transitions.
+	lifecycle lifecycle.State
+	// ownedSkillOperation is the exact operation admitted by this page.
+	// Foreign journal lifecycle events never affect its busy boundary.
+	ownedSkillOperation string
+	ownedSkillStream    bool
+	teamAgentNames      []string // last team roster; a change re-renders cached messages with fresh agent colors
+	streamStartTime     time.Time
 
 	// routingID is the tab identity this page's routed UI timers are
 	// addressed to; empty for standalone pages (timers then fire unrouted,
@@ -241,6 +238,15 @@ type chatPage struct {
 	// (background tabs).
 	pendingTimers []tea.Cmd
 
+	// Attach protocol state (tabs attached to a live subagent session).
+	// snapshotEnd is the session item count captured when the transcript
+	// snapshot was rendered: position-stamped events below it are already in
+	// the snapshot and are dropped. The head of an in-flight assistant
+	// message arrives as seed events from the session event hub (captured
+	// atomically with the subscription), so nothing needs repairing after
+	// the fact — and no scroll-disturbing rebuild is needed.
+	snapshotEnd int
+
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
@@ -249,10 +255,9 @@ type chatPage struct {
 	// keeps the banner so page literals stay banner-enabled.
 	hideBanner bool
 
-	// Message queue for enqueuing messages while agent is working
-	messageQueue    []queuedMessage
-	pendingMessages []queuedMessage
-	pendingSequence uint64
+	// Canonical session mailbox projection. Entries are added and removed only
+	// by accepted/promoted envelopes (or a replacement snapshot).
+	messageQueue []queuedMessage
 
 	// Editing state for branching sessions
 	editing          bool
@@ -393,13 +398,18 @@ func defaultKeyMap() KeyMap {
 
 // New creates a new chat page
 func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *service.SessionState, opts ...PageOption) Page {
+	if a == nil {
+		panic("chat page requires a session-backed app")
+	}
 	pageCtx, cancel := context.WithCancel(ctx)
+	index := subagentindex.New()
 	p := &chatPage{
 		ar:                ar,
 		cancel:            cancel,
 		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
 		sidebar:           sidebar.New(ar, pageCtx, sessionState),
-		messages:          messages.New(ar, sessionState),
+		messages:          messages.New(ar, sessionState, index),
+		subagents:         index,
 		app:               a,
 		keyMap:            defaultKeyMap(),
 		commandParser:     commands.NewParser(),
@@ -503,12 +513,31 @@ func (p *chatPage) Init() tea.Cmd {
 	// Load state from existing session (for session restore and branching)
 	if sess := p.app.Session(); sess != nil {
 		p.sidebar.LoadFromSession(sess)
+		// Seed the subagent id → name index from the persisted swarm so restored
+		// subagent tool calls are attributed by name, not just id.
+		if snap := sess.GetSubagentTree(); snap != nil {
+			p.subagents.Reset(*snap)
+		}
 		if len(sess.Messages) > 0 {
 			restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(sess)
 			cmds = append(cmds, p.messages.LoadFromSession(sess, restoredMedia))
 			if resolve := p.resolveGeneratedMediaCmd(mediaRequests); resolve != nil {
 				cmds = append(cmds, resolve)
 			}
+		}
+		// Attached subagent tab: root the swarm section at the subagent's own
+		// node and show the clickable link back to the parent tab. snapshotEnd
+		// is the rendered snapshot's length (taken from the same item copy):
+		// position-stamped events below it are already on screen and settle or
+		// drop; events at/after it apply. Attaching mid-run needs no special
+		// working-state handling here: the session event hub seeds a synthetic
+		// StreamStarted for a live run, driving the spinner through the normal
+		// path (here and in the tab bar).
+		// The tree snapshot is synchronous and authoritative, so it also closes
+		// the race where the running tree event predates tab attachment.
+		if info := p.app.AttachedSubagent(); info != nil {
+			p.sidebar.SetSubagentContext(info.NodeID, info.ParentAgent, info.ParentSessionID)
+			p.snapshotEnd = p.messages.LoadedItemCount()
 		}
 	}
 
@@ -525,6 +554,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
 		p.cancel()
+		p.subagents.Clear()
 	}
 }
 
@@ -595,11 +625,6 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, p.messages.ScrollToBottom())
 
-		// Process next queued message after cancel (queue is preserved)
-		if queueCmd := p.processNextQueuedMessage(); queueCmd != nil {
-			cmds = append(cmds, queueCmd)
-		}
-
 		return p, tea.Batch(cmds...)
 
 	case msgtypes.EditUserMessageMsg:
@@ -615,33 +640,28 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		slog.Debug(msg.Content)
 		return p.handleSendMsg(msg)
 
+	case skillAdmissionMsg:
+		if msg.operationID != p.ownedSkillOperation {
+			return p, nil
+		}
+		if msg.err != nil {
+			p.ownedSkillOperation = ""
+			p.ownedSkillStream = false
+			return p, tea.Batch(p.finishSkillOperation(), notification.ErrorCmd("Could not start fork skill: "+msg.err.Error()))
+		}
+		return p, nil
+
 	case steerSentMsg:
-		p.addPendingMessage(msg.pending)
 		return p, notification.InfoCmd("Message sent to the working agent · /settings to queue instead")
 
 	case steerFailedMsg:
-		// The steer queue rejected the message (full, or the stream just
-		// stopped). Fall back to the explicit queue path, which also runs
-		// the message immediately when the agent is no longer working.
-		msg.original.Queue = true
-		model, cmd := p.handleSendMsg(msg.original)
-		return model, tea.Batch(
-			notification.WarningCmd("Could not attach the message to the running stream"),
-			cmd,
-		)
+		return p, notification.ErrorCmd(fmt.Sprintf("Could not attach the message to the running stream: %v", msg.err))
 
 	case followUpSentMsg:
-		p.addPendingMessage(msg.pending)
 		return p, notification.InfoCmd("Follow-up queued for the next turn")
 
 	case followUpFailedMsg:
-		msg.original.FollowUp = false
-		msg.original.Queue = true
-		model, cmd := p.handleSendMsg(msg.original)
-		return model, tea.Batch(
-			notification.WarningCmd("Could not enqueue the follow-up"),
-			cmd,
-		)
+		return p, notification.ErrorCmd(fmt.Sprintf("Could not enqueue the follow-up: %v", msg.err))
 
 	case msgtypes.RetryMsg:
 		return p.handleRetry()
@@ -725,12 +745,12 @@ func (p *chatPage) setPendingResponse(pending bool) tea.Cmd {
 // pendingSpinnerContext labels the waiting spinner during delegation only.
 // Depth < 2 → empty (default playful spinner); nested → child + "parent → child".
 func (p *chatPage) pendingSpinnerContext() (sender, label string) {
-	n := len(p.agentStack)
+	n := len(p.lifecycle.Streams)
 	if n < 2 {
 		return "", ""
 	}
-	child := p.agentStack[n-1]
-	return child, p.agentStack[n-2] + " → " + child
+	child := p.lifecycle.Streams[n-1].AgentName
+	return child, p.lifecycle.Streams[n-2].AgentName + " → " + child
 }
 
 // renderCollapsedSidebar renders the sidebar in collapsed/band mode.
@@ -934,17 +954,19 @@ func (p *chatPage) Help() help.KeyMap {
 	return core.NewSimpleHelp(p.Bindings())
 }
 
-// cancelStream cancels the current stream and cleans up associated state
+// cancelStream sends the canonical turn cancellation command, then detaches
+// local rendering. Detaching never controls session execution.
 func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
-	if p.msgCancel == nil {
+	if p.app == nil || p.app.CancelRun() == runtime.CancelNotActive {
 		return nil
 	}
+	if p.msgCancel != nil {
+		p.msgCancel()
+		p.msgCancel = nil
+	}
 
-	p.msgCancel()
-	p.msgCancel = nil
 	p.streamCancelled = true
-	p.streamDepth = 0
-	p.agentStack = nil
+	p.lifecycle.Streams = nil
 	p.waitingForDoubleTap = false
 	p.setPendingResponse(false)
 	// Send StreamCancelledMsg to all components to handle cleanup
@@ -991,7 +1013,16 @@ func (p *chatPage) parseImmediateCommand(content string) tea.Cmd {
 	return p.commandParser.Parse(content)
 }
 
-// handleSendMsg handles incoming messages from the editor. Depending on
+type resolvedSend struct {
+	msg      msgtypes.SendMsg
+	resolved app.ResolvedInput
+}
+
+type skillAdmissionMsg struct {
+	operationID string
+	err         error
+}
+
 // state they are processed immediately, steered into the ongoing stream, or
 // queued until the current turn ends.
 func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
@@ -1019,80 +1050,53 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, notification.WarningCmd("Session is read-only. No new messages can be sent.")
 	}
 
-	if msg.BypassQueue || isBangCommand(msg.Content) {
+	if isBangCommand(msg.Content) {
 		cmd := p.processMessage(msg)
+		return p, cmd
+	}
+
+	resolved, err := p.app.ResolveInputOnce(p.ctx(), msg.Content)
+	if err != nil {
+		return p, notification.ErrorCmd("Could not resolve input: " + err.Error())
+	}
+	classified := resolvedSend{msg: msg, resolved: resolved}
+	if resolved.ForkSkill {
+		cmd := p.processResolvedMessage(classified)
 		return p, cmd
 	}
 
 	// If not working, process immediately
 	if !p.working {
-		cmd := p.processMessage(msg)
+		cmd := p.processResolvedMessage(classified)
 		return p, cmd
 	}
 
 	// Alt+Enter explicitly requests a separate end-of-turn follow-up. When the
 	// agent is idle there is no active turn to follow, so process it normally.
 	if msg.FollowUp && p.working && p.app != nil {
-		cmd := p.followUpMessage(msg)
+		cmd := p.followUpResolved(classified)
 		return p, cmd
 	}
 
 	// While the agent is working, the configured send mode decides the
-	// default: steer injects the message into the ongoing stream so the
-	// agent picks it up mid-turn without breaking the stream (issue #3547);
-	// queue holds it until the turn ends. Queue-flagged messages (internal
-	// fallbacks) always queue, and so do fork-mode skills — they spawn
-	// their own stream, which cannot attach to the running one.
-	if msg.Queue || p.app == nil || p.sendMode == msgtypes.SendModeQueue || p.isForkSkillCommand(msg.Content) {
-		cmd := p.enqueueMessage(msg)
+	// default: steer injects the message into the ongoing stream; queue
+	// submits it to the session-owned FIFO for a later turn.
+	if msg.Queue || p.sendMode == msgtypes.SendModeQueue {
+		cmd := p.followUpResolved(classified)
 		return p, cmd
 	}
 
-	cmd := p.steerMessage(msg)
+	cmd := p.steerResolved(classified)
 	return p, cmd
 }
 
-// isForkSkillCommand reports whether content invokes a fork-mode skill.
-func (p *chatPage) isForkSkillCommand(content string) bool {
-	_, _, ok := p.app.SkillCommandFork(p.ctx(), content)
-	return ok
-}
-
-// enqueueMessage appends the message to the local queue consumed when the
-// current stream stops, and reports the result to the user.
-func (p *chatPage) enqueueMessage(msg msgtypes.SendMsg) tea.Cmd {
-	// If queue is full, reject the message
-	if len(p.messageQueue) >= maxQueuedMessages {
-		return notification.WarningCmd(fmt.Sprintf("Queue full (max %d messages). Please wait.", maxQueuedMessages))
-	}
-
-	// Add to queue
-	p.pendingSequence++
-	p.messageQueue = append(p.messageQueue, queuedMessage{
-		content:     msg.Content,
-		attachments: msg.Attachments,
-		order:       p.pendingSequence,
-	})
-	p.syncQueueToSidebar()
-
-	queueLen := len(p.messageQueue)
-	notifyMsg := fmt.Sprintf("Message queued (%d waiting) · Ctrl+X to clear", queueLen)
-
-	return notification.InfoCmd(notifyMsg)
-}
-
-// steerSentMsg reports that a message was handed to the runtime's steer
-// queue; steerFailedMsg carries the message back for local queueing when
-// steering was rejected (e.g. steer queue full).
+// Command result messages report session admission only. Projection changes
+// arrive separately through canonical accepted/promoted envelopes.
 type (
-	steerSentMsg struct {
-		pending queuedMessage
-	}
-	steerFailedMsg  struct{ original msgtypes.SendMsg }
-	followUpSentMsg struct {
-		pending queuedMessage
-	}
-	followUpFailedMsg struct{ original msgtypes.SendMsg }
+	steerSentMsg      struct{}
+	steerFailedMsg    struct{ err error }
+	followUpSentMsg   struct{}
+	followUpFailedMsg struct{ err error }
 )
 
 // steerMessage injects the message into the ongoing stream via the runtime's
@@ -1100,33 +1104,31 @@ type (
 // skill/agent command expansion never blocks the UI. The transcript bubble is
 // added when the runtime drains the message and emits its UserMessageEvent,
 // which is the moment the agent actually sees it.
-func (p *chatPage) steerMessage(msg msgtypes.SendMsg) tea.Cmd {
+func (p *chatPage) steerResolved(input resolvedSend) tea.Cmd {
 	ctx := p.ctx()
-	p.pendingSequence++
-	order := p.pendingSequence
+	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
-		content := p.app.ResolveInput(ctx, msg.Content)
-		queued, err := p.app.QueueSteerMessage(ctx, content, msg.Attachments)
+		submission, err := p.app.SteerMessage(ctx, resolved.Content, msg.Attachments)
 		if err != nil {
-			slog.Warn("Failed to steer message; falling back to queue", "error", err)
-			return steerFailedMsg{original: msg}
+			slog.Warn("Failed to steer message", "error", err)
+			return steerFailedMsg{err: err}
 		}
-		return steerSentMsg{pending: queuedMessage{id: queued.ID, content: msg.Content, runtimeContent: content, attachments: msg.Attachments, order: order}}
+		if submission.Disposition == runtime.SubmissionDispositionQueued {
+			return followUpSentMsg{}
+		}
+		return steerSentMsg{}
 	}
 }
 
-func (p *chatPage) followUpMessage(msg msgtypes.SendMsg) tea.Cmd {
+func (p *chatPage) followUpResolved(input resolvedSend) tea.Cmd {
 	ctx := p.ctx()
-	p.pendingSequence++
-	order := p.pendingSequence
+	msg, resolved := input.msg, input.resolved
 	return func() tea.Msg {
-		content := p.app.ResolveInput(ctx, msg.Content)
-		queued, err := p.app.QueueFollowUpMessage(ctx, content, msg.Attachments)
-		if err != nil {
-			slog.Warn("Failed to enqueue follow-up; falling back to local queue", "error", err)
-			return followUpFailedMsg{original: msg}
+		if _, err := p.app.FollowUpMessage(ctx, resolved.Content, msg.Attachments); err != nil {
+			slog.Warn("Failed to enqueue follow-up", "error", err)
+			return followUpFailedMsg{err: err}
 		}
-		return followUpSentMsg{pending: queuedMessage{id: queued.ID, content: msg.Content, runtimeContent: content, attachments: msg.Attachments, followUp: true, order: order}}
+		return followUpSentMsg{}
 	}
 }
 
@@ -1165,9 +1167,6 @@ func (p *chatPage) handleInlineEditCommitted(msg messages.InlineEditCommittedMsg
 	if p.msgCancel != nil {
 		cancelCmd = p.cancelStream(false)
 	}
-
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
 
 	parentID := ""
 	if sess := p.app.Session(); sess != nil {
@@ -1268,96 +1267,39 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	return attachments
 }
 
-func (p *chatPage) addPendingMessage(msg queuedMessage) {
-	if msg.order == 0 {
-		p.pendingSequence++
-		msg.order = p.pendingSequence
-	}
-	p.pendingMessages = append(p.pendingMessages, msg)
-}
-
-func (p *chatPage) consumePendingMessage(content string) {
-	for i, msg := range p.pendingMessages {
-		if msg.runtimeContent != content && msg.runtimeContent != strings.TrimSuffix(content, "\n") {
-			continue
-		}
-		p.pendingMessages = append(p.pendingMessages[:i], p.pendingMessages[i+1:]...)
-		return
-	}
-}
-
+// restorePendingMessages recalls only inputs the session owner successfully withdrew.
+// The canceled event, not this command result, updates the mailbox projection.
 func (p *chatPage) restorePendingMessages() tea.Cmd {
-	pending := append([]queuedMessage(nil), p.pendingMessages...)
-	pending = append(pending, p.messageQueue...)
-	if len(pending) == 0 {
-		return notification.InfoCmd("No pending messages")
-	}
-	slices.SortStableFunc(pending, func(a, b queuedMessage) int { return cmp.Compare(a.order, b.order) })
-
-	restored := make([]string, 0, len(pending))
-	remaining := make([]queuedMessage, 0, len(p.pendingMessages))
-	for _, msg := range pending {
-		if msg.id == "" {
-			restored = append(restored, msg.content)
-			continue
+	pending := append([]queuedMessage(nil), p.messageQueue...)
+	ctx := p.ctx()
+	return func() tea.Msg {
+		var restored []string
+		for _, msg := range pending {
+			withdrawn, err := p.app.CancelPendingMessage(ctx, msg.turnID)
+			if err == nil && withdrawn {
+				restored = append(restored, msg.content)
+			}
 		}
-		if !p.app.CancelPendingMessage(p.ctx(), runtime.QueuedMessage{ID: msg.id}, msg.followUp) {
-			remaining = append(remaining, msg)
-			continue
+		if len(restored) == 0 {
+			return notification.InfoCmd("No pending messages")()
 		}
-		restored = append(restored, msg.content)
+		return tea.Batch(
+			core.CmdHandler(msgtypes.RestorePendingMessagesMsg{Content: strings.Join(restored, "\n")}),
+			core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelEditor}),
+		)()
 	}
-	if len(restored) == 0 {
-		return notification.InfoCmd("No pending messages")
-	}
-
-	p.pendingMessages = remaining
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
-	return tea.Batch(
-		core.CmdHandler(msgtypes.RestorePendingMessagesMsg{Content: strings.Join(restored, "\n")}),
-		core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelEditor}),
-	)
 }
 
-// processNextQueuedMessage pops the next message from the queue and processes it.
-// Returns nil if the queue is empty.
-func (p *chatPage) processNextQueuedMessage() tea.Cmd {
-	if len(p.messageQueue) == 0 {
-		return nil
-	}
+// processNextQueuedMessage is intentionally a no-op: session promotion, not a
+// local stream boundary, advances accepted input.
+func (p *chatPage) processNextQueuedMessage() tea.Cmd { return nil }
 
-	// Pop the first message from the queue
-	queued := p.messageQueue[0]
-	p.messageQueue[0] = queuedMessage{} // zero out to allow GC
-	p.messageQueue = p.messageQueue[1:]
-	p.syncQueueToSidebar()
-
-	msg := msgtypes.SendMsg{
-		Content:     queued.content,
-		Attachments: queued.attachments,
-	}
-
-	return p.processMessage(msg)
-}
-
-// handleClearQueue clears all queued messages and shows a notification.
+// handleClearQueue cannot mutate the session mailbox behind its projection.
 func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
-	count := len(p.messageQueue)
-	if count == 0 {
+	if len(p.messageQueue) == 0 {
 		return p, notification.InfoCmd("No messages queued")
 	}
-
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
-
-	var msg string
-	if count == 1 {
-		msg = "Cleared 1 queued message"
-	} else {
-		msg = fmt.Sprintf("Cleared %d queued messages", count)
-	}
-	return p, notification.SuccessCmd(msg)
+	return p, notification.WarningCmd("Accepted messages cannot be cleared")
 }
 
 // syncQueueToSidebar updates the sidebar with truncated previews of queued messages.
@@ -1374,8 +1316,14 @@ func (p *chatPage) syncQueueToSidebar() {
 	p.sidebar.SetQueuedMessages(previews...)
 }
 
-// processMessage processes a message with the runtime
+// processMessage handles already-resolved bypass/bang compatibility input.
 func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
+	return p.processResolvedMessage(resolvedSend{msg: msg, resolved: app.ResolvedInput{Display: msg.Content, Content: msg.Content}})
+}
+
+// processResolvedMessage processes one classification without rediscovery.
+func (p *chatPage) processResolvedMessage(input resolvedSend) tea.Cmd {
+	msg, resolved := input.msg, input.resolved
 	// Handle slash commands (e.g., /eval, /compact, /exit) BEFORE cancelling any ongoing stream.
 	// These are UI commands that shouldn't interrupt the running agent.
 	if !msg.BypassQueue {
@@ -1389,12 +1337,20 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 		return p.messages.ScrollToBottom()
 	}
 
+	if resolved.ForkSkill {
+		operationID := app.NewSkillOperationID()
+		p.ownedSkillOperation = operationID
+		return func() tea.Msg {
+			err := p.app.StartSkillForkOperation(p.ctx(), operationID, resolved.SkillName, resolved.SkillTask)
+			return skillAdmissionMsg{operationID: operationID, err: err}
+		}
+	}
+
 	if p.msgCancel != nil {
 		p.msgCancel()
 	}
 
-	p.streamDepth = 0
-	p.agentStack = nil
+	p.lifecycle.Streams = nil
 	p.sidebar.ResetStreamTracking()
 
 	var ctx context.Context
@@ -1413,16 +1369,8 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 		}
 	}
 
-	// Run command resolution and agent execution in a goroutine
-	// so the UI stays responsive while skill/agent commands are resolved.
-	go func() {
-		if skillName, task, ok := p.app.SkillCommandFork(ctx, msg.Content); ok {
-			// Fork-mode skill: run in an isolated sub-session.
-			p.app.RunSkillFork(ctx, p.msgCancel, skillName, task, msg.Attachments)
-			return
-		}
-		p.app.Run(ctx, p.msgCancel, p.app.ResolveInput(ctx, msg.Content), msg.Attachments)
-	}()
+	// Run the already-resolved input; no second discovery occurs here.
+	go p.app.Run(ctx, p.msgCancel, resolved.Content, msg.Attachments)
 
 	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, loadingCmd)
 }
@@ -1443,8 +1391,7 @@ func (p *chatPage) handleRetry() (layout.Model, tea.Cmd) {
 		p.msgCancel()
 	}
 
-	p.streamDepth = 0
-	p.agentStack = nil
+	p.lifecycle.Streams = nil
 	p.sidebar.ResetStreamTracking()
 
 	var ctx context.Context
@@ -1456,21 +1403,22 @@ func (p *chatPage) handleRetry() (layout.Model, tea.Cmd) {
 	return p, tea.Batch(p.messages.ScrollToBottom(), spinnerCmd)
 }
 
-// CompactSession generates a summary and compacts the session history
+// CompactSession requests session-owned compaction without mutating the page's
+// run state until canonical compaction events arrive.
 func (p *chatPage) CompactSession(additionalPrompt string) tea.Cmd {
-	// Cancel any active stream without showing cancellation message
-	cancelCmd := p.cancelStream(false)
-
-	var ctx context.Context
-	ctx, p.msgCancel = context.WithCancel(p.ctx())
-	p.app.CompactSession(ctx, p.msgCancel, additionalPrompt)
-
-	return tea.Batch(
-		cancelCmd,
-		p.setWorking(true),
-		p.setPendingResponse(true),
-		p.messages.ScrollToBottom(),
-	)
+	if p.app == nil {
+		return notification.InfoCmd("Manual compaction is unavailable for this session")
+	}
+	ctx := p.ctx()
+	return func() tea.Msg {
+		if err := p.app.CompactSession(ctx, additionalPrompt); err != nil {
+			if errors.Is(err, runtime.ErrUnsupported) {
+				return notification.ShowMsg{Type: notification.TypeInfo, Text: "Manual compaction is unavailable for this session"}
+			}
+			return notification.ShowMsg{Type: notification.TypeError, Text: fmt.Sprintf("Compaction request failed: %v", err)}
+		}
+		return nil
+	}
 }
 
 // SetSessionStarred updates the sidebar star indicator
@@ -1616,6 +1564,11 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 			p.sidebar = model.(sidebar.Model)
 			return cmd
 		}
+	}
+
+	// Motion left the sidebar: drop any hovered subagent row.
+	if _, ok := msg.(tea.MouseMotionMsg); ok {
+		p.sidebar.ClearSubagentHover()
 	}
 
 	model, cmd := p.messages.Update(msg)

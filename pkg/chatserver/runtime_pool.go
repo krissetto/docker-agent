@@ -1,6 +1,7 @@
 package chatserver
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"sync"
@@ -12,27 +13,25 @@ import (
 	"github.com/docker/docker-agent/pkg/version"
 )
 
-// runtimePool keeps a small set of `runtime.Runtime` instances ready for
-// reuse, keyed by agent name. Building a runtime is non-trivial (it
-// resolves the agent's tools, creates per-agent hook executors, sets up
-// channels for resume/elicitation), so reusing the work across requests
-// is a real latency win for hot paths.
-//
-// Concurrency model: a single runtime is *not* safe for concurrent
-// RunStream calls (its resume/elicitation channels are per-runtime
-// state). The pool therefore hands out a runtime to one caller at a
-// time. Callers Get → use → Put back. When the pool is empty a fresh
-// runtime is built.
-//
-// `maxIdle` bounds the number of idle runtimes per agent. Returning a
-// runtime to a full pool is a no-op; it simply gets garbage collected.
+// runtimePool keeps a bounded set of idle session runtime supervisors per
+// agent. A runtime is borrowed by one request at a time and returned after its
+// ephemeral session has been released. The least recently returned runtime is
+// shut down when an agent's idle limit is exceeded.
 type runtimePool struct {
 	team    *team.Team
 	ctx     func() context.Context
 	maxIdle int
+	new     func() (runtime.SessionRuntimeSupervisor, error)
 
-	mu   sync.Mutex
-	idle map[string]chan runtime.Runtime
+	mu       sync.Mutex
+	idle     map[string]*list.List
+	borrowed map[*idleRuntime]struct{}
+	closed   bool
+}
+
+type idleRuntime struct {
+	owner runtime.SessionRuntimeSupervisor
+	rt    runtime.SessionRuntime
 }
 
 // errInvalidRuntime is returned when a caller asks for a runtime for an
@@ -45,75 +44,123 @@ func newRuntimePool(ctx context.Context, t *team.Team, maxIdle int) *runtimePool
 	if maxIdle < 0 {
 		maxIdle = 0
 	}
-	return &runtimePool{
-		team:    t,
-		ctx:     func() context.Context { return context.WithoutCancel(ctx) },
-		maxIdle: maxIdle,
-		idle:    make(map[string]chan runtime.Runtime),
+	p := &runtimePool{
+		team:     t,
+		ctx:      func() context.Context { return context.WithoutCancel(ctx) },
+		maxIdle:  maxIdle,
+		idle:     make(map[string]*list.List),
+		borrowed: make(map[*idleRuntime]struct{}),
 	}
+	p.new = func() (runtime.SessionRuntimeSupervisor, error) {
+		rt, err := runtime.NewLocalRuntime(p.ctx(), p.team,
+			runtime.WithTracer(otel.Tracer(version.AppName)),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return runtime.NewSessionRuntimeSupervisor(rt), nil
+	}
+	return p
 }
 
-// Get returns a ready-to-use runtime for the given agent, either
-// recycled from the pool or freshly created.
-func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
+// Get returns a ready-to-use runtime for agent and a release function that
+// must be called after the request's session has been released.
+func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Context) error, error) {
 	if p == nil {
-		return nil, errInvalidRuntime
+		return nil, nil, errInvalidRuntime
 	}
-	if rt := p.takeIdle(agent); rt != nil {
-		return rt, nil
-	}
-	// Match the tracer scope used by the CLI; without this the
-	// pooled chatserver runtimes are tracer-less so all `runtime.*`
-	// spans go silent in OpenAI-compatible chat-completions mode.
-	rt, err := runtime.New(p.ctx(), p.team,
-		runtime.WithCurrentAgent(agent),
-		runtime.WithTracer(otel.Tracer(version.AppName)),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return rt, nil
-}
 
-// Put hands a finished runtime back to the pool. If the agent's idle
-// slot is full the runtime is discarded (not closed: the team owns the
-// underlying toolsets). The runtime must not be used by the caller
-// after Put returns.
-func (p *runtimePool) Put(agent string, rt runtime.Runtime) {
-	if p == nil || rt == nil || p.maxIdle == 0 {
-		return
-	}
-	ch := p.channelFor(agent)
-	select {
-	case ch <- rt:
-	default:
-		// pool full: drop on the floor. The team owns the toolsets,
-		// so nothing leaks; the runtime itself is ordinary garbage.
-	}
-}
-
-func (p *runtimePool) takeIdle(agent string) runtime.Runtime {
 	p.mu.Lock()
-	ch, ok := p.idle[agent]
+	if p.closed {
+		p.mu.Unlock()
+		return nil, nil, errInvalidRuntime
+	}
+	if idle := p.idle[agent]; idle != nil && idle.Len() > 0 {
+		elem := idle.Back()
+		entry := elem.Value.(*idleRuntime)
+		idle.Remove(elem)
+		if idle.Len() == 0 {
+			delete(p.idle, agent)
+		}
+		p.borrowed[entry] = struct{}{}
+		p.mu.Unlock()
+		return entry.rt, p.release(agent, entry), nil
+	}
 	p.mu.Unlock()
-	if !ok {
-		return nil
+
+	owner, err := p.new()
+	if err != nil {
+		return nil, nil, err
 	}
-	select {
-	case rt := <-ch:
-		return rt
-	default:
-		return nil
+	entry := &idleRuntime{owner: owner, rt: owner.Runtime()}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = owner.Shutdown(p.ctx())
+		return nil, nil, errInvalidRuntime
+	}
+	p.borrowed[entry] = struct{}{}
+	p.mu.Unlock()
+	return entry.rt, p.release(agent, entry), nil
+}
+
+func (p *runtimePool) release(agent string, entry *idleRuntime) func(context.Context) error {
+	var once sync.Once
+	var err error
+	return func(ctx context.Context) error {
+		once.Do(func() { err = p.put(ctx, agent, entry) })
+		return err
 	}
 }
 
-func (p *runtimePool) channelFor(agent string) chan runtime.Runtime {
+func (p *runtimePool) put(ctx context.Context, agent string, entry *idleRuntime) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	ch, ok := p.idle[agent]
-	if !ok {
-		ch = make(chan runtime.Runtime, p.maxIdle)
-		p.idle[agent] = ch
+	if _, ok := p.borrowed[entry]; !ok {
+		p.mu.Unlock()
+		return nil
 	}
-	return ch
+	delete(p.borrowed, entry)
+	if p.closed || p.maxIdle == 0 {
+		p.mu.Unlock()
+		return entry.owner.Shutdown(ctx)
+	}
+	idle := p.idle[agent]
+	if idle == nil {
+		idle = list.New()
+		p.idle[agent] = idle
+	}
+	idle.PushBack(entry)
+	if idle.Len() <= p.maxIdle {
+		p.mu.Unlock()
+		return nil
+	}
+	evicted := idle.Remove(idle.Front()).(*idleRuntime)
+	p.mu.Unlock()
+	return evicted.owner.Shutdown(ctx)
+}
+
+func (p *runtimePool) Shutdown(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	p.closed = true
+	owners := make([]runtime.SessionRuntimeSupervisor, 0)
+	for entry := range p.borrowed {
+		owners = append(owners, entry.owner)
+	}
+	for _, idle := range p.idle {
+		for elem := idle.Front(); elem != nil; elem = elem.Next() {
+			owners = append(owners, elem.Value.(*idleRuntime).owner)
+		}
+	}
+	p.idle = make(map[string]*list.List)
+	p.borrowed = make(map[*idleRuntime]struct{})
+	p.mu.Unlock()
+
+	errs := make([]error, 0, len(owners))
+	for _, owner := range owners {
+		errs = append(errs, owner.Shutdown(ctx))
+	}
+	return errors.Join(errs...)
 }

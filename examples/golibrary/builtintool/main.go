@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
@@ -51,18 +53,27 @@ func run(ctx context.Context) error {
 			),
 		),
 	)
+	defer func() { _ = agents.StopToolSets(context.WithoutCancel(ctx)) }()
 	rt, err := runtime.New(ctx, agents)
 	if err != nil {
 		return err
 	}
+	defer rt.Close()
 
-	sess := session.New(session.WithUserMessage("Tell me a story about my current directory"))
-
-	messages, err := rt.Run(ctx, sess)
+	sess := session.New(session.WithAgentName("root"))
+	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: "root"})
 	if err != nil {
 		return err
 	}
-
-	fmt.Println(messages[len(messages)-1].Message.Content)
-	return nil
+	var response strings.Builder
+	_, err = runtimeclient.RunTurnFunc(ctx, handle, runtime.TurnInput{Content: "Tell me a story about my current directory"}, func(_ context.Context, envelope runtime.SessionEvent) error {
+		switch event := envelope.Event.(type) {
+		case *runtime.AgentChoiceEvent:
+			response.WriteString(event.Content)
+		case *runtime.StreamStoppedEvent:
+			fmt.Println(response.String())
+		}
+		return nil
+	})
+	return err
 }

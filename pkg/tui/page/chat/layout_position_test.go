@@ -38,8 +38,7 @@ func newLayoutTestPage(t *testing.T, position msgtypes.SidebarPosition) *chatPag
 func TestNewChatPageShowsBannerBeforeAgentInfo(t *testing.T) {
 	t.Parallel()
 
-	sessionState := &service.SessionState{}
-	p := New(animation.NewRuntime(), t.Context(), nil, sessionState).(*chatPage)
+	p := newTestChatPage(t)
 	p.SetSize(160, 40)
 
 	assert.True(t, p.showStartupBanner)

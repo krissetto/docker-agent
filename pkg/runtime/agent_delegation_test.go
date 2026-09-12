@@ -116,7 +116,7 @@ func TestNewSubSession(t *testing.T) {
 		assert.False(t, s.SendUserMessage)
 		assert.Equal(t, 10, s.MaxIterations)
 		// AgentName should NOT be set when PinAgent is false
-		assert.Empty(t, s.AgentName)
+		assert.Equal(t, "worker", s.AgentName)
 	})
 
 	t.Run("pin agent", func(t *testing.T) {
@@ -182,8 +182,30 @@ func TestNewSubSession(t *testing.T) {
 		}
 
 		s := newSubSession(parent, cfg, childAgent)
-
 		assert.True(t, s.DisableStructuredOutput)
+	})
+
+	t.Run("inherits safety settings", func(t *testing.T) {
+		cfg := SubSessionConfig{
+			Task:           "write tests",
+			AgentName:      "worker",
+			SafetyPolicy:   session.SafetyPolicyBalanced,
+			Permissions:    &session.PermissionsConfig{Allow: []string{"shell"}},
+			NonInteractive: true,
+		}
+		s := newSubSession(parent, cfg, childAgent)
+		assert.Equal(t, session.SafetyPolicyBalanced, s.SafetyPolicy)
+		require.NotNil(t, s.Permissions)
+		assert.Equal(t, []string{"shell"}, s.Permissions.Allow)
+		cfg.Permissions.Allow[0] = "mutated"
+		assert.Equal(t, []string{"shell"}, s.Permissions.Allow)
+	})
+
+	t.Run("bare session fabricates no messages", func(t *testing.T) {
+		cfg := SubSessionConfig{AgentName: "worker", PinAgent: true}
+		s := newSubSession(parent, cfg, childAgent)
+		assert.Empty(t, s.Messages)
+		assert.Equal(t, parent.ID, s.ParentID)
 	})
 }
 
@@ -243,7 +265,7 @@ func TestSubSessionConfig_DefaultValues(t *testing.T) {
 	assert.False(t, s.ToolsApproved)
 	assert.False(t, s.SendUserMessage)
 	assert.False(t, s.DisableStructuredOutput)
-	assert.Empty(t, s.AgentName)
+	assert.Equal(t, "worker", s.AgentName)
 }
 
 func TestSubSessionConfig_InheritsAgentLimits(t *testing.T) {
@@ -989,7 +1011,7 @@ func TestTransferTask_PinnedParentDoesNotMutateSharedCurrentAgent(t *testing.T) 
 	record := func() {
 		mu.Lock()
 		defer mu.Unlock()
-		observed = append(observed, rt.CurrentAgent().Name())
+		observed = append(observed, rt.currentAgent().Name())
 	}
 
 	workerStream := newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build()
@@ -1042,7 +1064,7 @@ func TestTransferTask_PinnedParentDoesNotMutateSharedCurrentAgent(t *testing.T) 
 	assert.Equal(t, []string{"root"}, observed,
 		"shared current agent must stay untouched while the pinned child's transfer runs")
 	mu.Unlock()
-	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root", rt.currentAgent().Name())
 
 	grandchild := firstSubSession(child)
 	require.NotNil(t, grandchild)
@@ -1076,7 +1098,7 @@ func TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent(t *testing.T) {
 	record := func() {
 		mu.Lock()
 		defer mu.Unlock()
-		observed = append(observed, rt.CurrentAgent().Name())
+		observed = append(observed, rt.currentAgent().Name())
 	}
 
 	librarian := probeAgent("librarian", "found it", record)
@@ -1101,14 +1123,14 @@ func TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent(t *testing.T) {
 	assert.Equal(t, "found it", result.Output)
 
 	mu.Lock()
-	assert.Equal(t, []string{"librarian"}, observed,
-		"the shared current agent must point at the target while the child runs")
+	assert.Equal(t, []string{"root"}, observed,
+		"the child resolves its pinned agent without mutating shared current metadata")
 	mu.Unlock()
-	assert.Equal(t, "root", rt.CurrentAgent().Name(), "the shared current agent must be restored afterwards")
+	assert.Equal(t, "root", rt.currentAgent().Name())
 
 	child := firstSubSession(sess)
 	require.NotNil(t, child)
-	assert.Empty(t, child.AgentName, "foreground transfer children stay unpinned")
+	assert.Equal(t, "librarian", child.AgentName, "foreground transfer child is explicitly pinned")
 
 	switches, completed := collectTransferEvents(evts)
 	require.Len(t, switches, 2, "entry and return AgentSwitching events must be emitted")
@@ -1137,7 +1159,7 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 	record := func() {
 		mu.Lock()
 		defer mu.Unlock()
-		observed = append(observed, rt.CurrentAgent().Name())
+		observed = append(observed, rt.currentAgent().Name())
 	}
 
 	root := agent.New("root", "Root agent", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}))
@@ -1208,7 +1230,7 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 	assert.Equal(t, []string{"root", "root"}, observed,
 		"neither concurrent pinned transfer may mutate the shared current agent")
 	mu.Unlock()
-	assert.Equal(t, "root", rt.CurrentAgent().Name())
+	assert.Equal(t, "root", rt.currentAgent().Name())
 
 	grandA := firstSubSession(childA)
 	require.NotNil(t, grandA)
@@ -1371,7 +1393,7 @@ func TestRunAgent_NestedAcyclicDelegation(t *testing.T) {
 // worker session dispatches run_background_agent to helper, the subagent_stop
 // hook belongs to the pinned caller (worker), not to whatever the shared
 // current agent points at (root). Before the fix, runCollecting's deferred
-// hook used r.CurrentAgent(), so root's hook received the helper completion
+// hook used r.currentAgent(), so root's hook received the helper completion
 // and worker's never fired.
 //
 // In production the nested dispatch reaches the Runner entry (RunAgent) on a
@@ -1656,7 +1678,7 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	// The whole nested chain runs on detached goroutines that never touch
 	// the runtime's shared current agent.
 	waitClosed(t, workerDrained, "worker background task to drain")
-	assert.Equal(t, "root", rt.CurrentAgent().Name(),
+	assert.Equal(t, "root", rt.currentAgent().Name(),
 		"shared current agent must remain root while background tasks run")
 
 	// The subagent_stop hooks fire just before HandleRun's goroutines mark
@@ -1734,6 +1756,6 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	assert.Equal(t, child.ID, rootStops[0].SessionID)
 	assert.Equal(t, "worker done", rootStops[0].StopResponse)
 
-	assert.Equal(t, "root", rt.CurrentAgent().Name(),
+	assert.Equal(t, "root", rt.currentAgent().Name(),
 		"the shared current agent must still be root after the whole chain")
 }

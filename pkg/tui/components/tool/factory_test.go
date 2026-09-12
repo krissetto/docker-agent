@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
@@ -67,7 +68,19 @@ func TestRegisterAndResolve(t *testing.T) {
 	assert.True(t, ok)
 }
 
-// TestNew_Dispatch verifies New(animation.NewRuntime(), )'s renderer selection: a registered renderer is
+func TestCustomSubagentRendererOverridesInjectedBuiltin(t *testing.T) {
+	withCleanToolRegistry(t)
+	called := false
+	Register(subagent.ToolSpawnSubagent, func(*animation.Runtime, *types.Message, service.SessionStateReader) layout.Model {
+		called = true
+		return nil
+	})
+	msg := &types.Message{ToolCall: tools.ToolCall{Function: tools.FunctionCall{Name: subagent.ToolSpawnSubagent}}}
+	_ = New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	assert.True(t, called)
+}
+
+// TestNew_Dispatch verifies New's renderer selection: a registered renderer is
 // chosen by exact tool name first, then by "category:<category>", with the exact
 // name winning when both match, and an unregistered tool falling through to the
 // default. The factory is origin-agnostic — it keys only on the tool-call name

@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -117,6 +118,7 @@ type Model struct {
 	width            int
 	height           int
 	sessionState     service.SessionStateReader
+	subagents        *subagentindex.Index
 	reasoningVersion int                    // increments when reasoning content changes
 	cache            *renderCache           // cached rendering results
 	animationSub     animation.Subscription // whether we're registered with animation coordinator
@@ -126,9 +128,13 @@ type Model struct {
 }
 
 // New creates a new reasoning block.
-func New(ar *animation.Runtime, id, agentName string, sessionState service.SessionStateReader) *Model {
+func New(ar *animation.Runtime, id, agentName string, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) *Model {
 	if ar == nil {
 		panic("reasoningblock: nil animation runtime")
+	}
+	var index *subagentindex.Index
+	if len(indexes) > 0 {
+		index = indexes[0]
 	}
 	return &Model{
 		ar:           ar,
@@ -137,6 +143,7 @@ func New(ar *animation.Runtime, id, agentName string, sessionState service.Sessi
 		expanded:     sessionState == nil || sessionState.ExpandThinking(),
 		width:        80,
 		sessionState: sessionState,
+		subagents:    index,
 		now:          defaultNow,
 	}
 }
@@ -210,7 +217,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	for i, entry := range m.toolEntries {
 		if entry.msg.ToolCall.ID == msg.ToolCall.ID {
 			m.toolEntries[i].msg = msg
-			m.toolEntries[i].view = tool.New(m.ar, msg, m.sessionState)
+			m.toolEntries[i].view = tool.New(m.ar, msg, m.sessionState, m.subagents)
 			m.toolEntries[i].view.SetSize(m.contentWidth(), 0)
 			return m.toolEntries[i].view.Init()
 		}
@@ -299,7 +306,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		}
 
 		// Recreate view to pick up new state
-		view := tool.New(m.ar, entry.msg, m.sessionState)
+		view := tool.New(m.ar, entry.msg, m.sessionState, m.subagents)
 		view.SetSize(m.contentWidth(), 0)
 		m.toolEntries[i] = entry
 		m.toolEntries[i].view = view

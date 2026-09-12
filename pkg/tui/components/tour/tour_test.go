@@ -103,11 +103,11 @@ func TestObserve_ToolStepChecks(t *testing.T) {
 	t.Parallel()
 
 	approvals := map[string]tea.Msg{
-		"approve":      dialog.RuntimeResumeMsg{Request: runtime.ResumeApprove()},
-		"approve-tool": dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveTool("shell:cmd=ls*")},
+		"approve":      messages.InteractionResponseMsg{Response: runtime.InteractionResponse{Resume: runtime.ResumeApprove()}},
+		"approve-tool": messages.InteractionResponseMsg{Response: runtime.InteractionResponse{Resume: runtime.ResumeApproveTool("shell:cmd=ls*")}},
 		// Raw legacy verb: normalization must keep old senders working.
-		"approve-session":  dialog.RuntimeResumeMsg{Request: runtime.ResumeRequest{Type: "approve-session"}},
-		"approve-balanced": dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveBalanced()},
+		"approve-session":  messages.InteractionResponseMsg{Response: runtime.InteractionResponse{Resume: runtime.ResumeRequest{Type: "approve-session"}}},
+		"approve-balanced": messages.InteractionResponseMsg{Response: runtime.InteractionResponse{Resume: runtime.ResumeApproveBalanced()}},
 	}
 	for name, msg := range approvals {
 		m := startedTour()
@@ -118,7 +118,7 @@ func TestObserve_ToolStepChecks(t *testing.T) {
 	}
 
 	nonApprovals := map[string]tea.Msg{
-		"rejection":     dialog.RuntimeResumeMsg{Request: runtime.ResumeReject("not now")},
+		"rejection":     messages.InteractionResponseMsg{Response: runtime.InteractionResponse{Resume: runtime.ResumeReject("not now")}},
 		"auto-run tool": &runtime.ToolCallResponseEvent{},
 	}
 	for name, msg := range nonApprovals {

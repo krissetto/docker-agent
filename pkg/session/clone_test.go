@@ -22,6 +22,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 		ID:                      "sess-1",
 		Title:                   "title",
 		ToolsApproved:           true,
+		SafetyPolicy:            SafetyPolicyBalanced,
 		NonInteractive:          true,
 		HideToolResults:         true,
 		WorkingDir:              "/work",
@@ -53,6 +54,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 	assert.Equal(t, "sess-1", clone.ID)
 	assert.Equal(t, "title", clone.Title)
 	assert.True(t, clone.ToolsApproved)
+	assert.Equal(t, SafetyPolicyBalanced, clone.SafetyPolicy)
 	assert.True(t, clone.NonInteractive)
 	assert.True(t, clone.HideToolResults)
 	assert.Equal(t, "/work", clone.WorkingDir)

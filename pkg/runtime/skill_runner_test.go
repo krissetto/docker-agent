@@ -82,7 +82,7 @@ func TestRunSkillFork_PinnedSessionRunsAsPinnedAgent(t *testing.T) {
 	record := func() {
 		mu.Lock()
 		defer mu.Unlock()
-		observed = append(observed, rt.CurrentAgent().Name())
+		observed = append(observed, rt.currentAgent().Name())
 	}
 
 	// The fork skill is inline (body served from memory), so the test
@@ -116,7 +116,7 @@ func TestRunSkillFork_PinnedSessionRunsAsPinnedAgent(t *testing.T) {
 		WithModelStore(mockModelStore{}),
 	)
 	require.NoError(t, err)
-	require.Equal(t, "root", rt.CurrentAgent().Name(), "shared current agent starts at root")
+	require.Equal(t, "root", rt.currentAgent().Name(), "shared current agent starts at root")
 
 	sess := session.New(
 		session.WithUserMessage("Test"),
@@ -137,7 +137,7 @@ func TestRunSkillFork_PinnedSessionRunsAsPinnedAgent(t *testing.T) {
 	assert.Equal(t, []string{"root"}, observed,
 		"the shared current agent must stay root while the pinned skill child runs")
 	mu.Unlock()
-	assert.Equal(t, "root", rt.CurrentAgent().Name(), "the shared current agent must remain root afterwards")
+	assert.Equal(t, "root", rt.currentAgent().Name(), "the shared current agent must remain root afterwards")
 
 	child := firstSubSession(sess)
 	require.NotNil(t, child)

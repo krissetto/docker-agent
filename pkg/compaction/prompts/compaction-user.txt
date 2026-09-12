@@ -1,3 +1,11 @@
-Provide a summary for continuing our conversation above. 
-Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, 
-which files we're working on, and what we're going to do next considering new session will not have access to our full conversation.
+Provide a summary for continuing our conversation above. The new session will not have access to our full conversation, so include what it needs to carry on without redoing work or being re-told constraints or context.
+
+Be sure to preserve:
+1. Any difficulties or problems that came up, and how they were handled or resolved.
+2. Any options or approaches that were raised, tried, or set aside, and why.
+3. Anything that was asked for, decided, agreed, ruled out, or established as a preference, constraint, or boundary — stated exactly.
+4. Exactly where things stand now: what has been covered, settled, or completed so far, including which files were changed and how.
+5. Anything still open, unresolved, promised, or expected to happen next.
+6. Specific details that would be hard to reconstruct — file paths, names, numbers, commands, exact wording, links or references — kept exactly.
+
+Be complete on these even at the cost of length; keep everything else concise.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,11 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -575,6 +579,70 @@ func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
 	final := events[1].event
 	assert.True(t, final.TurnComplete)
 	assert.Equal(t, "resumed answer", eventText(t, final))
+}
+
+func TestRunDockerAgent_ResumeFailsClosedWhenPersistedChildBindingConflicts(t *testing.T) {
+	t.Parallel()
+
+	tm, root := newMockTeam("must not run")
+	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.(*session.SQLiteSessionStore).Close()) })
+
+	existing := session.New(session.WithID("a2a-ctx-invalid-binding"), session.WithOrigin("a2a"))
+	require.NoError(t, store.AddSession(t.Context(), existing))
+	child := session.New(session.WithID("a2a-invalid-bound-child"))
+	child.ParentID = existing.ID
+	child.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
+	require.NoError(t, store.AddSession(t.Context(), child))
+	rootID := subagent.SessionRootID(existing.ID)
+	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), existing.ID, subagent.Snapshot{
+		Root: rootID,
+		Nodes: []subagent.NodeSnapshot{{
+			Node: subagent.Node{ID: rootID, Agent: "root"},
+			Children: []subagent.NodeSnapshot{{Node: subagent.Node{
+				ID: "removed-child", Parent: rootID, Agent: "removed", SessionID: child.ID, State: subagent.NodeIdle,
+			}}},
+		}},
+	}))
+
+	ctx := newFakeInvocationContext(t.Context(), existing.ID, "follow-up question")
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
+
+	require.Len(t, events, 1)
+	assert.Nil(t, events[0].event)
+	require.Error(t, events[0].err)
+	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
+	assert.Contains(t, events[0].err.Error(), "session binding")
+	assert.Empty(t, existing.GetAllMessages(), "the session must not run after restore validation fails")
+}
+
+func TestRunDockerAgent_ResumeFailsClosedWhenSubagentTreeIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	tm, root := newMockTeam("must not run")
+	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.(*session.SQLiteSessionStore).Close()) })
+
+	existing := session.New(
+		session.WithID("a2a-ctx-invalid-tree"),
+		session.WithOrigin("a2a"),
+	)
+	require.NoError(t, store.AddSession(t.Context(), existing))
+	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), existing.ID, subagent.Snapshot{
+		Version: subagent.SnapshotVersion + 1,
+	}))
+
+	ctx := newFakeInvocationContext(t.Context(), existing.ID, "follow-up question")
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
+
+	require.Len(t, events, 1)
+	assert.Nil(t, events[0].event)
+	require.Error(t, events[0].err)
+	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
+	assert.Contains(t, events[0].err.Error(), "unsupported topology version")
+	assert.Empty(t, existing.GetAllMessages(), "the session must not run after restore validation fails")
 }
 
 func TestRunDockerAgent_RuntimeCreationError(t *testing.T) {

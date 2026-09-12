@@ -43,12 +43,6 @@ type ElicitationRequestHandler func(ctx context.Context, message string, schema 
 // configured (no RunStream is active).
 var errNoElicitationChannel = errors.New("no events channel available for elicitation")
 
-// errNoSuchElicitation is returned by ResumeElicitation when the given
-// elicitation ID (or, in the empty-ID fallback, "the single pending
-// request") no longer has a registered waiter — already answered, timed
-// out, or never existed.
-var errNoSuchElicitation = errors.New("no elicitation request in progress")
-
 // elicitationBridge owns the events channel that the runtime's MCP
 // elicitation handler sends requests to. Each RunStream call swaps in its
 // own channel on entry and the previous one back on exit, so nested
@@ -261,85 +255,6 @@ func (w *elicitationWaiters) resolve(id string, result ElicitationResult) bool {
 	return wt.tryResolve(result)
 }
 
-// resolveSingle delivers result to the sole pending waiter. It exists for
-// backward compatibility with clients that don't send an elicitation_id
-// (the pre-#3584 API contract only ever supported one request in flight).
-// It is a deliberate no-op — returning false — when zero or more than one
-// request is pending, since there is then no way to disambiguate which one
-// the caller meant.
-func (w *elicitationWaiters) resolveSingle(result ElicitationResult) bool {
-	w.mu.Lock()
-	if len(w.pending) != 1 {
-		w.mu.Unlock()
-		return false
-	}
-	var id string
-	var wt *elicitationWaiter
-	for k, v := range w.pending {
-		id, wt = k, v
-	}
-	delete(w.pending, id)
-	w.mu.Unlock()
-	return wt.tryResolve(result)
-}
-
-// count reports the number of elicitations currently awaiting a response.
-func (w *elicitationWaiters) count() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return len(w.pending)
-}
-
-// firstElicitationID extracts the (at most one meaningful) elicitation ID
-// from a variadic parameter. The parameter is variadic — rather than a
-// required positional string — purely so pre-#3584 callers of
-// Runtime.ResumeElicitation (3 args) keep compiling unchanged; see
-// docs/guides/go-sdk/index.md for the Go API compatibility note (this
-// project's CHANGELOG.md is generated per release from merged PRs, not
-// edited alongside the change, so it carries no such note pre-release).
-func firstElicitationID(elicitationID []string) string {
-	if len(elicitationID) == 0 {
-		return ""
-	}
-	return elicitationID[0]
-}
-
-// ResumeElicitation sends an elicitation response back to a waiting
-// elicitation request. When elicitationID is non-empty it is routed to that
-// specific request; when empty, it falls back to resolving the sole pending
-// request for backward compatibility with callers that predate per-request
-// correlation. Returns an error if no matching elicitation is in progress.
-//
-// Unlike the old shared-channel implementation, this never blocks on ctx:
-// each waiter channel is buffered (capacity 1) and registered before its
-// request event is emitted, so resolving it is always a non-blocking map
-// lookup plus a buffered send — there is no TOCTOU window to race. A
-// resolve that raced a ctx-cancellation on the handler side is decided by
-// an atomic terminal state (see elicitationWaiter), so a true here always
-// means the response will reach the caller, never a discarded one.
-func (r *LocalRuntime) ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error {
-	id := firstElicitationID(elicitationID)
-	slog.DebugContext(ctx, "Resuming runtime with elicitation response", "agent", r.currentAgentName(), "action", action, "elicitation_id", id)
-
-	result := ElicitationResult{
-		Action:  action,
-		Content: content,
-	}
-
-	var ok bool
-	if id != "" {
-		ok = r.elicitationWaiters.resolve(id, result)
-	} else {
-		ok = r.elicitationWaiters.resolveSingle(result)
-	}
-	if !ok {
-		slog.DebugContext(ctx, "No matching elicitation request in progress", "elicitation_id", id)
-		return errNoSuchElicitation
-	}
-	slog.DebugContext(ctx, "Elicitation response sent successfully", "action", action)
-	return nil
-}
-
 // OnElicitationRequest registers a handler invoked whenever an MCP toolset
 // raises an elicitation request. This is the reliable route for
 // background-job elicitations (run_background_agent): their RunStream runs
@@ -353,6 +268,78 @@ func (r *LocalRuntime) OnElicitationRequest(handler func(Event)) {
 	r.elicitationSinkMu.Lock()
 	defer r.elicitationSinkMu.Unlock()
 	r.onElicitationRequest = handler
+}
+
+type sessionElicitationSink struct {
+	id      uint64
+	parent  string
+	handler func(Event) bool
+
+	mu       sync.Mutex
+	idle     *sync.Cond
+	inFlight int
+}
+
+func newSessionElicitationSink(id uint64, parent string, handler func(Event) bool) *sessionElicitationSink {
+	sink := &sessionElicitationSink{id: id, parent: parent, handler: handler}
+	sink.idle = sync.NewCond(&sink.mu)
+	return sink
+}
+
+func (s *sessionElicitationSink) acquire() func(Event) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight++
+	return s.handler
+}
+
+func (s *sessionElicitationSink) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight--
+	if s.inFlight == 0 {
+		s.idle.Broadcast()
+	}
+}
+
+func (s *sessionElicitationSink) wait() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.inFlight > 0 {
+		s.idle.Wait()
+	}
+}
+
+// SubscribeSessionElicitations registers one App-owned, session-scoped reliable
+// elicitation route without replacing the Runtime interface's embedder-wide
+// fallback sink. Exact-session ownership wins. Otherwise parent links captured
+// from known session drivers are followed under the registry lock, so a
+// detached/background descendant is delivered to its nearest open ancestor
+// App. Traversal is bounded by the number of known drivers and cycles abort to
+// the fallback sink. Re-registering a session deterministically replaces its
+// prior App subscriber; the returned cancel only removes its own generation.
+func (r *LocalRuntime) SubscribeSessionElicitations(sessionID, parentID string, handler func(Event) bool) (func(), bool) {
+	r.elicitationSinkMu.Lock()
+	if r.elicitationSessionSinks == nil {
+		r.elicitationSessionSinks = make(map[string]*sessionElicitationSink)
+	}
+	r.nextElicitationSessionSink++
+	id := r.nextElicitationSessionSink
+	sink := newSessionElicitationSink(id, parentID, handler)
+	r.elicitationSessionSinks[sessionID] = sink
+	r.elicitationSinkMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.elicitationSinkMu.Lock()
+			if current, ok := r.elicitationSessionSinks[sessionID]; ok && current.id == id {
+				delete(r.elicitationSessionSinks, sessionID)
+			}
+			r.elicitationSinkMu.Unlock()
+			sink.wait()
+		})
+	}, true
 }
 
 // MirrorsElicitationOnRunStream marks LocalRuntime as a runtime whose
@@ -379,13 +366,77 @@ func (r *LocalRuntime) MirrorsElicitationOnRunStream() {}
 // an event observed on a RunStream channel), or the exactly-once guarantee
 // this type documents no longer holds (#3584 item 5 — dual delivery
 // previously required a stateful App-side dedupe to paper over).
-func (r *LocalRuntime) emitElicitationRequest(event Event) {
-	r.elicitationSinkMu.RLock()
-	handler := r.onElicitationRequest
-	r.elicitationSinkMu.RUnlock()
-	if handler != nil {
-		handler(event)
+func (r *LocalRuntime) elicitationRoute(sessionID string) []string {
+	parents := make(map[string]string)
+	if r.sessionDrivers != nil {
+		driverRoute := r.sessionDrivers.ElicitationRoute(sessionID)
+		for i, id := range driverRoute {
+			parent := ""
+			if i+1 < len(driverRoute) {
+				parent = driverRoute[i+1]
+			}
+			parents[id] = parent
+		}
 	}
+	r.liveSessionsMu.Lock()
+	for id, entry := range r.liveSessions {
+		if entry != nil && entry.sess != nil {
+			parents[id] = entry.sess.ParentID
+		}
+	}
+	r.liveSessionsMu.Unlock()
+
+	r.elicitationSinkMu.RLock()
+	for id, sink := range r.elicitationSessionSinks {
+		if _, known := parents[id]; !known {
+			parents[id] = sink.parent
+		}
+	}
+	r.elicitationSinkMu.RUnlock()
+
+	route := make([]string, 0, len(parents)+1)
+	seen := make(map[string]struct{}, len(parents)+1)
+	for current := sessionID; current != "" && len(route) <= len(parents); current = parents[current] {
+		if _, duplicate := seen[current]; duplicate {
+			break
+		}
+		seen[current] = struct{}{}
+		route = append(route, current)
+	}
+	return route
+}
+
+func (r *LocalRuntime) emitElicitationRequest(event Event) bool {
+	var route []string
+	if scoped, ok := event.(SessionScoped); ok {
+		route = r.elicitationRoute(scoped.GetSessionID())
+	}
+	r.elicitationSinkMu.RLock()
+	var (
+		scopedSink    *sessionElicitationSink
+		scopedHandler func(Event) bool
+		fallback      func(Event)
+	)
+	for _, sessionID := range route {
+		if sink, exists := r.elicitationSessionSinks[sessionID]; exists {
+			scopedSink = sink
+			scopedHandler = sink.acquire()
+			break
+		}
+	}
+	if scopedHandler == nil {
+		fallback = r.onElicitationRequest
+	}
+	r.elicitationSinkMu.RUnlock()
+	if scopedHandler != nil {
+		defer scopedSink.release()
+		return scopedHandler(event)
+	}
+	if fallback == nil {
+		return false
+	}
+	fallback(event)
+	return true
 }
 
 // EmitElicitationRequestForTesting invokes whatever OnElicitationRequest sink
@@ -400,14 +451,23 @@ func (r *LocalRuntime) EmitElicitationRequestForTesting(event Event) {
 	r.emitElicitationRequest(event)
 }
 
-// hasElicitationSink reports whether an embedder has registered an
-// OnElicitationRequest handler. Used to decide whether a background
-// session's elicitation has any chance of reaching a user (see
-// elicitationHandler's headless fast-decline path).
-func (r *LocalRuntime) hasElicitationSink() bool {
+// hasElicitationSink reports whether the requested session has an exact or
+// ancestor App subscriber, or the embedder-wide fallback sink. It uses the
+// same route resolution as delivery so one unrelated open App cannot make a
+// headless background session wait for a response nobody can receive.
+func (r *LocalRuntime) hasElicitationSink(sessionID string) bool {
+	route := r.elicitationRoute(sessionID)
 	r.elicitationSinkMu.RLock()
 	defer r.elicitationSinkMu.RUnlock()
-	return r.onElicitationRequest != nil
+	if r.onElicitationRequest != nil {
+		return true
+	}
+	for _, id := range route {
+		if _, ok := r.elicitationSessionSinks[id]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // elicitationDeclineNotes accumulates model-readable notes for elicitations
@@ -472,6 +532,17 @@ type elicitationSpec struct {
 	sessionID string
 }
 
+type nonInteractiveSessionKey struct{}
+
+func withNonInteractiveSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonInteractiveSessionKey{}, true)
+}
+
+func isNonInteractiveSession(ctx context.Context) bool {
+	value, _ := ctx.Value(nonInteractiveSessionKey{}).(bool)
+	return value
+}
+
 // elicitationHandler is the MCP-toolset-side hook that turns an inbound
 // elicitation request from a server into an ElicitationRequest event and
 // waits for the embedder's response, correlated by elicitation ID.
@@ -503,10 +574,6 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	if sessionID == "" {
 		sessionID = genai.ConversationIDFromContext(ctx)
 	}
-	agentName := spec.agentName
-	if agentName == "" {
-		agentName = r.currentAgentName()
-	}
 
 	// A background session (run_background_agent) marks its context so
 	// toolset Start() OAuth fails fast instead of eliciting (#3200). Mid-call
@@ -516,19 +583,23 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	// --exec CLI path, which never registers OnElicitationRequest), nobody at
 	// all can answer this request. Decline immediately with a model-readable
 	// note instead of parking a goroutine forever (#3584).
-	if !tools.InteractivePromptsAllowed(ctx) && !r.hasElicitationSink() {
+	backgroundWithoutPrompts := isNonInteractiveSession(ctx) || !tools.InteractivePromptsAllowed(ctx)
+	if backgroundWithoutPrompts && !r.hasElicitationSink(sessionID) {
 		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
 		r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
-		return tools.ElicitationResult{
-			Action: tools.ElicitationActionDecline,
-		}, nil
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
+	}
+
+	agentName := spec.agentName
+	if agentName == "" {
+		agentName = r.currentAgentName()
 	}
 
 	// No *agent.Agent is threaded into MCP handler callbacks, so fall back
 	// to the current agent here. The session ID is the conversation ID the
 	// run loop seeded into ctx (empty for elicitations outside a run, e.g.
 	// startup OAuth probes).
-	r.executeOnUserInputHooks(ctx, r.CurrentAgent(), genai.ConversationIDFromContext(ctx), "elicitation")
+	r.executeOnUserInputHooks(ctx, r.agentForContext(ctx), genai.ConversationIDFromContext(ctx), "elicitation")
 
 	// The registry key (and the ElicitationID surfaced to clients for
 	// ResumeElicitation routing) is always a freshly generated, internal
@@ -560,11 +631,30 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	slog.DebugContext(ctx, "Elicitation request meta", "meta", spec.meta)
 
 	ev := ElicitationRequest(spec.message, spec.mode, spec.schema, spec.url, correlationID, spec.serverElicitationID, sessionID, spec.meta, agentName)
+	if elicitation, ok := ev.(*ElicitationRequestEvent); ok {
+		if d, exists := r.sessionDrivers.Lookup(sessionID); exists {
+			// Each elicitation is independently addressable; the turn remains
+			// recorded separately in sessionInteraction.turnID.
+			elicitation.RequestID = correlationID
+			if elicitation.RequestID == "" {
+				elicitation.RequestID = spec.serverElicitationID
+			}
+			if elicitation.RequestID != "" {
+				d.RegisterInteraction(elicitation.RequestID, InteractionElicitation, elicitation)
+			}
+		}
+	}
 
-	// Reliable delivery: invoked synchronously, unconditionally, and exactly
-	// once, BEFORE anything that could block (#3584 review item 1). This
-	// must never be gated behind the best-effort bridge below.
-	r.emitElicitationRequest(ev)
+	// Acquire and invoke a reliable route as one operation. For background /
+	// prompt-disabled sessions, failure means the last subscriber disappeared
+	// before delivery; abandon the waiter and fast-decline instead of waiting
+	// forever. Interactive streams still retain their best-effort bridge path.
+	delivered := r.emitElicitationRequest(ev)
+	if backgroundWithoutPrompts && !delivered {
+		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
+		r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
+	}
 
 	// Best-effort secondary delivery on the owning stream's events channel,
 	// kept for remote/SSE consumers that read directly off RunStream

@@ -84,7 +84,7 @@ func structuredOutputRuntime(t *testing.T, so *latest.StructuredOutput, agentOpt
 func runAndCollect(t *testing.T, rt *LocalRuntime, sess *session.Session) []Event {
 	t.Helper()
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 	return events
@@ -625,7 +625,7 @@ func TestStructuredOutputToolMode_ForceHandoffAfterFinalization(t *testing.T) {
 	events := runAndCollect(t, rt, sess)
 
 	require.Empty(t, errorEvents(events))
-	assert.Equal(t, "summarizer", rt.CurrentAgentName(t.Context()))
+	assert.Equal(t, "summarizer", sess.AgentName)
 	assert.Equal(t, "summary of the JSON", sess.GetLastAssistantMessageContent())
 
 	// The structured result is still in the transcript, before the handoff.

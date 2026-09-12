@@ -84,7 +84,7 @@ func (r *mediaRecordingMessages) UpdateAssistantMedia(media []types.AssistantMed
 	return r.Model.UpdateAssistantMedia(media)
 }
 
-func newGeneratedMediaTestPage(t *testing.T, rt runtime.Runtime) (*chatPage, *mediaRecordingMessages) {
+func newGeneratedMediaTestPage(t *testing.T, rt app.Services) (*chatPage, *mediaRecordingMessages) {
 	t.Helper()
 	return newGeneratedMediaTestPageWithSession(t, rt, session.New())
 }
@@ -98,9 +98,9 @@ func testPNGBytes(t *testing.T) []byte {
 	return data.Bytes()
 }
 
-func newGeneratedMediaTestPageWithSession(t *testing.T, rt runtime.Runtime, sess *session.Session) (*chatPage, *mediaRecordingMessages) {
+func newGeneratedMediaTestPageWithSession(t *testing.T, rt app.Services, sess *session.Session) (*chatPage, *mediaRecordingMessages) {
 	t.Helper()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(rt)), service.NewSessionState(sess)).(*chatPage)
 	rec := &mediaRecordingMessages{Model: p.messages}
 	p.messages = rec
 	return p, rec

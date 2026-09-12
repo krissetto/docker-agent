@@ -237,6 +237,6 @@ func TestAvailableModelsIncludesDMR(t *testing.T) {
 		return []string{"ai/qwen3:latest"}, nil
 	}, stubModelStore{}, nil)
 
-	got := refsOf(r.AvailableModels(t.Context()))
+	got := refsOf(r.availableModels(t.Context(), ""))
 	assert.Contains(t, got, "dmr/ai/qwen3:latest")
 }

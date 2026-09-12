@@ -52,8 +52,10 @@ func (s *Screen) Frame(width, _, spinnerFrame int, busy bool, sessionState servi
 
 // ConfirmModel holds a pending tool-approval prompt.
 type ConfirmModel struct {
-	Tool string
-	View ToolView
+	Tool      string
+	View      ToolView
+	SessionID string
+	RequestID string
 }
 
 func (c *ConfirmModel) Render(width int) []string {

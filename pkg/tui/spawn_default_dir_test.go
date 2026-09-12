@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
@@ -30,10 +31,10 @@ type spySpawner struct {
 	dirs []string
 }
 
-func (s *spySpawner) spawn(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+func (s *spySpawner) spawn(ctx context.Context, workingDir string) (supervisor.SpawnedSession, error) {
 	s.dirs = append(s.dirs, workingDir)
 	sess := session.New(session.WithWorkingDir(workingDir))
-	return app.New(ctx, stubRuntime{}, sess), sess, func() {}, nil
+	return supervisor.SpawnedSession{App: app.New(ctx, nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), Session: sess, Ownership: supervisor.RuntimeBorrowed}, nil
 }
 
 // newSpawnTestModel wires a model with a real supervisor around spy plus the
@@ -43,13 +44,14 @@ func newSpawnTestModel(t *testing.T, spy *spySpawner, opts ...Option) *appModel 
 	m, _ := newTestModel(t)
 	m.ar = animation.NewRuntime()
 	m.buildCommandCategories = func(context.Context, tea.Model) []commands.Category { return nil }
-	m.application = app.New(t.Context(), stubRuntime{}, session.New())
+	m.application = app.New(t.Context(), nil, session.New(), runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
 	m.tabBar = tabbar.New(m.ar, 0)
 	m.statusBar = statusbar.New(m)
 	m.supervisor = supervisor.New(spy.spawn)
 	// Mirror New: the initial session is registered with the supervisor.
-	m.supervisor.AddSession(t.Context(), m.application, m.application.Session(), "/initial", func() {})
+	_, err := m.supervisor.AddSession(t.Context(), m.application, m.application.Session(), "/initial", func() {})
+	require.NoError(t, err)
 	m.width, m.height = 120, 40
 	for _, opt := range opts {
 		opt(m)

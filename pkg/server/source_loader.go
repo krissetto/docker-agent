@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"sync"
@@ -18,6 +19,11 @@ type sourceLoader struct {
 	mu   sync.RWMutex
 	data []byte
 	err  error
+	// generation counts successful loads that changed the configuration
+	// bytes. Consumers that build state from the source (session runtimes)
+	// key it by generation so a refreshed agent definition is picked up by
+	// the next session without disturbing sessions on the previous one.
+	generation uint64
 }
 
 func newSourceLoader(ctx context.Context, inner config.Source, refreshInterval time.Duration) *sourceLoader {
@@ -69,9 +75,20 @@ func (sl *sourceLoader) load(ctx context.Context) {
 			sl.err = err
 		}
 	} else {
+		if sl.err != nil || !bytes.Equal(sl.data, data) {
+			sl.generation++
+		}
 		sl.data = data
 		sl.err = nil
 	}
+}
+
+// Generation returns the current configuration generation (see the field
+// doc). It is 0 until the source has been read successfully once.
+func (sl *sourceLoader) Generation() uint64 {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.generation
 }
 
 func (sl *sourceLoader) hasError() bool {

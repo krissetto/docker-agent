@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -55,22 +56,17 @@ const (
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(toolset latest.Toolset) (tools.ToolSet, error) {
-	if toolset.Shared {
-		return newSharedTodoTool(), nil
-	}
-
-	return New(), nil
+	return New(WithShared(toolset.Shared)), nil
 }
 
 type ToolSet struct {
 	handler *todoHandler
+	shared  bool
 }
 
-type Todo struct {
-	ID          string `json:"id" jsonschema:"ID of the todo item"`
-	Description string `json:"description" jsonschema:"Description of the todo item"`
-	Status      string `json:"status" jsonschema:"Status of the todo item (pending, in-progress, completed)"`
-}
+// Todo is the durable session-scoped todo record. This alias preserves the
+// builtin package's public API and stable JSON schema while sharing one DTO.
+type Todo = session.Todo
 
 type CreateTodoArgs struct {
 	Description string `json:"description" jsonschema:"Description of the todo item"`
@@ -117,18 +113,10 @@ type ListTodosOutput struct {
 
 // Storage defines the storage layer for todo items.
 type Storage interface {
-	// Add appends a new todo item.
-	Add(ctx context.Context, todo Todo)
-	// All returns a copy of all todo items.
-	All(ctx context.Context) []Todo
-	// Len returns the number of todo items.
-	Len(ctx context.Context) int
-	// FindByID returns the index of the todo with the given ID, or -1 if not found.
-	FindByID(ctx context.Context, id string) int
-	// Update modifies the todo at the given index using the provided function.
-	Update(ctx context.Context, index int, fn func(Todo) Todo)
-	// Clear removes all todo items.
-	Clear(ctx context.Context)
+	Add(ctx context.Context, todo Todo) error
+	AllE(ctx context.Context) ([]Todo, error)
+	UpdateByID(ctx context.Context, id string, fn func(Todo) Todo) (bool, error)
+	Clear(ctx context.Context) error
 }
 
 // MemoryTodoStorage is an in-memory, concurrency-safe implementation of Storage.
@@ -142,29 +130,29 @@ func NewMemoryTodoStorage() *MemoryTodoStorage {
 	}
 }
 
-func (s *MemoryTodoStorage) Add(_ context.Context, todo Todo) {
+func (s *MemoryTodoStorage) Add(_ context.Context, todo Todo) error {
 	s.todos.Append(todo)
+	return nil
 }
 
 func (s *MemoryTodoStorage) All(_ context.Context) []Todo {
 	return s.todos.All()
 }
+func (s *MemoryTodoStorage) AllE(ctx context.Context) ([]Todo, error) { return s.All(ctx), nil }
+func (s *MemoryTodoStorage) Len(_ context.Context) int                { return s.todos.Length() }
 
-func (s *MemoryTodoStorage) Len(_ context.Context) int {
-	return s.todos.Length()
-}
-
-func (s *MemoryTodoStorage) FindByID(_ context.Context, id string) int {
+func (s *MemoryTodoStorage) UpdateByID(_ context.Context, id string, fn func(Todo) Todo) (bool, error) {
 	_, idx := s.todos.Find(func(t Todo) bool { return t.ID == id })
-	return idx
+	if idx < 0 {
+		return false, nil
+	}
+	s.todos.Update(idx, fn)
+	return true, nil
 }
 
-func (s *MemoryTodoStorage) Update(_ context.Context, index int, fn func(Todo) Todo) {
-	s.todos.Update(index, fn)
-}
-
-func (s *MemoryTodoStorage) Clear(_ context.Context) {
+func (s *MemoryTodoStorage) Clear(_ context.Context) error {
 	s.todos.Clear()
+	return nil
 }
 
 // Option is a functional option for configuring a Tool.
@@ -181,12 +169,16 @@ func WithStorage(storage Storage) Option {
 	}
 }
 
+func WithShared(shared bool) Option {
+	return func(t *ToolSet) { t.shared = shared }
+}
+
+func (t *ToolSet) Shared() bool { return t.shared }
+
 type todoHandler struct {
 	storage Storage
 	nextID  atomic.Int64
 }
-
-var newSharedTodoTool = sync.OnceValue(func() *ToolSet { return New() })
 
 func New(opts ...Option) *ToolSet {
 	t := &ToolSet{
@@ -200,43 +192,84 @@ func New(opts ...Option) *ToolSet {
 	return t
 }
 
+func (t *ToolSet) SetStorage(storage Storage) {
+	if storage == nil {
+		return
+	}
+	t.handler.storage = storage
+}
+
+// Todos returns the current session-keyed snapshot. The runtime supplies the
+// session ID on ctx.
+func (t *ToolSet) Todos(ctx context.Context) ([]Todo, error) {
+	return t.handler.storage.AllE(ctx)
+}
+
 func (t *ToolSet) Instructions() string {
 	return `## Todo Tools
 
 Track task progress with todos:
 - Create todos for each major step before starting complex work (prefer batch create_todos)
-- Update status to "in-progress" before starting, "completed" immediately after finishing
-- Every todo MUST be marked "completed" before your final response
-- Batch multiple updates in a single update_todos call
-- Never leave todos pending or in-progress when done`
+- Update status to "in-progress" before starting; mark "completed" only when the work is actually finished
+- Ending a turn to wait, ask a blocking question, or answer an unrelated request does not mean the task is done
+- Keep unfinished todos pending or in-progress while waiting or blocked
+- Batch multiple updates in a single update_todos call`
 }
 
 // addTodo creates a new todo and adds it to storage.
-func (h *todoHandler) addTodo(ctx context.Context, description string) Todo {
+func (h *todoHandler) addTodo(ctx context.Context, description string) (Todo, error) {
+	if storage, ok := h.storage.(interface {
+		AddTodo(ctx context.Context, description string) (Todo, error)
+	}); ok {
+		return storage.AddTodo(ctx, description)
+	}
+	all, err := h.storage.AllE(ctx)
+	if err != nil {
+		return Todo{}, err
+	}
+	// Reconcile the allocator with durable state on every process/toolset start.
+	for _, existing := range all {
+		if n, err := strconv.ParseInt(strings.TrimPrefix(existing.ID, "todo_"), 10, 64); err == nil && existing.ID == fmt.Sprintf("todo_%d", n) {
+			for current := h.nextID.Load(); n > current && !h.nextID.CompareAndSwap(current, n); current = h.nextID.Load() {
+			}
+		}
+	}
 	todo := Todo{
 		ID:          fmt.Sprintf("todo_%d", h.nextID.Add(1)),
 		Description: description,
 		Status:      "pending",
 	}
-	h.storage.Add(ctx, todo)
-	return todo
+	if err := h.storage.Add(ctx, todo); err != nil {
+		return Todo{}, err
+	}
+	return todo, nil
 }
 
 // jsonResult builds a ToolCallResult with a JSON-serialized output and current storage as Meta.
 func (h *todoHandler) jsonResult(ctx context.Context, v any) (*tools.ToolCallResult, error) {
+	all, err := h.storage.AllE(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("todo storage: %w", err)
+	}
 	out, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling todo output: %w", err)
 	}
 	return &tools.ToolCallResult{
 		Output: string(out),
-		Meta:   h.storage.All(ctx),
+		Meta:   all,
 	}, nil
 }
 
 func (h *todoHandler) createTodo(ctx context.Context, params CreateTodoArgs) (*tools.ToolCallResult, error) {
-	created := h.addTodo(ctx, params.Description)
-	all := h.storage.All(ctx)
+	created, err := h.addTodo(ctx, params.Description)
+	if err != nil {
+		return nil, err
+	}
+	all, err := h.storage.AllE(ctx)
+	if err != nil {
+		return nil, err
+	}
 	annotateTodoSpan(ctx, "create_todo", 1, len(all), countCompleted(all))
 	return h.jsonResult(ctx, CreateTodoOutput{
 		Created:  created,
@@ -248,9 +281,16 @@ func (h *todoHandler) createTodo(ctx context.Context, params CreateTodoArgs) (*t
 func (h *todoHandler) createTodos(ctx context.Context, params CreateTodosArgs) (*tools.ToolCallResult, error) {
 	created := make([]Todo, 0, len(params.Descriptions))
 	for _, desc := range params.Descriptions {
-		created = append(created, h.addTodo(ctx, desc))
+		item, err := h.addTodo(ctx, desc)
+		if err != nil {
+			return nil, err
+		}
+		created = append(created, item)
 	}
-	all := h.storage.All(ctx)
+	all, err := h.storage.AllE(ctx)
+	if err != nil {
+		return nil, err
+	}
 	annotateTodoSpan(ctx, "create_todos", len(params.Descriptions), len(all), countCompleted(all))
 	return h.jsonResult(ctx, CreateTodosOutput{
 		Created:  created,
@@ -263,16 +303,17 @@ func (h *todoHandler) updateTodos(ctx context.Context, params UpdateTodosArgs) (
 	result := UpdateTodosOutput{}
 
 	for _, update := range params.Updates {
-		idx := h.storage.FindByID(ctx, update.ID)
-		if idx == -1 {
-			result.NotFound = append(result.NotFound, update.ID)
-			continue
-		}
-
-		h.storage.Update(ctx, idx, func(t Todo) Todo {
+		found, err := h.storage.UpdateByID(ctx, update.ID, func(t Todo) Todo {
 			t.Status = update.Status
 			return t
 		})
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			result.NotFound = append(result.NotFound, update.ID)
+			continue
+		}
 		result.Updated = append(result.Updated, update)
 	}
 
@@ -285,7 +326,11 @@ func (h *todoHandler) updateTodos(ctx context.Context, params UpdateTodosArgs) (
 		return res, nil
 	}
 
-	result.AllTodos = h.storage.All(ctx)
+	allTodos, err := h.storage.AllE(ctx)
+	result.AllTodos = allTodos
+	if err != nil {
+		return nil, err
+	}
 	result.Reminder = h.incompleteReminder(ctx)
 	annotateTodoSpan(ctx, "update_todos", len(params.Updates), len(result.AllTodos), countCompleted(result.AllTodos))
 
@@ -295,7 +340,10 @@ func (h *todoHandler) updateTodos(ctx context.Context, params UpdateTodosArgs) (
 // incompleteReminder returns a reminder string listing any non-completed todos,
 // or an empty string if all are completed (or storage is empty).
 func (h *todoHandler) incompleteReminder(ctx context.Context) string {
-	all := h.storage.All(ctx)
+	all, err := h.storage.AllE(ctx)
+	if err != nil {
+		return ""
+	}
 	var pending, inProgress []string
 	for _, todo := range all {
 		switch todo.Status {
@@ -310,7 +358,7 @@ func (h *todoHandler) incompleteReminder(ctx context.Context) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("The following todos are still incomplete and MUST be completed:")
+	b.WriteString("The following todos are still incomplete:")
 	for _, s := range inProgress {
 		b.WriteString(" (in-progress) " + s)
 	}
@@ -321,7 +369,10 @@ func (h *todoHandler) incompleteReminder(ctx context.Context) string {
 }
 
 func (h *todoHandler) listTodos(ctx context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
-	todos := h.storage.All(ctx)
+	todos, err := h.storage.AllE(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if todos == nil {
 		todos = []Todo{}
 	}

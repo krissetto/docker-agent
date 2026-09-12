@@ -169,54 +169,9 @@ type UpdateSessionSafetyPolicyRequest struct {
 	SafetyPolicy session.SafetyPolicy `json:"safety_policy"`
 }
 
-// ResumeSessionRequest represents a request to resume a session.
-// Confirmation is one of "approve", "approve-balanced",
-// "approve-autonomous", "approve-tool", "reject" (deprecated aliases
-// "approve-session", "approve-safe", "approve-safer" stay accepted).
-type ResumeSessionRequest struct {
-	Confirmation string `json:"confirmation"`
-	Reason       string `json:"reason,omitempty"`    // e.g reason for tool call rejection
-	ToolName     string `json:"tool_name,omitempty"` // tool name for approve-tool confirmation
-}
-
 // DesktopTokenResponse represents the response from getting a desktop token
 type DesktopTokenResponse struct {
 	Token string `json:"token"`
-}
-
-// ResumeElicitationRequest represents a request to resume with an elicitation response
-type ResumeElicitationRequest struct {
-	Action  string         `json:"action"`  // "accept", "decline", or "cancel"
-	Content map[string]any `json:"content"` // The submitted form data (only present when action is "accept")
-	// ElicitationID correlates this response with a specific concurrent
-	// elicitation request (see the elicitation_id field on the
-	// ElicitationRequestEvent stream event). Optional and additive: when
-	// empty, the server falls back to resolving the sole pending request,
-	// for backward compatibility with clients that predate per-request
-	// correlation (#3584).
-	ElicitationID string `json:"elicitation_id,omitempty"`
-}
-
-// SteerSessionRequest represents a request to inject user messages into a
-// running agent session. The messages are picked up by the agent loop between
-// tool execution and the next LLM call.
-type SteerSessionRequest struct {
-	Messages []Message `json:"messages"`
-}
-
-// FollowUpResponse is the response to POST /api/sessions/:id/followup.
-//
-// Status is one of:
-//   - "queued_streaming": delivered; a turn is running (or starting).
-//   - "queued_idle": delivered to an idle headless session; it will run on the
-//     next turn.
-//   - "duplicate": a request with the same Idempotency-Key already landed, so
-//     this one was acknowledged without delivering the follow-up again.
-//
-// Duplicate mirrors the "duplicate" status as a boolean for convenience.
-type FollowUpResponse struct {
-	Status    string `json:"status"`
-	Duplicate bool   `json:"duplicate"`
 }
 
 // UpdateSessionTitleRequest represents a request to update a session's title
@@ -237,11 +192,6 @@ type ForkSessionRequest struct {
 type UpdateSessionTitleResponse struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
-}
-
-// AddMessageRequest represents a request to add a message to a session
-type AddMessageRequest struct {
-	Message *session.Message `json:"message"`
 }
 
 // UpdateMessageRequest represents a request to update a message in a session
@@ -377,15 +327,4 @@ type SessionSnapshotResponse struct {
 	// sub-sessions and item-level costs (e.g. compaction). Clients should
 	// prefer it over summing per-message costs, which misses those.
 	Cost float64 `json:"cost"`
-}
-
-// RunAgentRequest is the body of POST /api/sessions/:id/agent/:agent[/:agent_name].
-// It carries the user messages to enqueue plus an optional Model override
-// applied to the session's current agent before the turn starts. The
-// override is persistent (mirrors what setting a model on the session
-// would do) so subsequent turns reuse it. An empty Model leaves the
-// current override untouched.
-type RunAgentRequest struct {
-	Messages []Message `json:"messages"`
-	Model    string    `json:"model,omitempty"`
 }

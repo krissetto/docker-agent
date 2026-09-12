@@ -4,6 +4,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"slices"
@@ -12,42 +13,84 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
-// SessionRunner represents a running session.
-type SessionRunner struct {
+// SessionTab represents a running session.
+type SessionTab struct {
 	ID         string
 	App        *app.App
 	WorkingDir string
-	Title      string
-	IsRunning  bool // True when stream is active
-	NeedsAttn  bool // True when user attention is needed
+	// title and sessionState are a lightweight projection of the canonical session
+	// observation. They are never inferred from the foreground App view.
+	title        string
+	sessionState runtime.SessionState
+	lifecycle    lifecycle.State
+	NeedsAttn    bool // True when user attention is needed
 	// PendingEvents queues attention events (tool confirmation, max
 	// iterations, elicitation) that arrived while this tab was inactive, in
 	// arrival order, for replay when the user switches to it. A single slot
 	// used to overwrite an earlier event with a later one, silently dropping
 	// it (#3584) — e.g. two concurrent background-job elicitations on the
 	// same unfocused tab would leave only the second visible.
-	PendingEvents []tea.Msg
-	cancel        context.CancelFunc
-	cleanup       func()
+	PendingEvents   []tea.Msg
+	cancel          context.CancelFunc
+	lifetimeCtx     context.Context
+	routeCancel     context.CancelFunc
+	routeDone       <-chan struct{}
+	routeGeneration uint64
+	projection      *runtimeclient.Attachment
+	projectionGen   uint64
+	cleanup         func()
 }
 
-// SessionSpawner is a function that creates new sessions.
-// It takes a working directory and returns the app, session, and cleanup function.
-type SessionSpawner func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error)
+// RuntimeOwnership declares whether a spawned App borrows the runner's
+// existing backend/runtime owner or owns a distinct replacement.
+type RuntimeOwnership uint8
+
+const (
+	RuntimeBorrowed RuntimeOwnership = iota
+	RuntimeOwned
+)
+
+// SpawnedSession separates resources from their ownership contract. Cleanup
+// is required for RuntimeOwned and ignored for RuntimeBorrowed.
+type SpawnedSession struct {
+	App       *app.App
+	Session   *session.Session
+	Ownership RuntimeOwnership
+	Cleanup   func()
+}
+
+// SessionSpawner creates an App for another session and explicitly declares
+// whether it borrows or replaces the current runner's runtime ownership.
+type SessionSpawner func(ctx context.Context, workingDir string) (SpawnedSession, error)
 
 // Supervisor manages agent sessions.
 type Supervisor struct {
 	mu       sync.RWMutex
-	runners  map[string]*SessionRunner
+	runners  map[string]*SessionTab
 	order    []string // Maintains tab order
 	activeID string
 	spawner  SessionSpawner
 	program  *tea.Program
+
+	// Tab updates are coalesced behind one serialized sender. Runtime tree
+	// snapshots can fan the same invalidation out through several attached Apps;
+	// retaining only the newest pending view avoids goroutine growth while the
+	// single sender preserves running → terminal delivery order.
+	tabSender        func(messages.TabsUpdatedMsg)
+	pendingTabUpdate *messages.TabsUpdatedMsg
+	tabNotify        chan struct{}
+	tabNotifyDone    chan struct{}
+	tabNotifyOnce    sync.Once
+	tabNotifyStop    sync.Once
 
 	// programReady is closed when SetProgram is called. Subscription goroutines
 	// wait on this before consuming events so that startup events (welcome message,
@@ -59,9 +102,11 @@ type Supervisor struct {
 // New creates a new supervisor.
 func New(spawner SessionSpawner) *Supervisor {
 	return &Supervisor{
-		runners:      make(map[string]*SessionRunner),
-		spawner:      spawner,
-		programReady: make(chan struct{}),
+		runners:       make(map[string]*SessionTab),
+		spawner:       spawner,
+		programReady:  make(chan struct{}),
+		tabNotify:     make(chan struct{}, 1),
+		tabNotifyDone: make(chan struct{}),
 	}
 }
 
@@ -70,27 +115,37 @@ func (s *Supervisor) SetProgram(p *tea.Program) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.program = p
+	s.tabSender = func(msg messages.TabsUpdatedMsg) { p.Send(msg) }
+	s.startTabNotifierLocked()
 	s.programReadyOnce.Do(func() {
 		close(s.programReady)
 	})
 }
 
 // AddSession adds an existing session to the supervisor.
-func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.Session, workingDir string, cleanup func()) string {
+func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.Session, workingDir string, cleanup func()) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if _, exists := s.runners[sess.ID]; exists {
+		s.mu.Unlock()
+		if cleanup != nil {
+			cleanup()
+		}
+		return "", fmt.Errorf("session %q is already supervised", sess.ID)
+	}
 
-	runner := &SessionRunner{
-		ID:         sess.ID,
-		App:        a,
-		WorkingDir: workingDir,
-		Title:      sess.Title,
-		cleanup:    cleanup,
+	runner := &SessionTab{
+		ID:           sess.ID,
+		App:          a,
+		WorkingDir:   workingDir,
+		title:        sess.TitleSnapshot(),
+		sessionState: runtime.SessionStateSettled,
+		cleanup:      cleanup,
 	}
 
 	// Create a cancellable context for this session
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
+	runner.lifetimeCtx = sessionCtx
 	if a != nil {
 		a.Start(sessionCtx)
 	}
@@ -104,10 +159,20 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 
 	// Start the subscription goroutine with routing
 	if a != nil {
-		go s.subscribeWithRouting(sessionCtx, a, sess.ID)
+		runner.routeGeneration++
+		generation := runner.routeGeneration
+		routeCtx, routeCancel := context.WithCancel(sessionCtx)
+		runner.routeCancel = routeCancel
+		routeDone := make(chan struct{})
+		runner.routeDone = routeDone
+		go s.subscribeWithRouting(routeCtx, a, sess.ID, generation, nil, routeDone)
+	}
+	s.mu.Unlock()
+	if a != nil {
+		s.replaceProjection(sessionCtx, sess.ID, a.SessionHandle())
 	}
 
-	return sess.ID
+	return sess.ID, nil
 }
 
 // SpawnSession creates and adds a new session.
@@ -116,33 +181,189 @@ func (s *Supervisor) SpawnSession(ctx context.Context, workingDir string) (strin
 		return "", errors.New("session spawning is not available")
 	}
 
-	a, sess, cleanup, err := s.spawner(ctx, workingDir)
+	spawned, err := s.spawner(ctx, workingDir)
 	if err != nil {
 		return "", err
 	}
+	cleanup := spawned.Cleanup
+	if spawned.Ownership == RuntimeBorrowed {
+		cleanup = nil
+	}
 
-	sessionID := s.AddSession(ctx, a, sess, workingDir, cleanup)
+	sessionID, err := s.AddSession(ctx, spawned.App, spawned.Session, workingDir, cleanup)
+	if err != nil {
+		return "", err
+	}
 	return sessionID, nil
+}
+
+func sessionStateRunning(state runtime.SessionState) bool {
+	return state == runtime.SessionStateQueued || state == runtime.SessionStateRunning || state == runtime.SessionStateCancelling
+}
+
+func ownSessionActivity(state runtime.SessionState) messages.TabActivity {
+	switch state {
+	case runtime.SessionStateQueued:
+		return messages.TabActivityPending
+	case runtime.SessionStateRunning:
+		return messages.TabActivityRunning
+	default:
+		return messages.TabActivityNone
+	}
+}
+
+func (s *Supervisor) seedProjection(tabID string, generation uint64, snapshot runtime.SessionSnapshot) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	runner := s.runners[tabID]
+	if runner == nil || runner.projectionGen != generation {
+		return false
+	}
+	runner.lifecycle = lifecycle.FromSnapshot(snapshot)
+	runner.sessionState = runner.lifecycle.Status
+	if snapshot.Session != nil {
+		runner.title = snapshot.Session.TitleSnapshot()
+	}
+	runner.PendingEvents = nil
+	if tabID != s.activeID {
+		for _, interaction := range snapshot.Interactions {
+			if interaction.Event != nil {
+				runner.PendingEvents = append(runner.PendingEvents, interaction.Event)
+			}
+		}
+	}
+	runner.NeedsAttn = len(runner.PendingEvents) > 0
+	s.notifyTabsUpdated()
+	return true
+}
+
+func (s *Supervisor) applyProjectionEvent(tabID string, generation uint64, event runtime.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	runner := s.runners[tabID]
+	if runner == nil || runner.projectionGen != generation {
+		return
+	}
+	changed := true
+	switch event := event.(type) {
+	case *runtime.StreamStartedEvent:
+		runner.lifecycle, _ = runner.lifecycle.Apply(event)
+		runner.sessionState = runner.lifecycle.Status
+	case *runtime.StreamStoppedEvent:
+		runner.lifecycle, _ = runner.lifecycle.Apply(event)
+		runner.sessionState = runner.lifecycle.Status
+	case *runtime.SessionTitleEvent:
+		runner.title = event.Title
+	case *runtime.ToolCallConfirmationEvent, *runtime.MaxIterationsReachedEvent, *runtime.ElicitationRequestEvent:
+		if tabID != s.activeID {
+			runner.NeedsAttn = true
+			runner.PendingEvents = append(runner.PendingEvents, event)
+			if program := s.program; program != nil {
+				go program.Send(messages.BellMsg{})
+			}
+		} else {
+			changed = false
+		}
+	case *runtime.ErrorEvent:
+		if tabID != s.activeID {
+			runner.NeedsAttn = true
+			if program := s.program; program != nil {
+				go program.Send(messages.BellMsg{})
+			}
+		} else {
+			changed = false
+		}
+	default:
+		changed = false
+	}
+	if changed {
+		s.notifyTabsUpdated()
+	}
+}
+
+type tabProjectionSink struct {
+	s          *Supervisor
+	tabID      string
+	generation uint64
+}
+
+func (p *tabProjectionSink) Reset(snapshot runtime.SessionSnapshot) {
+	p.s.seedProjection(p.tabID, p.generation, snapshot)
+}
+
+func (p *tabProjectionSink) Apply(envelope runtime.SessionEvent) {
+	p.s.applyProjectionEvent(p.tabID, p.generation, envelope.Event)
+}
+
+func (p *tabProjectionSink) OnError(err error) {
+	p.s.applyProjectionEvent(p.tabID, p.generation, runtime.Error(err.Error()))
+}
+
+// replaceProjection synchronously fences the prior attachment before starting
+// a new ordinary-client observation. It never cancels or releases a session.
+func (s *Supervisor) replaceProjection(ctx context.Context, tabID string, handle runtime.SessionHandle) {
+	s.mu.Lock()
+	runner := s.runners[tabID]
+	if runner == nil {
+		s.mu.Unlock()
+		return
+	}
+	runner.projectionGen++
+	generation := runner.projectionGen
+	old := runner.projection
+	runner.projection = nil
+	s.mu.Unlock()
+
+	if old != nil {
+		old.Detach()
+	}
+	if handle == nil || ctx.Err() != nil {
+		return
+	}
+	attachment, err := runtimeclient.Attach(ctx, handle, &tabProjectionSink{s: s, tabID: tabID, generation: generation})
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	runner = s.runners[tabID]
+	if runner != nil && runner.projectionGen == generation {
+		runner.projection = attachment
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	attachment.Detach()
 }
 
 // subscribeWithRouting subscribes to app events and wraps them with session ID.
 // It waits for the program to be set before consuming events so that startup
 // events (welcome message, agent/team/tool info) are not dropped.
-func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessionID string) {
-	// Wait for the program to be available before consuming any events.
-	// Events are buffered in app.events, so nothing is lost during this wait.
-	select {
-	case <-s.programReady:
-	case <-ctx.Done():
-		return
+func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessionID string, generation uint64, ready chan<- struct{}, done chan<- struct{}) {
+	if done != nil {
+		defer close(done)
 	}
-
+	// Registration readiness comes from App, not program readiness, so a
+	// pre-program retarget stages immediately without blocking.
 	send := func(msg tea.Msg) {
+		seed := false
+		if bridged, ok := msg.(app.SessionEventMsg); ok {
+			msg = bridged.Event
+			seed = bridged.Seed
+		}
+
+		select {
+		case <-s.programReady:
+		case <-ctx.Done():
+			return
+		}
+
 		s.mu.RLock()
 		p := s.program
+		runner := s.runners[sessionID]
+		valid := runner != nil && runner.routeGeneration == generation
 		s.mu.RUnlock()
 
-		if p == nil {
+		if p == nil || !valid || ctx.Err() != nil {
 			return
 		}
 
@@ -150,25 +371,26 @@ func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessi
 		s.handleRuntimeEvent(sessionID, msg)
 
 		// Wrap the message with session ID
+		inner := msg
+		if event, ok := msg.(runtime.Event); ok {
+			inner = messages.SessionRuntimeEventMsg{Event: event, Seed: seed}
+		}
 		p.Send(messages.RoutedMsg{
-			SessionID: sessionID,
-			Inner:     msg,
+			SessionID:       sessionID,
+			RouteGeneration: generation,
+			Inner:           inner,
 		})
 	}
 
-	a.SubscribeWith(ctx, send)
-}
-
-// isTopLevelStream reports whether a stream lifecycle event belongs to the
-// runner's own top-level session rather than a forwarded nested sub-session
-// (e.g. transfer_task or a fork-mode run_skill). Sub-session streams share
-// the parent's event channel but carry a different SessionID; they must not
-// toggle IsRunning or clear a pending attention event on the parent runner.
-//
-// An empty SessionID is treated as top-level for backward compatibility with
-// emitters that omit it (matching the convention in handleTokenUsage). (#3217)
-func isTopLevelStream(runnerID, evSessionID string) bool {
-	return evSessionID == "" || evSessionID == runnerID
+	// Subscriber registration is independent from Bubble Tea program readiness.
+	// The callback itself waits to route until SetProgram.
+	subReady := make(chan struct{})
+	go a.Subscribe(ctx, func(msg any) { send(msg) }, app.SubscribeOptions{PreserveSessionMetadata: true, Ready: subReady})
+	<-subReady
+	if ready != nil {
+		close(ready)
+	}
+	<-ctx.Done()
 }
 
 // handleRuntimeEvent updates runner state based on runtime events.
@@ -181,84 +403,158 @@ func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
 		return
 	}
 
-	switch ev := msg.(type) {
-	case *runtime.StreamStartedEvent:
-		if isTopLevelStream(runner.ID, ev.SessionID) {
-			runner.IsRunning = true
-			// A new top-level turn supersedes any stale attention events raised
-			// by ITS OWN previous turn, but must not discard a still-live,
-			// unanswered elicitation from a detached background job
-			// (run_background_agent outlives the turn boundary via
-			// context.WithoutCancel) — that job's waiter goroutine is still
-			// blocked and would be orphaned if its prompt vanished from the
-			// queue (#3584 review item 4).
-			runner.PendingEvents = retainDetachedElicitations(runner.ID, runner.PendingEvents)
-			runner.NeedsAttn = len(runner.PendingEvents) > 0
-			s.notifyTabsUpdated()
+	if _, ok := msg.(*runtime.SubagentTreeEvent); ok {
+		// Topology invalidates descendant presentation only. Session lifecycle is
+		// projected exclusively from the canonical session observation below.
+		if runner.App != nil && s.runtimeTreeInvalidationOwnerLocked(runner.App.Runtime()) != runner.ID {
+			return
 		}
-
-	case *runtime.StreamStoppedEvent:
-		if isTopLevelStream(runner.ID, ev.SessionID) {
-			runner.IsRunning = false
-			// Same rule as StreamStarted above: only this runner's own
-			// top-level attention events are moot now that its stream ended.
-			// A detached background job's live elicitation must survive the
-			// foreground stream's stop so its waiter isn't orphaned (#3584
-			// review item 4).
-			runner.PendingEvents = retainDetachedElicitations(runner.ID, runner.PendingEvents)
-			runner.NeedsAttn = len(runner.PendingEvents) > 0
-			s.notifyTabsUpdated()
-		}
-
-	case *runtime.SessionTitleEvent:
-		runner.Title = ev.Title
 		s.notifyTabsUpdated()
+	}
+}
 
-	case *runtime.ToolCallConfirmationEvent, *runtime.MaxIterationsReachedEvent, *runtime.ElicitationRequestEvent:
-		// These require user attention
-		if sessionID != s.activeID {
-			runner.NeedsAttn = true
-			runner.PendingEvents = append(runner.PendingEvents, msg)
-			s.notifyTabsUpdated()
-			// Ring the terminal bell to alert the user
-			if p := s.program; p != nil {
-				go p.Send(messages.BellMsg{})
+// notifyTabsUpdated coalesces tab snapshots for one serialized sender (must
+// be called with the supervisor lock held). A newer snapshot may replace one
+// not yet sent, but can never overtake a snapshot already being sent.
+func (s *Supervisor) notifyTabsUpdated() {
+	if s.tabSender == nil && s.program != nil {
+		p := s.program
+		s.tabSender = func(msg messages.TabsUpdatedMsg) { p.Send(msg) }
+	}
+	if s.tabSender == nil {
+		return
+	}
+	s.startTabNotifierLocked()
+	update := messages.TabsUpdatedMsg{
+		Tabs:      s.buildTabInfoLocked(),
+		ActiveIdx: s.activeIndexLocked(),
+	}
+	s.pendingTabUpdate = &update
+	select {
+	case s.tabNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Supervisor) startTabNotifierLocked() {
+	if s.tabNotify == nil {
+		s.tabNotify = make(chan struct{}, 1)
+	}
+	if s.tabNotifyDone == nil {
+		s.tabNotifyDone = make(chan struct{})
+	}
+	s.tabNotifyOnce.Do(func() { go s.runTabNotifier() })
+}
+
+func (s *Supervisor) runTabNotifier() {
+	for {
+		select {
+		case <-s.tabNotifyDone:
+			return
+		case <-s.tabNotify:
+			for {
+				s.mu.Lock()
+				pending := s.pendingTabUpdate
+				s.pendingTabUpdate = nil
+				sender := s.tabSender
+				s.mu.Unlock()
+				if pending == nil || sender == nil {
+					break
+				}
+				sender(*pending)
 			}
 		}
 	}
 }
 
-// retainDetachedElicitations filters pending to keep only
-// ElicitationRequestEvents raised by a session other than runnerID — i.e. a
-// detached background job's sub-session, whose elicitation waiter is still
-// blocked awaiting a response regardless of what the runner's own top-level
-// stream is doing. Everything else (ToolCallConfirmation, MaxIterationsReached,
-// and elicitations belonging to runnerID's own top-level stream) is dropped:
-// those are inherently scoped to the stream that just started or stopped, so
-// they are genuinely moot once it does.
-func retainDetachedElicitations(runnerID string, pending []tea.Msg) []tea.Msg {
-	return slices.DeleteFunc(pending, func(msg tea.Msg) bool {
-		elic, ok := msg.(*runtime.ElicitationRequestEvent)
-		return !ok || isTopLevelStream(runnerID, elic.SessionID)
-	})
+func (s *Supervisor) runtimeTreeInvalidationOwnerLocked(services app.Services) string {
+	fallback := ""
+	for _, id := range s.order {
+		candidate := s.runners[id]
+		if candidate == nil || candidate.App == nil || candidate.App.Runtime() != services {
+			continue
+		}
+		if candidate.App.AttachedSubagent() == nil {
+			return id
+		}
+		if fallback == "" {
+			fallback = id
+		}
+	}
+	return fallback
 }
 
-// notifyTabsUpdated sends a tabs updated message (must be called with lock held).
-func (s *Supervisor) notifyTabsUpdated() {
-	p := s.program
-	if p == nil {
-		return
+// tabActivity derives presentation state from the runtime's current tree.
+// The snapshot is synchronous and authoritative, which also seeds tabs opened
+// after a tree event and naturally clears state after replacement or teardown.
+func tabActivity(runner *SessionTab) (messages.TabActivity, bool) {
+	if runner.App == nil {
+		return ownSessionActivity(runner.sessionState), false
 	}
 
-	tabs := s.buildTabInfoLocked()
-	activeIdx := s.activeIndexLocked()
+	attached := runner.App.AttachedSubagent()
+	isAttached := attached != nil
+	provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree })
+	if !ok || provider.SubagentTree() == nil {
+		return ownSessionActivity(runner.sessionState), isAttached
+	}
 
-	// Send asynchronously to avoid blocking.
-	// Capture p locally so the goroutine doesn't race on s.program.
-	go p.Send(messages.TabsUpdatedMsg{
-		Tabs:      tabs,
-		ActiveIdx: activeIdx,
-	})
+	var nodeID subagent.NodeID
+	if attached != nil {
+		nodeID = attached.NodeID
+	} else if sess := runner.App.Session(); sess != nil {
+		nodeID = subagent.SessionRootID(sess.ID)
+	}
+	if nodeID == "" {
+		return messages.TabActivityNone, isAttached
+	}
+
+	snapshot := provider.SubagentTree().Snapshot()
+	return deriveTabActivity(snapshot, nodeID, ownSessionActivity(runner.sessionState)), isAttached
+}
+
+func deriveTabActivity(snapshot subagent.Snapshot, nodeID subagent.NodeID, own messages.TabActivity) messages.TabActivity {
+	node, found := subagentview.Find(snapshot.Nodes, nodeID)
+	if found {
+		descendant := strictDescendantState(node)
+		if descendant == messages.TabActivityDescendantRunning {
+			return descendant
+		}
+		if own == messages.TabActivityRunning {
+			return own
+		}
+		if descendant == messages.TabActivityPending {
+			return descendant
+		}
+		return own
+	}
+	return own
+}
+
+func strictDescendantState(node subagent.NodeSnapshot) messages.TabActivity {
+	pending := false
+	var walk func([]subagent.NodeSnapshot) bool
+	walk = func(nodes []subagent.NodeSnapshot) bool {
+		for _, child := range nodes {
+			switch child.Node.State {
+			case subagent.NodeRunning:
+				return true
+			case subagent.NodeStarting:
+				pending = true
+			}
+			if walk(child.Children) {
+				return true
+			}
+		}
+		return false
+	}
+	if walk(node.Children) {
+		return messages.TabActivityDescendantRunning
+	}
+	if pending {
+		return messages.TabActivityPending
+	}
+	return messages.TabActivityNone
 }
 
 // buildTabInfoLocked builds tab info (must be called with lock held).
@@ -270,16 +566,19 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			continue
 		}
 
-		title := runner.Title
+		title := runner.title
 		if title == "" {
 			title = filepath.Base(runner.WorkingDir)
 		}
 
+		activity, attached := tabActivity(runner)
 		tabs = append(tabs, messages.TabInfo{
 			SessionID:      id,
 			Title:          title,
 			IsActive:       id == s.activeID,
-			IsRunning:      runner.IsRunning,
+			IsRunning:      sessionStateRunning(runner.sessionState),
+			IsAttached:     attached,
+			Activity:       activity,
 			NeedsAttention: runner.NeedsAttn,
 		})
 	}
@@ -292,7 +591,7 @@ func (s *Supervisor) activeIndexLocked() int {
 }
 
 // SwitchTo switches to a different session.
-func (s *Supervisor) SwitchTo(sessionID string) *SessionRunner {
+func (s *Supervisor) SwitchTo(sessionID string) *SessionTab {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -343,7 +642,7 @@ func (s *Supervisor) SetPendingEvent(sessionID string, event tea.Msg) {
 }
 
 // ActiveRunner returns the currently active session runner.
-func (s *Supervisor) ActiveRunner() *SessionRunner {
+func (s *Supervisor) ActiveRunner() *SessionTab {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -351,19 +650,36 @@ func (s *Supervisor) ActiveRunner() *SessionRunner {
 }
 
 // GetRunner returns the runner for the given session ID, or nil if not found.
-func (s *Supervisor) GetRunner(sessionID string) *SessionRunner {
+func (s *Supervisor) GetRunner(sessionID string) *SessionTab {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.runners[sessionID]
 }
 
-// SetRunnerTitle updates the title of the runner for the given session ID.
-// It also triggers a tab update notification.
-func (s *Supervisor) SetRunnerTitle(sessionID, title string) {
+// FindBySession returns the runner whose App currently drives the given
+// session, or nil. Unlike GetRunner it matches the App's *current* session:
+// a restored tab keeps its original runner key but may drive another session.
+func (s *Supervisor) FindBySession(sessionID string) *SessionTab {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, runner := range s.runners {
+		if runner.App == nil {
+			continue
+		}
+		if sess := runner.App.Session(); sess != nil && sess.ID == sessionID {
+			return runner
+		}
+	}
+	return nil
+}
+
+// SeedTitle seeds a lazy tab before its session is attached. Once observation
+// starts, canonical snapshot/journal title updates replace this value.
+func (s *Supervisor) SeedTitle(sessionID, title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if runner, ok := s.runners[sessionID]; ok {
-		runner.Title = title
+		runner.title = title
 		s.notifyTabsUpdated()
 	}
 }
@@ -373,7 +689,7 @@ func (s *Supervisor) SetRunnerTitle(sessionID, title string) {
 // is run asynchronously. A new subscription goroutine is started for the new app.
 // This is used when restoring a session whose working directory differs from
 // the runner's current one, requiring a fresh runtime.
-func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, newApp *app.App, workingDir string, cleanup func()) {
+func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spawned SpawnedSession, workingDir string) {
 	s.mu.Lock()
 	runner, ok := s.runners[sessionID]
 	if !ok {
@@ -385,28 +701,139 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, new
 	if runner.cancel != nil {
 		runner.cancel()
 	}
+	if runner.routeCancel != nil {
+		runner.routeCancel()
+	}
 	oldCleanup := runner.cleanup
 
-	// Replace app, working dir, and cleanup.
-	runner.App = newApp
+	// Replace app and working directory. Borrowed replacement explicitly
+	// transfers the existing runner ownership; an owned replacement installs
+	// its cleanup and retires the prior owner.
+	runner.App = spawned.App
 	runner.WorkingDir = workingDir
-	runner.cleanup = cleanup
+	if spawned.Ownership == RuntimeOwned {
+		runner.cleanup = spawned.Cleanup
+	}
+	runner.sessionState = runtime.SessionStateSettled
 
 	// Create a new cancellable context for the replacement.
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
-	newApp.Start(sessionCtx)
+	runner.lifetimeCtx = sessionCtx
+	if spawned.App != nil {
+		spawned.App.Start(sessionCtx)
+	}
 
 	s.notifyTabsUpdated()
 	s.mu.Unlock()
+	if spawned.App != nil {
+		s.replaceProjection(sessionCtx, sessionID, spawned.App.SessionHandle())
+	}
 
-	// Run old cleanup outside the lock.
-	if oldCleanup != nil {
+	// Run old cleanup outside the lock only when ownership was replaced.
+	if spawned.Ownership == RuntimeOwned && oldCleanup != nil {
 		go oldCleanup()
 	}
 
 	// Start routing events from the new app.
-	go s.subscribeWithRouting(sessionCtx, newApp, sessionID)
+	if spawned.App != nil {
+		s.mu.Lock()
+		generation := uint64(0)
+		if current := s.runners[sessionID]; current == runner {
+			current.routeGeneration++
+			generation = current.routeGeneration
+		}
+		s.mu.Unlock()
+		routeCtx, routeCancel := context.WithCancel(sessionCtx)
+		s.mu.Lock()
+		if current := s.runners[sessionID]; current == runner {
+			current.routeCancel = routeCancel
+		} else {
+			routeCancel()
+		}
+		s.mu.Unlock()
+		go s.subscribeWithRouting(routeCtx, spawned.App, sessionID, generation, nil, nil)
+	}
+}
+
+// RefreshProjection replaces a tab observer after its App binds a different
+// canonical session (session restore/clear). The old observer is detached first;
+// neither session is cancelled or released.
+func (s *Supervisor) RefreshProjection(ctx context.Context, sessionID string) {
+	s.mu.Lock()
+	runner := s.runners[sessionID]
+	if runner == nil {
+		s.mu.Unlock()
+		return
+	}
+	var handle runtime.SessionHandle
+	if runner.App != nil {
+		handle = runner.App.SessionHandle()
+	}
+	runner.sessionState = runtime.SessionStateSettled
+	runner.PendingEvents = nil
+	runner.NeedsAttn = false
+	s.notifyTabsUpdated()
+	s.mu.Unlock()
+	s.replaceProjection(ctx, sessionID, handle)
+}
+
+func (s *Supervisor) RetargetRunner(ctx context.Context, oldID, newID, workingDir string) bool {
+	s.mu.Lock()
+	runner := s.runners[oldID]
+	if runner == nil || s.runners[newID] != nil {
+		s.mu.Unlock()
+		return false
+	}
+	if runner.routeCancel != nil {
+		runner.routeCancel()
+	}
+	runner.routeGeneration++
+	generation := runner.routeGeneration
+	routeCtx, routeCancel := context.WithCancel(runner.lifetimeCtx)
+	runner.routeCancel = routeCancel
+	routeDone := make(chan struct{})
+	runner.routeDone = routeDone
+	delete(s.runners, oldID)
+	runner.ID = newID
+	runner.WorkingDir = workingDir
+	s.runners[newID] = runner
+	for i, id := range s.order {
+		if id == oldID {
+			s.order[i] = newID
+		}
+	}
+	if s.activeID == oldID {
+		s.activeID = newID
+	}
+	var handle runtime.SessionHandle
+	if runner.App != nil {
+		handle = runner.App.SessionHandle()
+	}
+	s.notifyTabsUpdated()
+	appRef := runner.App
+	s.mu.Unlock()
+	s.replaceProjection(routeCtx, newID, handle)
+	if appRef != nil {
+		ready := make(chan struct{})
+		go s.subscribeWithRouting(routeCtx, appRef, newID, generation, ready, routeDone)
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Supervisor) RouteGeneration(sessionID string) (uint64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	runner := s.runners[sessionID]
+	if runner == nil {
+		return 0, false
+	}
+	return runner.routeGeneration, true
 }
 
 // ActiveID returns the ID of the currently active session.
@@ -436,6 +863,10 @@ func (s *Supervisor) CloseSession(sessionID string) string {
 	if runner.cancel != nil {
 		runner.cancel()
 	}
+	if runner.routeCancel != nil {
+		runner.routeCancel()
+	}
+	projection := runner.projection
 	cleanup := runner.cleanup
 
 	// Remove from maps
@@ -462,7 +893,10 @@ func (s *Supervisor) CloseSession(sessionID string) string {
 	activeID := s.activeID
 	s.mu.Unlock()
 
-	// Run cleanup outside the lock so it can't deadlock.
+	// Detach and run cleanup outside the lock so callbacks cannot deadlock.
+	if projection != nil {
+		projection.Detach()
+	}
 	if cleanup != nil {
 		go cleanup()
 	}
@@ -505,9 +939,16 @@ func (s *Supervisor) Shutdown() {
 
 	// Cancel all contexts first, then collect cleanup functions.
 	var cleanups []func()
+	var projections []*runtimeclient.Attachment
 	for _, runner := range s.runners {
 		if runner.cancel != nil {
 			runner.cancel()
+		}
+		if runner.routeCancel != nil {
+			runner.routeCancel()
+		}
+		if runner.projection != nil {
+			projections = append(projections, runner.projection)
 		}
 		if runner.cleanup != nil {
 			cleanups = append(cleanups, runner.cleanup)
@@ -515,12 +956,22 @@ func (s *Supervisor) Shutdown() {
 	}
 
 	count := len(s.runners)
-	s.runners = make(map[string]*SessionRunner)
+	s.runners = make(map[string]*SessionTab)
 	s.order = nil
 	s.activeID = ""
+	done := s.tabNotifyDone
 	s.mu.Unlock()
 
-	// Run cleanups outside the lock so they can't deadlock.
+	s.tabNotifyStop.Do(func() {
+		if done != nil {
+			close(done)
+		}
+	})
+
+	// Fence projections and run cleanups outside the lock.
+	for _, projection := range projections {
+		projection.Detach()
+	}
 	for _, cleanup := range cleanups {
 		cleanup()
 	}

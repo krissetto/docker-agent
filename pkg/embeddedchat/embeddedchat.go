@@ -11,6 +11,7 @@ import (
 
 	dagentcfg "github.com/docker/docker-agent/pkg/config"
 	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -81,8 +82,7 @@ type Event struct {
 	// Done marks a clean end of the reply stream.
 	Done bool
 	// RuntimeEvent is the original docker-agent runtime event for projected
-	// events. Not every runtime event is forwarded by this compact API; callers
-	// that need the full raw stream can use Runtime().RunStream directly.
+	// events. Not every runtime event is forwarded by this compact API.
 	RuntimeEvent dagentruntime.Event
 }
 
@@ -104,28 +104,22 @@ type ToolActivity struct {
 	NeedsConfirmation bool
 }
 
-// runtimeRunner is the subset of runtime.Runtime the headless session needs.
-type runtimeRunner interface {
-	RunStream(ctx context.Context, sess *session.Session) <-chan dagentruntime.Event
-	Resume(ctx context.Context, req dagentruntime.ResumeRequest)
-	ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error
-	Close() error
-}
-
-// Session owns one embedded runtime and one mutable conversation session.
+// Session owns one embedded runtime supervisor and one immutable conversation session.
 type Session struct {
 	cfg Config
 
-	rt      runtimeRunner
-	session *session.Session
-	welcome string
-	// workingDir is the absolute workspace root captured once at New; every
-	// conversation session persists it as its workspace provenance.
+	supervisor   dagentruntime.SessionRuntimeSupervisor
+	rt           dagentruntime.SessionRuntime
+	handle       dagentruntime.SessionHandle
+	conversation *session.Session
+	welcome      string
+	// workingDir captures the workspace provenance once at initialization.
 	workingDir string
 
 	mu           sync.Mutex
 	activeCancel context.CancelFunc
 	activeRun    int
+	activeTurnID string
 	closed       bool
 }
 
@@ -183,34 +177,59 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, fmt.Errorf("embeddedchat: create runtime: %w", err)
 	}
 
-	s := &Session{cfg: cfg, rt: rt}
+	supervisor := dagentruntime.NewSessionRuntimeSupervisor(rt)
+	s := &Session{cfg: cfg, supervisor: supervisor, rt: supervisor.Runtime()}
 	// Capture the embedder's workspace root once, at initialization: a later
 	// process chdir must not change which workspace owns the conversations.
 	s.workingDir, err = session.CaptureLocalWorkingDir(runConfig.WorkingDir)
 	if err != nil {
+		_ = supervisor.Shutdown(context.WithoutCancel(ctx))
 		return nil, fmt.Errorf("embeddedchat: capture working dir: %w", err)
 	}
 	if root, err := tm.DefaultAgent(); err == nil {
 		s.welcome = root.WelcomeMessage()
 	}
 	if cfg.InitialSession != nil {
-		s.session = cfg.InitialSession
+		s.conversation = cfg.InitialSession
 	} else {
 		s.resetConversationLocked()
 	}
+	if s.conversation.AgentName == "" {
+		s.conversation.AgentName = s.welcomeAgent(tm)
+	}
+	if err := s.bindConversationLocked(ctx); err != nil {
+		_ = supervisor.Shutdown(context.WithoutCancel(ctx))
+		return nil, err
+	}
 	return s, nil
+}
+
+func (s *Session) welcomeAgent(tm *team.Team) string {
+	root, err := tm.DefaultAgent()
+	if err != nil {
+		return ""
+	}
+	return root.Name()
+}
+
+func (s *Session) bindConversationLocked(ctx context.Context) error {
+	handle, err := s.rt.CreateSession(ctx, s.conversation, dagentruntime.SessionBinding{AgentName: s.conversation.AgentName})
+	if err != nil {
+		return fmt.Errorf("embeddedchat: bind session: %w", err)
+	}
+	s.handle = handle
+	return nil
 }
 
 // WelcomeMessage returns the loaded agent's welcome message.
 func (s *Session) WelcomeMessage() string { return s.welcome }
 
-// Runtime returns the underlying docker-agent runtime for advanced embedders.
-// It returns nil only for sessions not created by New.
-func (s *Session) Runtime() dagentruntime.Runtime {
+// SessionRuntime returns the underlying session registry for advanced embedders.
+// It does not expose a second local stream execution path.
+func (s *Session) SessionRuntime() dagentruntime.SessionRuntime {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rt, _ := s.rt.(dagentruntime.Runtime)
-	return rt
+	return s.rt
 }
 
 // Conversation returns the underlying docker-agent session.
@@ -220,7 +239,7 @@ func (s *Session) Runtime() dagentruntime.Runtime {
 func (s *Session) Conversation() *session.Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.session
+	return s.conversation
 }
 
 // Restart cancels any active run and replaces the conversation with a fresh
@@ -232,8 +251,16 @@ func (s *Session) Restart() error {
 		return ErrClosed
 	}
 	s.cancelActiveLocked()
+	if s.handle != nil {
+		if _, err := s.handle.Cancel(context.Background(), s.activeTurnID); err != nil {
+			return fmt.Errorf("embeddedchat: cancel previous session run: %w", err)
+		}
+		if err := s.handle.Release(context.Background()); err != nil {
+			return fmt.Errorf("embeddedchat: release previous session: %w", err)
+		}
+	}
 	s.resetConversationLocked()
-	return nil
+	return s.bindConversationLocked(context.Background())
 }
 
 // Close cancels any active run and releases runtime resources.
@@ -245,10 +272,10 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 	s.cancelActiveLocked()
-	rt := s.rt
+	supervisor := s.supervisor
 	s.mu.Unlock()
-	if rt != nil {
-		return rt.Close()
+	if supervisor != nil {
+		return supervisor.Shutdown(context.Background())
 	}
 	return nil
 }
@@ -257,7 +284,7 @@ func (s *Session) resetConversationLocked() {
 	// The captured root goes first so an embedder-supplied WithWorkingDir in
 	// SessionOptions still wins.
 	opts := append([]session.Opt{session.WithWorkingDir(s.workingDir)}, s.cfg.SessionOptions...)
-	s.session = session.New(opts...)
+	s.conversation = session.New(opts...)
 }
 
 func (s *Session) cancelActiveLocked() {
@@ -275,7 +302,7 @@ func (s *Session) cancelActiveLocked() {
 // further events are delivered to the caller.
 func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error) {
 	s.mu.Lock()
-	if s.rt == nil || s.session == nil {
+	if s.rt == nil || s.handle == nil || s.conversation == nil {
 		s.mu.Unlock()
 		return nil, ErrNotInitialized
 	}
@@ -291,12 +318,26 @@ func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error)
 	s.activeCancel = cancel
 	s.activeRun++
 	runID := s.activeRun
-	s.session.AddMessage(session.UserMessage(prompt))
-	events := s.rt.RunStream(runCtx, s.session)
+	observation, err := s.handle.Observe(runCtx, dagentruntime.ObserveOptions{})
+	if err != nil {
+		s.activeCancel = nil
+		cancel()
+		s.mu.Unlock()
+		return nil, fmt.Errorf("embeddedchat: observe session: %w", err)
+	}
+	submission, err := s.handle.Submit(runCtx, dagentruntime.TurnInput{Content: prompt})
+	if err != nil {
+		observation.Cancel()
+		s.activeCancel = nil
+		cancel()
+		s.mu.Unlock()
+		return nil, fmt.Errorf("embeddedchat: submit message: %w", err)
+	}
+	s.activeTurnID = submission.TurnID
 	s.mu.Unlock()
 
 	out := make(chan Event, eventBufferSize(s.cfg.EventBuffer))
-	go s.forwardEvents(runCtx, events, out, cancel, runID)
+	go s.forwardEvents(runCtx, observation, submission.TurnID, out, cancel, runID)
 	return out, nil
 }
 
@@ -312,11 +353,14 @@ func (s *Session) Confirm(ctx context.Context, req dagentruntime.ResumeRequest) 
 	if rt == nil {
 		return ErrNotInitialized
 	}
-	rt.Resume(ctx, req)
-	return nil
+	return s.handle.Respond(ctx, dagentruntime.InteractionResponse{
+		InteractionID: req.RequestID,
+		Kind:          dagentruntime.InteractionConfirmation,
+		Resume:        req,
+	})
 }
 
-func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime.Event, out chan<- Event, cancel context.CancelFunc, runID int) {
+func (s *Session) forwardEvents(ctx context.Context, observation dagentruntime.Observation, turnID string, out chan<- Event, cancel context.CancelFunc, runID int) {
 	defer close(out)
 	defer cancel()
 	defer func() {
@@ -337,45 +381,64 @@ func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime
 	}
 
 	errSent := false
-	for event := range events {
-		if ctx.Err() != nil {
-			continue
+	handle := func(envelope dagentruntime.SessionEvent) bool {
+		if envelope.Gap {
+			emit(Event{Err: fmt.Errorf("embeddedchat: observation gap; first available sequence %d", envelope.FirstAvailable)})
+			return false
 		}
-
+		if envelope.TurnID != turnID {
+			return true
+		}
+		event := envelope.Event
 		switch e := event.(type) {
 		case *dagentruntime.ToolCallConfirmationEvent:
 			if errSent {
-				s.rt.Resume(ctx, dagentruntime.ResumeReject("The run was aborted."))
-				continue
+				_ = s.handle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
+				return true
 			}
 			if !emit(Event{RuntimeEvent: event, Tool: &ToolActivity{Call: e.ToolCall, Def: e.ToolDefinition, NeedsConfirmation: true}}) {
-				s.rt.Resume(ctx, dagentruntime.ResumeReject("The run was aborted."))
+				_ = s.handle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
 			}
 		case *dagentruntime.ElicitationRequestEvent:
-			// This headless wrapper has no built-in elicitation UI. Decline so the
-			// run cannot hang forever; embedders that need elicitation can consume
-			// RuntimeEvent directly by driving the runtime themselves.
-			_ = s.rt.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
+			_ = s.handle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: dagentruntime.ElicitationResult{Action: tools.ElicitationActionDecline}})
 		case *dagentruntime.MaxIterationsReachedEvent:
-			s.rt.Resume(ctx, dagentruntime.ResumeReject(""))
+			_ = s.handle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionMaxIterations, Resume: dagentruntime.ResumeReject("")})
 		case *dagentruntime.ErrorEvent:
 			if errSent {
-				continue
+				return true
 			}
 			if !emit(Event{RuntimeEvent: event, Err: errors.New(e.Error)}) {
-				return
+				return false
 			}
 			errSent = true
+		case *dagentruntime.StreamStoppedEvent:
+			return false
 		default:
 			if errSent {
-				continue
+				return true
 			}
-			if translated, ok := TranslateRuntimeEvent(event); ok {
-				if !emit(translated) {
-					return
-				}
+			if translated, ok := TranslateRuntimeEvent(event); ok && !emit(translated) {
+				return false
 			}
 		}
+		return true
+	}
+
+	termination := runtimeclient.ConsumeTurn(ctx, observation, turnID, func(ctx context.Context, envelope dagentruntime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		if ctx.Err() != nil {
+			return runtimeclient.TurnContinue, nil
+		}
+		if !handle(envelope) {
+			return runtimeclient.TurnTerminate, nil
+		}
+		return runtimeclient.TurnContinue, nil
+	})
+	if termination.Err != nil && ctx.Err() == nil {
+		emit(Event{Err: termination.Err, Done: true})
+		errSent = true
+	}
+	if termination.Terminated {
+		return
 	}
 	if !errSent && ctx.Err() == nil {
 		emit(Event{Done: true})

@@ -58,7 +58,7 @@ func TestRunStream_StreamStoppedDeliveredUnderSlowConsumer(t *testing.T) {
 	sess.Title = "Unit Test"
 
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 
@@ -91,7 +91,7 @@ func TestLocalRuntime_FinalizeEventChannelDeliversStreamStoppedToSlowButAliveCon
 
 	done := make(chan struct{})
 	go func() {
-		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
 		close(done)
 	}()
 

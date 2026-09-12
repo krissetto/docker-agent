@@ -40,6 +40,14 @@ const maxSSELineBytes = 16 * 1024 * 1024
 // many real overflows.
 const defaultMaxOverflowCompactions = 1
 
+const (
+	defaultMaxActiveDescendants     = 100
+	defaultMaxActiveDescendantsRoot = 100
+	defaultMaxSubagentDepth         = 3
+	defaultMaxSubagentMailbox       = 64
+	defaultMaxOrphanMailbox         = 64
+)
+
 // toolsChangedTimeout bounds how long a single MCP-tool-change refresh
 // may take. The handler is invoked outside any RunStream goroutine (it's
 // a notification from a server), so a slow or stuck server cannot be

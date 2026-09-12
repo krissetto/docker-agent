@@ -166,8 +166,30 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, core.CmdHandler(msgtypes.ShowCostDialogMsg{})
 		}
 
+	case TargetSidebarSubagent:
+		if msg.Button == tea.MouseLeft {
+			// Navigating to another tab: this sidebar gets no further mouse
+			// events, so drop the hover highlight now or the row stays lit
+			// until the user returns AND moves the mouse over the sidebar.
+			p.sidebar.ClearSubagentHover()
+			return p, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID})
+		}
+
+	case TargetSidebarParent:
+		if msg.Button == tea.MouseLeft {
+			p.sidebar.ClearSubagentHover()
+			return p, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: hit.ParentSessionID})
+		}
+
 	case TargetMessages:
 		if !p.messages.IsMouseOnScrollbar(msg.X, msg.Y) {
+			// A click on a subagent tool message ("Spawned x (id)" and
+			// friends) opens a tab attached to that subagent's session.
+			if msg.Button == tea.MouseLeft {
+				if id, ok := p.messages.SubagentNodeAt(msg.X, msg.Y); ok {
+					return p, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: string(id)})
+				}
+			}
 			cmd := p.routeMouseEvent(msg, msg.Y)
 			focusCmd := core.CmdHandler(msgtypes.RequestFocusMsg{
 				Target: msgtypes.PanelMessages,
@@ -228,6 +250,9 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 		sidebarModel, sidebarCmd := p.sidebar.Update(msg)
 		p.sidebar = sidebarModel.(sidebar.Model)
 		cmds = append(cmds, sidebarCmd)
+		if p.messages.IsScrollbarDragging() {
+			p.sidebar.ClearSubagentHover()
+		}
 		return p, tea.Batch(cmds...)
 	}
 

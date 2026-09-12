@@ -648,6 +648,36 @@
             "type": "string"
           }
         },
+        "subagents": {
+          "type": "array",
+          "description": "Async subagents this agent may spawn and communicate with. Each entry is either a target agent name string, or an object with agent (target agent name), optional name (alias used by the delegating model), and optional description (prompt override). Agents communicate asynchronously; spawned subagents have independent sessions/runtime contexts and can end their turn until messaged again.",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["agent"],
+                "properties": {
+                  "agent": {
+                    "type": "string",
+                    "description": "Target agent name."
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Optional alias exposed to the delegating model. Defaults to agent."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Optional description override exposed in the harness prompt."
+                  }
+                }
+              }
+            ]
+          }
+        },
         "handoffs": {
           "type": "array",
           "description": "List of agents this agent can hand off the conversation to. Can be names of agents defined in this config, external references (OCI images like 'namespace/repo' or URLs), or named external references using 'name:reference' syntax (e.g. 'reviewer:myorg/review-pr'). External agents without an explicit name are named after their last path segment. Pin external OCI references to an immutable digest (e.g. 'namespace/repo@sha256:...') to serve them from cache; tag references are re-resolved against the registry on every run.",

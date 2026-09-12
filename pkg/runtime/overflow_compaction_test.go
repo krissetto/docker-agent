@@ -18,7 +18,7 @@ import (
 func runOverflowSession(t *testing.T, rt *LocalRuntime) (compactions int, sawError bool) {
 	t.Helper()
 	sess := session.New(session.WithUserMessage("Hello"))
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "started" {
 			compactions++
 		}

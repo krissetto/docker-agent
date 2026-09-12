@@ -69,13 +69,16 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	t := loadResult.Team
 	defer stopToolSets(ctx, t)
 
-	rt, err := runtime.New(ctx, t,
+	rt, err := runtime.NewLocalRuntime(ctx, t,
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)
 	if err != nil {
 		return err
 	}
+
+	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+	defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
 
 	var appOpts []app.Opt
 	// The creator runs in the user's checkout and writes the generated agent
@@ -102,21 +105,20 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	// theme (including "auto") the same way `docker-agent run` does.
 	applyTheme("")
 
-	return runTUI(ctx, rt, sess, nil, nil, nil, appOpts...)
+	appOpts = append(appOpts, app.WithRuntimeServices(rt))
+	return runTUI(ctx, rt, supervisor.Runtime(), sess, runtime.SessionBinding{AgentName: rt.CurrentAgentName(ctx), Model: f.modelParam}, nil, nil, nil, appOpts...)
 }
 
-func runTUI(ctx context.Context, rt runtime.Runtime, sess *session.Session, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, opts ...app.Opt) error {
-	return runTUIWrapped(ctx, rt, sess, spawner, cleanup, tuiOpts, nil, opts...)
+func runTUI(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, opts ...app.Opt) error {
+	return runTUIWrapped(ctx, rt, sessions, sess, binding, spawner, cleanup, tuiOpts, nil, opts...)
 }
 
 // runTUIWrapped is runTUI with an optional model wrapper, used by --record to
 // interpose the input recorder between the terminal and the real model.
-func runTUIWrapped(ctx context.Context, rt runtime.Runtime, sess *session.Session, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, wrap func(tea.Model) tea.Model, opts ...app.Opt) error {
-	if gen := rt.TitleGenerator(ctx); gen != nil {
-		opts = append(opts, app.WithTitleGenerator(gen))
-	}
+func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, wrap func(tea.Model) tea.Model, opts ...app.Opt) error {
+	opts = withTitleGenerator(ctx, rt, opts)
 
-	a := app.New(ctx, rt, sess, opts...)
+	a := app.New(ctx, sessions, sess, binding, opts...)
 
 	coalescer := tuiinput.NewWheelCoalescer()
 	filter := func(model tea.Model, msg tea.Msg) tea.Msg {

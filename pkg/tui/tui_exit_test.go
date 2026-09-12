@@ -532,10 +532,11 @@ func TestCleanupAll_RepeatCallsDoNotStackOnWedgedCleanup(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	var cleanupCalls atomic.Int32
 	sv := supervisor.New(nil)
-	sv.AddSession(t.Context(), nil, session.New(), t.TempDir(), func() {
+	_, err := sv.AddSession(t.Context(), nil, session.New(), t.TempDir(), func() {
 		cleanupCalls.Add(1)
 		<-release
 	})
+	require.NoError(t, err)
 	m.supervisor = sv
 
 	// All calls must return promptly, and only the first may start a cleanup.
@@ -575,7 +576,8 @@ func TestCleanupAll_WedgedResourceCleanupForcesExit(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	sv := supervisor.New(nil)
-	sv.AddSession(t.Context(), nil, session.New(), t.TempDir(), func() { <-release })
+	_, err := sv.AddSession(t.Context(), nil, session.New(), t.TempDir(), func() { <-release })
+	require.NoError(t, err)
 	m.supervisor = sv
 
 	var in, out bytes.Buffer

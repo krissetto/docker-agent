@@ -63,7 +63,26 @@ func (r *LocalRuntime) enforceMaxIterations(
 		"max", runtimeMaxIterations,
 	)
 
-	events.Emit(MaxIterationsReached(runtimeMaxIterations))
+	requestID := "max-iterations"
+	// Install the responder rendezvous before publishing the interaction. An
+	// observer may answer immediately after seeing the event; publishing first
+	// creates a real window where SessionHandle.Respond cannot deliver and
+	// incorrectly reports the freshly observed interaction as stale.
+	var resume chan ResumeRequest
+	if !sess.NonInteractive && ctx.Err() == nil {
+		resume = r.interactions.resumeChannel(sess.ID)
+		defer r.interactions.removeResume(sess.ID, resume)
+	}
+	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+		if active := d.ActiveRequestID(); active != "" {
+			requestID = active
+		}
+		event := MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID)
+		d.RegisterInteraction(requestID, InteractionMaxIterations, event)
+		events.Emit(event)
+	} else {
+		events.Emit(MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID))
+	}
 
 	maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)
 	r.notifyMaxIterations(ctx, a, sess.ID, maxIterMsg)
@@ -88,10 +107,7 @@ func (r *LocalRuntime) enforceMaxIterations(
 		return runtimeMaxIterations, iterationStop
 	}
 
-	// A cancelled run can never deliver a resume decision. Bail out
-	// before signalling a bogus "waiting for user input" (#4004);
-	// mirrors the ctx.Done() branch below, which also skips the stop
-	// message.
+	// A cancelled run can never deliver a resume decision.
 	if ctx.Err() != nil {
 		slog.DebugContext(ctx, "Context already cancelled at max iterations; stopping",
 			"agent", a.Name(),
@@ -100,13 +116,10 @@ func (r *LocalRuntime) enforceMaxIterations(
 		return runtimeMaxIterations, iterationStop
 	}
 
-	// Only now is the runtime actually waiting for the user; the
-	// non-interactive auto-stop above never is (#4004).
 	r.executeOnUserInputHooks(ctx, a, sess.ID, "max iterations reached")
 
-	// Wait for user decision (resume / reject)
 	select {
-	case req := <-r.resumeChan:
+	case req := <-resume:
 		if req.Type == ResumeTypeApprove {
 			slog.DebugContext(ctx, "User chose to continue after max iterations", "agent", a.Name())
 			newMax := iteration + 10

@@ -66,7 +66,7 @@ func TestOnUserInputHooks_RootInteractiveStreamEnd_FiresOnce(t *testing.T) {
 	r, rb := runtimeWithRecordedUserInput(t)
 	sess := session.New(session.WithUserMessage("hi"))
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	got := rb.snapshot()
@@ -83,7 +83,7 @@ func TestOnUserInputHooks_NonInteractiveStreamEnd_DoesNotFire(t *testing.T) {
 	r, rb := runtimeWithRecordedUserInput(t)
 	sess := session.New(session.WithUserMessage("hi"), session.WithNonInteractive(true))
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	assert.Empty(t, rb.snapshot(), "non-interactive teardown must not fire on_user_input")
@@ -99,7 +99,7 @@ func TestOnUserInputHooks_SubSessionStreamEnd_DoesNotFire(t *testing.T) {
 	r, rb := runtimeWithRecordedUserInput(t)
 	sub := session.New(session.WithUserMessage("hi"), session.WithParentID("parent-session"))
 
-	for range r.RunStream(t.Context(), sub) {
+	for range r.runExecution(t.Context(), sub) {
 	}
 
 	assert.Empty(t, rb.snapshot(), "sub-session teardown must not fire on_user_input")
@@ -137,12 +137,12 @@ func TestEnforceMaxIterations_Interactive_FiresOnUserInput(t *testing.T) {
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedUserInput(t)
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { r.resumeChan <- ResumeReject("stop") }()
+	go func() { r.interactions.resumeChannel(sess.ID) <- ResumeReject("stop") }()
 	_, decision := r.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
 
 	assert.Equal(t, iterationStop, decision)
@@ -158,7 +158,7 @@ func TestEnforceMaxIterations_NonInteractive_DoesNotFireOnUserInput(t *testing.T
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedUserInput(t)
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 	sess := session.New()
 	sess.NonInteractive = true
@@ -179,7 +179,7 @@ func TestEnforceMaxIterations_ContextCancelled_DoesNotFireOnUserInput(t *testing
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedUserInput(t)
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 	sess := session.New()
 	events := make(chan Event, 8)
@@ -224,7 +224,7 @@ func TestEnforceMaxIterations_PinnedSessionAgent_AttributesHookToThatAgent(t *te
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { r.resumeChan <- ResumeReject("stop") }()
+	go func() { r.interactions.resumeChannel(sess.ID) <- ResumeReject("stop") }()
 	_, decision := r.enforceMaxIterations(t.Context(), sess, worker, 10, 10, NewChannelSink(events))
 
 	assert.Equal(t, iterationStop, decision)
@@ -262,7 +262,7 @@ func TestOnUserInputHooks_Elicitation_CarriesConversationID(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("elicitation request event not delivered to the sink")
 	}
-	require.NoError(t, r.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
+	respondToElicitation(t, r, ev, ElicitationResult{Action: tools.ElicitationActionAccept, Content: nil})
 	require.NoError(t, <-done)
 
 	got := rb.snapshot()

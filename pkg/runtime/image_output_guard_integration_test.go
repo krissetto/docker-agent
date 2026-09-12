@@ -77,7 +77,7 @@ func TestRunStream_ImageOutputGuard_RejectsBeforeDispatch(t *testing.T) {
 	sess.Title = "image output guard integration test"
 
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for _, ev := range runAndCollect(t, rt, sess) {
 		events = append(events, ev)
 	}
 

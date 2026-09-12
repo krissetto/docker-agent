@@ -198,7 +198,7 @@ func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
 	parent := make(chan Event, 1)
 	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
 
 	var stopped int
 	for ev := range events {
@@ -229,7 +229,7 @@ func TestLocalRuntime_FinalizeEventChannelDropsStreamStoppedAfterBoundedTimeout(
 	done := make(chan struct{})
 	start := time.Now()
 	go func() {
-		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
 		close(done)
 	}()
 
@@ -275,7 +275,7 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 	events <- Error("prior stream output 2")
 	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
 
 	var delivered []Event
 	for ev := range events {
@@ -346,7 +346,7 @@ func TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn(t *testing.T)
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		for range rt.RunStream(t.Context(), sess) {
+		for range rt.runExecution(t.Context(), sess) {
 		}
 	}()
 

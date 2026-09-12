@@ -28,7 +28,7 @@ func TestUserPromptSubmitFiresOncePerTopLevelTurn(t *testing.T) {
 		session.WithUserMessage("hi"),
 	)
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	assert.Equal(t, int32(1), calls.Load(),
@@ -51,7 +51,7 @@ func TestUserPromptSubmitSkippedForSubSessions(t *testing.T) {
 		session.WithSendUserMessage(false),
 	)
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	assert.Equal(t, int32(0), calls.Load(),
@@ -111,7 +111,7 @@ func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
 	sess := session.New()
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	assert.Equal(t, int32(1), calls.Load(),
@@ -226,7 +226,7 @@ func TestUserFollowupSubmitFiresOnDequeue(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	assert.Equal(t, int32(1), calls.Load(),

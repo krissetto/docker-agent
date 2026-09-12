@@ -2,18 +2,28 @@ package leantui
 
 import (
 	"context"
+	"slices"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // handleEvent applies a single runtime event emitted by the App to the model,
 // updating the conversation, tool state, status footer, or busy state.
 func (m *model) handleEvent(ctx context.Context, ev any) {
+	turnID := ""
+	seed := false
+	if bridged, ok := ev.(app.SessionEventMsg); ok {
+		turnID = bridged.TurnID
+		seed = bridged.Seed
+		ev = bridged.Event
+	}
 	switch e := ev.(type) {
 	case msgtypes.SendMsg:
 		if e.BypassQueue {
@@ -22,13 +32,58 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.submitFollowUp(ctx, e.Content)
 		}
 	case *runtime.StreamStartedEvent:
+		m.lifecycle, _ = m.lifecycle.Apply(e)
+		m.ownedSkillStream = m.ownedSkillOperation != ""
 		m.busy = true
 		m.trackStreamStarted(e.SessionID)
+	case *runtime.PendingUserMessageCanceledEvent:
+		m.pendingUsers = slices.DeleteFunc(m.pendingUsers, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
+		m.queue = slices.DeleteFunc(m.queue, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
 	case *runtime.UserMessageEvent:
-		m.handleUserMessageEvent(e)
+		m.handleUserMessageEvent(e, turnID)
 	case *runtime.StreamStoppedEvent:
+		m.lifecycle, _ = m.lifecycle.Apply(e)
 		m.trackStreamStopped()
-		m.handleStreamStopped(ctx)
+		if m.lifecycle.Depth() == 0 {
+			m.handleStreamStopped(ctx)
+		}
+	case *runtime.SkillOperationEvent:
+		if e.OperationID != m.ownedSkillOperation {
+			break
+		}
+		switch e.Status {
+		case "completed", "failed":
+			m.ownedSkillOperation = ""
+			started := m.ownedSkillStream
+			m.ownedSkillStream = false
+			if e.Status == "failed" && e.Error != "" {
+				m.addNotice("✗ ", e.Error, ui.StError())
+			}
+			if !started && m.lifecycle.Depth() == 0 {
+				m.finishBusy(ctx)
+			}
+		}
+	case *runtime.PauseChangedEvent:
+		if m.sessionState != nil {
+			if e.Paused {
+				m.sessionState.SetPauseState(service.PausePausing)
+				if !seed {
+					m.addNotice("⏸ ", "Pausing after the current request", ui.StMuted())
+				}
+			} else {
+				m.sessionState.SetPauseState(service.PauseNone)
+				if !seed {
+					m.addNotice("▶ ", "Resumed", ui.StMuted())
+				}
+			}
+		}
+	case *runtime.PausedEvent:
+		if m.sessionState != nil {
+			m.sessionState.SetPauseState(service.PausePaused)
+		}
+		if !seed {
+			m.addNotice("⏸ ", "Paused", ui.StMuted())
+		}
 	case *runtime.AgentChoiceReasoningEvent:
 		m.screen.Transcript.AppendReasoning(e.Content)
 	case *runtime.AgentChoiceEvent:
@@ -64,8 +119,10 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.screen.Transcript.RemoveTool(ui.ToolViewID(e.ToolCall))
 		toolDef := ui.EnsureToolDefinition(e.ToolCall, e.ToolDefinition)
 		m.screen.Confirm = &ui.ConfirmModel{
-			Tool: toolDef.Name,
-			View: *ui.NewToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
+			Tool:      toolDef.Name,
+			View:      *ui.NewToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
+			SessionID: e.SessionID,
+			RequestID: e.RequestID,
 		}
 	case *runtime.TokenUsageEvent:
 		m.setTokenUsage(e.SessionID, e.Usage)
@@ -83,6 +140,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.TeamInfoEvent:
 		m.applyTeamInfo(ctx, e)
 	case *runtime.SessionCompactionEvent:
+		m.lifecycle, _ = m.lifecycle.Apply(e)
 		m.handleSessionCompaction(ctx, e)
 	case *runtime.ErrorEvent:
 		m.screen.Transcript.FlushPending()
@@ -103,16 +161,16 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	}
 }
 
-func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent) {
+func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent, turnID string) {
 	if m.consumeIgnoredUserEcho(e.Message) {
 		return
 	}
-	if pending, ok := m.consumePendingUser(ui.PendingUserSteer, e.Message); ok {
+	if pending, ok := m.consumePendingUser(ui.PendingUserSteer, turnID, e.Message); ok {
 		m.screen.Transcript.FlushPending()
 		m.addUserEcho(pending.Display)
 		return
 	}
-	if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, e.Message); ok {
+	if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, turnID, e.Message); ok {
 		m.screen.Transcript.FlushPending()
 		m.addUserEcho(pending.Display)
 		return
@@ -138,7 +196,9 @@ func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionC
 		m.status.Compacting = true
 	case "completed":
 		m.status.Compacting = false
-		m.finishBusy(ctx)
+		if m.lifecycle.Depth() == 0 {
+			m.finishBusy(ctx)
+		}
 	}
 }
 
@@ -157,7 +217,7 @@ func (m *model) finishBusy(ctx context.Context) bool {
 		next := m.queue[0]
 		m.queue[0] = ui.PendingUserMessage{}
 		m.queue = m.queue[1:]
-		if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, next.Content); ok {
+		if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, next.TurnID, next.Content); ok {
 			next.Display = pending.Display
 		}
 		m.addUserEcho(next.Display)

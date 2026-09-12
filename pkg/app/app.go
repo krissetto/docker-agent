@@ -36,15 +36,42 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
+type Services interface {
+	CurrentAgentInfo(ctx context.Context) runtime.CurrentAgentInfo
+	CurrentAgentTools(ctx context.Context) ([]tools.Tool, error)
+	CurrentAgentToolsetStatuses() []tools.ToolsetStatus
+	RestartToolset(ctx context.Context, name string) error
+	EmitStartupInfo(ctx context.Context, sess *session.Session, sink runtime.EventSink)
+	EmitAgentInfo(ctx context.Context, sink runtime.EventSink)
+	ResetStartupInfo()
+	SessionStore() session.Store
+	PermissionsInfo() *runtime.PermissionsInfo
+	CurrentAgentSkillsToolset() *skillstool.ToolSet
+	CurrentMCPPrompts(ctx context.Context) map[string]tools.PromptInfo
+	ExecuteMCPPrompt(ctx context.Context, name string, arguments map[string]string) (string, error)
+	UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error
+	OnToolsChanged(handler func(runtime.Event))
+	OnBackgroundEvent(handler func(runtime.Event))
+}
+
+type sessionState struct {
+	session *session.Session
+	handle  runtime.SessionHandle
+	binding runtime.SessionBinding
+	err     error
+}
+
 type App struct {
 	ctx func() context.Context
 
-	runtime                runtime.Runtime
-	session                *session.Session
+	stateMu                sync.RWMutex // guards currentState, published as one coherent immutable tuple
+	currentState           sessionState
+	runtime                Services
+	sessions               runtime.SessionRuntime
 	firstMessage           *string
 	firstMessageAttach     string
 	queuedMessages         []string
-	events                 chan tea.Msg
+	events                 chan any
 	throttleDuration       time.Duration
 	cancel                 context.CancelFunc
 	currentAgentModel      string                      // Tracks the current agent's model ID from AgentInfoEvent
@@ -53,11 +80,37 @@ type App struct {
 	titleGenerating        atomic.Bool                 // True when title generation is in progress
 	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
 	snapshotController     builtins.SnapshotController // Drives /undo, /snapshots, /reset; nil for runtimes that don't capture snapshots
-	streamGuard            sync.Locker                 // Held for the duration of every direct RunStream call; nil when not attached to a SessionManager (see WithStreamGuard)
+
+	// stopBridge tears down the session-event bridge (the hub subscription
+	// feeding the App bus); re-set whenever the session changes. hubBridged
+	// reports whether a bridge is active: the bus is then the single event
+	// source and Run's own channel is drained for flow control only.
+	// runCancelled mutes bridged events after the user cancels the in-flight
+	// turn (all but the stream stop), mirroring the classic drop-on-cancel.
+	stopBridge   func()
+	hubBridged   bool
+	bridgeEpoch  atomic.Uint64
+	runCancelled atomic.Bool
+	// lifecycleMu correlates accepted submissions with cancellation and bridged
+	// envelopes. A cancelled request only mutes its own tail; a stale stop can
+	// never clear presentation state for a newer request.
+	lifecycleMu        sync.Mutex
+	latestRequestID    string
+	projectedRequestID string
+	cancelledRequests  map[string]struct{}
+	// suppressUserEcho drops the pre-StreamStarted user-message re-emission
+	// of a retried run from the bridged stream — the bubble is already on
+	// screen. Cleared by the run's StreamStarted.
+	suppressUserEcho atomic.Bool
+
+	// attachedSubagent marks this App as a live viewer of an async subagent's
+	// sub-session: the runtime's session driver owns runs and delivery; the
+	// App only observes events and hands user input to the runtime.
+	attachedSubagent *runtime.SubagentAttachInfo
 
 	startOnce  sync.Once
 	subsMu     sync.Mutex
-	subs       []chan tea.Msg
+	subs       []chan any
 	fanoutOnce sync.Once
 }
 
@@ -123,35 +176,117 @@ func WithSnapshotController(c builtins.SnapshotController) Opt {
 	}
 }
 
-// WithStreamGuard makes the App hold l for the duration of every direct
-// RunStream call (Run, Retry, RunWithMessage). When the App is attached to a
-// SessionManager (the --listen control plane or the local recall
-// coordinator), l is the SAME lock RunSession and AddMessage/UpdateMessage
-// already use (via TryLock) to detect a session's active stream, so a
-// concurrent REST mutation correctly sees the App's own stream as busy
-// instead of racing it (#3590). Without this option (a bare App with no
-// attached SessionManager) there is nothing to race against, so omitting it
-// is safe.
-func WithStreamGuard(l sync.Locker) Opt {
-	return func(a *App) {
-		a.streamGuard = l
-	}
+// WithRuntimeServices injects legacy non-execution presentation/configuration
+// services while handle execution remains exclusively owned by SessionRuntime.
+func WithRuntimeServices(services Services) Opt {
+	return func(a *App) { a.runtime = services }
 }
 
-func New(ctx context.Context, rt runtime.Runtime, sess *session.Session, opts ...Opt) *App {
+func New(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, opts ...Opt) *App {
 	app := &App{
-		ctx:              func() context.Context { return context.WithoutCancel(ctx) },
-		runtime:          rt,
-		session:          sess,
-		events:           make(chan tea.Msg, 128),
-		throttleDuration: 50 * time.Millisecond, // Throttle rapid events
+		ctx:      func() context.Context { return context.WithoutCancel(ctx) },
+		runtime:  nil,
+		sessions: sessions,
+		currentState: sessionState{
+			session: sess,
+			binding: binding,
+		},
+		events: make(chan any, 128),
 	}
-
 	for _, opt := range opts {
 		opt(app)
 	}
+	state := app.state()
+	if sessions != nil && sess != nil {
+		state.binding = app.resolvedSessionBinding(sess, state.binding)
+		state.handle, state.binding, state.err = resolveSessionHandle(ctx, sessions, sess, state.binding)
+	} else if sess != nil {
+		state.err = &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
+	}
+	app.replaceSessionState(state)
+
+	app.cancelledRequests = make(map[string]struct{})
 
 	return app
+}
+
+// resolveSessionHandle reuses the registry's immutable handle when a persisted
+// session is loaded again. A new handle is registered only for a genuinely
+// unknown ID; stopped, closed, stale, and binding errors remain final.
+func resolveSessionHandle(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding) (runtime.SessionHandle, runtime.SessionBinding, error) {
+	handle, err := sessions.SessionByID(sess.ID)
+	if err != nil {
+		var sessionErr *runtime.SessionError
+		if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound {
+			return nil, binding, err
+		}
+		handle, err = sessions.CreateSession(ctx, sess, binding)
+		if err != nil {
+			return nil, binding, err
+		}
+	}
+
+	if handle == nil {
+		return nil, binding, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: sess.ID, Operation: "resolve_session"}
+	}
+	if hydrator, ok := handle.(runtime.Hydrator); ok {
+		if err := hydrator.Hydrate(ctx); err != nil {
+			return nil, binding, err
+		}
+	}
+	// The handle owns the final/default agent binding. Normalize to it before
+	// looking up persisted metadata so an empty requested binding can never
+	// write or decorate the empty override key.
+	binding.AgentName = handle.AgentName()
+	if ref, ok := sess.AgentModelOverrides[binding.AgentName]; ok {
+		binding.Model = ref
+	}
+	if switcher := handle; switcher != nil && switcher.Metadata().Capabilities.ModelSwitching {
+		// Reconciliation is deliberate even for the empty ref: multiple sessions
+		// can pin the same in-process agent, so loading a default session must
+		// clear an override left by the previously active session.
+		if err := switcher.SetModel(ctx, binding.Model); err != nil {
+			return nil, binding, fmt.Errorf("reconcile session model override: %w", err)
+		}
+	}
+	return handle, binding, nil
+}
+
+func (a *App) resolvedSessionBinding(sess *session.Session, binding runtime.SessionBinding) runtime.SessionBinding {
+	if binding.AgentName == "" {
+		binding.AgentName = sess.AgentName
+	}
+	if binding.Model == "" && sess.AgentModelOverrides != nil {
+		binding.Model = sess.AgentModelOverrides[binding.AgentName]
+	}
+	return binding
+}
+
+func (s sessionState) operationError(operation string) error {
+	if s.err != nil {
+		return s.err
+	}
+	sessionID := ""
+	if s.session != nil {
+		sessionID = s.session.ID
+	}
+	return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: sessionID, Operation: runtime.SessionOperation(operation)}
+}
+
+func (a *App) sessionError(operation string) error {
+	return a.state().operationError(operation)
+}
+
+func (a *App) state() sessionState {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.currentState
+}
+
+func (a *App) replaceSessionState(state sessionState) {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	a.currentState = state
 }
 
 // Start begins App-owned background event producers. Construction stays cheap
@@ -159,14 +294,19 @@ func New(ctx context.Context, rt runtime.Runtime, sess *session.Session, opts ..
 // lifecycle.
 func (a *App) Start(ctx context.Context) {
 	a.startOnce.Do(func() {
+		if a.attachedSubagent == nil {
+			a.reloadSubagentTree(ctx)
+		}
+		// One event source for local runtimes: the session's canonical stream
+		// feeds the bus, whoever drives a run — this App, the subagent
+		// manager, or the runtime's session handle waking the session.
+		a.hubBridged = a.startSessionEventBridge(ctx)
+		a.startSubagentTreeBridge(ctx)
 		// Emit startup info (agent, team, tools) through the events channel.
 		// This runs in the background so the TUI can start immediately while
 		// slow operations (like MCP tool loading) complete asynchronously.
-		// Snapshot the session on this goroutine: ReplaceSession may swap
-		// a.session concurrently, and it re-emits startup info for the new
-		// session itself.
-		sess := a.session
-		go func() {
+		startupSession := a.Session()
+		go func(sess *session.Session) {
 			startupEvents := make(chan runtime.Event, 10)
 			go func() {
 				defer close(startupEvents)
@@ -179,10 +319,10 @@ func (a *App) Start(ctx context.Context) {
 					return
 				}
 			}
-		}()
+		}(startupSession)
 
 		// Subscribe to tool list changes so the sidebar updates immediately
-		// when an MCP server adds or removes tools (outside of a RunStream).
+		// when an MCP server adds or removes tools outside handle turns.
 		a.runtime.OnToolsChanged(func(event runtime.Event) {
 			select {
 			case a.events <- event:
@@ -199,44 +339,29 @@ func (a *App) Start(ctx context.Context) {
 			case <-ctx.Done():
 			}
 		})
-
-		// Forward elicitation requests raised anywhere in the runtime —
-		// including background-job (run_background_agent) sub-sessions whose
-		// RunStream has no live UI reading its own events channel — so they
-		// always reach the TUI as a dialog. For runtimes that mirror sink
-		// deliveries onto their RunStream channel too (LocalRuntime: the
-		// swap-based bridge best-effort-sends the same event on the very
-		// RunStream channel Run/Retry/RunWithMessage read from below), this
-		// sink is the single, exactly-once delivery point and those loops skip
-		// the mirrored copy (see mustSkipMirroredElicitation). Runtimes that
-		// don't mirror it (RemoteRuntime, whose OnElicitationRequest below is
-		// a no-op) deliver elicitations only through that RunStream copy,
-		// which those loops forward unfiltered (#3584 review).
-		a.runtime.OnElicitationRequest(func(event runtime.Event) {
-			a.sendEvent(ctx, event)
-		})
 	})
 }
 
-func (a *App) SendFirstMessage() tea.Cmd {
+type EventCommand func() any
+
+func (a *App) InitialEventCommands() []EventCommand {
 	if a.firstMessage == nil {
 		return nil
 	}
 
-	cmds := []tea.Cmd{
-		func() tea.Msg {
+	commands := []EventCommand{
+		func() any {
 			// Use the shared PrepareUserMessage function for consistent attachment handling
-			userMsg, attachedPath, err := cli.PrepareUserMessage(a.ctx(), a.runtime, *a.firstMessage, a.firstMessageAttach)
-			if err != nil {
-				slog.Error("Failed to prepare first message", "error", err)
-				return nil
-			}
+			userMsg, attachedPath := a.prepareFirstMessage(a.ctx(), *a.firstMessage, a.firstMessageAttach)
 			if userMsg == nil {
 				// Agent-only command with no content - agent switched but no message to send
 				return nil
 			}
 			// Inherit the attachment in any sub-session created by this turn.
-			a.session.AddAttachedFile(attachedPath)
+			state := a.state()
+			if state.session != nil {
+				state.session.AddAttachedFile(attachedPath)
+			}
 
 			// If the message has multi-content (attachments), we need to handle it specially
 			if len(userMsg.Message.MultiContent) > 0 {
@@ -255,14 +380,14 @@ func (a *App) SendFirstMessage() tea.Cmd {
 	// The TUI's message queue will hold them until the agent finishes
 	// processing the previous message.
 	for _, msg := range a.queuedMessages {
-		cmds = append(cmds, func() tea.Msg {
+		commands = append(commands, func() any {
 			return messages.SendMsg{
 				Content: msg,
 			}
 		})
 	}
 
-	return tea.Sequence(cmds...)
+	return commands
 }
 
 // CurrentAgentTools returns the tools available to the current agent.
@@ -310,11 +435,17 @@ type agentThinkingLevelsProvider interface {
 	CurrentAgentThinkingLevels(ctx context.Context) []effort.Level
 }
 
-// CurrentAgentThinkingLevels returns the thinking-effort levels supported by
-// the current agent's active model, or nil when the runtime cannot resolve
-// this (remote runtime, unresolvable agent/model, or a model that does not
-// support thinking at all). Backs the /effort argument completer (#3731).
+// CurrentAgentThinkingLevels returns the handle-authoritative thinking-effort
+// levels supported by the bound agent's active model. Legacy local runtimes
+// retain the provider fallback for embedders that have not adopted sessions.
 func (a *App) CurrentAgentThinkingLevels(ctx context.Context) []effort.Level {
+	handle := a.SessionHandle()
+	if provider := handle; provider != nil {
+		return provider.ThinkingLevels(ctx)
+	}
+	if handle != nil {
+		return slices.Clone(handle.Metadata().ThinkingLevels)
+	}
 	p, ok := a.runtime.(agentThinkingLevelsProvider)
 	if !ok {
 		return nil
@@ -322,26 +453,192 @@ func (a *App) CurrentAgentThinkingLevels(ctx context.Context) []effort.Level {
 	return p.CurrentAgentThinkingLevels(ctx)
 }
 
+func (a *App) CurrentAgentThinkingLevel(ctx context.Context) effort.Level {
+	handle := a.SessionHandle()
+	if provider := handle; provider != nil {
+		return provider.CurrentThinkingLevel(ctx)
+	}
+	if handle != nil {
+		return handle.Metadata().ThinkingLevel
+	}
+	return ""
+}
+
+// SupportsModelSwitching reports whether the bound handle/transport exposes a
+// model-switching capability.
+func (a *App) SupportsModelSwitching() bool {
+	switcher := a.SessionHandle()
+	return switcher != nil && switcher.Metadata().Capabilities.ModelSwitching
+}
+
+// AvailableModels returns model choices for the bound handle's pinned agent.
+func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
+	switcher := a.SessionHandle()
+	if switcher == nil || !switcher.Metadata().Capabilities.ModelSwitching {
+		return nil
+	}
+	currentRef := ""
+	var customRefs []string
+	state := a.state()
+	if state.session != nil {
+		currentRef = state.session.AgentModelOverrides[state.binding.AgentName]
+		customRefs = state.session.CustomModelsUsed
+	}
+	return runtime.DecorateModelChoices(switcher.AvailableModels(ctx), currentRef, customRefs)
+}
+
+func (a *App) unsupportedSessionOperation(operation runtime.SessionOperation) error {
+	sessionID := ""
+	if sess := a.Session(); sess != nil {
+		sessionID = sess.ID
+	}
+	return runtime.UnsupportedSessionOperation(sessionID, operation)
+}
+
+// RefreshModelsCatalog refreshes discovery for the bound handle when supported.
+func (a *App) RefreshModelsCatalog(ctx context.Context) error {
+	refresher := a.SessionHandle()
+	if refresher == nil {
+		return a.unsupportedSessionOperation(runtime.SessionOperationRefreshModels)
+	}
+	return refresher.RefreshModelsCatalog(ctx)
+}
+
+func (a *App) SupportsModelCatalogRefresh() bool {
+	handle := a.SessionHandle()
+	return handle != nil && handle.Metadata().Capabilities.ModelCatalogRefresh
+}
+
+func (a *App) SupportsPause() bool {
+	handle := a.SessionHandle()
+	return handle != nil && handle.Metadata().Capabilities.Pause
+}
+
+func (a *App) TogglePause(ctx context.Context) (bool, error) {
+	pauser := a.SessionHandle()
+	if pauser == nil {
+		return false, a.unsupportedSessionOperation(runtime.SessionOperationPause)
+	}
+	return pauser.TogglePause(ctx)
+}
+
+func (a *App) refreshSessionProjection(ctx context.Context) {
+	reader := a.SessionHandle()
+	if reader == nil {
+		return
+	}
+	snapshot, err := reader.Snapshot(ctx)
+	if err != nil || snapshot == nil {
+		return
+	}
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	state := a.currentState
+	state.session = snapshot
+	a.currentState = state
+}
+
+func (a *App) SupportsSessionEditing() bool {
+	handle := a.SessionHandle()
+	return handle != nil && handle.Metadata().Capabilities.SessionEditing
+}
+
+func (a *App) SetCurrentSessionStarred(ctx context.Context, starred bool) error {
+	editor := a.SessionHandle()
+	if editor == nil {
+		return a.unsupportedSessionOperation(runtime.SessionOperationSetStarred)
+	}
+	if err := editor.SetStarred(ctx, starred); err != nil {
+		return err
+	}
+	a.refreshSessionProjection(ctx)
+	return nil
+}
+
+// SetCurrentAgentModel changes the bound handle's model. The handle owns the
+// override and its persistence, so the App only refreshes its projection of
+// the session and the sidebar's agent info afterwards.
+func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
+	switcher := a.SessionHandle()
+	if switcher == nil {
+		return a.unsupportedSessionOperation(runtime.SessionOperationSetModel)
+	}
+	if err := switcher.SetModel(ctx, modelRef); err != nil {
+		return err
+	}
+	a.refreshSessionProjection(ctx)
+	a.refreshAgentInfo(ctx)
+	return nil
+}
+
+func (a *App) SupportsThinkingLevels() bool {
+	handle := a.SessionHandle()
+	return handle != nil && handle.Metadata().Capabilities.ThinkingLevels
+}
+
+// CycleAgentThinkingLevel advances the bound session's pinned agent through
+// the handle-owned mutation capability.
+func (a *App) CycleAgentThinkingLevel(ctx context.Context) (effort.Level, error) {
+	controller := a.SessionHandle()
+	if controller == nil {
+		return "", a.unsupportedSessionOperation(runtime.SessionOperationThinkingLevel)
+	}
+	level, err := controller.CycleThinkingLevel(ctx)
+	if err == nil {
+		a.refreshAgentInfo(ctx)
+	}
+	return level, err
+}
+
+// SetAgentThinkingLevel applies level to the bound session's pinned agent
+// through the handle-owned mutation capability.
+func (a *App) SetAgentThinkingLevel(ctx context.Context, level effort.Level) (effort.Level, error) {
+	controller := a.SessionHandle()
+	if controller == nil {
+		return "", a.unsupportedSessionOperation(runtime.SessionOperationThinkingLevel)
+	}
+	applied, err := controller.SetThinkingLevel(ctx, level)
+	if err == nil {
+		a.refreshAgentInfo(ctx)
+	}
+	return applied, err
+}
+
+func (a *App) refreshAgentInfo(ctx context.Context) {
+	emitter := a.SessionHandle()
+	if emitter == nil {
+		return
+	}
+	a.pumpToEvents(ctx, func(sink runtime.EventSink) {
+		emitter.EmitPinnedAgentInfo(ctx, sink)
+	})
+}
+
 // CurrentAgentCommands returns the commands for the active agent
 func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
 	return a.runtime.CurrentAgentInfo(ctx).Commands
 }
 
-// CurrentAgentSkills returns the available skills if skills are enabled for the current agent.
-func (a *App) CurrentAgentSkills() []skills.Skill {
+// CurrentAgentSkillsContext returns the available skills if skills are enabled for the current agent.
+func (a *App) CurrentAgentSkillsContext(ctx context.Context) ([]skills.Skill, error) {
+	if runner := a.SessionHandle(); runner != nil {
+		return runner.Skills(ctx)
+	}
 	st := a.runtime.CurrentAgentSkillsToolset()
 	if st == nil {
-		return nil
+		return nil, nil
 	}
-	return st.Skills()
+	return st.Skills(), nil
 }
 
 // ResolveSkillCommand checks if the input matches a skill slash command (e.g. /skill-name args).
 // If matched, it reads the skill content and returns the resolved prompt. Otherwise returns "".
 //
-// Fork-mode skills are NOT resolved here; chat dispatches them via
-// SkillCommandFork + RunSkillFork to keep the parent transcript clean.
+// StartSkillForkOperation dispatches fork-mode skills without polluting the parent transcript.
 func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, error) {
+	if runner := a.SessionHandle(); runner != nil {
+		return runner.ResolveSkillCommand(ctx, input)
+	}
 	if !strings.HasPrefix(input, "/") {
 		return "", nil
 	}
@@ -361,8 +658,8 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 
 		if skill.IsFork() {
 			// Fall through to ResolveCommand for non-chat callers; the
-			// chat layer already routed fork-mode skills via
-			// SkillCommandFork before reaching this point.
+			// chat layers already routed fork-mode skills via
+			// SkillCommandForkResult before reaching this point.
 			return "", nil
 		}
 
@@ -385,126 +682,86 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 	return "", nil
 }
 
-// SkillCommandFork returns (skillName, task, true) when input is a slash
+// SkillCommandForkResult returns (skillName, task, true) when input is a slash
 // command for a `context: fork` skill, otherwise (_, _, false). Chat layers
-// must call this before ResolveInput and route to RunSkillFork on a hit.
-func (a *App) SkillCommandFork(_ context.Context, input string) (skillName, task string, ok bool) {
+// must call this before ResolveInputOnce and route to StartSkillForkOperation.
+// SkillCommandForkResult performs fork-skill discovery and preserves transport
+// errors so callers never silently fall through to a normal message.
+func (a *App) SkillCommandForkResult(ctx context.Context, input string) (skillName, task string, ok bool, err error) {
 	if !strings.HasPrefix(input, "/") {
-		return "", "", false
+		return "", "", false, nil
 	}
-
+	if runner := a.SessionHandle(); runner != nil {
+		cmd, arg, _ := strings.Cut(input[1:], " ")
+		availableSkills, err := runner.Skills(ctx)
+		if err != nil {
+			return "", "", false, err
+		}
+		for _, skill := range availableSkills {
+			if skill.Name == cmd && skill.IsFork() {
+				return skill.Name, strings.TrimSpace(arg), true, nil
+			}
+		}
+		return "", "", false, nil
+	}
 	st := a.runtime.CurrentAgentSkillsToolset()
 	if st == nil {
-		return "", "", false
+		return "", "", false, nil
 	}
-
 	cmd, arg, _ := strings.Cut(input[1:], " ")
 	arg = strings.TrimSpace(arg)
-
 	for _, skill := range st.Skills() {
-		if skill.Name != cmd {
-			continue
+		if skill.Name == cmd && skill.IsFork() {
+			return skill.Name, arg, true, nil
 		}
-		if !skill.IsFork() {
-			return "", "", false
-		}
-		return skill.Name, arg, true
 	}
-
-	return "", "", false
+	return "", "", false, nil
 }
 
-// RunSkillFork dispatches a fork-mode skill in an isolated sub-session of
-// the current parent. The parent gains a SubSession item once the runtime
-// opens the child; the sub-session's first user message is the expanded
-// SKILL.md body. Companion of SkillCommandFork.
-func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skillName, task string, _ []messages.Attachment) {
-	a.cancel = cancel
-	// Snapshot the session like Run does: the goroutines below outlive any
-	// concurrent ReplaceSession and must keep working against this session.
-	sess := a.session
-
-	// Mirrors App.Run's drain loop: forward events to the App bus and
-	// always let StreamStoppedEvent through, even after ctx cancellation,
-	// so the supervisor marks the session idle.
-	go func() {
-		events := make(chan runtime.Event, defaultRuntimeEventBuffer)
-		var failed atomic.Bool
-		go func() {
-			defer close(events)
-			result, err := a.runtime.RunSkillFork(ctx, sess, skillstool.RunSkillArgs{
-				Name: skillName,
-				Task: task,
-			}, runtime.NewChannelSink(events))
-			switch {
-			case errors.Is(err, runtime.ErrUnsupported):
-				slog.WarnContext(ctx, "Runtime does not support fork-mode skills; skill not executed", "skill", skillName)
-				failed.Store(true)
-				a.sendEvent(ctx, runtime.Error(fmt.Sprintf("Skill %q cannot run: this runtime does not support fork-mode skills.", skillName)))
-			case err != nil:
-				slog.ErrorContext(ctx, "Failed to run fork-mode skill", "skill", skillName, "error", err)
-				failed.Store(true)
-				a.sendEvent(ctx, runtime.Error(fmt.Sprintf("Skill %q failed: %v", skillName, err)))
-			case result != nil && result.IsError:
-				failed.Store(true)
-				a.sendEvent(ctx, runtime.Error(result.Output))
-			}
-		}()
-
-		// sawStop tracks ANY StreamStoppedEvent forwarded here — unlike
-		// forwardRunStreamEvents' root-only rule (#4136), every event on this
-		// channel belongs to the fork's own sub-session, so a root-session
-		// check would always be false here and synthesize a spurious
-		// duplicate stop on every fork run, successful or not.
-		var (
-			sawStop       bool
-			lastSessionID string
-			agentName     string
-		)
-		for event := range events {
-			if scoped, ok := event.(runtime.SessionScoped); ok {
-				if id := scoped.GetSessionID(); id != "" {
-					lastSessionID = id
-				}
-			}
-			if name := event.GetAgentName(); name != "" {
-				agentName = name
-			}
-			if _, ok := event.(*runtime.StreamStoppedEvent); ok {
-				sawStop = true
-			}
-
-			if ctx.Err() != nil {
-				if _, ok := event.(*runtime.StreamStoppedEvent); ok {
-					// ctx is cancelled; detach cancellation but keep its trace
-					// context so the stop event still reaches subscribers.
-					a.sendEvent(context.WithoutCancel(ctx), event)
-				}
-				continue
-			}
-			a.sendEvent(ctx, event)
-		}
-
-		if !sawStop {
-			a.synthesizeStreamStopped(ctx, cmp.Or(lastSessionID, sess.ID), agentName, failed.Load())
-		}
-	}()
+func (a *App) SupportsForkSkills() bool {
+	handle := a.SessionHandle()
+	return handle != nil && handle.Metadata().Capabilities.ForkSkills
 }
 
-// defaultRuntimeEventBuffer matches Summarize and Runtime.RunStream;
-// wide enough that a fork-skill sub-session won't block the producer.
-const defaultRuntimeEventBuffer = 100
+func NewSkillOperationID() string { return uuid.NewString() }
 
-// ResolveInput resolves the user input by trying skill commands first,
-// then agent commands. Returns the resolved content ready to send to the agent.
-func (a *App) ResolveInput(ctx context.Context, input string) string {
+func (a *App) StartSkillForkOperation(ctx context.Context, operationID, skillName, task string) error {
+	args := skillstool.RunSkillArgs{Name: skillName, Task: task}
+	starter := a.SessionHandle()
+	if starter == nil {
+		return a.unsupportedSessionOperation(runtime.SessionOperationRunSkill)
+	}
+	if err := starter.StartSkillFork(ctx, operationID, args); err != nil {
+		return err
+	}
+	return nil
+}
+
+type ResolvedInput struct {
+	Display   string
+	Content   string
+	SkillName string
+	SkillTask string
+	ForkSkill bool
+}
+
+// ResolveInputOnce classifies and resolves slash input exactly once.
+func (a *App) ResolveInputOnce(ctx context.Context, input string) (ResolvedInput, error) {
+	out := ResolvedInput{Display: input, Content: input}
+	if name, task, ok, err := a.SkillCommandForkResult(ctx, input); err != nil {
+		return out, err
+	} else if ok {
+		out.SkillName, out.SkillTask, out.ForkSkill = name, task, true
+		return out, nil
+	}
 	if resolved, err := a.ResolveSkillCommand(ctx, input); err != nil {
-		return fmt.Sprintf("Error loading skill: %v", err)
+		return out, err
 	} else if resolved != "" {
-		return resolved
+		out.Content = resolved
+		return out, nil
 	}
-
-	return a.ResolveCommand(ctx, input)
+	out.Content = a.ResolveCommand(ctx, input)
+	return out, nil
 }
 
 // CurrentAgentModel returns the model ID for the current agent.
@@ -515,9 +772,13 @@ func (a *App) CurrentAgentModel(ctx context.Context) string {
 		return a.currentAgentModel
 	}
 	// Fallback to session overrides
-	if a.session != nil && a.session.AgentModelOverrides != nil {
-		agentName := a.runtime.CurrentAgentName(ctx)
-		if modelRef, ok := a.session.AgentModelOverrides[agentName]; ok {
+	state := a.state()
+	if state.session != nil && state.session.AgentModelOverrides != nil {
+		agentName := ""
+		if state.handle != nil {
+			agentName = state.handle.AgentName()
+		}
+		if modelRef, ok := state.session.AgentModelOverrides[agentName]; ok {
 			return modelRef
 		}
 	}
@@ -541,8 +802,24 @@ func (a *App) ExecuteMCPPrompt(ctx context.Context, promptName string, arguments
 }
 
 // ResolveCommand converts /command to its prompt text
+func (a *App) prepareFirstMessage(ctx context.Context, input, attachPath string) (*session.Message, string) {
+	resolved := a.ResolveCommand(ctx, input)
+	messageText, commandPath := cli.ParseAttachCommand(resolved)
+	return cli.CreateUserMessageWithAttachment(ctx, messageText, cmp.Or(commandPath, attachPath))
+}
+
 func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
-	return runtime.ResolveCommand(ctx, a.runtime, userInput)
+	command, rest, ok := a.LookupCommand(ctx, userInput)
+	if !ok {
+		return userInput
+	}
+	if command.Instruction == "" {
+		return rest
+	}
+	if rest == "" {
+		return command.Instruction
+	}
+	return command.Instruction + " " + rest
 }
 
 // LookupCommand parses userInput as a /command invocation and returns the
@@ -551,40 +828,44 @@ func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
 // sub-agent declared via the `agent:` field) should call this before
 // ResolveCommand to inspect the raw command.
 func (a *App) LookupCommand(ctx context.Context, userInput string) (types.Command, string, bool) {
-	return runtime.LookupCommand(ctx, a.runtime, userInput)
+	if !strings.HasPrefix(userInput, "/") {
+		return types.Command{}, "", false
+	}
+	head, rest, _ := strings.Cut(userInput, " ")
+	command, ok := a.runtime.CurrentAgentInfo(ctx).Commands[strings.TrimPrefix(head, "/")]
+	return command, rest, ok
 }
 
 // EmitStartupInfo emits initial agent, team, and toolset information to the provided channel
 func (a *App) EmitStartupInfo(ctx context.Context, events chan runtime.Event) {
-	a.runtime.EmitStartupInfo(ctx, a.session, runtime.NewChannelSink(events))
+	state := a.state()
+	a.runtime.EmitStartupInfo(ctx, state.session, runtime.NewChannelSink(events))
 }
 
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	a.cancel = cancel
-	sess := a.session
-
-	// If this is the first message and no title exists, start local title generation
-	if sess.TitleSnapshot() == "" && a.titleGen != nil {
+	a.runCancelled.Store(false)
+	state := a.state()
+	// If this is the first message and no title exists, start local title generation.
+	if state.session != nil && state.session.TitleSnapshot() == "" && a.titleGen != nil {
 		a.titleGenerating.Store(true)
-		go a.generateTitle(ctx, sess, []string{message})
+		go a.generateTitle(ctx, state, []string{message})
 	}
-
-	go func() {
-		release := a.acquireStreamGuard()
-		defer release()
-		if ctx.Err() != nil {
-			return
-		}
-
-		if len(attachments) > 0 {
-			multiContent := a.buildUserMultiContent(ctx, sess, message, attachments)
-			sess.AddMessage(session.UserMessage(message, multiContent...))
-		} else {
-			sess.AddMessage(session.UserMessage(message))
-		}
-		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), nil)
-	}()
+	msg := runtime.TurnInput{Content: message}
+	if len(attachments) > 0 {
+		msg.MultiContent = a.buildUserMultiContent(ctx, state.session, message, attachments)
+	}
+	if state.handle == nil {
+		a.sendEvent(ctx, runtime.Error(state.operationError("submit").Error()))
+		return
+	}
+	submission, err := state.handle.Submit(ctx, msg)
+	if err != nil {
+		a.sendEvent(ctx, runtime.Error(err.Error()))
+		return
+	}
+	a.recordSubmission(submission.TurnID)
 }
 
 // buildUserMultiContent assembles the MultiContent parts for a user message
@@ -741,188 +1022,17 @@ func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment
 	return true
 }
 
-// sendEvent sends an event to the TUI, respecting context cancellation to
+// SendPresentationEvent sends an event to the TUI, respecting context cancellation to
 // avoid blocking on the channel when the consumer has stopped reading.
-func (a *App) sendEvent(ctx context.Context, event tea.Msg) {
+func (a *App) SendPresentationEvent(ctx context.Context, event any) {
+	a.sendEvent(ctx, event)
+}
+
+func (a *App) sendEvent(ctx context.Context, event any) {
 	select {
 	case a.events <- event:
 	case <-ctx.Done():
 	}
-}
-
-// isElicitationRequestEvent reports whether event is an
-// *runtime.ElicitationRequestEvent.
-func isElicitationRequestEvent(event runtime.Event) bool {
-	_, ok := event.(*runtime.ElicitationRequestEvent)
-	return ok
-}
-
-// elicitationSinkMirror is an optional runtime capability satisfied by
-// runtimes whose OnElicitationRequest sink is the single, exactly-once
-// delivery point for elicitation requests even though the runtime ALSO
-// best-effort-mirrors the same event onto its RunStream channel, for the
-// benefit of out-of-process consumers reading RunStream directly (see
-// runtime.LocalRuntime.MirrorsElicitationOnRunStream and elicitationHandler,
-// #3584).
-type elicitationSinkMirror interface {
-	MirrorsElicitationOnRunStream()
-}
-
-// mustSkipMirroredElicitation reports whether rt implements
-// elicitationSinkMirror, i.e. whether Start's OnElicitationRequest sink
-// (below) already delivers every elicitation from rt exactly once, making
-// any *runtime.ElicitationRequestEvent read directly off RunStream a
-// duplicate that Run/Retry/RunWithMessage must skip to avoid a second
-// dialog for the same request.
-//
-// Runtimes that do NOT implement it (RemoteRuntime, whose
-// OnElicitationRequest is a documented no-op) deliver elicitations ONLY via
-// RunStream, so that copy is the sole delivery and must reach a.events
-// unfiltered — an earlier fix skipped this event unconditionally and
-// silently dropped every remote elicitation as a result (#3584 review).
-func mustSkipMirroredElicitation(rt runtime.Runtime) bool {
-	_, ok := rt.(elicitationSinkMirror)
-	return ok
-}
-
-// forwardRunStreamEvents drains ch and forwards each event to a.events,
-// applying the bookkeeping shared by Run, Retry, and RunWithMessage. This is
-// the SINGLE place that decides whether a RunStream event reaches a.events:
-// centralizing it here (instead of three copies of the same loop) is what
-// lets one set of tests cover all three entry points, and makes it
-// impossible for one of them to silently regress independently of the
-// others (#3584 review — Retry and RunWithMessage had duplicated this exact
-// logic untested).
-//
-// filter, when non-nil, runs after the elicitation-mirroring skip below and
-// may itself veto forwarding an event by returning false. Retry uses it to
-// suppress the pre-StreamStarted re-emitted user message; Run and
-// RunWithMessage pass nil.
-func (a *App) forwardRunStreamEvents(ctx context.Context, sess *session.Session, ch <-chan runtime.Event, filter func(event runtime.Event) (forward bool)) {
-	skipMirroredElicitation := mustSkipMirroredElicitation(a.runtime)
-
-	// sawRootStop/sawRootError/agentName drive the #4136 fallback below: the
-	// runtime documents channel close (not receipt of StreamStoppedEvent) as
-	// the terminal signal, and may drop the event under back-pressure
-	// (LocalRuntime.finalizeEventChannel). Only a root-session stop counts —
-	// a sub-session (delegation/fork) stop leaves the root stream running.
-	var (
-		sawRootStop  bool
-		sawRootError bool
-		agentName    string
-	)
-
-	for event := range ch {
-		isRoot := isRootSessionEvent(event, sess.ID)
-		if isRoot {
-			if name := event.GetAgentName(); name != "" {
-				agentName = name
-			}
-			switch event.(type) {
-			case *runtime.StreamStoppedEvent:
-				// Tracked here — before the cancellation/filter/dedupe checks
-				// below — so a filter that happens to veto a genuine root stop
-				// can never leave this bookkeeping thinking none arrived and
-				// synthesize a spurious duplicate.
-				sawRootStop = true
-			case *runtime.ErrorEvent:
-				sawRootError = true
-			}
-		}
-
-		// If context is cancelled, continue draining but don't forward events
-		// — except StreamStoppedEvent, which must always propagate so the
-		// supervisor can mark the session as no longer running.
-		if ctx.Err() != nil {
-			if _, ok := event.(*runtime.StreamStoppedEvent); ok {
-				// ctx is cancelled; detach cancellation but keep its trace
-				// context so the stop event still reaches subscribers.
-				a.sendEvent(context.WithoutCancel(ctx), event)
-			}
-			continue
-		}
-
-		// Already delivered via the OnElicitationRequest sink (Start) for
-		// runtimes that mirror it onto RunStream too; skip that duplicate
-		// copy to avoid a second dialog for the same request. Runtimes that
-		// deliver ONLY via RunStream (e.g. RemoteRuntime) are unaffected —
-		// mustSkipMirroredElicitation is false for them (#3584 review).
-		if skipMirroredElicitation && isElicitationRequestEvent(event) {
-			continue
-		}
-
-		if filter != nil && !filter(event) {
-			continue
-		}
-
-		// Clear titleGenerating flag when title is generated (from server for remote runtime)
-		if _, ok := event.(*runtime.SessionTitleEvent); ok {
-			a.titleGenerating.Store(false)
-		}
-
-		a.sendEvent(ctx, event)
-	}
-
-	if !sawRootStop {
-		a.synthesizeStreamStopped(ctx, sess.ID, agentName, sawRootError)
-	}
-}
-
-// isRootSessionEvent reports whether event belongs to the given root
-// session rather than a sub-session (delegation or fork-skill child).
-// Events that don't implement [runtime.SessionScoped], or that carry an
-// empty SessionID, are treated as root-scoped by convention — matching how
-// [runtime.SessionScoped] consumers elsewhere (e.g. the supervisor's
-// isTopLevelStream) already interpret an absent session id.
-func isRootSessionEvent(event runtime.Event, sessionID string) bool {
-	scoped, ok := event.(runtime.SessionScoped)
-	if !ok {
-		return true
-	}
-	id := scoped.GetSessionID()
-	return id == "" || id == sessionID
-}
-
-// synthesizeStreamStopped sends a StreamStoppedEvent for sessionID when the
-// runtime's event channel closed without forwarding one (#4136). Consumers
-// (the chat page, the supervisor) clear their "Working…" state only on
-// receipt of this event and treat channel close as the terminal signal only
-// in the runtime's documentation, not in their own code — so a dropped
-// event (see LocalRuntime.finalizeEventChannel's non-blocking emit) leaves
-// them stuck indefinitely without this fallback.
-func (a *App) synthesizeStreamStopped(ctx context.Context, sessionID, agentName string, sawError bool) {
-	reason := runtime.TurnEndReasonNormal
-	switch {
-	case ctx.Err() != nil:
-		reason = runtime.TurnEndReasonCanceled
-	case sawError:
-		reason = runtime.TurnEndReasonError
-	}
-	if agentName == "" {
-		agentName = a.runtime.CurrentAgentName(ctx)
-	}
-	slog.WarnContext(ctx, "runtime stream closed without a StreamStoppedEvent; synthesizing one",
-		"session_id", sessionID, "reason", reason)
-	// ctx may already be cancelled; detach cancellation but keep its trace
-	// context so the synthesized stop still reaches subscribers, mirroring
-	// the ctx-cancelled StreamStoppedEvent forwarding above.
-	a.sendEvent(context.WithoutCancel(ctx), runtime.StreamStopped(sessionID, agentName, reason))
-}
-
-// acquireStreamGuard locks a.streamGuard (set via WithStreamGuard) and
-// returns the matching release func, or a no-op release when no guard is
-// attached (a bare App with no SessionManager to race against). Callers must
-// hold the lock for the entire direct RunStream call — acquire it before
-// mutating the session and defer the release only after the stream ends —
-// mirroring the order SessionManager.RunSession already uses so a concurrent
-// AddMessage/UpdateMessage/RunSession sees this stream as busy the same way
-// (#3590).
-func (a *App) acquireStreamGuard() func() {
-	if a.streamGuard == nil {
-		return func() {}
-	}
-	a.streamGuard.Lock()
-	return a.streamGuard.Unlock
 }
 
 // processInlineAttachment handles content that is already in memory (e.g. pasted
@@ -932,53 +1042,32 @@ func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *stri
 	fmt.Fprintf(textBuilder, "<attached_file path=%q>\n%s\n</attached_file>", att.Name, att.Content)
 }
 
-// Retry re-runs the agent loop on the current session without adding a new
-// user message. It is used to resume the conversation after an error: the
-// session already holds the messages exchanged so far, so RunStream picks up
-// from where it left off.
-//
-// RunStream re-emits a UserMessageEvent for the trailing session message at
-// startup (before StreamStarted) whenever SendUserMessage is set. On retry
-// that message is already displayed, so forwarding the re-emission would
-// duplicate the user bubble — or, when the tail is a tool/assistant message,
-// render non-user content inside a spurious user bubble. We suppress any
-// UserMessageEvent observed before StreamStarted to drop exactly that
-// re-emission; genuine user messages injected mid-run (steer / follow-up)
-// arrive after StreamStarted and are forwarded normally.
+// Retry requests an handle-native retry without appending transcript input.
 func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 	a.cancel = cancel
-	sess := a.session
-
-	go func() {
-		release := a.acquireStreamGuard()
-		defer release()
-		if ctx.Err() != nil {
-			return
-		}
-
-		streamStarted := false
-		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), func(event runtime.Event) bool {
-			switch event.(type) {
-			case *runtime.StreamStartedEvent:
-				streamStarted = true
-			case *runtime.UserMessageEvent:
-				if !streamStarted {
-					return false
-				}
-			}
-			return true
-		})
-	}()
+	a.runCancelled.Store(false)
+	a.suppressUserEcho.Store(true)
+	state := a.state()
+	if state.handle == nil {
+		a.sendEvent(ctx, runtime.Error(state.operationError("retry").Error()))
+		return
+	}
+	submission, err := state.handle.Retry(ctx)
+	if err != nil {
+		a.sendEvent(ctx, runtime.Error(err.Error()))
+		return
+	}
+	a.recordSubmission(submission.TurnID)
 }
 
 // RunWithMessage runs the agent loop with a pre-constructed message.
 // This is used for special cases like image attachments.
 func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
 	a.cancel = cancel
-	sess := a.session
-
+	a.runCancelled.Store(false)
+	state := a.state()
 	// If this is the first message and no title exists, start local title generation
-	if sess.TitleSnapshot() == "" && a.titleGen != nil {
+	if state.session != nil && state.session.TitleSnapshot() == "" && a.titleGen != nil {
 		a.titleGenerating.Store(true)
 		// Extract text content from the message for title generation
 		userMessage := msg.Message.Content
@@ -990,19 +1079,20 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 				}
 			}
 		}
-		go a.generateTitle(ctx, sess, []string{userMessage})
+		go a.generateTitle(ctx, state, []string{userMessage})
 	}
 
-	go func() {
-		release := a.acquireStreamGuard()
-		defer release()
-		if ctx.Err() != nil {
-			return
-		}
-
-		sess.AddMessage(msg)
-		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), nil)
-	}()
+	input := runtime.TurnInput{Content: msg.Message.Content, MultiContent: msg.Message.MultiContent}
+	if state.handle == nil {
+		a.sendEvent(ctx, runtime.Error(state.operationError("submit").Error()))
+		return
+	}
+	submission, err := state.handle.Submit(ctx, input)
+	if err != nil {
+		a.sendEvent(ctx, runtime.Error(err.Error()))
+		return
+	}
+	a.recordSubmission(submission.TurnID)
 }
 
 func (a *App) RunBangCommand(ctx context.Context, command string) {
@@ -1021,29 +1111,17 @@ func (a *App) RunBangCommand(ctx context.Context, command string) {
 	a.events <- runtime.ShellOutput(output)
 }
 
-// InjectUserMessage feeds content into the app exactly as if the user had
-// typed and submitted it in the TUI. It is the entry point external drivers
-// (the --listen control plane) use to send follow-up prompts: routing through
-// the normal SendMsg path means the message is queued when the agent is busy,
-// triggers title generation on the first turn, and — crucially — starts a
-// RunStream whose events flow through a.events to every subscriber (the TUI
-// and any SSE consumer). Enqueuing into the runtime's follow-up queue instead
-// would do nothing while the agent is idle, since that queue is only drained
-// mid-stream.
-//
-// SendMsg is a TUI message, not a runtime.Event, so SSE subscribers (which
-// forward only runtime.Events) ignore it; it reaches the TUI program alone.
-func (a *App) InjectUserMessage(ctx context.Context, content string) {
-	a.sendEvent(ctx, messages.SendMsg{Content: content})
+type SubscribeOptions struct {
+	PreserveSessionMetadata bool
+	Ready                   chan<- struct{}
 }
 
-// SubscribeWith subscribes to app events using a custom send function.
-// Multiple concurrent subscribers are supported: a single fan-out goroutine
-// drains the throttled event stream and dispatches a copy to each one.
-// Slow subscribers drop events rather than block the bus.
-func (a *App) SubscribeWith(ctx context.Context, send func(tea.Msg)) {
-	ch := make(chan tea.Msg, subscriberBufferSize)
+func (a *App) Subscribe(ctx context.Context, send func(any), options SubscribeOptions) {
+	ch := make(chan any, subscriberBufferSize)
 	a.addSubscriber(ch)
+	if options.Ready != nil {
+		close(options.Ready)
+	}
 	defer a.removeSubscriber(ch)
 
 	a.fanoutOnce.Do(a.startFanOut)
@@ -1053,23 +1131,37 @@ func (a *App) SubscribeWith(ctx context.Context, send func(tea.Msg)) {
 		case <-ctx.Done():
 			return
 		case msg := <-ch:
+			if bridged, ok := msg.(SessionEventMsg); ok {
+				if bridged.Epoch != 0 && (bridged.Epoch != a.bridgeEpoch.Load() || (a.Session() != nil && bridged.OriginSessionID != a.Session().ID)) {
+					continue
+				}
+				if !options.PreserveSessionMetadata {
+					msg = bridged.Event
+				}
+			}
 			send(msg)
 		}
 	}
 }
 
+// Deprecated: use Subscribe. It preserves the legacy unwrapped event
+// semantics required by older embedders.
+func (a *App) SubscribeWith(ctx context.Context, send func(tea.Msg)) {
+	a.Subscribe(ctx, func(msg any) { send(msg) }, SubscribeOptions{})
+}
+
 const subscriberBufferSize = 1024
 
-func (a *App) addSubscriber(ch chan tea.Msg) {
+func (a *App) addSubscriber(ch chan any) {
 	a.subsMu.Lock()
 	defer a.subsMu.Unlock()
 	a.subs = append(a.subs, ch)
 }
 
-func (a *App) removeSubscriber(ch chan tea.Msg) {
+func (a *App) removeSubscriber(ch chan any) {
 	a.subsMu.Lock()
 	defer a.subsMu.Unlock()
-	a.subs = slices.DeleteFunc(a.subs, func(c chan tea.Msg) bool { return c == ch })
+	a.subs = slices.DeleteFunc(a.subs, func(c chan any) bool { return c == ch })
 }
 
 // startFanOut runs once per App. It throttles the raw events channel and
@@ -1120,13 +1212,18 @@ func (a *App) startFanOut() {
 // to track turn state (running/waiting/failed/paused) and identity (title).
 // These are low-frequency and irrecoverable when lost, unlike the content
 // deltas that dominate the stream, so the fan-out prefers them on overflow.
-func isTurnBoundaryEvent(msg tea.Msg) bool {
+func isTurnBoundaryEvent(msg any) bool {
+	if bridged, ok := msg.(SessionEventMsg); ok {
+		msg = bridged.Event
+	}
 	switch msg.(type) {
 	case *runtime.StreamStartedEvent,
 		*runtime.StreamStoppedEvent,
 		*runtime.UserMessageEvent,
 		*runtime.ErrorEvent,
+		*runtime.PauseChangedEvent,
 		*runtime.PausedEvent,
+		*runtime.SkillOperationEvent,
 		*runtime.SessionTitleEvent:
 		return true
 	default:
@@ -1134,92 +1231,100 @@ func isTurnBoundaryEvent(msg tea.Msg) bool {
 	}
 }
 
-// Resume resumes the runtime with the given confirmation request
-func (a *App) Resume(req runtime.ResumeRequest) {
-	a.runtime.Resume(a.ctx(), req)
-}
-
-// Steer queues a user message for mid-turn injection into the running agent.
-func (a *App) Steer(ctx context.Context, msg runtime.QueuedMessage) error {
-	return a.runtime.Steer(ctx, msg)
-}
-
-// FollowUp queues a user message for a separate turn after the current turn.
-func (a *App) FollowUp(ctx context.Context, msg runtime.QueuedMessage) error {
-	return a.runtime.FollowUp(ctx, msg)
-}
-
-// CancelPendingMessage withdraws a queued steer or follow-up before the runtime
-// consumes it. Runtimes without queue cancellation support return false.
-func (a *App) CancelPendingMessage(ctx context.Context, msg runtime.QueuedMessage, followUp bool) bool {
-	canceler, ok := a.runtime.(runtime.PendingMessageCanceler)
-	if !ok {
-		return false
-	}
-	if followUp {
-		return canceler.CancelFollowUp(ctx, msg.ID)
-	}
-	return canceler.CancelSteer(ctx, msg.ID)
-}
-
 // SteerMessage resolves attachments into message parts and queues the result
-// for mid-turn injection into the running agent.
-func (a *App) SteerMessage(ctx context.Context, content string, attachments []messages.Attachment) error {
-	_, err := a.QueueSteerMessage(ctx, content, attachments)
-	return err
-}
-
-// QueueSteerMessage is SteerMessage with the queue entry returned for cancellation.
-func (a *App) QueueSteerMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
-	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, a.session, content, attachments)
+// for mid-turn injection into the running agent. The runtime appends the
+// message to the session (and emits the matching UserMessageEvent) when the
+// agent loop drains it.
+func (a *App) SteerMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.Submission, error) {
+	state := a.state()
+	if state.handle == nil {
+		return runtime.Submission{}, state.operationError("send")
 	}
-	return msg, a.runtime.Steer(ctx, msg)
+	input := runtime.TurnInput{Content: content}
+	if len(attachments) > 0 {
+		input.MultiContent = a.buildUserMultiContent(ctx, state.session, content, attachments)
+	}
+	return state.handle.Steer(ctx, input)
 }
 
 // FollowUpMessage resolves attachments and queues a message for a separate turn
 // after the current agent turn finishes.
-func (a *App) FollowUpMessage(ctx context.Context, content string, attachments []messages.Attachment) error {
-	_, err := a.QueueFollowUpMessage(ctx, content, attachments)
-	return err
-}
-
-// QueueFollowUpMessage is FollowUpMessage with the queue entry returned for cancellation.
-func (a *App) QueueFollowUpMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
+func (a *App) FollowUpMessage(ctx context.Context, content string, attachments []messages.Attachment) (runtime.Submission, error) {
+	state := a.state()
+	if state.handle == nil {
+		return runtime.Submission{}, state.operationError("submit")
+	}
+	input := runtime.TurnInput{Content: content}
 	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, a.session, content, attachments)
+		input.MultiContent = a.buildUserMultiContent(ctx, state.session, content, attachments)
 	}
-	return msg, a.runtime.FollowUp(ctx, msg)
+	submission, err := state.handle.Submit(ctx, input)
+	if err == nil {
+		a.recordSubmission(submission.TurnID)
+	}
+	return submission, err
 }
 
-// TogglePause toggles whether the runtime loop is paused at iteration
-// boundaries. The second return value is false if the underlying runtime
-// doesn't support pausing (e.g. remote runtimes), in which case the first
-// return value is meaningless.
-func (a *App) TogglePause() (paused, supported bool) {
-	p, err := a.runtime.TogglePause(a.ctx())
-	if errors.Is(err, runtime.ErrUnsupported) {
-		return false, false
+func (a *App) fenceSessionBridge() {
+	a.bridgeEpoch.Add(1)
+	if a.stopBridge != nil {
+		a.stopBridge()
+		a.stopBridge = nil
 	}
+	a.hubBridged = false
+}
+
+// SwitchAgentTransactional stages the fresh handle without activating its event
+// bridge. The caller fences/persists routing first, then invokes commit.
+func (a *App) SwitchAgentTransactional(ctx context.Context, target string) (commit func(), rollback func() error, err error) {
+	if a.attachedSubagent != nil {
+		return nil, nil, &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: a.Session().ID, Operation: "switch_attached_agent"}
+	}
+	state := a.state()
+	sess, handle := state.session, state.handle
+	if sess == nil || handle == nil {
+		return nil, nil, state.operationError("switch_agent")
+	}
+	switcher, ok := a.sessions.(runtime.AgentSwitcher)
+	if !ok {
+		return nil, nil, runtime.ErrUnsupported
+	}
+	newSession, cloned, err := switcher.SwitchAgent(ctx, sess.ID, target)
 	if err != nil {
-		slog.Error("Failed to toggle pause", "error", err)
-		return false, false
+		return nil, nil, err
 	}
-	return p, true
-}
-
-// ResumeElicitation resumes an elicitation request with the given action and
-// content. elicitationID is variadic, mirroring runtime.Runtime.ResumeElicitation,
-// purely so pre-#3584 3-arg callers keep compiling unchanged; at most the
-// first value is meaningful, and "" (or omitting it) falls back to resolving
-// the sole pending request.
-func (a *App) ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error {
-	return a.runtime.ResumeElicitation(ctx, action, content, elicitationID...)
+	if cloned == nil || newSession == nil {
+		return nil, nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: sess.ID, Operation: "switch_agent"}
+	}
+	binding := runtime.SessionBinding{AgentName: newSession.AgentName(), Model: newSession.Metadata().Model, Durability: state.binding.Durability}
+	a.fenceSessionBridge()
+	a.replaceSessionState(sessionState{session: cloned, handle: newSession, binding: binding})
+	a.firstMessage = nil
+	a.firstMessageAttach = ""
+	activate := func() {
+		a.hubBridged = a.startSessionEventBridge(ctx)
+		a.reEmitStartupInfo(ctx)
+	}
+	var once sync.Once
+	undo := func() error {
+		var rollbackErr error
+		once.Do(func() {
+			a.replaceSessionState(state)
+			a.hubBridged = a.startSessionEventBridge(ctx)
+			a.reEmitStartupInfo(ctx)
+			if a.sessions != nil {
+				rollbackErr = a.sessions.DeleteSession(context.WithoutCancel(ctx), cloned.ID)
+			}
+		})
+		return rollbackErr
+	}
+	return activate, undo, nil
 }
 
 func (a *App) NewSession() {
+	if a.attachedSubagent != nil {
+		return // an attached viewer cannot swap out the subagent's session
+	}
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil
@@ -1228,29 +1333,27 @@ func (a *App) NewSession() {
 	// so they don't reset to default on /new
 	var opts []session.Opt
 	var priorPolicy session.SafetyPolicy
-	if a.session != nil {
-		// WithSafetyPolicy("") is a no-op, so a legacy session (no explicit
-		// mode) keeps relying on the ToolsApproved flag alone; an explicit
-		// strict/balanced choice — which leaves ToolsApproved=false — must be
-		// carried over here or /new silently falls back to legacy behavior.
+	current := a.state()
+	if current.session != nil {
 		opts = append(opts,
-			session.WithToolsApproved(a.session.ToolsApproved),
-			session.WithSafetyPolicy(a.session.GetSafetyPolicy()),
-			session.WithHideToolResults(a.session.HideToolResults),
-			session.WithWorkingDir(a.session.WorkingDir),
+			session.WithToolsApproved(current.session.ToolsApproved),
+			session.WithSafetyPolicy(current.session.GetSafetyPolicy()),
+			session.WithHideToolResults(current.session.HideToolResults),
+			session.WithWorkingDir(current.session.WorkingDir),
 		)
-		priorPolicy = a.session.GetPriorSafetyPolicy()
+		priorPolicy = current.session.GetPriorSafetyPolicy()
 	}
-	// There is no WithPriorSafetyPolicy option; writing the field before the
-	// session is published via a.session keeps the write on an unshared
-	// value, so it is safe. Preserving the toggle memory keeps an autonomous
-	// escalation able to toggle back to its prior mode.
 	sess := session.New(opts...)
 	sess.PriorSafetyPolicy = priorPolicy
-	a.session = sess
+	state := sessionState{session: sess, binding: a.resolvedSessionBinding(sess, current.binding)}
+	if a.sessions != nil {
+		state.handle, state.binding, state.err = resolveSessionHandle(a.ctx(), a.sessions, sess, state.binding)
+	}
+	a.replaceSessionState(state)
 	// Clear first message so it won't be re-sent on re-init
 	a.firstMessage = nil
 	a.firstMessageAttach = ""
+	a.hubBridged = a.startSessionEventBridge(a.ctx())
 
 	// Re-emit startup info so the sidebar shows agent/tools info in the new session
 	a.reEmitStartupInfo(a.ctx())
@@ -1259,10 +1362,12 @@ func (a *App) NewSession() {
 // reEmitStartupInfo resets and re-emits startup info (agent, team, tools)
 // through the events channel so the sidebar updates.
 func (a *App) reEmitStartupInfo(ctx context.Context) {
+	if a.runtime == nil {
+		return
+	}
 	a.runtime.ResetStartupInfo()
-	// Snapshot before handing off to the background goroutine so a later
-	// ReplaceSession cannot race with this read.
-	sess := a.session
+	state := a.state()
+	sess := state.session
 	a.pumpToEvents(ctx, func(sink runtime.EventSink) {
 		a.runtime.EmitStartupInfo(ctx, sess, sink)
 	})
@@ -1290,13 +1395,11 @@ func (a *App) pumpToEvents(ctx context.Context, emit func(runtime.EventSink)) {
 }
 
 func (a *App) Session() *session.Session {
-	return a.session
+	return a.state().session
 }
 
-// contextBreakdownProvider is an optional runtime capability: computing the
-// estimated context-window composition for a session. Only the local runtime
-// (which holds the agent and its tools) implements it; remote runtimes
-// don't, so the /context dialog reports the feature as unavailable.
+// contextBreakdownProvider is a compatibility capability for runtimes that
+// compute context directly rather than exposing session context operations.
 type contextBreakdownProvider interface {
 	ContextBreakdown(ctx context.Context, sess *session.Session) (*runtime.ContextBreakdown, error)
 }
@@ -1333,8 +1436,11 @@ func (a *App) ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFil
 
 // ContextBreakdown returns the estimated context-window composition for the
 // current session. Returns an error wrapping [runtime.ErrUnsupported] when
-// the runtime cannot compute it (e.g. remote runtimes).
+// the bound handle/runtime does not advertise context inspection.
 func (a *App) ContextBreakdown(ctx context.Context) (*runtime.ContextBreakdown, error) {
+	if inspector := a.SessionHandle(); inspector != nil {
+		return inspector.ContextBreakdown(ctx)
+	}
 	cp, ok := a.runtime.(contextBreakdownProvider)
 	if !ok {
 		return nil, fmt.Errorf("context breakdown: %w", runtime.ErrUnsupported)
@@ -1342,10 +1448,8 @@ func (a *App) ContextBreakdown(ctx context.Context) (*runtime.ContextBreakdown, 
 	return cp.ContextBreakdown(ctx, a.Session())
 }
 
-// liveSessionLister is an optional runtime capability: listing the current
-// root session plus every live sub-agent session for the /context team view.
-// Only the local runtime (which owns the RunStream registry) implements it;
-// remote runtimes degrade to a root-only view.
+// liveSessionLister is an optional presentation capability for listing the
+// current root session plus every live sub-agent session in the team view.
 type liveSessionLister interface {
 	LiveSessions(ctx context.Context, current *session.Session) []runtime.LiveSession
 }
@@ -1354,6 +1458,13 @@ type liveSessionLister interface {
 // sub-agent session (foreground children and background agent tasks), or nil
 // when the runtime does not expose live-session tracking.
 func (a *App) LiveSessions(ctx context.Context) []runtime.LiveSession {
+	if inspector := a.SessionHandle(); inspector != nil {
+		rows, err := inspector.LiveSessions(ctx)
+		if err == nil {
+			return rows
+		}
+		return nil
+	}
 	lister, ok := a.runtime.(liveSessionLister)
 	if !ok {
 		return nil
@@ -1375,14 +1486,33 @@ type liveSessionCompactor interface {
 // runtime cannot target live sessions (e.g. remote runtimes), or the
 // runtime's rejection for unknown/finished sessions and duplicate requests.
 func (a *App) CompactLiveSession(ctx context.Context, sessionID, additionalPrompt string) error {
+	sink := runtime.EventSinkFunc(func(event runtime.Event) {
+		a.sendEvent(ctx, event)
+	})
+	if compactor := a.SessionHandle(); compactor != nil {
+		return compactor.CompactTarget(ctx, sessionID, additionalPrompt, sink)
+	}
 	compactor, ok := a.runtime.(liveSessionCompactor)
 	if !ok {
 		return fmt.Errorf("targeted session compaction: %w", runtime.ErrUnsupported)
 	}
-	sink := runtime.EventSinkFunc(func(event runtime.Event) {
-		a.sendEvent(ctx, event)
-	})
 	return compactor.CompactLiveSession(ctx, sessionID, additionalPrompt, sink)
+}
+
+// CompactSession requests manual compaction from the bound handle and bridges
+// its canonical events through the normal app event sink.
+func (a *App) CompactSession(ctx context.Context, additionalPrompt string) error {
+	compactor := a.SessionHandle()
+	if compactor == nil {
+		return fmt.Errorf("session compaction: %w", runtime.ErrUnsupported)
+	}
+	if runtime.IsLocalSessionHandle(compactor) {
+		// Local handles journal events themselves; the observation bridge emits
+		// them exactly once.
+		return compactor.Compact(ctx, additionalPrompt, nil)
+	}
+	sink := runtime.EventSinkFunc(func(event runtime.Event) { a.sendEvent(ctx, event) })
+	return compactor.Compact(ctx, additionalPrompt, sink)
 }
 
 // AttachedFiles returns the current session's attached file paths, the same
@@ -1416,6 +1546,13 @@ func (a *App) DropAttachedFile(ctx context.Context, path string) (string, error)
 	resolved, err := resolveAttachedFile(sess.AttachedFilesSnapshot(), path)
 	if err != nil {
 		return "", err
+	}
+	if editor := a.SessionHandle(); editor != nil {
+		if err := editor.RemoveAttachment(ctx, resolved); err != nil {
+			return "", err
+		}
+		a.refreshSessionProjection(ctx)
+		return resolved, nil
 	}
 	if !sess.RemoveAttachedFile(resolved) {
 		return "", fmt.Errorf("file is not attached to this session: %s", resolved)
@@ -1459,20 +1596,39 @@ func resolveAttachedFile(attached []string, path string) (string, error) {
 	}
 }
 
+// Runtime returns presentation-only services. Session execution capabilities are
+// exposed separately by SessionRuntime and must never be inferred from Services.
+func (a *App) Runtime() Services {
+	return a.runtime
+}
+
+// SessionHandle returns the current immutable session handle for lifecycle-safe
+// ownership transfer. Callers must not infer registry ownership from it.
+func (a *App) SessionHandle() runtime.SessionHandle {
+	return a.state().handle
+}
+
+// SessionRuntime returns the shared handle registry injected at construction.
+func (a *App) SessionRuntime() runtime.SessionRuntime { return a.sessions }
+
+// Binding returns the immutable session binding used to create the handle.
+func (a *App) Binding() runtime.SessionBinding { return a.state().binding }
+
 // PermissionsInfo returns combined permissions info from team and session.
 // Returns nil if no permissions are configured at either level.
 func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
+	state := a.state()
 	// Get team-level permissions from runtime
 	teamPerms := a.runtime.PermissionsInfo()
 
 	// Get session-level permissions
 	var sessionPerms *runtime.PermissionsInfo
-	if a.session != nil && a.session.Permissions != nil {
-		if len(a.session.Permissions.Allow) > 0 || len(a.session.Permissions.Ask) > 0 || len(a.session.Permissions.Deny) > 0 {
+	if state.session != nil && state.session.Permissions != nil {
+		if len(state.session.Permissions.Allow) > 0 || len(state.session.Permissions.Ask) > 0 || len(state.session.Permissions.Deny) > 0 {
 			sessionPerms = &runtime.PermissionsInfo{
-				Allow: a.session.Permissions.Allow,
-				Ask:   a.session.Permissions.Ask,
-				Deny:  a.session.Permissions.Deny,
+				Allow: state.session.Permissions.Allow,
+				Ask:   state.session.Permissions.Ask,
+				Deny:  state.session.Permissions.Deny,
 			}
 		}
 	}
@@ -1503,168 +1659,12 @@ func (a *App) HasPermissions() bool {
 	return a.PermissionsInfo() != nil
 }
 
-// SwitchAgent switches the currently active agent for subsequent user messages
-func (a *App) SwitchAgent(agentName string) error {
-	// Called from the Bubble Tea event loop, which has no context; this is
-	// a TUI-root boundary.
-	return a.runtime.SetCurrentAgent(a.ctx(), agentName)
-}
-
-// SetCurrentAgentModel sets the model for the current agent and persists
-// the override in the session. Returns an error if model switching is not
-// supported by the runtime (e.g., remote runtimes).
-// Pass an empty modelRef to clear the override and use the agent's default model.
-func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
-	agentName := a.runtime.CurrentAgentName(ctx)
-
-	// Set the model override on the runtime (empty modelRef clears the override)
-	if err := a.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
-		if errors.Is(err, runtime.ErrUnsupported) {
-			return errors.New("model switching not supported by this runtime")
-		}
-		return err
+func (a *App) sessionAgentName() string {
+	state := a.state()
+	if state.handle != nil {
+		return state.handle.AgentName()
 	}
-
-	// Update the session's model overrides
-	if modelRef == "" {
-		// Clear the override - remove from map
-		delete(a.session.AgentModelOverrides, agentName)
-		slog.DebugContext(ctx, "Cleared model override from session", "session_id", a.session.ID, "agent", agentName)
-	} else {
-		// Set the override
-		if a.session.AgentModelOverrides == nil {
-			a.session.AgentModelOverrides = make(map[string]string)
-		}
-		a.session.AgentModelOverrides[agentName] = modelRef
-		slog.DebugContext(ctx, "Set model override in session", "session_id", a.session.ID, "agent", agentName, "model", modelRef)
-
-		// Track custom models (inline provider/model format) in the session
-		if strings.Contains(modelRef, "/") {
-			a.trackCustomModel(modelRef)
-		}
-	}
-
-	// Persist the session
-	if store := a.runtime.SessionStore(); store != nil {
-		if err := store.UpdateSession(ctx, a.session); err != nil {
-			return fmt.Errorf("failed to persist model override: %w", err)
-		}
-		slog.DebugContext(ctx, "Persisted session with model override", "session_id", a.session.ID, "overrides", a.session.AgentModelOverrides)
-	}
-
-	// Re-emit startup info so the sidebar updates with the new model
-	a.reEmitStartupInfo(ctx)
-
-	return nil
-}
-
-// CycleAgentThinkingLevel advances the current agent's thinking-effort level
-// to the next value in its provider's cycle and returns the newly selected
-// level. The change applies to the running session only (it is not persisted
-// as a model override). Returns an error wrapping [runtime.ErrUnsupported]
-// when the runtime or model cannot cycle thinking levels.
-func (a *App) CycleAgentThinkingLevel(ctx context.Context) (effort.Level, error) {
-	agentName := a.runtime.CurrentAgentName(ctx)
-	level, err := a.runtime.CycleAgentThinkingLevel(ctx, agentName)
-	if err != nil {
-		return "", err
-	}
-	// Refresh only the agent/team info so the sidebar reflects the updated
-	// thinking level. We intentionally avoid reEmitStartupInfo here: it would
-	// re-run tool discovery and make the sidebar's tool count flicker.
-	a.refreshAgentInfo(ctx)
-	return level, nil
-}
-
-// SetAgentThinkingLevel sets the current agent's thinking-effort level to the
-// requested value and returns the applied level. Like
-// [App.CycleAgentThinkingLevel], the change applies to the running session
-// only. Returns an error wrapping [runtime.ErrUnsupported] when the runtime
-// or model cannot switch thinking levels.
-func (a *App) SetAgentThinkingLevel(ctx context.Context, level effort.Level) (effort.Level, error) {
-	agentName := a.runtime.CurrentAgentName(ctx)
-	applied, err := a.runtime.SetAgentThinkingLevel(ctx, agentName, level)
-	if err != nil {
-		return "", err
-	}
-	a.refreshAgentInfo(ctx)
-	return applied, nil
-}
-
-// refreshAgentInfo pushes fresh agent and team info through the events channel
-// without re-running the heavier startup steps (tool discovery, token usage).
-func (a *App) refreshAgentInfo(ctx context.Context) {
-	a.pumpToEvents(ctx, func(sink runtime.EventSink) {
-		a.runtime.EmitAgentInfo(ctx, sink)
-	})
-}
-
-// RefreshModelsCatalog forces a refetch of the models.dev catalog that
-// backs catalog-driven model discovery. Refreshing is an optional
-// runtime capability: only the local runtime exposes it, so remote
-// runtimes report [runtime.ErrUnsupported].
-func (a *App) RefreshModelsCatalog(ctx context.Context) error {
-	refresher, ok := a.runtime.(interface {
-		RefreshModelsCatalog(ctx context.Context) error
-	})
-	if !ok {
-		return runtime.ErrUnsupported
-	}
-	return refresher.RefreshModelsCatalog(ctx)
-}
-
-// AvailableModels returns the list of models available for selection.
-// Returns nil if model switching is not supported.
-func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
-	start := time.Now()
-	if !a.runtime.SupportsModelSwitching() {
-		slog.DebugContext(ctx, "App available models skipped; model switching unsupported", "duration", time.Since(start))
-		return nil
-	}
-
-	agentName := a.runtime.CurrentAgentName(ctx)
-	currentRef := ""
-	var customRefs []string
-	if a.session != nil {
-		currentRef = a.session.AgentModelOverrides[agentName]
-		customRefs = a.session.CustomModelsUsed
-	}
-
-	runtimeStart := time.Now()
-	baseModels := a.runtime.AvailableModels(ctx)
-	runtimeDuration := time.Since(runtimeStart)
-	decorateStart := time.Now()
-	models := runtime.DecorateModelChoices(baseModels, currentRef, customRefs)
-	slog.DebugContext(ctx, "App available models completed",
-		"duration", time.Since(start),
-		"runtime_duration", runtimeDuration,
-		"decorate_duration", time.Since(decorateStart),
-		"base_models", len(baseModels),
-		"models", len(models),
-		"custom_refs", len(customRefs),
-		"agent", agentName,
-	)
-	return models
-}
-
-// trackCustomModel adds a custom model to the session's history if not already present.
-func (a *App) trackCustomModel(modelRef string) {
-	if a.session == nil {
-		return
-	}
-
-	// Check if already tracked
-	if slices.Contains(a.session.CustomModelsUsed, modelRef) {
-		return
-	}
-
-	a.session.CustomModelsUsed = append(a.session.CustomModelsUsed, modelRef)
-	slog.Debug("Tracked custom model in session", "session_id", a.session.ID, "model", modelRef)
-}
-
-// SupportsModelSwitching returns true if the runtime supports model switching.
-func (a *App) SupportsModelSwitching() bool {
-	return a.runtime.SupportsModelSwitching()
+	return ""
 }
 
 // ShouldExitAfterFirstResponse returns true if the app is configured to exit
@@ -1673,52 +1673,61 @@ func (a *App) ShouldExitAfterFirstResponse() bool {
 	return a.exitAfterFirstResponse
 }
 
+// MarkRunCancelled mutes bridged events for the cancelled in-flight turn
+// (all but the stream stop) so the UI freezes immediately while the run
+// winds down, matching the classic drop-on-cancel behavior. Cleared on the
+// next Run.
+func (a *App) MarkRunCancelled() {
+	a.lifecycleMu.Lock()
+	if a.latestRequestID != "" {
+		a.cancelledRequests[a.latestRequestID] = struct{}{}
+	}
+	a.lifecycleMu.Unlock()
+	a.runCancelled.Store(true)
+}
+
+func (a *App) recordSubmission(requestID string) {
+	if requestID == "" {
+		return
+	}
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	a.latestRequestID = requestID
+}
+
+// CancelRun cancels the current run without ending the pinned handle lifetime.
+// It returns whether a run was active.
+func (a *App) CancelRun() runtime.CancelOutcome {
+	a.lifecycleMu.Lock()
+	turnID := a.projectedRequestID
+	if turnID == "" {
+		turnID = a.latestRequestID
+	}
+	a.lifecycleMu.Unlock()
+	state := a.state()
+	if state.handle == nil || turnID == "" {
+		return runtime.CancelNotActive
+	}
+	result, err := state.handle.Cancel(a.ctx(), turnID)
+	if err != nil {
+		return runtime.CancelNotActive
+	}
+	if result.Outcome == runtime.CancelAccepted || result.Outcome == runtime.CancelAlreadyCancelling {
+		a.lifecycleMu.Lock()
+		a.cancelledRequests[turnID] = struct{}{}
+		a.lifecycleMu.Unlock()
+	}
+	return result.Outcome
+}
+
 // IsReadOnly returns true when the session is in read-only mode and no new
 // messages should be sent to the LLM.
 func (a *App) IsReadOnly() bool {
 	return a.readOnly
 }
 
-func (a *App) CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string) {
-	a.cancel = cancel
-
-	sess := a.session
-	if sess == nil {
-		cancel()
-		return
-	}
-
-	go func() {
-		defer cancel()
-
-		agentName := a.runtime.CurrentAgentName(ctx)
-		completed := false
-		events := make(chan runtime.Event, 100)
-		go func() {
-			defer close(events)
-			a.runtime.Summarize(ctx, sess, additionalPrompt, runtime.NewChannelSink(events))
-		}()
-		for event := range events {
-			if ctx.Err() != nil {
-				return
-			}
-			if e, ok := event.(*runtime.SessionCompactionEvent); ok && e.Status == "completed" {
-				completed = true
-			}
-			a.sendEvent(ctx, event)
-		}
-		if !completed && ctx.Err() == nil {
-			// The compaction never emitted its started/completed pair (e.g. a
-			// pre_compact / before_compaction hook vetoed it). Synthesize the
-			// terminal event so the TUI unsticks, but report it as skipped —
-			// nothing was compacted.
-			a.sendEvent(ctx, runtime.SessionCompactionCompleted(sess.ID, runtime.CompactionOutcomeSkipped, agentName))
-		}
-	}()
-}
-
 func (a *App) PlainTextTranscript() string {
-	return transcript.PlainText(a.session)
+	return transcript.PlainText(a.Session())
 }
 
 // SessionStore returns the session store for browsing/loading sessions.
@@ -1732,55 +1741,51 @@ func (a *App) SessionStore() session.Store {
 // so the sidebar displays the agent and tool information.
 // If the session has stored model overrides, they are applied to the runtime.
 func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
+	if a.attachedSubagent != nil {
+		return // an attached viewer cannot swap out the subagent's session
+	}
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil
 	}
-	a.session = sess
+	current := a.state()
+	binding := runtime.SessionBinding{
+		AgentName:  sess.AgentName,
+		Durability: current.binding.Durability,
+	}
+	binding.Model = sess.AgentModelOverrides[binding.AgentName]
+	var handle runtime.SessionHandle
+	var sessionErr error
+	if a.sessions != nil {
+		handle, binding, sessionErr = resolveSessionHandle(ctx, a.sessions, sess, binding)
+	}
+	a.replaceSessionState(sessionState{session: sess, handle: handle, binding: binding, err: sessionErr})
 	// Clear first message so it won't be re-sent on re-init
 	a.firstMessage = nil
 	a.firstMessageAttach = ""
+	a.hubBridged = a.startSessionEventBridge(ctx)
 
-	// Apply any stored model overrides from the session
-	a.applySessionModelOverrides(ctx, sess)
+	// Hydrate the loaded session's subagent view from the subagent store
+	// before the TUI components read it.
+	a.reloadSubagentTree(ctx)
 
 	// Reset and re-emit startup info so the sidebar shows agent/tools info
 	a.reEmitStartupInfo(ctx)
-}
 
-// applySessionModelOverrides applies any stored model overrides from a loaded session.
-func (a *App) applySessionModelOverrides(ctx context.Context, sess *session.Session) {
-	if len(sess.AgentModelOverrides) == 0 {
-		slog.DebugContext(ctx, "No model overrides to apply from session", "session_id", sess.ID)
-		return
-	}
-
-	// Check if runtime supports model switching
-	if !a.runtime.SupportsModelSwitching() {
-		slog.DebugContext(ctx, "Runtime does not support model switching, skipping overrides")
-		return
-	}
-
-	slog.DebugContext(ctx, "Applying model overrides from session", "session_id", sess.ID, "overrides", sess.AgentModelOverrides)
-	for agentName, modelRef := range sess.AgentModelOverrides {
-		if err := a.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
-			// Log but don't fail - the session can still be used with default models
-			slog.WarnContext(ctx, "Failed to apply model override from session", "agent", agentName, "model", modelRef, "error", err)
-			a.events <- runtime.Warning(fmt.Sprintf("Failed to apply model override for agent %q: %v", agentName, err), agentName)
-		} else {
-			slog.InfoContext(ctx, "Applied model override from session", "agent", agentName, "model", modelRef)
-		}
-	}
+	// If this runtime is still driving subagents for the loaded session (an
+	// in-process switch back), push the live swarm snapshot: the sidebar just
+	// restored the persisted tree with active nodes marked stopped.
+	a.emitLiveSubagentTree(ctx)
 }
 
 // throttleEvents buffers and merges rapid events to prevent UI flooding
-func (a *App) throttleEvents(ctx context.Context, in <-chan tea.Msg) <-chan tea.Msg {
-	out := make(chan tea.Msg, 128)
+func (a *App) throttleEvents(ctx context.Context, in <-chan any) <-chan any {
+	out := make(chan any, 128)
 
 	go func() {
 		defer close(out)
 
-		var buffer []tea.Msg
+		var buffer []any
 		var timerCh <-chan time.Time
 
 		flush := func() {
@@ -1824,7 +1829,7 @@ func (a *App) throttleEvents(ctx context.Context, in <-chan tea.Msg) <-chan tea.
 }
 
 // shouldThrottle determines if an event should be buffered/throttled
-func (a *App) shouldThrottle(msg tea.Msg) bool {
+func (a *App) shouldThrottle(msg any) bool {
 	switch msg.(type) {
 	case *runtime.AgentChoiceEvent:
 		return true
@@ -1845,12 +1850,12 @@ func (a *App) shouldThrottle(msg tea.Msg) bool {
 // chunks costs O(N) instead of the O(N^2) the naive `merged.Content + next.Content`
 // pattern produces. This matters during fast LLM streams where dozens of
 // chunks land per throttle window.
-func (a *App) mergeEvents(events []tea.Msg) []tea.Msg {
+func (a *App) mergeEvents(events []any) []any {
 	if len(events) == 0 {
 		return events
 	}
 
-	result := make([]tea.Msg, 0, len(events))
+	result := make([]any, 0, len(events))
 
 	for i := 0; i < len(events); i++ {
 		switch ev := events[i].(type) {
@@ -1885,7 +1890,7 @@ func (a *App) mergeEvents(events []tea.Msg) []tea.Msg {
 // mergeAgentChoiceRun merges first with any directly-following AgentChoiceEvents
 // for the same agent. It returns the merged event and the number of follow-up
 // events that were consumed.
-func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []tea.Msg) (*runtime.AgentChoiceEvent, int) {
+func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []any) (*runtime.AgentChoiceEvent, int) {
 	n := 0
 	total := len(first.Content)
 	for _, msg := range rest {
@@ -1915,7 +1920,7 @@ func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []tea.Msg) (*runt
 
 // mergeAgentChoiceReasoningRun is the AgentChoiceReasoningEvent counterpart of
 // mergeAgentChoiceRun.
-func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest []tea.Msg) (*runtime.AgentChoiceReasoningEvent, int) {
+func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest []any) (*runtime.AgentChoiceReasoningEvent, int) {
 	n := 0
 	total := len(first.Content)
 	for _, msg := range rest {
@@ -1945,7 +1950,7 @@ func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest
 
 // mergeToolCallOutputRun merges output chunks across consecutive
 // ToolCallOutputEvents that share the same tool call ID.
-func mergeToolCallOutputRun(first *runtime.ToolCallOutputEvent, rest []tea.Msg) (*runtime.ToolCallOutputEvent, int) {
+func mergeToolCallOutputRun(first *runtime.ToolCallOutputEvent, rest []any) (*runtime.ToolCallOutputEvent, int) {
 	n := 0
 	total := len(first.Output)
 	for _, msg := range rest {
@@ -1977,7 +1982,7 @@ func mergeToolCallOutputRun(first *runtime.ToolCallOutputEvent, rest []tea.Msg) 
 
 // mergePartialToolCallRun merges argument deltas across consecutive
 // PartialToolCallEvents that share the same tool call ID.
-func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []tea.Msg) (*runtime.PartialToolCallEvent, int) {
+func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []any) (*runtime.PartialToolCallEvent, int) {
 	n := 0
 	total := len(first.ToolCall.Function.Arguments)
 	for _, msg := range rest {
@@ -2025,7 +2030,8 @@ func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []tea.Msg
 // If filename is empty, a default name based on the session title and timestamp is used.
 func (a *App) ExportHTML(ctx context.Context, filename string) (string, error) {
 	agentInfo := a.runtime.CurrentAgentInfo(ctx)
-	return export.SessionToFile(a.session, agentInfo.Description, filename)
+	state := a.state()
+	return export.SessionToFile(state.session, agentInfo.Description, filename)
 }
 
 // ErrTitleGenerating is returned when attempting to set a title while generation is in progress.
@@ -2034,7 +2040,8 @@ var ErrTitleGenerating = errors.New("title generation in progress, please wait")
 // UpdateSessionTitle updates the current session's title and persists it.
 // It works with both local and remote runtimes.
 func (a *App) UpdateSessionTitle(ctx context.Context, title string) error {
-	if a.session == nil {
+	state := a.state()
+	if state.session == nil {
 		return errors.New("no active session")
 	}
 
@@ -2043,13 +2050,14 @@ func (a *App) UpdateSessionTitle(ctx context.Context, title string) error {
 		return ErrTitleGenerating
 	}
 
-	// Persist the title through the runtime
-	if err := a.runtime.UpdateSessionTitle(ctx, a.session, title); err != nil {
+	// Route the intent through the handle so persistence, replay, and all
+	// observers see one canonical title event.
+	if state.handle == nil {
+		return state.operationError("update_title")
+	}
+	if err := state.handle.UpdateTitle(ctx, title); err != nil {
 		return fmt.Errorf("failed to update session title: %w", err)
 	}
-
-	// Emit a SessionTitleEvent to update the UI consistently
-	a.events <- runtime.SessionTitle(a.session.ID, title)
 	return nil
 }
 
@@ -2061,56 +2069,38 @@ func (a *App) IsTitleGenerating() bool {
 // generateTitle generates a title using the local title generator.
 // This method always clears the titleGenerating flag when done (success or failure).
 // It should be called in a goroutine.
-func (a *App) generateTitle(ctx context.Context, sess *session.Session, userMessages []string) {
+func (a *App) generateTitle(ctx context.Context, state sessionState, userMessages []string) {
 	// Always clear the flag when done, whether success or failure
 	defer a.titleGenerating.Store(false)
 
-	if a.titleGen == nil {
+	if a.titleGen == nil || state.handle == nil {
 		slog.DebugContext(ctx, "No title generator available, skipping title generation")
-		// Emit empty title event so the UI clears any title-generation spinner
-		select {
-		case a.events <- runtime.SessionTitle(sess.ID, ""):
-		case <-ctx.Done():
-		}
 		return
 	}
 
-	title, err := a.titleGen.Generate(ctx, sess.ID, userMessages)
+	if state.session == nil || state.handle == nil {
+		return
+	}
+	title, err := a.titleGen.Generate(ctx, state.session.ID, userMessages)
 	if err != nil {
-		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", sess.ID, "error", err)
-		// Emit empty title event so the UI clears any title-generation spinner
-		select {
-		case a.events <- runtime.SessionTitle(sess.ID, ""):
-		case <-ctx.Done():
-		}
+		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", state.session.ID, "error", err)
 		return
 	}
 
 	if title == "" {
-		// Emit empty title event so the UI clears any title-generation spinner
-		select {
-		case a.events <- runtime.SessionTitle(sess.ID, ""):
-		case <-ctx.Done():
-		}
 		return
 	}
 
-	// Persist the title
-	if err := a.runtime.UpdateSessionTitle(ctx, sess, title); err != nil {
-		slog.ErrorContext(ctx, "Failed to persist title", "session_id", sess.ID, "error", err)
-	}
-
-	// Emit the title event to update the UI
-	select {
-	case a.events <- runtime.SessionTitle(sess.ID, title):
-	case <-ctx.Done():
+	if err := state.handle.UpdateTitle(ctx, title); err != nil {
+		slog.ErrorContext(ctx, "Failed to update handle title", "session_id", state.session.ID, "error", err)
 	}
 }
 
 // RegenerateSessionTitle triggers AI-based title regeneration for the current session.
 // Returns ErrTitleGenerating if a title generation is already in progress.
 func (a *App) RegenerateSessionTitle(ctx context.Context) error {
-	if a.session == nil {
+	state := a.state()
+	if state.session == nil {
 		return errors.New("no active session")
 	}
 
@@ -2125,18 +2115,29 @@ func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 
 		// Collect user messages for title generation
 		var userMessages []string
-		for _, msg := range a.session.GetAllMessages() {
+		for _, msg := range state.session.GetAllMessages() {
 			if msg.Message.Role == chat.MessageRoleUser {
 				userMessages = append(userMessages, msg.Message.Content)
 			}
 		}
 
-		go a.generateTitle(ctx, a.session, userMessages)
+		go a.generateTitle(ctx, state, userMessages)
 		return nil
 	}
 
 	// For remote runtime, title regeneration is not yet supported
 	// (the server would need to implement this)
-	slog.DebugContext(ctx, "Title regeneration not available for remote runtime", "session_id", a.session.ID)
+	slog.DebugContext(ctx, "Title regeneration not available for remote runtime", "session_id", state.session.ID)
 	return errors.New("title regeneration not available")
+}
+
+// CancelPendingMessage withdraws a canonical pending input without cancelling an active turn.
+// False means the input was already promoted or the handle does not support withdrawal.
+func (a *App) CancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
+	state := a.state()
+	canceler, ok := state.handle.(runtime.PendingMessageCanceler)
+	if !ok || turnID == "" {
+		return false, nil
+	}
+	return canceler.CancelPendingMessage(ctx, turnID)
 }

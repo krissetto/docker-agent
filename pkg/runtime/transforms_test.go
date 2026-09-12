@@ -404,7 +404,7 @@ func TestRunStream_StripsImagesForTextOnlyModel(t *testing.T) {
 		chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
 	))
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 		// drain — only the recorded provider state matters
 	}
 
@@ -462,7 +462,7 @@ func TestRunStream_CapabilityOverrideWinsOverModelsDev(t *testing.T) {
 		chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
 	))
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 		// drain — only the recorded provider state matters
 	}
 
@@ -508,7 +508,7 @@ func TestRunStream_FallbackUsesItsOwnCapabilities(t *testing.T) {
 		chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
 	))
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	require.Len(t, fallback.got, 1)
@@ -550,7 +550,7 @@ func TestRunStream_TransformErrorDoesNotBreakRun(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("hi"))
 	var sawStop bool
-	for ev := range r.RunStream(t.Context(), sess) {
+	for ev := range r.runExecution(t.Context(), sess) {
 		if _, ok := ev.(*StreamStoppedEvent); ok {
 			sawStop = true
 		}
@@ -915,11 +915,11 @@ func TestRunStream_GeneratedMediaAbsentFromNextTurnHistory(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("draw a cat"), session.WithWorkingDir(t.TempDir()))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	sess.AddMessage(session.UserMessage("thanks"))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	require.Len(t, prov.got, 2, "the provider must have been called for both turns")
@@ -1052,11 +1052,11 @@ func TestRunStream_MediaOnlyAssistantHistoryRemainsCoherent(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("draw a cat"), session.WithWorkingDir(t.TempDir()))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	sess.AddMessage(session.UserMessage("thanks"))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	require.Len(t, prov.got, 2, "the provider must have been called for both turns")
@@ -1111,11 +1111,11 @@ func TestRunStream_MediaOnlyAssistantHistoryRemainsCoherent_UnknownModel(t *test
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("draw a cat"), session.WithWorkingDir(t.TempDir()))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	sess.AddMessage(session.UserMessage("thanks"))
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 	}
 
 	require.Len(t, prov.got, 2, "the provider must have been called for both turns")

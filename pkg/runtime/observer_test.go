@@ -80,7 +80,7 @@ func TestObserver_OnRunStartFiresExactlyOnce(t *testing.T) {
 	obs := &recordingObserver{}
 	r, sess := runtimeWithObserver(t, obs)
 
-	for range r.RunStream(t.Context(), sess) {
+	for range r.runExecution(t.Context(), sess) {
 		// drain
 	}
 
@@ -100,7 +100,7 @@ func TestObserver_SeesEveryEventBeforeCaller(t *testing.T) {
 	r, sess := runtimeWithObserver(t, obs)
 
 	var consumed []Event
-	for event := range r.RunStream(t.Context(), sess) {
+	for event := range r.runExecution(t.Context(), sess) {
 		consumed = append(consumed, event)
 	}
 
@@ -151,7 +151,7 @@ func TestObserver_MultipleObserversFireInRegistrationOrder(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	for range r.RunStream(t.Context(), session.New(session.WithUserMessage("hi"))) {
+	for range r.runExecution(t.Context(), session.New(session.WithUserMessage("hi"))) {
 	}
 
 	mu.Lock()

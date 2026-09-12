@@ -81,7 +81,7 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 	sess.Title = "Unit Test"
 
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 
@@ -90,7 +90,7 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 		require.False(t, isErr, "unexpected error event: %+v", errEv)
 	}
 
-	assert.Equal(t, "summarizer", rt.CurrentAgentName(t.Context()), "current agent must be the force_handoff target after the run")
+	assert.Equal(t, "summarizer", sess.AgentName, "session must be pinned to the force_handoff target after the run")
 	assert.Equal(t, 1, sumProv.handoffCallCount(), "target agent's model must be invoked exactly once")
 	assert.Equal(t, "final summary", sess.GetLastAssistantMessageContent())
 
@@ -120,12 +120,10 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 	assert.True(t, sawNotice, "target agent must see the handoff notice")
 }
 
-// TestForceHandoff_SkippedForPinnedSession documents the guard for pinned
-// sessions (background agents): resolveSessionAgent always returns the
-// pinned agent, so honouring force_handoff there would loop forever. The
-// runtime must finish the run on the pinned agent without ever invoking
-// the target.
-func TestForceHandoff_SkippedForPinnedSession(t *testing.T) {
+// TestForceHandoff_UpdatesPinnedSession documents session-v2 force handoff:
+// session identity moves to the configured target and cannot loop on stale
+// process-global state.
+func TestForceHandoff_UpdatesPinnedSession(t *testing.T) {
 	t.Parallel()
 
 	rt, sumProv := forceHandoffTeam(t,
@@ -136,10 +134,10 @@ func TestForceHandoff_SkippedForPinnedSession(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"), session.WithAgentName("root"))
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
-	assert.Equal(t, 0, sumProv.handoffCallCount(), "force_handoff target must not run for pinned sessions")
-	assert.Equal(t, "root", rt.CurrentAgentName(t.Context()))
-	assert.Equal(t, "done", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, 1, sumProv.handoffCallCount(), "force_handoff target runs once")
+	assert.Equal(t, "summarizer", sess.AgentName)
+	assert.Equal(t, "should never run", sess.GetLastAssistantMessageContent())
 }

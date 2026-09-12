@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -53,7 +54,11 @@ func TestRuntimeForSession_TitleGeneratorKeepsImageOutputModels(t *testing.T) {
 		sess := session.New()
 		require.NoError(t, store.AddSession(ctx, sess))
 
-		run, titleGen, err := sm.runtimeForSession(ctx, sess, "image-only.yaml", "", &config.RuntimeConfig{})
+		tm, err := sm.loadTeam(ctx, "image-only.yaml", &config.RuntimeConfig{})
+		require.NoError(t, err)
+		run, err := runtime.NewLocalRuntime(ctx, tm)
+		require.NoError(t, err)
+		titleGen := run.TitleGenerator(ctx)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = run.Close() })
 
@@ -64,7 +69,11 @@ func TestRuntimeForSession_TitleGeneratorKeepsImageOutputModels(t *testing.T) {
 		sess := session.New()
 		require.NoError(t, store.AddSession(ctx, sess))
 
-		run, titleGen, err := sm.runtimeForSession(ctx, sess, "mixed.yaml", "", &config.RuntimeConfig{})
+		tm, err := sm.loadTeam(ctx, "mixed.yaml", &config.RuntimeConfig{})
+		require.NoError(t, err)
+		run, err := runtime.NewLocalRuntime(ctx, tm)
+		require.NoError(t, err)
+		titleGen := run.TitleGenerator(ctx)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = run.Close() })
 

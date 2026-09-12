@@ -35,7 +35,7 @@ func TestManagerBackgroundDialog(t *testing.T) {
 	// Stack a background dialog (i.e. one carrying an originating event) on top.
 	type fakeEvent struct{ id int }
 	event := &fakeEvent{id: 42}
-	bg := NewElicitationDialog("Pick a value", nil, nil, "")
+	bg := NewElicitationDialog("Pick a value", nil, nil, ElicitationRef{})
 	mgr.handleOpen(OpenDialogMsg{
 		Model:            bg,
 		OriginatingEvent: event,

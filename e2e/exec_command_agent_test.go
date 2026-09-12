@@ -6,14 +6,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestExec_CommandTargetsAgent verifies that invoking a /command which targets
-// a sub-agent sends the instructions directly to that agent, bypassing the root
-// agent (no transfer_task round-trip). The recorded cassette only contains a
-// single request carrying the specialist agent's system prompt, which proves
-// the message reached the specialist directly.
+// TestExec_CommandTargetsAgent verifies that the specialist can be selected
+// directly as the session's immutable binding. Session-v2 deliberately rejects
+// changing a live root session's identity through an agent-targeting command.
 func TestExec_CommandTargetsAgent(t *testing.T) {
 	t.Parallel()
-	out := runCLI(t, "run", "--exec", "testdata/command_agent.yaml", "/ask What's 2+2?")
+	out := runCLI(t, "run", "--exec", "--agent", "specialist", "testdata/command_agent.yaml", "What's 2+2?")
 
 	require.Equal(t, "SPECIALIST: 4", out)
 }

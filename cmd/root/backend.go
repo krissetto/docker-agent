@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	pathx "github.com/docker/docker-agent/pkg/path"
@@ -29,7 +30,7 @@ type backend interface {
 	LoadTeam(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error)
 
 	CreateSessionRequest(workingDir string) runtime.CreateSessionRequest
-	CreateSession(ctx context.Context, loaded *teamloader.LoadResult, req runtime.CreateSessionRequest) (runtime.Runtime, *session.Session, func(), error)
+	CreateSession(ctx context.Context, loaded *teamloader.LoadResult, req runtime.CreateSessionRequest) (app.Services, runtime.SessionRuntime, *session.Session, func(), error)
 
 	// ResumeWorkingDir returns the working directory stored on the session
 	// this run would resume (--session naming an existing session), so a
@@ -39,7 +40,7 @@ type backend interface {
 	// it has no stored working directory, or that directory no longer exists.
 	ResumeWorkingDir(ctx context.Context) (dir string, ok bool)
 
-	Spawner(rt runtime.Runtime) tui.SessionSpawner
+	Spawner(services app.Services, sessions runtime.SessionRuntime) tui.SessionSpawner
 
 	// Close releases backend-owned resources (e.g., the shared session
 	// store). It is called once when the embedder is shutting down,
@@ -108,33 +109,34 @@ func (b *localBackend) sessionStore(ctx context.Context, req runtime.CreateSessi
 	return b.store, b.storeErr
 }
 
-func (b *localBackend) CreateSession(ctx context.Context, loaded *teamloader.LoadResult, req runtime.CreateSessionRequest) (runtime.Runtime, *session.Session, func(), error) {
+func (b *localBackend) CreateSession(ctx context.Context, loaded *teamloader.LoadResult, req runtime.CreateSessionRequest) (app.Services, runtime.SessionRuntime, *session.Session, func(), error) {
 	store, err := b.sessionStore(ctx, req)
 	if err != nil {
 		stopToolSets(ctx, loaded.Team)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	rt, sess, err := b.flags.createLocalRuntimeAndSession(ctx, loaded, req, store)
 	if err != nil {
 		stopToolSets(ctx, loaded.Team)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
+	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
 			stopToolSets(ctx, loaded.Team)
-			if err := rt.Close(); err != nil {
-				slog.ErrorContext(ctx, "Failed to close runtime", "error", err)
+			if err := supervisor.Shutdown(context.WithoutCancel(ctx)); err != nil {
+				slog.ErrorContext(ctx, "Failed to shut down session runtime", "error", err)
 			}
 		})
 	}
-	return rt, sess, cleanup, nil
+	return rt, supervisor.Runtime(), sess, cleanup, nil
 }
 
-func (b *localBackend) Spawner(rt runtime.Runtime) tui.SessionSpawner {
-	return b.flags.createSessionSpawner(b.agentSource, rt.SessionStore())
+func (b *localBackend) Spawner(services app.Services, sessions runtime.SessionRuntime) tui.SessionSpawner {
+	return b.flags.createSessionSpawner(b.agentSource, services, sessions)
 }
 
 // ResumeWorkingDir looks up the session named by --session and returns the
@@ -205,12 +207,16 @@ func (b *remoteBackend) CreateSessionRequest(workingDir string) runtime.CreateSe
 	return b.flags.createSessionRequest(workingDir)
 }
 
-func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadResult, req runtime.CreateSessionRequest) (runtime.Runtime, *session.Session, func(), error) {
+func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadResult, req runtime.CreateSessionRequest) (app.Services, runtime.SessionRuntime, *session.Session, func(), error) {
 	client, err := runtime.NewClient(b.flags.remoteAddress)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create remote client: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create remote client: %w", err)
 	}
 
+	sessionRuntime, err := runtime.NewSessionTransport(client, runtime.WithSessionTransportSource(b.agentFileName))
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to create remote session transport: %w", err)
+	}
 	sessTemplate := session.New(
 		session.WithToolsApproved(req.ToolsApproved),
 		session.WithSafetyPolicy(req.SafetyPolicy),
@@ -218,31 +224,36 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 		// remote server's workspace. The server establishes its own workspace
 		// provenance for the session it creates (see server.SessionManager).
 	)
-
-	sess, err := client.CreateSession(ctx, sessTemplate)
+	handle, err := sessionRuntime.CreateSession(ctx, sessTemplate, runtime.SessionBinding{AgentName: req.AgentName})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+	sess := session.New(
+		session.WithID(handle.ID()),
+		session.WithAgentName(handle.AgentName()),
+		session.WithToolsApproved(req.ToolsApproved),
+		session.WithSafetyPolicy(req.SafetyPolicy),
+	)
 
-	rt, err := runtime.NewRemoteRuntime(client,
+	services, err := runtime.NewRemoteServices(client,
 		runtime.WithRemoteCurrentAgent(req.AgentName),
 		runtime.WithRemoteAgentFilename(b.agentFileName),
 	)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create remote runtime: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to create remote runtime: %w", err)
 	}
 
 	slog.DebugContext(ctx, "Using remote runtime", "address", b.flags.remoteAddress, "agent", req.AgentName)
 
 	cleanup := func() {
-		if err := rt.Close(); err != nil {
+		if err := services.Close(); err != nil {
 			slog.ErrorContext(ctx, "Failed to close remote runtime", "error", err)
 		}
 	}
-	return rt, sess, cleanup, nil
+	return services, sessionRuntime, sess, cleanup, nil
 }
 
-func (b *remoteBackend) Spawner(runtime.Runtime) tui.SessionSpawner {
+func (b *remoteBackend) Spawner(app.Services, runtime.SessionRuntime) tui.SessionSpawner {
 	return nil
 }
 

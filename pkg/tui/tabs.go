@@ -94,13 +94,21 @@ func (m *appModel) restoreTabs(
 			restoredFirst = true
 			runtimeID = initialTabID
 		} else {
-			a, newSess, spawnCleanup, err := spawner(ctx, saved.WorkingDir)
+			spawned, err := spawner(ctx, saved.WorkingDir)
 			if err != nil {
 				slog.WarnContext(ctx, "Failed to restore tab", "working_dir", saved.WorkingDir, "error", err)
 				_ = ts.RemoveTab(ctx, saved.SessionID)
 				continue
 			}
-			runtimeID = sv.AddSession(ctx, a, newSess, saved.WorkingDir, spawnCleanup)
+			cleanup := spawned.Cleanup
+			if spawned.Ownership == RuntimeBorrowed {
+				cleanup = nil
+			}
+			runtimeID, err = sv.AddSession(ctx, spawned.App, spawned.Session, saved.WorkingDir, cleanup)
+			if err != nil {
+				slog.WarnContext(ctx, "Failed to supervise restored tab", "session_id", saved.SessionID, "error", err)
+				continue
+			}
 		}
 
 		// Stash persisted session ID for lazy loading on first switch.
@@ -121,7 +129,7 @@ func (m *appModel) restoreTabs(
 		// Peek at the session title so the tab bar shows a name before lazy load.
 		if sessionStore != nil && saved.SessionID != "" {
 			if oldSess, err := sessionStore.GetSession(ctx, saved.SessionID); err == nil && oldSess.Title != "" {
-				sv.SetRunnerTitle(runtimeID, oldSess.Title)
+				sv.SeedTitle(runtimeID, oldSess.Title)
 			}
 		}
 	}
@@ -143,7 +151,7 @@ func (m *appModel) persistedSessionID(tabID string) string {
 	if persistedID, ok := m.pendingRestores[tabID]; ok {
 		return persistedID
 	}
-	if runner := m.supervisor.GetRunner(tabID); runner != nil {
+	if runner := m.supervisor.GetRunner(tabID); runner != nil && runner.App != nil {
 		return runner.App.Session().ID
 	}
 	return tabID

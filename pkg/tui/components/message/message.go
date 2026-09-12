@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
@@ -32,6 +33,7 @@ type Model interface {
 	AppendContent(content string) tea.Cmd
 	SetSelected(selected bool)
 	SetHovered(hovered bool)
+	InvalidateRenderCache()
 	CodeBlocks() []markdown.CodeBlock
 	// Finalize releases per-message render state that is only needed while the
 	// message is actively streaming. The message content and code-block metadata
@@ -304,6 +306,13 @@ func (mv *messageModel) SetHovered(hovered bool) {
 	}
 }
 
+// InvalidateRenderCache drops the memoized render so the next Render re-styles
+// the message (used when process-global styling such as the agent color
+// registry changes underneath otherwise-identical inputs).
+func (mv *messageModel) InvalidateRenderCache() {
+	mv.renderCache.valid = false
+}
+
 // Update handles messages and updates the message view state
 func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if loaded, ok := msg.(markdownImagesLoadedMsg); ok && loaded.target == mv {
@@ -509,6 +518,12 @@ func (mv *messageModel) render(width int) string {
 		glyph := styles.SpinnerDotsAccentStyle.MarginLeft(2).Render(mv.spinner.RawFrame())
 		return glyph + " " + styles.AgentAccentStyleFor(msg.Sender).Render(msg.Content)
 	case types.MessageTypeUser:
+		// Notes the runtime writes on a subagent's behalf are harness plumbing,
+		// not prose the user typed: render a compact attribution line instead of
+		// a user bubble.
+		if subagent.IsSystemInfo(msg.Content) {
+			return renderSystemInfoUser(msg.Content)
+		}
 		// Choose style based on selection state
 		messageStyle := styles.UserMessageStyle
 		if mv.selected && msg.SessionPosition != nil {
@@ -586,7 +601,7 @@ func (mv *messageModel) render(width int) string {
 		// Translate the markdown-relative line indices into messageModel View()
 		// coordinates. The rendered markdown is preceded by the sender prefix
 		// (when shown) and the always-present topRow line inside the styled
-		// envelope, so the first line of `rendered` lands at this offset.
+		// bubble frame, so the first line of `rendered` lands at this offset.
 		prefixLines := 0
 		if prefix != "" {
 			prefixLines = strings.Count(prefix, "\n")
@@ -998,4 +1013,16 @@ func preserveIndentation(line string) string {
 		return line
 	}
 	return strings.Repeat("\u00A0", leadingSpaces) + line[leadingSpaces:]
+}
+
+// renderSystemInfoUser renders a runtime-authored <system_info> note
+// (subagent turn report or relayed message) as a compact attribution line:
+// the subagent's name in its accent color followed by "(id) replied".
+func renderSystemInfoUser(content string) string {
+	name, id, ok := subagent.MentionedSubagent(content)
+	if !ok {
+		return styles.MutedStyle.MarginLeft(2).Render("system info received")
+	}
+	return styles.AgentAccentStyleFor(name).MarginLeft(2).Render(name) +
+		styles.MutedStyle.Render(fmt.Sprintf(" (%s) replied", id))
 }

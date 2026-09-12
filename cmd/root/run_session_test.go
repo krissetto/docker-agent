@@ -1,19 +1,90 @@
 package root
 
 import (
+	"context"
+	"io"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
+
+type titleTestProvider struct {
+	rootTestProvider
+
+	calls *atomic.Int32
+}
+
+type titleTestStream struct {
+	sent bool
+}
+
+func (s *titleTestStream) Recv() (chat.MessageStreamResponse, error) {
+	if s.sent {
+		return chat.MessageStreamResponse{}, io.EOF
+	}
+	s.sent = true
+	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "Second tab title"}}}}, nil
+}
+
+func (*titleTestStream) Close() {}
+
+func (p titleTestProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	p.calls.Add(1)
+	return &titleTestStream{}, nil
+}
+
+func TestSpawnedSecondTabGeneratesAndProjectsTitle(t *testing.T) {
+	calls := &atomic.Int32{}
+	model := titleTestProvider{calls: calls}
+	tm := team.New(team.WithAgents(agent.New("root", "instructions", agent.WithModel(model), agent.WithTitleModel(model))))
+	rt, err := runtime.NewLocalRuntime(t.Context(), tm)
+	require.NoError(t, err)
+	sessionsOwner := runtime.NewSessionRuntimeSupervisor(rt)
+	sessions := sessionsOwner.Runtime()
+	t.Cleanup(func() { require.NoError(t, sessionsOwner.Shutdown(context.WithoutCancel(t.Context()))) })
+
+	// Both tabs live in the runtime's working directory, so the second one
+	// borrows the shared session registry instead of loading its own runtime.
+	workingDir := t.TempDir()
+	flags := &runExecFlags{}
+	flags.runConfig.WorkingDir = workingDir
+	initialSession := session.New(session.WithID("first"), session.WithAgentName("root"))
+	initialApp := app.New(t.Context(), sessions, initialSession, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
+	spawner := flags.createSessionSpawner(nil, rt, sessions)
+	s := supervisor.New(spawner)
+	t.Cleanup(s.Shutdown)
+	s.AddSession(t.Context(), initialApp, initialSession, workingDir, nil)
+
+	secondID, err := s.SpawnSession(t.Context(), workingDir)
+	require.NoError(t, err)
+	second := s.GetRunner(secondID)
+	require.NotNil(t, second)
+	second.App.Run(t.Context(), func() {}, "message in second tab", nil)
+
+	require.Eventually(t, func() bool {
+		return second.App.Session().TitleSnapshot() == "Second tab title"
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		tabs, _ := s.GetTabs()
+		return len(tabs) == 2 && tabs[1].SessionID == secondID && tabs[1].Title == "Second tab title"
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Positive(t, calls.Load(), "the second tab's first message must schedule title generation")
+}
 
 func newSessionTestLoadResult() *teamloader.LoadResult {
 	agt := agent.New("root", "instructions", agent.WithModel(rootTestProvider{}))

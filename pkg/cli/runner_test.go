@@ -13,14 +13,10 @@ import (
 	"gotest.tools/v3/assert"
 
 	"github.com/docker/docker-agent/pkg/config/types"
-	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
-	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
-	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 func TestMain(m *testing.M) {
@@ -30,14 +26,12 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// mockRuntime implements runtime.Runtime for testing the CLI runner.
-// It emits pre-configured events from RunStream and records Resume calls.
+// mockRuntime is the command source and session registry/session the CLI runner
+// drives in tests.
 type mockRuntime struct {
-	events []runtime.Event
-	// runStreamFn, when set, replaces the default pre-buffered RunStream —
-	// used to model a live runtime that only makes progress while the
-	// consumer keeps draining.
-	runStreamFn func(context.Context, *session.Session) <-chan runtime.Event
+	events    []runtime.Event
+	commands  types.Commands
+	observeFn func(context.Context, runtime.ObserveOptions) (runtime.Observation, error)
 
 	mu                    sync.Mutex
 	resumes               []runtime.ResumeRequest
@@ -45,121 +39,65 @@ type mockRuntime struct {
 	elicitationLastAction tools.ElicitationAction
 }
 
-// mockRuntimeWithOverrides extends mockRuntime to allow method overriding for testing
-type mockRuntimeWithOverrides struct {
-	*mockRuntime
-
-	setCurrentAgentFn  func(string) error
-	currentAgentInfoFn func(context.Context) runtime.CurrentAgentInfo
+func (m *mockRuntime) AgentCommands(context.Context, string) (types.Commands, error) {
+	return m.commands, nil
 }
 
-func (m *mockRuntimeWithOverrides) SetCurrentAgent(ctx context.Context, name string) error {
-	if m.setCurrentAgentFn != nil {
-		return m.setCurrentAgentFn(name)
-	}
-	return m.mockRuntime.SetCurrentAgent(ctx, name)
-}
-
-func (m *mockRuntimeWithOverrides) CurrentAgentInfo(ctx context.Context) runtime.CurrentAgentInfo {
-	if m.currentAgentInfoFn != nil {
-		return m.currentAgentInfoFn(ctx)
-	}
-	return m.mockRuntime.CurrentAgentInfo(ctx)
-}
-
-func (m *mockRuntime) CurrentAgentName(context.Context) string { return "test" }
-func (m *mockRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
-	return runtime.CurrentAgentInfo{Name: "test"}
-}
-
-func (m *mockRuntime) SetCurrentAgent(context.Context, string) error { return nil }
-
-func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
-
-func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
-
-func (m *mockRuntime) RestartToolset(context.Context, string) error                         { return nil }
-func (m *mockRuntime) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {}
-func (m *mockRuntime) EmitAgentInfo(context.Context, runtime.EventSink)                     {}
-func (m *mockRuntime) ResetStartupInfo()                                                    {}
-func (m *mockRuntime) Run(context.Context, *session.Session) ([]session.Message, error) {
+func (m *mockRuntime) AgentTools(context.Context, string) ([]tools.Tool, error) {
 	return nil, nil
 }
 
-func (m *mockRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, _ map[string]any, _ ...string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.elicitationDeclines++
-	m.elicitationLastAction = action
-	return nil
+func (m *mockRuntime) CreateSession(context.Context, *session.Session, runtime.SessionBinding) (runtime.SessionHandle, error) {
+	return cliSession{rt: m}, nil
 }
 
-func (m *mockRuntime) SessionStore() session.Store                                            { return nil }
-func (m *mockRuntime) Summarize(context.Context, *session.Session, string, runtime.EventSink) {}
-func (m *mockRuntime) PermissionsInfo() *runtime.PermissionsInfo                              { return nil }
+func (m *mockRuntime) SessionByID(string) (runtime.SessionHandle, error) {
+	return cliSession{rt: m}, nil
+}
+func (m *mockRuntime) DeleteSession(context.Context, string) error { return nil }
+func (m *mockRuntime) ID() string                                  { return "session" }
+func (m *mockRuntime) AgentName() string                           { return "test" }
+func (m *mockRuntime) Metadata() runtime.SessionMetadata           { return runtime.SessionMetadata{} }
 
-func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet { return nil }
-
-func (m *mockRuntime) RunSkillFork(context.Context, *session.Session, skillstool.RunSkillArgs, runtime.EventSink) (*tools.ToolCallResult, error) {
-	return nil, nil
+func (m *mockRuntime) Submit(context.Context, runtime.TurnInput) (runtime.Submission, error) {
+	return runtime.Submission{SessionID: "session", TurnID: "request"}, nil
 }
 
-func (m *mockRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.PromptInfo {
-	return nil
+func (m *mockRuntime) Retry(ctx context.Context) (runtime.Submission, error) {
+	return m.Submit(ctx, runtime.TurnInput{Retry: true})
 }
 
-func (m *mockRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
-	return "", nil
-}
-
-func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error { return nil }
-
-func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
-
-func (m *mockRuntime) Close() error { return nil }
-
-func (m *mockRuntime) Steer(context.Context, runtime.QueuedMessage) error { return nil }
-
-func (m *mockRuntime) FollowUp(context.Context, runtime.QueuedMessage) error { return nil }
-
-func (m *mockRuntime) QueueStatus() runtime.QueueStatus { return runtime.QueueStatus{} }
-
-func (m *mockRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
-
-func (m *mockRuntime) SetAgentModel(context.Context, string, string) error { return nil }
-
-func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
-}
-
-func (m *mockRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
-}
-
-func (m *mockRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-
-func (m *mockRuntime) SupportsModelSwitching() bool                                          { return false }
-func (m *mockRuntime) OnToolsChanged(func(runtime.Event))                                    {}
-func (m *mockRuntime) OnBackgroundEvent(func(runtime.Event))                                 {}
-func (m *mockRuntime) OnElicitationRequest(func(runtime.Event))                              {}
-func (m *mockRuntime) RegenerateTitle(context.Context, *session.Session, chan runtime.Event) {}
-
-func (m *mockRuntime) Resume(_ context.Context, req runtime.ResumeRequest) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.resumes = append(m.resumes, req)
-}
-
-func (m *mockRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan runtime.Event {
-	if m.runStreamFn != nil {
-		return m.runStreamFn(ctx, sess)
+func (m *mockRuntime) Observe(ctx context.Context, opts runtime.ObserveOptions) (runtime.Observation, error) {
+	if m.observeFn != nil {
+		return m.observeFn(ctx, opts)
 	}
-	ch := make(chan runtime.Event, len(m.events))
-	for _, e := range m.events {
-		ch <- e
+	ch := make(chan runtime.SessionEvent, len(m.events)+1)
+	for _, event := range m.events {
+		ch <- runtime.SessionEvent{SessionID: "session", TurnID: "request", Event: event}
 	}
+	ch <- runtime.SessionEvent{SessionID: "session", TurnID: "request", Event: &runtime.StreamStoppedEvent{}}
 	close(ch)
-	return ch
+	return runtime.Observation{Events: ch, Cancel: func() {}}, nil
+}
+
+func (m *mockRuntime) Status(context.Context) (runtime.SessionStatus, error) {
+	return runtime.SessionStatus{}, nil
+}
+
+func (m *mockRuntime) Respond(_ context.Context, response runtime.InteractionResponse) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if response.Kind == runtime.InteractionElicitation {
+		m.elicitationDeclines++
+		m.elicitationLastAction = response.Elicitation.Action
+	} else {
+		m.resumes = append(m.resumes, response.Resume)
+	}
+	return nil
+}
+
+func (m *mockRuntime) Cancel(context.Context, string) (runtime.CancelResult, error) {
+	return runtime.CancelResult{Outcome: runtime.CancelAccepted}, nil
 }
 
 func (m *mockRuntime) getResumes() []runtime.ResumeRequest {
@@ -189,7 +127,7 @@ func TestMaxIterationsAutoApproveInYoloMode(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -213,7 +151,7 @@ func TestMaxIterationsAutoApproveSafetyCap(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -241,7 +179,7 @@ func TestMaxIterationsAutoApproveJSONMode(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: true, OutputJSON: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -261,7 +199,7 @@ func TestMaxIterationsRejectInJSONModeWithoutYolo(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: false, OutputJSON: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -293,7 +231,7 @@ func TestToolCallConfirmationRejectedInJSONModeUnderYolo(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: true, OutputJSON: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -319,7 +257,7 @@ func TestElicitationAutoDeclineInJSONMode(t *testing.T) {
 	sess := session.New()
 	cfg := Config{OutputJSON: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	rt.mu.Lock()
@@ -343,7 +281,7 @@ func TestMaxIterationsSafetyCapJSONMode(t *testing.T) {
 	sess := session.New()
 	cfg := Config{AutoApprove: true, OutputJSON: true}
 
-	err := Run(t.Context(), out, cfg, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, cfg, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	resumes := rt.getResumes()
@@ -361,53 +299,43 @@ func TestPrepareUserMessage_AgentSwitching(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		userInput         string
-		commandAgent      string
-		setAgentErr       error
-		expectedContent   string
-		expectedAttach    string
-		expectAgentSwitch bool
-		expectNilMessage  bool
-		expectError       bool
+		name            string
+		userInput       string
+		commandAgent    string
+		expectedContent string
+		expectedAttach  string
+		expectError     bool
 	}{
 		{
-			name:              "agent switch succeeds with trailing args",
-			userInput:         "/plan design a login flow",
-			commandAgent:      "planner",
-			setAgentErr:       nil,
-			expectedContent:   "design a login flow",
-			expectedAttach:    "",
-			expectAgentSwitch: true,
+			name:            "agent switch succeeds with trailing args",
+			userInput:       "/plan design a login flow",
+			commandAgent:    "planner",
+			expectedContent: "design a login flow",
+			expectedAttach:  "",
+			expectError:     true,
 		},
 		{
-			name:              "agent switch succeeds without trailing args",
-			userInput:         "/plan",
-			commandAgent:      "planner",
-			setAgentErr:       nil,
-			expectedContent:   "",
-			expectedAttach:    "",
-			expectAgentSwitch: true,
-			expectNilMessage:  true,
+			name:            "agent switch succeeds without trailing args",
+			userInput:       "/plan",
+			commandAgent:    "planner",
+			expectedContent: "",
+			expectedAttach:  "",
+			expectError:     true,
 		},
 		{
-			name:              "agent switch fails - returns error",
-			userInput:         "/plan design a login flow",
-			commandAgent:      "planner",
-			setAgentErr:       errors.New("agent not found"),
-			expectedContent:   "",
-			expectedAttach:    "",
-			expectAgentSwitch: true,
-			expectError:       true,
+			name:            "agent switch fails - returns error",
+			userInput:       "/plan design a login flow",
+			commandAgent:    "planner",
+			expectedContent: "",
+			expectedAttach:  "",
+			expectError:     true,
 		},
 		{
-			name:              "non-agent command - no switch",
-			userInput:         "/test regular command",
-			commandAgent:      "",
-			setAgentErr:       nil,
-			expectedContent:   "This is the test instruction regular command",
-			expectedAttach:    "",
-			expectAgentSwitch: false,
+			name:            "non-agent command - no switch",
+			userInput:       "/test regular command",
+			commandAgent:    "",
+			expectedContent: "This is the test instruction regular command",
+			expectedAttach:  "",
 		},
 	}
 
@@ -415,58 +343,22 @@ func TestPrepareUserMessage_AgentSwitching(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a mock runtime that tracks SetCurrentAgent calls
-			var setAgentCalled bool
-			var setAgentName string
-			rt := &mockRuntimeWithOverrides{
-				mockRuntime: &mockRuntime{events: []runtime.Event{}},
+			commands := make(types.Commands)
+			if tt.commandAgent != "" {
+				commands["plan"] = types.Command{Description: "Hand off to the planner", Agent: tt.commandAgent}
+			} else {
+				commands["test"] = types.Command{Instruction: "This is the test instruction"}
 			}
+			rt := &mockRuntime{commands: commands}
 
-			// Override SetCurrentAgent to track calls and return the test error
-			rt.setCurrentAgentFn = func(name string) error {
-				setAgentCalled = true
-				setAgentName = name
-				return tt.setAgentErr
-			}
-
-			// Override CurrentAgentInfo to return test commands
-			rt.currentAgentInfoFn = func(context.Context) runtime.CurrentAgentInfo {
-				commands := make(map[string]types.Command)
-				if tt.commandAgent != "" {
-					commands["plan"] = types.Command{
-						Description: "Hand off to the planner",
-						Agent:       tt.commandAgent,
-					}
-				} else {
-					commands["test"] = types.Command{
-						Instruction: "This is the test instruction",
-					}
-				}
-				return runtime.CurrentAgentInfo{
-					Name:     "test",
-					Commands: commands,
-				}
-			}
-
-			msg, attachPath, err := PrepareUserMessage(t.Context(), rt, tt.userInput, "")
+			msg, attachPath, err := PrepareUserMessage(t.Context(), rt, "test", tt.userInput, "")
 			if tt.expectError {
 				assert.Assert(t, err != nil, "Expected error but got nil")
 				return
 			}
 			assert.NilError(t, err)
 
-			// Verify agent switch was called (or not)
-			assert.Equal(t, tt.expectAgentSwitch, setAgentCalled, "SetCurrentAgent call mismatch")
-			if tt.expectAgentSwitch && setAgentCalled {
-				assert.Equal(t, tt.commandAgent, setAgentName, "Wrong agent name passed to SetCurrentAgent")
-			}
-
-			// Verify message content
-			if tt.expectNilMessage {
-				assert.Assert(t, msg == nil, "Expected nil message")
-			} else {
-				assert.Equal(t, tt.expectedContent, msg.Message.Content, "Message content mismatch")
-			}
+			assert.Equal(t, tt.expectedContent, msg.Message.Content, "Message content mismatch")
 			assert.Equal(t, tt.expectedAttach, attachPath, "Attachment path mismatch")
 		})
 	}
@@ -475,24 +367,14 @@ func TestPrepareUserMessage_AgentSwitching(t *testing.T) {
 func TestPrepareUserMessage_EmptyMessageForAgentOnlyCommand(t *testing.T) {
 	t.Parallel()
 
-	rt := &mockRuntimeWithOverrides{
-		mockRuntime: &mockRuntime{},
-	}
-	rt.currentAgentInfoFn = func(context.Context) runtime.CurrentAgentInfo {
-		return runtime.CurrentAgentInfo{
-			Name: "test",
-			Commands: map[string]types.Command{
-				"plan": {Agent: "planner"}, // agent-only, no instruction
-			},
-		}
-	}
+	rt := &mockRuntime{commands: types.Commands{
+		"plan": {Agent: "planner"},
+	}}
 
-	msg, attachPath, err := PrepareUserMessage(t.Context(), rt, "/plan", "")
-	assert.NilError(t, err)
-
-	// Agent-only command with no args should produce nil message
-	assert.Assert(t, msg == nil, "Expected nil message for agent-only command with no args")
-	assert.Equal(t, "", attachPath, "Expected no attachment")
+	msg, attachPath, err := PrepareUserMessage(t.Context(), rt, "test", "/plan", "")
+	assert.ErrorContains(t, err, "immutable session binding")
+	assert.Assert(t, msg == nil)
+	assert.Equal(t, "", attachPath)
 }
 
 // TestPrepareUserMessage_CommandResolution tests that commands are resolved
@@ -500,21 +382,11 @@ func TestPrepareUserMessage_EmptyMessageForAgentOnlyCommand(t *testing.T) {
 func TestPrepareUserMessage_CommandResolution(t *testing.T) {
 	t.Parallel()
 
-	rt := &mockRuntimeWithOverrides{
-		mockRuntime: &mockRuntime{},
-	}
-	rt.currentAgentInfoFn = func(context.Context) runtime.CurrentAgentInfo {
-		return runtime.CurrentAgentInfo{
-			Name: "test",
-			Commands: map[string]types.Command{
-				"fix": {
-					Instruction: "Fix the file ${args[0]}",
-				},
-			},
-		}
-	}
+	rt := &mockRuntime{commands: types.Commands{
+		"fix": {Instruction: "Fix the file ${args[0]}"},
+	}}
 
-	msg, _, err := PrepareUserMessage(t.Context(), rt, "/fix main.go", "")
+	msg, _, err := PrepareUserMessage(t.Context(), rt, "test", "/fix main.go", "")
 	assert.NilError(t, err)
 
 	assert.Equal(t, "Fix the file main.go", msg.Message.Content, "Command should be resolved with args")
@@ -556,7 +428,7 @@ func TestRunEmptyStdinNonTTYFails(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.New()
 
-	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, sess, nil)
+	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, cliSessions{rt}, sess, nil)
 	assert.ErrorContains(t, err, "no message provided and stdin is not a terminal")
 	assert.ErrorContains(t, err, "interactive terminal")
 }
@@ -568,7 +440,7 @@ func TestRunEmptyStdinWithDashFails(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.New()
 
-	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, sess, []string{"-"})
+	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, cliSessions{rt}, sess, []string{"-"})
 	assert.ErrorContains(t, err, "no message received on stdin")
 }
 
@@ -581,9 +453,9 @@ func TestRunPipedStdinStillWorks(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.New()
 
-	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, sess, nil)
+	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, cliSessions{rt}, sess, nil)
 	assert.NilError(t, err)
-	assert.Equal(t, len(sess.GetAllMessages()) > 0, true)
+	assert.Equal(t, len(sess.GetAllMessages()), 0) // session owns transcript mutation
 }
 
 // An ErrorEvent must surface exactly once: returned to the command layer
@@ -597,7 +469,7 @@ func TestErrorEventReturnedNotPrinted(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.New()
 
-	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, sess, []string{"hello"})
+	err := Run(t.Context(), NewPrinter(&buf), Config{}, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.ErrorContains(t, err, "model failed: HTTP 404")
 
 	var runtimeErr RuntimeError
@@ -616,16 +488,17 @@ func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
 
 	drained := make(chan struct{})
 	rt := &mockRuntime{
-		runStreamFn: func(context.Context, *session.Session) <-chan runtime.Event {
-			ch := make(chan runtime.Event) // unbuffered: every send needs a live consumer
+		observeFn: func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+			ch := make(chan runtime.SessionEvent) // unbuffered: every send needs a live consumer
 			go func() {
 				defer close(ch)
 				defer close(drained)
-				ch <- &runtime.ElicitationRequestEvent{Type: "elicitation_request", Message: "Choose a deployment region"}
-				ch <- runtime.Warning("The deployment choice was declined", "test")
-				ch <- runtime.AgentChoice("test", "sess", "Continuing without deployment.")
+				ch <- runtime.SessionEvent{TurnID: "request", Event: &runtime.ElicitationRequestEvent{Type: "elicitation_request", Message: "Choose a deployment region"}}
+				ch <- runtime.SessionEvent{TurnID: "request", Event: runtime.Warning("The deployment choice was declined", "test")}
+				ch <- runtime.SessionEvent{TurnID: "request", Event: runtime.AgentChoice("test", "sess", "Continuing without deployment.")}
+				ch <- runtime.SessionEvent{TurnID: "request", Event: &runtime.StreamStoppedEvent{}}
 			}()
-			return ch
+			return runtime.Observation{Events: ch, Cancel: func() {}}, nil
 		},
 	}
 
@@ -633,7 +506,7 @@ func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
 	out := NewPrinter(&buf)
 	sess := session.New()
 
-	err := Run(t.Context(), out, Config{}, rt, sess, []string{"hello"})
+	err := Run(t.Context(), out, Config{}, rt, cliSessions{rt}, sess, []string{"hello"})
 	assert.NilError(t, err)
 
 	select {
@@ -651,3 +524,52 @@ func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
 	assert.Check(t, strings.Contains(buf.String(), "Continuing without deployment."),
 		"the assistant response must still be printed: %q", buf.String())
 }
+func (m *mockRuntime) Release(context.Context) error { return nil }
+
+func (m *mockRuntime) UpdateTitle(context.Context, string) error { return nil }
+
+type cliSessions struct{ rt *mockRuntime }
+
+func (r cliSessions) CreateSession(context.Context, *session.Session, runtime.SessionBinding) (runtime.SessionHandle, error) {
+	return cliSession{rt: r.rt}, nil
+}
+
+func (r cliSessions) SessionByID(string) (runtime.SessionHandle, error) {
+	return cliSession{rt: r.rt}, nil
+}
+func (r cliSessions) DeleteSession(context.Context, string) error { return nil }
+
+type cliSession struct {
+	runtime.UnsupportedSessionHandle
+	rt *mockRuntime
+}
+
+func (a cliSession) ID() string                        { return a.rt.ID() }
+func (a cliSession) AgentName() string                 { return a.rt.AgentName() }
+func (a cliSession) Metadata() runtime.SessionMetadata { return a.rt.Metadata() }
+func (a cliSession) Submit(c context.Context, i runtime.TurnInput) (runtime.Submission, error) {
+	return a.rt.Submit(c, i)
+}
+func (a cliSession) Retry(c context.Context) (runtime.Submission, error) { return a.rt.Retry(c) }
+
+func (a cliSession) Steer(c context.Context, i runtime.TurnInput) (runtime.Submission, error) {
+	return a.rt.Submit(c, i)
+}
+
+func (a cliSession) Observe(c context.Context, o runtime.ObserveOptions) (runtime.Observation, error) {
+	return a.rt.Observe(c, o)
+}
+
+func (a cliSession) Status(c context.Context) (runtime.SessionStatus, error) {
+	return a.rt.Status(c)
+}
+
+func (a cliSession) Respond(c context.Context, r runtime.InteractionResponse) error {
+	return a.rt.Respond(c, r)
+}
+
+func (a cliSession) Cancel(c context.Context, id string) (runtime.CancelResult, error) {
+	return a.rt.Cancel(c, id)
+}
+func (a cliSession) Release(c context.Context) error               { return a.rt.Release(c) }
+func (a cliSession) UpdateTitle(c context.Context, t string) error { return a.rt.UpdateTitle(c, t) }

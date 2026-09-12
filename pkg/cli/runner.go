@@ -17,9 +17,11 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
-	"github.com/docker/docker-agent/pkg/session"
+	sessionpkg "github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // RuntimeError wraps runtime errors to distinguish them from usage errors
@@ -80,7 +82,7 @@ type Config struct {
 // Run executes an agent in non-TUI mode, handling user input and runtime events.
 // userMessages contains the user messages to send. If a single message is "-",
 // input is read from stdin. If empty, an interactive prompt loop is started.
-func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess *session.Session, userMessages []string) error {
+func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource, sessionRuntime runtime.SessionRuntime, sess *sessionpkg.Session, userMessages []string) error {
 	// Enable ${...} JavaScript expressions in slash-command instructions.
 	jscommands.Register()
 
@@ -92,6 +94,11 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 	telemetry.EnsureGlobalTelemetryInitialized(ctx)
 	if telemetryClient := telemetry.GetGlobalTelemetryClient(ctx); telemetryClient != nil {
 		ctx = telemetry.WithClient(ctx, telemetryClient)
+	}
+
+	handle, err := sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName})
+	if err != nil {
+		return fmt.Errorf("bind CLI session: %w", err)
 	}
 
 	sess.SetTitle("Running agent")
@@ -107,34 +114,48 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			return nil
 		}
 
-		userMsg, attachedPath, err := PrepareUserMessage(ctx, rt, userInput, cfg.AttachmentPath)
+		userMsg, attachedPath, err := PrepareUserMessage(ctx, rt, handle.AgentName(), userInput, cfg.AttachmentPath)
 		if err != nil {
 			return fmt.Errorf("failed to prepare message: %w", err)
 		}
 		if userMsg == nil {
-			// Agent-only command with no content - agent switched but no message to send
 			return nil
 		}
-		sess.AddMessage(userMsg)
 		sess.AddAttachedFile(attachedPath)
 
+		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		if err != nil {
+			return fmt.Errorf("observe CLI session: %w", err)
+		}
+		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: userMsg.Message.Content, MultiContent: userMsg.Message.MultiContent})
+		if err != nil {
+			observation.Cancel()
+			return fmt.Errorf("submit CLI message: %w", err)
+		}
+		eventsCtx, cancelEvents := context.WithCancel(ctx)
+		defer cancelEvents()
+		events := correlatedSessionEvents(eventsCtx, observation, submission.TurnID)
 		if cfg.OutputJSON {
-			for event := range rt.RunStream(ctx, sess) {
+			for envelope := range events {
+				if envelope.Err != nil {
+					return envelope.Err
+				}
+				event := envelope.Event
 				switch e := event.(type) {
 				case *runtime.ToolCallConfirmationEvent:
 					// JSON mode has no user at stdin — reject unconditionally.
 					// A confirmation event under AutoApprove means a
 					// preempt-yolo hook overrode --yolo; the safe answer is
 					// still Reject (the hook said Ask, not Approve).
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeReject("")})
 				case *runtime.ElicitationRequestEvent:
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: runtime.ElicitationResult{Action: tools.ElicitationActionDecline}})
 				case *runtime.MaxIterationsReachedEvent:
 					switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
 					case maxIterContinue:
-						rt.Resume(ctx, runtime.ResumeApprove())
+						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeApprove()})
 					default: // maxIterStop or maxIterPrompt (no interactive prompt in JSON mode)
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
 						return nil
 					}
 				case *runtime.ErrorEvent:
@@ -152,9 +173,13 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		}
 
 		firstLoop := true
-		lastAgent := rt.CurrentAgentName(ctx)
+		lastAgent := handle.AgentName()
 		var lastConfirmedToolCallID string
-		for event := range rt.RunStream(ctx, sess) {
+		for envelope := range events {
+			if envelope.Err != nil {
+				return envelope.Err
+			}
+			event := envelope.Event
 			agentName := event.GetAgentName()
 			if agentName != "" && (firstLoop || lastAgent != agentName) {
 				if !firstLoop {
@@ -178,15 +203,15 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				lastConfirmedToolCallID = e.ToolCall.ID // Store the ID to avoid duplicate printing
 				switch result {
 				case ConfirmationApprove:
-					rt.Resume(ctx, runtime.ResumeApprove())
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApprove()})
 				case ConfirmationApproveBalanced:
-					sess.SetSafetyPolicy(session.SafetyPolicyBalanced)
-					rt.Resume(ctx, runtime.ResumeApproveBalanced())
+					sess.SetSafetyPolicy(sessionpkg.SafetyPolicyBalanced)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApproveBalanced()})
 				case ConfirmationApproveSession:
-					sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
-					rt.Resume(ctx, runtime.ResumeApproveAutonomous())
+					sess.SetSafetyPolicy(sessionpkg.SafetyPolicyAutonomous)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApproveAutonomous()})
 				case ConfirmationReject:
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeReject("")})
 					lastConfirmedToolCallID = "" // Clear on reject since tool won't execute
 				case ConfirmationAbort:
 					// Stop the agent loop immediately
@@ -228,20 +253,20 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			case *runtime.MaxIterationsReachedEvent:
 				switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
 				case maxIterContinue:
-					rt.Resume(ctx, runtime.ResumeApprove())
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeApprove()})
 				case maxIterStop:
-					rt.Resume(ctx, runtime.ResumeReject(""))
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
 					return nil
 				case maxIterPrompt:
 					result := out.PromptMaxIterationsContinue(ctx, e.MaxIterations)
 					switch result {
 					case ConfirmationApprove:
-						rt.Resume(ctx, runtime.ResumeApprove())
+						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeApprove()})
 					case ConfirmationReject:
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
 						return nil
 					case ConfirmationAbort:
-						rt.Resume(ctx, runtime.ResumeReject(""))
+						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
 						return nil
 					}
 				}
@@ -250,7 +275,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				if !ok || serverURL == "" {
 					// Keep draining after declining forms so follow-up events cannot stall the turn.
 					slog.WarnContext(ctx, "Declining elicitation without form support in CLI mode", "message", e.Message)
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: runtime.ElicitationResult{Action: tools.ElicitationActionDecline}})
 					continue
 				}
 
@@ -262,9 +287,9 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 
 				switch result {
 				case ConfirmationApprove:
-					_ = rt.ResumeElicitation(ctx, "accept", nil, e.ElicitationID)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: runtime.ElicitationResult{Action: tools.ElicitationActionAccept}})
 				case ConfirmationReject:
-					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
+					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: runtime.ElicitationResult{Action: tools.ElicitationActionDecline}})
 					return errors.New("OAuth authorization rejected by user")
 				}
 			}
@@ -343,10 +368,35 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 	return nil
 }
 
-// PrepareUserMessage resolves commands, parses /attach directives, and creates
-// a user message with optional image attachment. This is the common flow for
-// both TUI and CLI modes.
-//
+// sessionEvent is one correlated observation item or a terminal observation error.
+type sessionEvent struct {
+	runtime.SessionEvent
+
+	Err error
+}
+
+func correlatedSessionEvents(ctx context.Context, observation runtime.Observation, turnID string) <-chan sessionEvent {
+	out := make(chan sessionEvent)
+	go func() {
+		defer close(out)
+		termination := runtimeclient.ConsumeTurn(ctx, observation, turnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+			select {
+			case out <- sessionEvent{SessionEvent: envelope}:
+				return runtimeclient.TurnContinue, nil
+			case <-ctx.Done():
+				return runtimeclient.TurnTerminate, ctx.Err()
+			}
+		})
+		if termination.Err != nil {
+			select {
+			case out <- sessionEvent{Err: termination.Err}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+	return out
+}
+
 // PrepareUserMessage resolves commands, parses /attach directives, and creates
 // a user message with optional image attachment. This is the common flow for
 // both TUI and CLI modes.
@@ -360,25 +410,17 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 // Returns the prepared session.Message ready to be added to the session, plus
 // the absolute path of the file that was actually attached (empty when no
 // attachment was used), and an error if agent switching fails. Callers should
-// pass the attachment path to session.Session.AddAttachedFile so sub-agents
+// pass the attachment path to sessionpkg.Session.AddAttachedFile so sub-agents
 // inherit the file context.
-func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, globalAttachPath string) (*session.Message, string, error) {
+func PrepareUserMessage(ctx context.Context, rt runtime.CommandSource, agentName, userInput, globalAttachPath string) (*sessionpkg.Message, string, error) {
+	commandSource := rt
+
 	// Resolve any /command to its prompt text BEFORE switching agents.
 	// This ensures the command is looked up in the original agent's command table.
-	resolvedContent := runtime.ResolveCommand(ctx, rt, userInput)
+	resolvedContent := runtime.ResolveCommand(ctx, commandSource, agentName, userInput)
 
-	// Switch the active agent if the /command targets a sub-agent.
-	// This must happen before the message is added to the session so the
-	// next runtime turn runs on the right agent.
-	if cmd, _, ok := runtime.LookupCommand(ctx, rt, userInput); ok && cmd.Agent != "" {
-		if err := rt.SetCurrentAgent(ctx, cmd.Agent); err != nil {
-			slog.WarnContext(ctx, "Failed to switch agent for /command", "agent", cmd.Agent, "error", err)
-			return nil, "", fmt.Errorf("switch agent %q: %w", cmd.Agent, err)
-		}
-		// Agent-only command with no trailing args: switch but send no message.
-		if resolvedContent == "" {
-			return nil, "", nil
-		}
+	if cmd, _, ok := runtime.LookupCommand(ctx, commandSource, agentName, userInput); ok && cmd.Agent != "" {
+		return nil, "", fmt.Errorf("agent-targeting command requires immutable session binding to %q; start that agent directly", cmd.Agent)
 	}
 
 	// Parse for /attach commands in the message
@@ -451,11 +493,11 @@ func ParseAttachCommand(userInput string) (messageText, attachPath string) {
 // was actually attached. The returned path is empty when no attachment was
 // produced (no path supplied, file unreadable, type unsupported, file too
 // large to inline, etc.). Callers should record successful attachments via
-// session.Session.AddAttachedFile so sub-agents inherit the file context.
-func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmentPath string) (*session.Message, string) {
+// sessionpkg.Session.AddAttachedFile so sub-agents inherit the file context.
+func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmentPath string) (*sessionpkg.Message, string) {
 	// noAttachment returns the message without any attachment.
-	noAttachment := func() (*session.Message, string) {
-		return session.UserMessage(userContent), ""
+	noAttachment := func() (*sessionpkg.Message, string) {
+		return sessionpkg.UserMessage(userContent), ""
 	}
 
 	if attachmentPath == "" {
@@ -518,5 +560,5 @@ func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmen
 		})
 	}
 
-	return session.UserMessage(textContent, multiContent...), absPath
+	return sessionpkg.UserMessage(textContent, multiContent...), absPath
 }

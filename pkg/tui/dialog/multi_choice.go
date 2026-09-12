@@ -34,6 +34,7 @@ type MultiChoiceResult struct {
 type MultiChoiceResultMsg struct {
 	DialogID string
 	Result   MultiChoiceResult
+	Context  any
 }
 
 // MultiChoiceConfig configures the multi-choice dialog.
@@ -46,6 +47,7 @@ type MultiChoiceConfig struct {
 	SecondaryLabel    string              // Label for secondary button (default: "Skip")
 	PrimaryLabel      string              // Label for primary button (default: "Continue")
 	CustomPlaceholder string              // Placeholder for custom input
+	Context           any                 // Opaque correlation returned with the result
 }
 
 // selection represents which item is currently selected.
@@ -564,6 +566,7 @@ func (d *multiChoiceDialog) sendResult(result MultiChoiceResult) tea.Cmd {
 		core.CmdHandler(MultiChoiceResultMsg{
 			DialogID: d.config.DialogID,
 			Result:   result,
+			Context:  d.config.Context,
 		}),
 	)
 }

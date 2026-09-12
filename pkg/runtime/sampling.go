@@ -62,7 +62,7 @@ func (r *LocalRuntime) samplingHandler(ctx context.Context, req *mcp.CreateMessa
 		"system_prompt", req.SystemPrompt != "",
 	)
 
-	a := r.CurrentAgent()
+	a := r.agentForContext(ctx)
 	if a == nil {
 		return nil, errors.New("no current agent available to handle sampling request")
 	}
@@ -311,7 +311,7 @@ func (r *LocalRuntime) samplingWithToolsHandler(ctx context.Context, req *mcp.Cr
 		"system_prompt", req.SystemPrompt != "",
 	)
 
-	a := r.CurrentAgent()
+	a := r.agentForContext(ctx)
 	if a == nil {
 		return nil, errors.New("no current agent available to handle sampling request")
 	}

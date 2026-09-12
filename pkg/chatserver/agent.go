@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -188,6 +189,17 @@ func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) bool 
 	return false
 }
 
+func latestUserInput(sess *session.Session) (runtime.TurnInput, bool) {
+	for _, item := range slices.Backward(sess.MessagesSnapshot()) {
+		msg := item.Message
+		if msg == nil || msg.Message.Role != chat.MessageRoleUser {
+			continue
+		}
+		return runtime.TurnInput{Content: msg.Message.Content, MultiContent: msg.Message.MultiContent}, true
+	}
+	return runtime.TurnInput{}, false
+}
+
 // agentEmit collects the side-effect callbacks invoked by runAgentLoop as
 // it drives the runtime. All callbacks are optional; nil means "ignore
 // this kind of event".
@@ -211,10 +223,20 @@ type agentEmit struct {
 // All ErrorEvents seen in the run are joined into the returned error so
 // callers can see the full picture; the loop keeps draining until the
 // stream closes so the runtime can shut down cleanly.
-func runAgentLoop(ctx context.Context, rt runtime.Runtime, sess *session.Session, emit agentEmit) error {
+func runAgentLoop(ctx context.Context, handle runtime.SessionHandle, input runtime.TurnInput, emit agentEmit) error {
 	var runErrs []error
 	toolIndex := 0
-	for ev := range rt.RunStream(ctx, sess) {
+	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	if err != nil {
+		return fmt.Errorf("observe chat session: %w", err)
+	}
+	submission, err := handle.Submit(ctx, input)
+	if err != nil {
+		observation.Cancel()
+		return fmt.Errorf("submit chat prompt: %w", err)
+	}
+	termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		ev := envelope.Event
 		switch e := ev.(type) {
 		case *runtime.AgentChoiceEvent:
 			if emit.onContent != nil {
@@ -231,19 +253,29 @@ func runAgentLoop(ctx context.Context, rt runtime.Runtime, sess *session.Session
 				toolIndex++
 			}
 		case *runtime.ToolCallConfirmationEvent:
-			// Defensive: resolved policy normally handles tool approval before this point.
-			rt.Resume(ctx, runtime.ResumeApprove())
+			return runtimeclient.TurnTerminate, errors.New("interactive tool confirmation is unavailable in chat completions")
 		case *runtime.ElicitationRequestEvent:
-			// Required: the runtime blocks until we respond, regardless
-			// of NonInteractive. Decline so the tool call fails fast.
-			_ = rt.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
+			response := runtime.InteractionResponse{
+				InteractionID: envelope.InteractionID,
+				Kind:          runtime.InteractionElicitation,
+				ElicitationID: e.ElicitationID,
+				Elicitation:   runtime.ElicitationResult{Action: tools.ElicitationActionDecline},
+			}
+			if err := handle.Respond(ctx, response); err != nil {
+				return runtimeclient.TurnTerminate, fmt.Errorf("decline chat elicitation: %w", err)
+			}
 		case *runtime.MaxIterationsReachedEvent:
-			// Defensive: in non-interactive mode the runtime already
-			// stops on its own and this Resume is dropped.
-			rt.Resume(ctx, runtime.ResumeReject(""))
+			return runtimeclient.TurnTerminate, errors.New("maximum iterations reached")
 		case *runtime.ErrorEvent:
 			runErrs = append(runErrs, errors.New(e.Error))
 		}
+		return runtimeclient.TurnContinue, nil
+	})
+	if termination.Err != nil {
+		if termination.ObservationError {
+			return errors.Join(errors.Join(runErrs...), fmt.Errorf("observe chat session: %w", termination.Err))
+		}
+		return errors.Join(errors.Join(runErrs...), termination.Err)
 	}
 	return errors.Join(runErrs...)
 }

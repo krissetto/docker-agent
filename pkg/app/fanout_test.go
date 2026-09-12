@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,7 +18,7 @@ import (
 func TestFanOut_TurnBoundaryEventEvictsPendingDelta(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan tea.Msg, 16)
+	events := make(chan any, 16)
 	app := &App{
 		ctx:              func() context.Context { return t.Context() },
 		events:           events,
@@ -28,7 +27,7 @@ func TestFanOut_TurnBoundaryEventEvictsPendingDelta(t *testing.T) {
 
 	// A one-slot subscriber makes the overflow deterministic. The subscriber
 	// never reads, standing in for a consumer that fell behind.
-	ch := make(chan tea.Msg, 1)
+	ch := make(chan any, 1)
 	app.addSubscriber(ch)
 	app.fanoutOnce.Do(app.startFanOut)
 
@@ -57,18 +56,18 @@ func TestFanOut_TurnBoundaryEventEvictsPendingDelta(t *testing.T) {
 func TestFanOut_DroppableEventIsDroppedOnOverflow(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan tea.Msg, 16)
+	events := make(chan any, 16)
 	app := &App{
 		ctx:              func() context.Context { return t.Context() },
 		events:           events,
 		throttleDuration: time.Millisecond,
 	}
 
-	ch := make(chan tea.Msg, 1)
+	ch := make(chan any, 1)
 	app.addSubscriber(ch)
 	// The witness is registered after ch, so once a message reaches it the
 	// fan-out has already made its keep-or-drop decision for ch.
-	witness := make(chan tea.Msg, 16)
+	witness := make(chan any, 16)
 	app.addSubscriber(witness)
 	app.fanoutOnce.Do(app.startFanOut)
 

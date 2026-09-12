@@ -52,6 +52,33 @@ func TestFilesystemTool_DisplayNames(t *testing.T) {
 	}
 }
 
+func TestFilesystemTool_InstructionsMatchOutputLimitingSchema(t *testing.T) {
+	t.Parallel()
+	tool := New(t.TempDir())
+
+	instructions := tool.Instructions()
+	assert.Contains(t, instructions, "giving directory_tree a narrow directory path")
+	assert.Contains(t, instructions, "using exclude patterns in search_files_content")
+	assert.NotContains(t, instructions, "max_depth")
+
+	all, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	for _, name := range []string{ToolNameDirectoryTree, ToolNameSearchFilesContent} {
+		idx := slices.IndexFunc(all, func(tl tools.Tool) bool { return tl.Name == name })
+		require.NotEqual(t, -1, idx)
+		schema, err := tools.SchemaToMap(all[idx].Parameters)
+		require.NoError(t, err)
+		properties := schema["properties"].(map[string]any)
+		assert.Contains(t, properties, "path")
+		if name == ToolNameDirectoryTree {
+			assert.Len(t, properties, 1, "directory_tree only accepts path")
+			assert.NotContains(t, properties, "max_depth")
+		} else {
+			assert.Contains(t, properties, "excludePatterns")
+		}
+	}
+}
+
 func TestFilesystemTool_ResolvePath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

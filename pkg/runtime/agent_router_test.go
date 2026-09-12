@@ -51,27 +51,6 @@ func TestAgentRouter_SetUnvalidated(t *testing.T) {
 	assert.Equal(t, "child", a.Name())
 }
 
-func TestAgentRouter_SetValidated_Success(t *testing.T) {
-	t.Parallel()
-
-	tm := newTestTeam(t)
-	r := newAgentRouter(tm, "root")
-
-	require.NoError(t, r.SetValidated("child"))
-	assert.Equal(t, "child", r.Name())
-}
-
-func TestAgentRouter_SetValidated_UnknownAgentLeavesNameUnchanged(t *testing.T) {
-	t.Parallel()
-
-	tm := newTestTeam(t)
-	r := newAgentRouter(tm, "root")
-
-	err := r.SetValidated("nope")
-	require.Error(t, err, "validated set must propagate the team's lookup error")
-	assert.Equal(t, "root", r.Name(), "current name must not change on validation failure")
-}
-
 func TestAgentRouter_ResolveSession_PinnedWins(t *testing.T) {
 	t.Parallel()
 

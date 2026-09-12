@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 var ErrNothingToUndo = errors.New("nothing to undo")
@@ -23,20 +25,22 @@ func (a *App) SnapshotsEnabled() bool {
 // UndoLastSnapshot restores the files captured in the most recent
 // snapshot checkpoint for the current session.
 func (a *App) UndoLastSnapshot(ctx context.Context) (UndoSnapshotResult, error) {
-	if a.snapshotController == nil || a.session == nil {
+	state := a.state()
+	if a.snapshotController == nil || state.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}
-	return snapshotResult(a.snapshotController.UndoLast(ctx, a.session.ID, a.snapshotCwd()))
+	return snapshotResult(a.snapshotController.UndoLast(ctx, state.session.ID, snapshotCwd(state.session)))
 }
 
 // ListSnapshots returns the file count of every snapshot captured during
 // the current session, oldest first. Returns nil when no snapshots exist
 // or when no controller is configured.
 func (a *App) ListSnapshots() []int {
-	if a.snapshotController == nil || a.session == nil {
+	state := a.state()
+	if a.snapshotController == nil || state.session == nil {
 		return nil
 	}
-	infos := a.snapshotController.List(a.session.ID)
+	infos := a.snapshotController.List(state.session.ID)
 	counts := make([]int, len(infos))
 	for i, info := range infos {
 		counts[i] = info.Files
@@ -48,10 +52,11 @@ func (a *App) ListSnapshots() []int {
 // returns to the state captured at that snapshot. keep == 0 resets to
 // the original pre-agent state.
 func (a *App) ResetSnapshot(ctx context.Context, keep int) (UndoSnapshotResult, error) {
-	if a.snapshotController == nil || a.session == nil {
+	state := a.state()
+	if a.snapshotController == nil || state.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}
-	return snapshotResult(a.snapshotController.Reset(ctx, a.session.ID, a.snapshotCwd(), keep))
+	return snapshotResult(a.snapshotController.Reset(ctx, state.session.ID, snapshotCwd(state.session), keep))
 }
 
 // snapshotCwd resolves the working directory the snapshot operations
@@ -59,9 +64,9 @@ func (a *App) ResetSnapshot(ctx context.Context, keep int) (UndoSnapshotResult, 
 // embedder when the session is constructed); if it's empty we fall
 // back to os.Getwd so snapshot commands keep working in setups that
 // don't propagate a working dir on the session.
-func (a *App) snapshotCwd() string {
-	if a.session != nil && a.session.WorkingDir != "" {
-		return a.session.WorkingDir
+func snapshotCwd(sess *session.Session) string {
+	if sess != nil && sess.WorkingDir != "" {
+		return sess.WorkingDir
 	}
 	cwd, _ := os.Getwd()
 	return cwd

@@ -165,7 +165,7 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 
-	application := app.New(t.Context(), rt, session.New(session.WithToolsApproved(true)))
+	application := app.New(t.Context(), rt, session.New(session.WithToolsApproved(true)), runtime.SessionBinding{}, app.WithRuntimeServices(rt))
 
 	wd, _ := os.Getwd()
 	model := tui.New(t.Context(), nil /* no spawner: single tab */, application, wd, func() {})

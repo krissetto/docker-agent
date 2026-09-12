@@ -214,7 +214,7 @@ var (
 				Bold(true)
 
 	AssistantMessageStyle = BaseMessageStyle.
-				Padding(0, 1)
+				Padding(0, 3, 0, 1)
 
 	WelcomeMessageStyle = BaseMessageStyle.
 				BorderStyle(lipgloss.DoubleBorder()).
@@ -387,7 +387,7 @@ var (
 
 	ToolName = ToolMessageStyle.
 			Foreground(TextMutedGray).
-			Padding(0, 1)
+			Padding(0, 3, 0, 1)
 
 	ToolNameError = ToolName.
 			Foreground(ErrorStrong).
@@ -524,7 +524,7 @@ var (
 	CompletionBoxStyle = BaseStyle.
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(BorderSecondary).
-				Padding(0, 1)
+				Padding(0, 3, 0, 1)
 
 	CompletionNormalStyle = BaseStyle.
 				Foreground(TextPrimary).
@@ -569,7 +569,7 @@ var (
 	AgentBadgeStyle = BaseStyle.
 			Foreground(AgentBadgeFg).
 			Background(AgentBadgeBg).
-			Padding(0, 1)
+			Padding(0, 3, 0, 1)
 
 	ThinkingBadgeStyle = BaseStyle.
 				Foreground(TextMuted). // Muted blue, distinct from gray italic content

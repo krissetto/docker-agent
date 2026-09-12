@@ -49,7 +49,7 @@ func TestExecuteOnSessionResumeHooks_ForwardsLimits(t *testing.T) {
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedSessionResume(t)
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 
 	r.executeOnSessionResumeHooks(t.Context(), a, "session-y", 5, 15)

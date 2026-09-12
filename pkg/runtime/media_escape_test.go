@@ -110,7 +110,7 @@ func TestRunStream_EscapingGeneratedMediaCompletesWithoutElicitation(t *testing.
 			defer cancel()
 			var warnings int
 			var stopped bool
-			for event := range rt.RunStream(ctx, sess) {
+			for event := range rt.runExecution(ctx, sess) {
 				switch event.(type) {
 				case *WarningEvent:
 					warnings++

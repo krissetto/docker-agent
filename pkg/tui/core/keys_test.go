@@ -193,5 +193,5 @@ func TestValidActions(t *testing.T) {
 	assert.Contains(t, actions, "editor_send")
 	assert.Contains(t, actions, "editor_newline")
 	assert.Contains(t, actions, "quit")
-	assert.Len(t, actions, 15)
+	assert.Len(t, actions, 14)
 }

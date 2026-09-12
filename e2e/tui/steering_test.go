@@ -63,27 +63,25 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		Enter().
 		Send(tea.PasteMsg{Content: "Also, what's 3+3?"}).
 		WaitFor(tuitest.Contains("What's 2+2?")).
-		// First chunks visible: the model call is in flight, the stream is live.
 		WaitFor(tuitest.Contains("2 +"))
+	firstBeforeSteer := d.Frame()
 
 	// Plain Enter while the agent is working steers into the ongoing stream.
 	d.Enter().
 		WaitFor(tuitest.Contains("Message sent to the working agent")).
 		Assert(tuitest.Absent("Message queued"))
-
-	// The runtime drains the steered message at the end of the model call,
-	// emits it as a user message, and answers it in the same stream.
-	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
-		WaitFor(tuitest.Contains("Also, what's 3+3?")).
+	// The first answer remains in the session history sent to the second model
+	// call, even if the renderer coalesces adjacent assistant blocks.
+	require.Contains(t, firstBeforeSteer, "2 +")
+	d.WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))
 }
 
 // TestChat_QueueSendModeWhileStreaming switches the send mode to Queue via
 // the /settings dialog, then submits a second message while the agent is
-// still streaming. The message must go to the local queue (queue toast, no
-// steering toast) and only be dispatched once the first stream stops,
-// producing a second turn with its own answer. The switch must also be
-// persisted to the user config.
+// still streaming. The session must accept it immediately, project it in the
+// sidebar, and promote it only once the first stream stops, producing a second
+// turn with its own answer. The switch must also be persisted to user config.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	d := newStreamingTUI(t)
 
@@ -110,12 +108,14 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 		WaitFor(tuitest.Contains("What's 2+2?")).
 		WaitFor(tuitest.Contains("2 +"))
 
-	// With the queue send mode, a plain Enter queues instead of steering.
+	// With queue send mode, session admission immediately projects the pending
+	// FIFO in the sidebar instead of maintaining a local queue/toast mirror.
 	d.Enter().
-		WaitFor(tuitest.Contains("Message queued (1 waiting)")).
-		Assert(tuitest.Absent("Message sent to the working agent"))
+		WaitFor(tuitest.Contains("Queue (1)")).
+		WaitFor(tuitest.Contains("Also, what's 3+3?"))
+	d.Assert(tuitest.Absent("Message sent to the working agent"))
 
-	// The queued message is processed only after the first stream stops.
+	// Promotion removes it from the sidebar and renders it once in chat.
 	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
 		WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))

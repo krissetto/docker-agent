@@ -90,7 +90,7 @@ func TestExecuteOnAgentSwitchHooks_ForwardsTransitionFields(t *testing.T) {
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedAgentSwitch(t, "root")
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 
 	r.executeOnAgentSwitchHooks(t.Context(), a, "session-x", "root", "planner", agentSwitchKindTransferTask)
@@ -192,7 +192,7 @@ func TestExecuteOnAgentSwitchHooks_FromAgentModelsNilWhenFromEmpty(t *testing.T)
 	t.Parallel()
 
 	r, rb := runtimeWithRecordedAgentSwitch(t, "root")
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	require.NotNil(t, a)
 
 	r.executeOnAgentSwitchHooks(t.Context(), a, "s", "", "root", agentSwitchKindHandoff)

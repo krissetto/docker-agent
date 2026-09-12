@@ -4,7 +4,6 @@ import (
 	"strconv"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -16,7 +15,7 @@ func TestMergeEventsConcatenatesAgentChoiceContent(t *testing.T) {
 
 	a := &App{}
 	chunks := []string{"Hello ", "streaming ", "world", "!"}
-	events := make([]tea.Msg, 0, len(chunks))
+	events := make([]any, 0, len(chunks))
 	for _, c := range chunks {
 		events = append(events, &runtime.AgentChoiceEvent{
 			Content:      c,
@@ -36,7 +35,7 @@ func TestMergeEventsKeepsBoundaryBetweenAgents(t *testing.T) {
 	t.Parallel()
 
 	a := &App{}
-	events := []tea.Msg{
+	events := []any{
 		&runtime.AgentChoiceEvent{Content: "a1", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
 		&runtime.AgentChoiceEvent{Content: "a2", AgentContext: runtime.AgentContext{AgentName: "agent-a"}},
 		&runtime.AgentChoiceEvent{Content: "b1", AgentContext: runtime.AgentContext{AgentName: "agent-b"}},
@@ -55,7 +54,7 @@ func TestMergeEventsConcatenatesPartialToolCallArguments(t *testing.T) {
 	t.Parallel()
 
 	a := &App{}
-	events := []tea.Msg{
+	events := []any{
 		&runtime.PartialToolCallEvent{
 			ToolCall: tools.ToolCall{
 				ID:       "call-1",
@@ -88,7 +87,7 @@ func TestMergeEventsConcatenatesToolCallOutput(t *testing.T) {
 	t.Parallel()
 
 	a := &App{}
-	events := []tea.Msg{
+	events := []any{
 		&runtime.ToolCallOutputEvent{ToolCallID: "call-1", Output: "line 1\n"},
 		&runtime.ToolCallOutputEvent{ToolCallID: "call-1", Output: "line 2\n"},
 		&runtime.ToolCallOutputEvent{ToolCallID: "call-2", Output: "other\n"},
@@ -137,9 +136,9 @@ func BenchmarkMergeEventsPartialToolCall(b *testing.B) {
 	}
 }
 
-func buildAgentChoiceEvents(n int) []tea.Msg {
+func buildAgentChoiceEvents(n int) []any {
 	const chunk = "the quick brown fox jumps over the lazy dog. "
-	events := make([]tea.Msg, 0, n)
+	events := make([]any, 0, n)
 	for range n {
 		events = append(events, &runtime.AgentChoiceEvent{
 			Content:      chunk,
@@ -149,9 +148,9 @@ func buildAgentChoiceEvents(n int) []tea.Msg {
 	return events
 }
 
-func buildPartialToolCallEvents(n int) []tea.Msg {
+func buildPartialToolCallEvents(n int) []any {
 	const chunk = `,"key":"value"`
-	events := make([]tea.Msg, 0, n)
+	events := make([]any, 0, n)
 	for range n {
 		events = append(events, &runtime.PartialToolCallEvent{
 			ToolCall: tools.ToolCall{

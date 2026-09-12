@@ -123,6 +123,8 @@ type SubSessionConfig struct {
 	SystemMessage string
 	// AgentName is the name of the agent that will execute the sub-session.
 	AgentName string
+	// Model pins an optional session-scoped model reference.
+	Model string
 	// Title is a human-readable label for the sub-session (e.g. "Transferred task").
 	Title string
 	// ToolsApproved overrides whether tools are pre-approved in the child session.
@@ -130,11 +132,9 @@ type SubSessionConfig struct {
 	// Deprecated: prefer SafetyPolicy; kept for callers that only know
 	// the legacy blanket-approval flag.
 	ToolsApproved bool
-	// SafetyPolicy is the safety mode the child session inherits from
-	// its parent, so a Balanced/Autonomous opt-in (or a Strict pin)
-	// survives task transfers, skills, and background agents.
+	// SafetyPolicy carries the parent's safety mode into the child session.
 	SafetyPolicy session.SafetyPolicy
-	// Permissions defines session-level tool permission overrides.
+	// Permissions carries session-scoped permission rules into the child session.
 	Permissions *session.PermissionsConfig
 	// NonInteractive marks the child session as running without a user present
 	// (e.g. MCP server, A2A adapter, background agent). This causes the runtime
@@ -211,6 +211,15 @@ type delegationRequest struct {
 // newSubSession builds a *session.Session from a SubSessionConfig and a parent
 // session. It consolidates the session options that were previously duplicated
 // across handleTaskTransfer and RunAgent.
+//
+// The session only carries the messages its config asked for: a Task is
+// framed as the usual delegation system message, and the synthetic "Please
+// proceed." kick-off accompanies whatever instructions were given. A config
+// with no Task, SystemMessage, or ImplicitUserMessage therefore yields a bare
+// session with no messages at all — async subagents rely on this and make the
+// task the child's first regular user message, so their sessions read like
+// ordinary sessions everywhere (attached tabs, read_subagent transcripts, and
+// the model's own context alike).
 func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *agent.Agent) *session.Session {
 	// Sub-agents start in a fresh session, so they don't see the user's
 	// original messages or attached files. Snapshot the parent's attached
@@ -220,13 +229,8 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	attachedFiles := parent.AttachedFilesSnapshot()
 
 	sysMsg := cfg.SystemMessage
-	if sysMsg == "" {
+	if sysMsg == "" && cfg.Task != "" {
 		sysMsg = buildTaskSystemMessage(cfg.Task, cfg.ExpectedOutput, attachedFiles)
-	}
-
-	userMsg := cfg.ImplicitUserMessage
-	if userMsg == "" {
-		userMsg = "Please proceed."
 	}
 
 	lineage := cfg.DelegationLineage
@@ -234,16 +238,19 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		lineage = parent.DelegationLineageSnapshot()
 	}
 
+	attrs := parent.AttributesSnapshot()
+	if attrs == nil {
+		attrs = make(map[string]string)
+	}
+	attrs[SessionAgentAttribute] = cfg.AgentName
 	opts := []session.Opt{
-		session.WithSystemMessage(sysMsg),
-		session.WithImplicitUserMessage(userMsg),
 		session.WithMaxIterations(childAgent.MaxIterations()),
 		session.WithMaxConsecutiveToolCalls(childAgent.MaxConsecutiveToolCalls()),
 		session.WithMaxOldToolCallTokens(childAgent.MaxOldToolCallTokens()),
 		session.WithMaxToolResultTokens(childAgent.MaxToolResultTokens()),
 		session.WithTitle(cfg.Title),
 		session.WithToolsApproved(cfg.ToolsApproved),
-		session.WithSafetyPolicy(cfg.SafetyPolicy),
+		session.WithPermissions(session.ClonePermissionsConfig(cfg.Permissions)),
 		session.WithNonInteractive(cfg.NonInteractive),
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
@@ -252,16 +259,26 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		// WorkingDir is the workspace-root provenance later used to resolve
 		// files the child produced. Empty stays empty (headless parents).
 		session.WithWorkingDir(parent.WorkingDir),
+		session.WithAgentName(cfg.AgentName),
 		session.WithAttachedFiles(attachedFiles),
-		session.WithAttributes(parent.AttributesSnapshot()),
+		session.WithAttributes(attrs),
 	}
-	if cfg.PinAgent {
-		opts = append(opts, session.WithAgentName(cfg.AgentName))
+	if sysMsg != "" {
+		opts = append(opts, session.WithSystemMessage(sysMsg))
+	}
+	if cfg.SafetyPolicy != "" {
+		opts = append(opts, session.WithSafetyPolicy(cfg.SafetyPolicy))
+	}
+	if userMsg := cfg.ImplicitUserMessage; userMsg != "" || sysMsg != "" {
+		if userMsg == "" {
+			userMsg = "Please proceed."
+		}
+		opts = append(opts, session.WithImplicitUserMessage(userMsg))
 	}
 	if len(lineage) > 0 {
 		opts = append(opts, session.WithDelegationLineage(lineage))
 	}
-	opts = append(opts, session.WithPermissions(cfg.Permissions))
+
 	// Merge parent's excluded tools with config's excluded tools so that
 	// nested sub-sessions (e.g. skill → transfer_task → child) inherit
 	// exclusions from all ancestors and don't re-introduce filtered tools.
@@ -275,7 +292,14 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	if len(cfg.ExtraToolSets) > 0 {
 		opts = append(opts, session.WithExtraToolSets(cfg.ExtraToolSets))
 	}
-	return session.New(opts...)
+	s := session.New(opts...)
+	if s.AgentModelOverrides == nil {
+		s.AgentModelOverrides = map[string]string{}
+	}
+	if cfg.Model != "" {
+		s.AgentModelOverrides[cfg.AgentName] = cfg.Model
+	}
+	return s
 }
 
 // mergeExcludedTools combines two excluded-tool lists, deduplicating entries.
@@ -299,27 +323,6 @@ func mergeExcludedTools(parent, child []string) []string {
 		merged = append(merged, t)
 	}
 	return merged
-}
-
-// swapCurrentAgent swaps the runtime's current agent from `from` to `to`,
-// emitting the AgentSwitching/AgentInfo events and invoking the on_agent_switch
-// hooks on entry, and returns a closure that reverses everything (restores
-// `from`, emits the counterpart events and the matching return-side hooks)
-// when invoked.
-//
-// Use as `defer r.swapCurrentAgent(ctx, sessionID, from, to, evts)()` so the
-// swap takes effect immediately and the restore runs at function exit.
-func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, from, to *agent.Agent, evts EventSink) func() {
-	evts.Emit(AgentSwitching(true, from.Name(), to.Name()))
-	r.executeOnAgentSwitchHooks(ctx, from, sessionID, from.Name(), to.Name(), agentSwitchKindTransferTask)
-	r.setCurrentAgent(to.Name())
-	evts.Emit(AgentInfo(to.Name(), agentModelLabel(ctx, to), to.Description(), to.WelcomeMessage()))
-	return func() {
-		r.setCurrentAgent(from.Name())
-		evts.Emit(AgentSwitching(false, to.Name(), from.Name()))
-		r.executeOnAgentSwitchHooks(ctx, from, sessionID, to.Name(), from.Name(), agentSwitchKindTransferTaskReturn)
-		evts.Emit(AgentInfo(from.Name(), agentModelLabel(ctx, from), from.Description(), from.WelcomeMessage()))
-	}
 }
 
 // runForwarding manages the lifecycle of a blocking sub-session, forwarding
@@ -357,17 +360,17 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 		return nil, err
 	}
 
-	if req.SwitchCurrentAgent {
-		if parent.AgentName == "" {
-			defer r.swapCurrentAgent(ctx, parent.ID, callerAgent, child, evts)()
-		} else {
-			// Pinned parent (background delegation): the shared current
-			// agent belongs to the concurrent foreground loop and must not
-			// be mutated. Pin the child to the target instead — RunStream
-			// resolves pinned sessions directly, so the child still
-			// executes as the target agent, without switch events/hooks.
-			req.PinAgent = true
-		}
+	if req.SwitchCurrentAgent && parent.AgentName == "" {
+		// Session execution never mutates runtime-global agent state. The child is
+		// pinned to its explicit target; switching events/hooks describe the
+		// scoped delegation only.
+		evts.Emit(AgentSwitching(true, callerAgent.Name(), child.Name()))
+		r.executeOnAgentSwitchHooks(ctx, callerAgent, parent.ID, callerAgent.Name(), child.Name(), agentSwitchKindTransferTask)
+		defer func() {
+			evts.Emit(AgentSwitching(false, child.Name(), callerAgent.Name()))
+			r.executeOnAgentSwitchHooks(ctx, callerAgent, parent.ID, child.Name(), callerAgent.Name(), agentSwitchKindTransferTaskReturn)
+		}()
+		req.PinAgent = true
 	}
 
 	s := newSubSession(parent, req.SubSessionConfig, child)
@@ -383,7 +386,7 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, req.AgentName, s.GetLastAssistantMessageContent())
 	}()
 
-	childEvents := r.RunStream(ctx, s)
+	childEvents := r.runExecution(ctx, s)
 	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
@@ -439,20 +442,31 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	if err != nil {
 		return &agenttool.RunResult{ErrMsg: fmt.Sprintf("agent %q not found: %s", cfg.AgentName, err)}
 	}
-
 	s := newSubSession(parent, cfg, child)
+	return r.runCollectingSession(ctx, parent, s, child, callerAgent, onContent)
+}
 
-	// subagent_stop fires after the background sub-session has fully
-	// drained — success or failure. The caller agent (whoever dispatched
-	// run_background_agent) owns the executor. The deferred call ensures
-	// the hook fires even when an ErrorEvent or ctx cancellation breaks
-	// us out of the loop.
+// runCollectingSession runs a pre-built child session to completion, collecting
+// its output. Splitting the session construction out of [runCollecting] lets
+// the async subagent manager build the session first (so it can capture the
+// session id for message routing and transcript reads) and then hand it here to
+// run.
+func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *session.Session, child, parentAgent *agent.Agent, onContent func(string)) *agenttool.RunResult {
+	// subagent_stop fires after the sub-session has fully drained —
+	// success or failure. parentAgent owns the executor: subagent_stop is
+	// observed by whoever spawned the sub-agent. runCollecting resolves it
+	// via CurrentAgent (the background path doesn't carry the parent agent
+	// name); the subagent manager passes the recorded parent instead, since
+	// its children run concurrently with (and nest below) whatever agent
+	// currently drives the runtime. dispatchHook silently no-ops when
+	// parentAgent is nil. The deferred call ensures the hook fires even
+	// when an ErrorEvent or ctx cancellation breaks us out of the loop.
 	defer func() {
-		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, cfg.AgentName, s.GetLastAssistantMessageContent())
+		r.executeSubagentStopHooks(ctx, parent, s, parentAgent, child.Name(), s.GetLastAssistantMessageContent())
 	}()
 
 	var errMsg string
-	events := r.RunStream(ctx, s)
+	events := r.runExecution(ctx, s)
 	for event := range events {
 		if ctx.Err() != nil {
 			break
@@ -504,7 +518,7 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 		// usageCtx: the context-limit lookup must still resolve for a
 		// cancelled task.
 		finalUsage.ContextLimit = r.contextLimitForAgentModel(usageCtx, child, r.getEffectiveModelID(usageCtx, child))
-		r.emitBackgroundEvent(NewTokenUsageEvent(s.ID, cfg.AgentName, finalUsage))
+		r.emitBackgroundEvent(NewTokenUsageEvent(s.ID, child.Name(), finalUsage))
 	}
 
 	// Persist the sub-session unconditionally — the partial transcript is
@@ -629,7 +643,7 @@ func (r *LocalRuntime) SubAgentNames(sess *session.Session) []string {
 // source-compatible; HandleRun never takes this path for LocalRuntime
 // because the session-aware SubAgentNames above is preferred.
 func (r *LocalRuntime) CurrentAgentSubAgentNames() []string {
-	a := r.CurrentAgent()
+	a := r.currentAgent()
 	if a == nil {
 		return nil
 	}
@@ -639,14 +653,12 @@ func (r *LocalRuntime) CurrentAgentSubAgentNames() []string {
 // RunAgent implements agenttool.Runner. It starts a sub-agent synchronously
 // and blocks until completion or cancellation.
 //
-// Background tasks inherit the parent session's permissions because there is no user
-// present to respond to interactive approval prompts during async execution.
-// Tool calls that result in an "Ask" outcome will be auto-denied by the dispatcher
-// due to the non-interactive context.
+// Background tasks inherit the parent session's safety policy and
+// session-scoped permissions. They still run non-interactively, so any tool
+// that remains Ask after those inherited rules is denied rather than blocking.
 func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams) *agenttool.RunResult {
 	// Caller identity must come from the parent session, not the shared
-	// current agent: nested background delegation runs on pinned sessions
-	// whose agent can differ from whatever the foreground loop points at.
+	// current agent: nested background delegation runs on pinned sessions.
 	caller := r.resolveSessionAgent(params.ParentSession)
 	if caller == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
@@ -655,14 +667,15 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	if guardErr != "" {
 		return &agenttool.RunResult{ErrMsg: guardErr}
 	}
+	toolsApproved, safetyPolicy, permissions := params.ParentSession.SafetySettings()
 	return r.runCollecting(ctx, params.ParentSession, SubSessionConfig{
 		Task:              params.Task,
 		ExpectedOutput:    params.ExpectedOutput,
 		AgentName:         params.AgentName,
 		Title:             "Background agent task",
-		ToolsApproved:     params.ParentSession.IsToolsApproved(),
-		SafetyPolicy:      params.ParentSession.GetSafetyPolicy(),
-		Permissions:       params.ParentSession.ClonePermissions(),
+		ToolsApproved:     toolsApproved,
+		SafetyPolicy:      safetyPolicy,
+		Permissions:       permissions,
 		NonInteractive:    true,
 		PinAgent:          true,
 		DelegationLineage: childLineage,
@@ -727,15 +740,16 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	ctx, span := r.startSpan(ctx, "runtime.task_transfer", trace.WithAttributes(delegationAttrs...))
 	defer span.End()
 
+	toolsApproved, safetyPolicy, permissions := sess.SafetySettings()
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
 		SubSessionConfig: SubSessionConfig{
 			Task:              params.Task,
 			ExpectedOutput:    params.ExpectedOutput,
 			AgentName:         params.Agent,
 			Title:             "Transferred task",
-			ToolsApproved:     sess.IsToolsApproved(),
-			SafetyPolicy:      sess.GetSafetyPolicy(),
-			Permissions:       sess.ClonePermissions(),
+			ToolsApproved:     toolsApproved,
+			SafetyPolicy:      safetyPolicy,
+			Permissions:       permissions,
 			NonInteractive:    sess.NonInteractive,
 			DelegationLineage: childLineage,
 		},
@@ -785,7 +799,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	defer span.End()
 
 	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
-	r.setCurrentAgent(next.Name())
+	sess.AgentName = next.Name()
 	handoffMessage := "The agent " + ca + " handed off the conversation to you. " +
 		"Your available handoff agents and tools are specified in the system messages that follow. " +
 		"Only use those capabilities - do not attempt to use tools or hand off to agents that you see " +
@@ -809,7 +823,7 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 	slog.InfoContext(ctx, "Forced handoff", "from_agent", from.Name(), "to_agent", to.Name(), "session_id", sess.ID)
 
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), to.Name(), agentSwitchKindForceHandoff)
-	r.setCurrentAgent(to.Name())
+	sess.AgentName = to.Name()
 
 	sess.AddMessage(session.ImplicitUserMessage(
 		"The agent " + from.Name() + " finished its response and the conversation was automatically " +

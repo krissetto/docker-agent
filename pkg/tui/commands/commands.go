@@ -678,8 +678,8 @@ type effortLevelsSource interface {
 // order. Unlike toolsetRestartCandidates, unsupported levels are never
 // listed (let alone Disabled): SetAgentThinkingLevel hard-rejects any level
 // outside this set, so offering it would complete-then-fail. A source with
-// no resolvable levels (remote runtime, non-reasoning model) yields no
-// candidates, and the popup simply doesn't open.
+// levels (including over the first-party remote transport), an unresolvable
+// model, or a model without selectable thinking yields no candidates.
 func effortCandidates(ctx context.Context, source effortLevelsSource) []ArgumentCandidate {
 	levels := source.CurrentAgentThinkingLevels(ctx)
 	candidates := make([]ArgumentCandidate, 0, len(levels))
@@ -788,9 +788,12 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 		})
 	}
 
-	// Add skill commands if skills are enabled for the current agent
-	skillsList := application.CurrentAgentSkills()
-	if len(skillsList) > 0 {
+	// Add skill commands if skills are enabled for the current agent.
+	// Discovery failures remain visible instead of silently removing skills.
+	skillsList, skillsErr := application.CurrentAgentSkillsContext(ctx)
+	if skillsErr != nil {
+		categories = append(categories, Category{Name: "Skills", Commands: []Item{{ID: "skills.error", Label: "Skills unavailable", Description: skillsErr.Error(), Category: "Skills", Hidden: false}}})
+	} else if len(skillsList) > 0 {
 		skillCommands := make([]Item, 0, len(skillsList))
 		for _, skill := range skillsList {
 			skillName := skill.Name

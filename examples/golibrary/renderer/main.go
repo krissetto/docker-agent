@@ -177,7 +177,7 @@ func run(ctx context.Context) error {
 		session.WithTitle("Repository search demo"),
 		session.WithToolsApproved(true),
 	)
-	a := app.New(ctx, rt, sess, app.WithFirstMessage(firstMessage))
+	a := app.New(ctx, rt, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt), app.WithFirstMessage(firstMessage))
 
 	// The one line that matters: a custom renderer for the MCP tool.
 	wd, _ := os.Getwd()

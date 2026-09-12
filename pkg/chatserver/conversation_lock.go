@@ -2,11 +2,9 @@ package chatserver
 
 import "github.com/docker/docker-agent/pkg/concurrent"
 
-// conversationLockSet ensures only one in-flight request at a time per
-// conversation id. Concurrent requests sharing an id would otherwise share
-// the same `*session.Session` (the cache hands out the same pointer to every
-// caller for that id), and two concurrent runtime.RunStream calls on one
-// session interleave message appends and produce garbled transcripts.
+// conversationLockSet ensures only one in-flight request at a time per stable
+// conversation ID. Session execution outlives an observer, but two simultaneous
+// protocol turns for one conversation would make response ordering ambiguous.
 //
 // We reject the second request with 409 Conflict instead of serialising it,
 // for two reasons: it surfaces the misuse to the client immediately, and it

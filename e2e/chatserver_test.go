@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,68 +18,71 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/cmd/root"
+	"github.com/docker/docker-agent/pkg/chatserver"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 func TestServeChatConversationFailedTurnDoesNotAdvanceCache(t *testing.T) {
 	modelServer := newRecordingChatCompletionsServer(t)
 
 	agentFile := filepath.Join(t.TempDir(), "agent.yaml")
+	modelName := "e2e-" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	agentYAML := fmt.Appendf(nil, `version: "9"
 
 providers:
-  e2e:
+  %[2]s:
     api_type: openai_chatcompletions
-    base_url: %s/v1
+    base_url: %[1]s/v1
 
 models:
-  e2e-model:
-    provider: e2e
-    model: e2e-model
+  %[2]s:
+    provider: %[2]s
+    model: %[2]s
     max_tokens: 64
 
 agents:
   root:
-    model: e2e-model
+    model: %[2]s
     description: E2E chat server agent
     instruction: Reply concisely.
-`, modelServer.URL())
+`, modelServer.URL(), modelName)
 	require.NoError(t, os.WriteFile(agentFile, agentYAML, 0o644))
 
-	addr := freeTCPAddr(t)
+	var listenConfig net.ListenConfig
+	ln, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	os.Unsetenv("DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND")
-	t.Setenv("DOCKER_AGENT_MODELS_GATEWAY", "")
-	t.Setenv("CAGENT_MODELS_GATEWAY", "")
-	t.Setenv("OPENAI_API_KEY", "DUMMY")
-
-	var stdout, stderr bytes.Buffer
+	runConfig := &config.RuntimeConfig{
+		Config: config.Config{WorkingDir: t.TempDir()},
+		EnvProviderForTests: &testEnvProvider{
+			environment.DockerDesktopTokenEnv: "DUMMY",
+			"OPENAI_API_KEY":                  "DUMMY",
+		},
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- root.Execute(ctx, nil, &stdout, &stderr,
-			"--cache-dir", filepath.Join(t.TempDir(), "cache"),
-			"--config-dir", filepath.Join(t.TempDir(), "config"),
-			"--data-dir", filepath.Join(t.TempDir(), "data"),
-			"serve", "chat",
-			"--listen", addr,
-			"--conversations-max", "10",
-			"--request-timeout", "2s",
-			agentFile,
-		)
+		errCh <- chatserver.Run(ctx, agentFile, chatserver.Options{
+			RunConfig:                runConfig,
+			ConversationsMaxSessions: 10,
+			RequestTimeout:           2 * time.Second,
+		}, ln)
 	}()
-	baseURL := "http://" + addr
+	baseURL := "http://" + ln.Addr().String()
 	waitForChatServer(t, baseURL)
 	defer func() {
 		cancel()
 		select {
 		case err := <-errCh:
-			if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-				require.NoError(t, err, "stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				require.NoError(t, err)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("chat server did not stop")
@@ -140,7 +144,7 @@ func newRecordingChatCompletionsServer(t *testing.T) *recordingChatCompletionsSe
 
 		if lastUserMessage(req.Messages) == "please fail" {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"error":{"message":"forced failure","type":"server_error"}}`)
 			return
 		}
@@ -253,15 +257,6 @@ func writeSSEData(w http.ResponseWriter, payload any) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-}
-
-func freeTCPAddr(t *testing.T) string {
-	t.Helper()
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	return ln.Addr().String()
 }
 
 func waitForChatServer(t *testing.T, baseURL string) {

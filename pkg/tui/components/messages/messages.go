@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/lrucache"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -27,12 +28,14 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -107,6 +110,20 @@ type Model interface {
 	// keyed by the owning message's index in sess.Messages; nil when the
 	// caller cannot resolve generated media.
 	LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd
+	LoadedItemCount() int
+	// RemovePendingSessionPosition shifts restored message positions after durable withdrawal.
+	RemovePendingSessionPosition(position int)
+	// FinalizeStreamedAssistant settles the streamed tail of an assistant
+	// message against its committed content (a MessageAddedEvent):
+	// alreadyShown drops the trailing streamed bubbles (the message came with
+	// the transcript snapshot and is on screen), otherwise the tail is
+	// finalized in place with the canonical content — creating the bubbles if
+	// streaming deltas were missed entirely. Never touches scroll state.
+	FinalizeStreamedAssistant(agentName, content, reasoning string, alreadyShown bool) tea.Cmd
+	// InvalidateRenderCaches drops all cached message renders so the next View
+	// re-renders with current styling (e.g. after the agent color registry
+	// changes on a TeamInfoEvent that arrived after a session restore).
+	InvalidateRenderCaches()
 
 	// StopAnimations unregisters every view from the animation coordinator.
 	// Call it when the list is discarded or its host view goes away, so
@@ -144,6 +161,10 @@ type Model interface {
 	// FocusAt gives focus and selects the message at the given screen coordinates.
 	// Falls back to the default Focus behavior if no message is found at that position.
 	FocusAt(x, y int) tea.Cmd
+
+	// SubagentNodeAt returns the subagent node id referenced by the subagent
+	// tool message at the given screen coordinates, if any.
+	SubagentNodeAt(x, y int) (subagent.NodeID, bool)
 }
 
 // renderedItem represents a cached rendered message with position information
@@ -221,6 +242,7 @@ type model struct {
 	selection selectionState
 
 	sessionState SessionState
+	subagents    *subagentindex.Index
 	scrollview   *scrollview.Model
 
 	xPos, yPos int
@@ -231,8 +253,15 @@ type model struct {
 	deferredTail      []string
 
 	// Message selection state
-	selectedMessageIndex int  // Index of selected message (-1 = no selection)
-	focused              bool // Whether the messages component is focused
+	selectedMessageIndex int // Index of selected message (-1 = no selection)
+	// loadedItemCount is the length of the item snapshot last rendered by
+	// LoadFromSession (0 when never loaded), taken from the same copy as the
+	// rendered items. loadedMessageCount is how many view messages that
+	// render produced: reconciliation never reaches below it, so snapshot
+	// bubbles are untouchable even when adjacent to streamed ones.
+	loadedItemCount    int
+	loadedMessageCount int
+	focused            bool // Whether the messages component is focused
 
 	// Inline editing state
 	inlineEditMsgIndex      int            // Index of message being edited (-1 = not editing)
@@ -253,8 +282,8 @@ type model struct {
 }
 
 // New creates a new message list component
-func New(ar *animation.Runtime, sessionState SessionState) Model {
-	return newModel(ar, 120, 24, sessionState)
+func New(ar *animation.Runtime, sessionState SessionState, indexes ...*subagentindex.Index) Model {
+	return newModel(ar, 120, 24, sessionState, indexes...)
 }
 
 // NewScrollableView creates a simple scrollable view for displaying messages in dialogs
@@ -263,13 +292,17 @@ func NewScrollableView(ar *animation.Runtime, width, height int, sessionState Se
 	return newModel(ar, width, height, sessionState)
 }
 
-func newModel(ar *animation.Runtime, width, height int, sessionState SessionState) *model {
+func newModel(ar *animation.Runtime, width, height int, sessionState SessionState, indexes ...*subagentindex.Index) *model {
 	sv := scrollview.New(
 		scrollview.WithReserveScrollbarSpace(true),
 	)
 	sv.SetSize(width, height)
 	if ar == nil {
 		panic("messages: nil animation runtime")
+	}
+	var index *subagentindex.Index
+	if len(indexes) > 0 {
+		index = indexes[0]
 	}
 	return &model{
 		ar:                   ar,
@@ -279,6 +312,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 		renderedItems:        lrucache.New[int, renderedItem](renderedItemsCacheSize),
 		urlSpans:             newURLSpanCache(),
 		sessionState:         sessionState,
+		subagents:            index,
 		scrollview:           sv,
 		selectedMessageIndex: -1,
 		inlineEditMsgIndex:   -1,
@@ -1468,9 +1502,10 @@ func (m *model) ensureAllItemsRendered() {
 		return
 	}
 
-	// A cache smaller than the item count would evict every entry during the
-	// sequential scan below, making each rebuild a full re-render.
-	m.renderedItems.EnsureCapacity(len(m.views))
+	// Size once for restored history so its initial sequential rebuild does not
+	// churn, but do not grow without bound as live entries arrive. Historical
+	// entries naturally age out through the LRU after the loaded snapshot.
+	m.renderedItems.EnsureCapacity(max(renderedItemsCacheSize, m.loadedMessageCount))
 
 	if len(m.views) == 0 {
 		m.renderedLines = nil
@@ -1633,6 +1668,15 @@ func (m *model) invalidateAllItems() {
 	m.invalidateView()
 }
 
+func (m *model) InvalidateRenderCaches() {
+	for _, view := range m.views {
+		if mv, ok := view.(message.Model); ok {
+			mv.InvalidateRenderCache()
+		}
+	}
+	m.invalidateAllItems()
+}
+
 // finalizePreviousMessageView releases per-message render state on the most
 // recent message.Model view (if any) before a new top-level entry is
 // appended. The renderCache and IncrementalRenderer are pure caches — dropping
@@ -1740,10 +1784,21 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	shouldAutoScroll := !m.userHasScrolled
 
 	m.finalizePreviousMessageView()
-	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.sessionState.SetPreviousMessage(msg)
-	m.views = append(m.views, view)
+
+	// Keep the pending-response spinner pinned at the tail: content that
+	// arrives while waiting (e.g. runtime-injected subagent notes) slots in
+	// above it, preserving removeSpinner's tail invariant.
+	if tail := len(m.messages) - 1; tail >= 0 &&
+		msg.Type != types.MessageTypeSpinner &&
+		m.messages[tail].Type == types.MessageTypeSpinner {
+		m.messages = slices.Insert(m.messages, tail, msg)
+		m.views = slices.Insert(m.views, tail, view)
+	} else {
+		m.messages = append(m.messages, msg)
+		m.views = append(m.views, view)
+	}
 	m.renderDirty = true
 	m.invalidateView()
 
@@ -1782,7 +1837,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 		}
 
 		// Create new reasoning block
-		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState)
+		block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
 		block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 		block.SetSize(m.contentWidth(), 0)
 
@@ -1819,9 +1874,16 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 
 	var cmds []tea.Cmd
 
+	// One consistent snapshot: rendered items and the recorded length
+	// (loadedItemCount) must come from the same copy, or a message committed
+	// between the two reads would be both rendered and replayed from events.
+	items := sess.ItemsSnapshot()
+	m.loadedItemCount = len(items)
+	defer func() { m.loadedMessageCount = len(m.messages) }()
+
 	// First pass: collect tool results by ToolCallID
 	toolResults := make(map[string]string)
-	for _, item := range sess.Messages {
+	for _, item := range items {
 		if !item.IsMessage() {
 			continue
 		}
@@ -1831,7 +1893,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 		}
 	}
 
-	for pos, item := range sess.Messages {
+	for pos, item := range items {
 		if item.IsError() {
 			errMsg := types.Error(item.Error.Message)
 			appendSessionMessage(errMsg, m.createMessageView(errMsg))
@@ -1842,7 +1904,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 		}
 
 		smsg := item.Message
-		if smsg.Implicit {
+		if smsg.Implicit || smsg.Pending {
 			continue
 		}
 
@@ -2050,6 +2112,93 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 	return nil
 }
 
+// LoadedItemCount reports the length of the item snapshot last rendered by
+// LoadFromSession — everything at a session position below it is already on
+// screen when merging with a live stream.
+func (m *model) LoadedItemCount() int { return m.loadedItemCount }
+
+// FinalizeStreamedAssistant settles the streamed tail of an assistant message
+// against its committed content (see the Model interface docs). The streamed
+// tail is the trailing run of assistant-text and reasoning-block messages
+// from agentName rendered AFTER the transcript snapshot — snapshot bubbles
+// are never touched, even when adjacent. Standalone tool bubbles are keyed by
+// tool-call id and update themselves, so they are never part of the tail.
+func (m *model) FinalizeStreamedAssistant(agentName, content, reasoning string, alreadyShown bool) tea.Cmd {
+	// Locate the streamed tail, bounded by the snapshot render.
+	start := len(m.messages)
+	for start > m.loadedMessageCount {
+		msg := m.messages[start-1]
+		isStreamed := msg.Sender == agentName &&
+			(msg.Type == types.MessageTypeAssistant || msg.Type == types.MessageTypeAssistantReasoningBlock)
+		if !isStreamed {
+			break
+		}
+		start--
+	}
+
+	if alreadyShown {
+		// The committed message came with the transcript snapshot and is on
+		// screen; the streamed tail duplicates it.
+		if start == len(m.messages) {
+			return nil
+		}
+		m.messages = m.messages[:start]
+		m.views = m.views[:start]
+		if m.selectedMessageIndex >= len(m.messages) {
+			m.selectedMessageIndex = -1
+		}
+		if m.hoveredMessageIndex >= len(m.messages) {
+			m.hoveredMessageIndex = -1
+		}
+		m.invalidateAllItems()
+		m.renderDirty = true
+		return nil
+	}
+
+	// Finalize the committed message's bubbles in place with the canonical
+	// committed content — self-healing for any streaming delta the viewer
+	// missed. Scan backwards for the LAST streamed message only: its text
+	// bubble, and the reasoning block that opens it (a second text bubble
+	// means we crossed into an earlier message).
+	textIdx, reasonIdx := -1, -1
+scan:
+	for i := len(m.messages) - 1; i >= start; i-- {
+		switch m.messages[i].Type {
+		case types.MessageTypeAssistant:
+			if textIdx != -1 {
+				break scan
+			}
+			textIdx = i
+		case types.MessageTypeAssistantReasoningBlock:
+			reasonIdx = i
+			break scan
+		}
+	}
+
+	var cmds []tea.Cmd
+	if reasoning != "" {
+		if reasonIdx != -1 {
+			if block, ok := m.views[reasonIdx].(*reasoningblock.Model); ok {
+				block.SetReasoning(reasoning)
+				m.messages[reasonIdx].Content = reasoning
+				m.invalidateItem(reasonIdx)
+			}
+		} else {
+			cmds = append(cmds, m.addReasoningBlock(agentName, reasoning))
+		}
+	}
+	if content != "" {
+		if textIdx != -1 {
+			m.messages[textIdx].Content = content
+			m.views[textIdx].(message.Model).SetMessage(m.messages[textIdx])
+			m.invalidateItem(textIdx)
+		} else {
+			cmds = append(cmds, m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content)))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	m.removeSpinner()
 
@@ -2063,8 +2212,8 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	lastIdx := len(m.messages) - 1
 	lastMsg := m.messages[lastIdx]
 
-	// Append to existing assistant message from same agent
-	if lastMsg.Type == types.MessageTypeAssistant && lastMsg.Sender == agentName {
+	// Append to an existing post-snapshot assistant message from the same agent.
+	if lastIdx >= m.loadedMessageCount && lastMsg.Type == types.MessageTypeAssistant && lastMsg.Sender == agentName {
 		if m.userHasScrolled {
 			if len(m.deferredTail) == 0 {
 				m.deferredTailIndex = lastIdx
@@ -2074,13 +2223,6 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 		}
 		materializeCmd := m.materializeDeferredTail()
 		cmd := m.views[lastIdx].(message.Model).AppendContent(content)
-		// While scrolled away from the tail, the viewport and its geometry are
-		// unchanged. Retain the exact content but defer markdown rendering and
-		// transcript splicing until the tail becomes visible again.
-		if m.userHasScrolled {
-			m.renderedItems.Delete(lastIdx)
-			return tea.Batch(materializeCmd, cmd)
-		}
 		m.refreshRenderedItem(lastIdx)
 		m.visualGeneration++
 		return tea.Batch(materializeCmd, cmd)
@@ -2163,8 +2305,10 @@ func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
 	lastIdx := len(m.messages) - 1
 	lastMsg := m.messages[lastIdx]
 
-	// Append to existing reasoning block for this agent
-	if lastMsg.Type == types.MessageTypeAssistantReasoningBlock && lastMsg.Sender == agentName {
+	// Append to existing reasoning block for this agent — but never merge
+	// into a snapshot-rendered block (streamed content is always a new
+	// message; see AppendToLastMessage).
+	if lastIdx >= m.loadedMessageCount && lastMsg.Type == types.MessageTypeAssistantReasoningBlock && lastMsg.Sender == agentName {
 		if block, ok := m.views[lastIdx].(*reasoningblock.Model); ok {
 			block.AppendReasoning(content)
 			lastMsg.Content += content // Keep content in sync for copying
@@ -2230,8 +2374,14 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)
 
-	m.messages = append(m.messages, msg)
-	m.views = append(m.views, block)
+	// Same tail-spinner pinning as addMessage.
+	if tail := len(m.messages) - 1; tail >= 0 && m.messages[tail].Type == types.MessageTypeSpinner {
+		m.messages = slices.Insert(m.messages, tail, msg)
+		m.views = slices.Insert(m.views, tail, layout.Model(block))
+	} else {
+		m.messages = append(m.messages, msg)
+		m.views = append(m.views, block)
+	}
 	m.sessionState.SetPreviousMessage(msg)
 	m.renderDirty = true
 
@@ -2292,7 +2442,7 @@ func (m *model) totalScrollableHeight() int {
 
 // Helper methods
 func (m *model) createToolCallView(msg *types.Message) layout.Model {
-	view := tool.New(m.ar, msg, m.sessionState)
+	view := tool.New(m.ar, msg, m.sessionState, m.subagents)
 	view.SetSize(m.contentWidth(), 0)
 	return view
 }
@@ -2332,7 +2482,7 @@ func (m *model) removeSpinner() {
 			m.views = m.views[:lastIdx]
 		}
 		m.messages = m.messages[:lastIdx]
-		// The spinner is always at the tail, so other indices are unchanged
+		// The spinner is normally at the tail, so other indices are unchanged
 		// and their cached entries remain valid. Only the joined renderedLines
 		// references the now-removed spinner, so we drop it and force a rejoin
 		// on the next render. The LRU itself never held a spinner entry
@@ -2347,6 +2497,29 @@ func (m *model) removeSpinner() {
 		m.urlSpans.clear()
 		m.renderDirty = true
 		m.invalidateView()
+		return
+	}
+
+	// Defensive fallback: a spinner buried mid-list (the tail invariant was
+	// broken by a direct append) would otherwise be stuck forever. Rare path,
+	// so the full cache invalidation the index shift requires is acceptable.
+	for i := range slices.Backward(m.messages) {
+		if m.messages[i].Type != types.MessageTypeSpinner {
+			continue
+		}
+		if i < len(m.views) {
+			animation.StopView(m.views[i])
+			m.views = slices.Delete(m.views, i, i+1)
+		}
+		m.messages = slices.Delete(m.messages, i, i+1)
+		if m.selectedMessageIndex > i {
+			m.selectedMessageIndex--
+		}
+		if m.hoveredMessageIndex > i {
+			m.hoveredMessageIndex--
+		}
+		m.invalidateAllItems()
+		return
 	}
 }
 
@@ -2554,6 +2727,18 @@ func (m *model) mouseToLineCol(x, y int) (line, col int) {
 	adjustedX := max(0, x-m.xPos)
 	adjustedY := max(0, y-m.yPos)
 	return m.scrollOffset + adjustedY, adjustedX
+}
+
+// SubagentNodeAt returns the subagent node id referenced by the subagent tool
+// message at the given screen coordinates ("Spawned x (id)" and friends), so
+// a click on it can open a tab attached to that subagent.
+func (m *model) SubagentNodeAt(x, y int) (subagent.NodeID, bool) {
+	line, _ := m.mouseToLineCol(x, y)
+	msgIdx, _, _ := m.globalLineToMessageLine(line)
+	if msgIdx < 0 || msgIdx >= len(m.messages) {
+		return "", false
+	}
+	return subagenttool.NodeIDFor(m.messages[msgIdx])
 }
 
 func (m *model) isMouseOnScrollbar(x, y int) bool {
@@ -2797,5 +2982,19 @@ func (m *model) StopAnimations() {
 	m.slackAnimationSub.Stop()
 	for _, v := range m.views {
 		animation.StopView(v)
+	}
+}
+
+func (m *model) RemovePendingSessionPosition(position int) {
+	if position < 0 {
+		return
+	}
+	for _, msg := range m.messages {
+		if msg.SessionPosition != nil && *msg.SessionPosition > position {
+			*msg.SessionPosition--
+		}
+	}
+	if position < m.loadedItemCount {
+		m.loadedItemCount--
 	}
 }

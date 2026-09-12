@@ -159,6 +159,9 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 	// gateway mode skips it too.
 	if gateway == "" && !globalOptions.GeneratingTitle() && !globalOptions.Compacting() {
 		if err := configureModel(ctx, httpClient, baseURL, cfg.Model, backendCfg, parsed.mode, parsed.rawRuntimeFlags); err != nil {
+			if hasExplicitConfigureOptions(backendCfg, parsed.mode, parsed.rawRuntimeFlags) {
+				return nil, fmt.Errorf("failed to configure DMR model %q: %w", cfg.Model, err)
+			}
 			slog.DebugContext(ctx, "model configure via API skipped or failed", "error", err)
 		}
 	}
@@ -176,6 +179,11 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		engine:         engine,
 		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF, false, false),
 	}, nil
+}
+
+func hasExplicitConfigureOptions(backend configureBackendConfig, mode *string, rawRuntimeFlags string) bool {
+	return backend.ContextSize != nil || len(backend.RuntimeFlags) > 0 || backend.Speculative != nil ||
+		backend.KeepAlive != nil || backend.VLLM != nil || backend.LlamaCpp != nil || mode != nil || rawRuntimeFlags != ""
 }
 
 // convertMessages converts chat messages to OpenAI format and merges consecutive

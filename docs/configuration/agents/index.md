@@ -21,7 +21,8 @@ agents:
     description: string # Optional: what this agent does
     instruction: string | [list] # Optional: system prompt, mutually exclusive with instruction_file; a list is joined by blank lines
     instruction_file: string | [list] # Optional: load the system prompt from one or more files relative to this config (mutually exclusive with instruction)
-    sub_agents: [list] # Optional: local or external sub-agent references
+    sub_agents: [list] # Optional: synchronous transfer_task delegation; use when this agent hands off one task and waits for its result
+    subagents: [list] # Optional: asynchronous delegation; use for concurrent persistent children the agent can message/read/stop
     toolsets: [list] # Optional: tool configurations (use `type: rag` for RAG sources)
     fallback: # Optional: fallback config
       models: [list]
@@ -93,7 +94,8 @@ agents:
 | `description`               | string  | ✗        | Brief description of the agent's purpose. Used by coordinators to decide delegation.                                                                                          |
 | `instruction`               | string \| array  | ✗        | System prompt that defines the agent's behavior, personality, and constraints. Accepts a single string or a list of strings; list items are concatenated in order, separated by a blank line (handy for a shared preamble, or for flavors to append to with `instruction+`).                                                      |
 | `instruction_file`          | string \| array  | ✗        | Path(s) to a file or files (relative to the config file's directory) whose contents become the agent's instruction, loaded at startup. Accepts a single path or a list; multiple files are concatenated in order, separated by a blank line. Mutually exclusive with `instruction`. Each path must be a local relative path inside the config directory (absolute paths and `..` traversal are rejected). Only supported for local file-based configs, not OCI/URL sources. See [External Instruction Files](#external-instruction-files) below. |
-| `sub_agents`                | array   | ✗        | List of agent names or external OCI references this agent can delegate to. Supports local agents, registry references (e.g., `myorg/agent:tag`), and named references (`name:reference`). Automatically enables the `transfer_task` tool. Pin external OCI references to a digest (`name@sha256:…`) to skip the per-run registry lookup that tag references incur. See [External Sub-Agents](../../concepts/multi-agent/index.md#external-sub-agents-from-registries). |
+| `sub_agents`                | array   | ✗        | Synchronous delegation for a task this agent hands off with `transfer_task` and waits to receive back. Use it for one-at-a-time specialist calls and for external OCI agents. Avoid declaring it together with `subagents`. Supports local agents, registry references (e.g., `myorg/agent:tag`), and named references (`name:reference`). Pin external OCI references to a digest (`name@sha256:…`) to skip the per-run registry lookup that tag references incur. See [External Sub-Agents](../../concepts/multi-agent/index.md#external-sub-agents-from-registries). |
+| `subagents`                 | array   | ✗        | Asynchronous delegation for concurrent, persistent local children that keep working while the caller continues and can receive follow-ups. Each entry is an agent name or `{agent, name, description}`. Declaring `subagents` gives the agent `spawn_subagent`, `send_message`, `read_subagent`, and `stop_subagent`. Avoid declaring both delegation modes on the same agent. See [Async Subagents](#async-subagents) below. |
 | `toolsets`                  | array   | ✗        | List of tool configurations. See [Tool Config](../tools/index.md).                                                                                                        |
 | `fallback`                  | object  | ✗        | Automatic model failover configuration.                                                                                                                                       |
 | `add_date`                  | boolean | ✗        | When `true`, injects the current date into the agent's context.                                                                                                               |
@@ -582,6 +584,44 @@ The `{{session_id}}` token is replaced at invocation time with the current sessi
 URLs are validated before being handed to the OS opener: a parseable URL with a non-empty scheme is required, and flag-like inputs (those starting with `-`) are rejected to prevent argument injection.
 
 See [`examples/url_commands.yaml`](https://github.com/docker/docker-agent/blob/main/examples/url_commands.yaml) for a complete example.
+
+## Async Subagents
+
+`sub_agents` delegates synchronously: `transfer_task` hands the conversation
+over and waits for the answer. `subagents` is the asynchronous alternative for
+fan-out work. The parent spawns one or more subagents, keeps working or simply
+ends its turn, and is **resumed automatically** when a subagent sends a message
+or finishes — there is nothing to poll.
+
+```yaml
+agents:
+  root:
+    model: anthropic/claude-sonnet-5
+    description: Coordinator that fans work out to async subagents
+    instruction: Spawn subagents for independent work, then end your turn.
+    subagents:
+      - agent: web_researcher
+        name: web                     # alias the model addresses
+        description: Finds recent public information and cites sources
+      - code_analyst                  # bare name: uses the agent's own description
+
+  web_researcher:
+    model: openai/gpt-5.6-sol
+    description: Searches the web and summarises findings with sources
+    instruction: Research the topic; send progress updates, finish with sources.
+
+  code_analyst:
+    model: anthropic/claude-sonnet-5
+    description: Analyses the local codebase
+    instruction: Inspect the codebase and report concrete findings.
+```
+
+Each subagent runs in its own session with its own context window. The parent
+can address a running subagent with `send_message`, inspect its transcript with
+`read_subagent`, and `stop_subagent` it. In the TUI the sidebar shows the live
+subagent tree; a subagent's session can be opened in a tab, and the tree is
+restored when the session is loaded again. See
+[`examples/async_subagents.yaml`](https://github.com/docker/docker-agent/blob/main/examples/async_subagents.yaml).
 
 ## Read-Only Agents
 

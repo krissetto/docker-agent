@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -16,7 +17,7 @@ func TestExtractAttachmentsFromSession(t *testing.T) {
 
 	sess := session.New()
 	p := newTestChatPage(t)
-	p.app = app.New(t.Context(), queueTestRuntime{}, sess)
+	p.app = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(queueTestRuntime{}))
 
 	msg := session.Message{
 		Message: chat.Message{

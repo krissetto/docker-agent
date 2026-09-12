@@ -1,0 +1,21 @@
+# syntax=docker/runtime-kit:3@sha256:0e1bf74bd59778999dedd36fc784e71f4202e6dc1a730ae1420f2589df56d62f
+schemaVersion: "3"
+kind: workload
+displayName: Custom Docker Agent async subagents
+capabilities:
+  - type: com.docker.runtime/network-policy@1
+    config:
+      runtime:
+        allow:
+          - api.openai.com
+  - type: com.docker.runtime/credential@1
+    config:
+      service: openai
+      phase: runtime
+      apiKey:
+        name: OPENAI_API_KEY
+        proxyManaged: true
+        inject:
+          - domain: api.openai.com
+            header: Authorization
+            format: "Bearer %s"

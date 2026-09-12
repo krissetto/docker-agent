@@ -18,6 +18,8 @@ const (
 	TargetSidebarAgent
 	TargetSidebarUsageContext
 	TargetSidebarUsage
+	TargetSidebarSubagent
+	TargetSidebarParent
 	TargetSidebarContent
 	TargetMessages
 )
@@ -28,6 +30,11 @@ const (
 type HitTest struct {
 	page      *chatPage
 	AgentName string // populated when At() returns TargetSidebarAgent
+	// SubagentID is the subagent node id when At() returns
+	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
+	// when it returns TargetSidebarParent.
+	SubagentID      string
+	ParentSessionID string
 }
 
 // NewHitTest creates a hit tester for the given chat page.
@@ -120,6 +127,12 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarUsageContext
 	case sidebar.ClickUsage:
 		return TargetSidebarUsage
+	case sidebar.ClickSubagent:
+		h.SubagentID = agentName
+		return TargetSidebarSubagent
+	case sidebar.ClickSubagentParent:
+		h.ParentSessionID = agentName
+		return TargetSidebarParent
 	default:
 		return TargetSidebarContent
 	}

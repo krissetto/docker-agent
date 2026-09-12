@@ -68,11 +68,11 @@ func testLoadSessionThenClickEditLabel(t *testing.T, newTab bool, width int) {
 		// past session in a new tab instead of replacing in-place.
 		initialSess.AddMessage(session.UserMessage("existing chat"))
 	}
-	application := app.New(ctx, rt, initialSess)
+	application := app.New(ctx, nil, initialSess, runtime.SessionBinding{}, app.WithRuntimeServices(rt))
 
-	spawner := func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+	spawner := func(ctx context.Context, workingDir string) (SpawnedSession, error) {
 		sess := session.New()
-		return app.New(ctx, rt, sess), sess, func() {}, nil
+		return SpawnedSession{App: app.New(ctx, nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(rt)), Session: sess, Ownership: RuntimeBorrowed}, nil
 	}
 
 	model := New(ctx, spawner, application, dir, func() {})

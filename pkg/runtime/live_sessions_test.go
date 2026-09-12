@@ -33,15 +33,17 @@ type providerStep struct {
 // stepProvider serves scripted steps in call order. Calls beyond the script
 // return an empty stream.
 type stepProvider struct {
-	id    string
-	mu    sync.Mutex
-	steps []providerStep
+	id       string
+	mu       sync.Mutex
+	steps    []providerStep
+	messages [][]chat.Message
 }
 
 func (p *stepProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero(p.id) }
 
-func (p *stepProvider) CreateChatCompletionStream(ctx context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+func (p *stepProvider) CreateChatCompletionStream(ctx context.Context, messages []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
 	p.mu.Lock()
+	p.messages = append(p.messages, append([]chat.Message(nil), messages...))
 	var step providerStep
 	if len(p.steps) > 0 {
 		step = p.steps[0]
@@ -144,8 +146,8 @@ func TestLiveSessions_ListsRootAndActiveChildren(t *testing.T) {
 	childB := newWorkerSession("child-b")
 	childB.SetUsage(10, 5)
 
-	streamA := rt.RunStream(t.Context(), childA)
-	streamB := rt.RunStream(t.Context(), childB)
+	streamA := rt.runExecution(t.Context(), childA)
+	streamB := rt.runExecution(t.Context(), childB)
 	waitClosed(t, startedA, "first child turn")
 	waitClosed(t, startedB, "second child turn")
 
@@ -412,7 +414,7 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
 	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
+	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "first child turn")
 
 	requestEvents := make(chan Event, 64)
@@ -470,7 +472,7 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
 	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
+	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "final child turn")
 
 	requestEvents := make(chan Event, 64)
@@ -504,77 +506,41 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 	}
 }
 
-// TestCompactLiveSession_DuplicateSessionIDsCompactOnlyTargetEntry is the
-// regression test for the boundary drain consuming the exact
-// *liveSessionEntry of its own RunStream: with two simultaneously registered
-// sessions sharing one ID, a request queued to the currently targetable
-// (latest) entry must not be consumed by the older stream's iteration
-// boundary or teardown drain, and must mutate only the newer in-memory
-// session.
-func TestCompactLiveSession_DuplicateSessionIDsCompactOnlyTargetEntry(t *testing.T) {
+// TestCompactLiveSession_StaleDuplicateEntryCannotDrainCurrentEntry is the
+// regression test for the boundary drain consuming the exact *liveSessionEntry
+// of its own RunStream: if an older entry with the same session ID is finishing
+// while a newer entry is targetable, a request queued to the current entry must
+// not be consumed by the stale entry's iteration boundary or teardown drain.
+func TestCompactLiveSession_StaleDuplicateEntryCannotDrainCurrentEntry(t *testing.T) {
 	t.Parallel()
 
-	startedA := make(chan struct{})
-	releaseA := make(chan struct{})
-	startedB := make(chan struct{})
-	releaseB := make(chan struct{})
 	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// Older stream turn 1: a tool call keeps the stream live (the loop
-		// continues to execute the call) while the newer stream registers
-		// under the same session ID. A tool-call turn is used rather than a
-		// bare content turn so the older stream deterministically reaches a
-		// second model call regardless of the bare-EOF stop rule.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_older", "unknown_tool").
-			AddToolCallArguments("call_older", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: startedA, release: releaseA},
-		// Newer stream turn 1, gated so it stays live throughout. A tool-call
-		// turn is used (matching the older stream) so the newer stream reaches
-		// an iteration boundary where the pending compaction can run.
-		{stream: newStreamBuilder().
-			AddToolCallName("call_newer", "unknown_tool").
-			AddToolCallArguments("call_newer", "{}").
-			AddToolCallStopWithUsage(1, 1).
-			Build(), started: startedB, release: releaseB},
-		// Older stream turn 2: natural stop. With the request left alone this
-		// is the older stream's next model call (after the tool result feeds
-		// back in); stealing the request would consume this step as the
-		// compaction summary instead.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
-		// The compaction summary call, drained by the newer stream's own
-		// iteration boundary.
+		// The compaction summary call, drained by the newer entry only.
 		{stream: newStreamBuilder().AddContent("latest summary").AddStopWithUsage(10, 5).Build()},
-		// Newer stream turn 2: natural stop.
-		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
 	older := newWorkerSession("dup-id")
 	newer := newWorkerSession("dup-id")
+	olderEntry := rt.registerLiveSession(older)
+	newerEntry := rt.registerLiveSession(newer)
 
-	streamA := rt.RunStream(t.Context(), older)
-	waitClosed(t, startedA, "older stream turn")
-	streamB := rt.RunStream(t.Context(), newer)
-	waitClosed(t, startedB, "newer stream turn")
-
-	// The registry now maps dup-id to the newer entry, so the request is
-	// queued there.
+	// The registry maps dup-id to the newer entry, so the request is queued there.
 	requestEvents := make(chan Event, 64)
 	require.NoError(t, rt.CompactLiveSession(t.Context(), "dup-id", "", NewChannelSink(requestEvents)))
 
-	// Run the older stream to completion (iteration boundary plus teardown
-	// drain) while the request is still pending for the newer entry.
-	close(releaseA)
-	drainStream(t, streamA)
+	// The stale entry's boundary and teardown drains must not consume the newer
+	// entry's request.
+	rt.runQueuedCompaction(t.Context(), olderEntry)
+	rt.finishLiveSession(t.Context(), olderEntry)
+	assert.Empty(t, older.LastSummary(), "the stale entry must not execute the current entry's request")
 
-	assert.Empty(t, older.LastSummary(), "the older stream must not execute the newer entry's request")
 	err := rt.CompactLiveSession(t.Context(), "dup-id", "", nil)
-	require.Error(t, err, "the queued request must survive the older stream's boundary and teardown")
+	require.Error(t, err, "the queued request must survive the stale entry's drains")
 	assert.Contains(t, err.Error(), "already pending")
 
-	close(releaseB)
-	drainStream(t, streamB)
+	rt.runQueuedCompaction(t.Context(), newerEntry)
+	rt.finishLiveSession(t.Context(), newerEntry)
 	close(requestEvents)
 
 	var outcomes []string
@@ -605,7 +571,7 @@ func TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent(t *testing.T)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	child := newWorkerSession("child-1")
-	stream := rt.RunStream(ctx, child)
+	stream := rt.runExecution(ctx, child)
 	waitClosed(t, started, "child turn")
 
 	requestEvents := make(chan Event, 64)
@@ -661,7 +627,7 @@ func TestCompactLiveSession_HookVetoSynthesizesSkipped(t *testing.T) {
 	))
 
 	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
+	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "first child turn")
 
 	requestEvents := make(chan Event, 64)
@@ -712,7 +678,7 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 	}
 
 	child := newWorkerSession("child-1")
-	stream := rt.RunStream(t.Context(), child)
+	stream := rt.runExecution(t.Context(), child)
 	close(release)
 	drainStream(t, stream)
 

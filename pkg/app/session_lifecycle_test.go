@@ -5,7 +5,6 @@ import (
 	"io"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -15,25 +14,25 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
 
-type sessionCaptureRuntime struct {
-	mockRuntime
-
-	started chan *session.Session
-	release chan struct{}
+// sessionCaptureHandle records submission at the session ownership boundary.
+type sessionCaptureHandle struct {
+	projectionSession
+	sess   *session.Session
+	inputs []runtime.TurnInput
 }
 
-func (r *sessionCaptureRuntime) RunStream(_ context.Context, sess *session.Session) <-chan runtime.Event {
-	ch := make(chan runtime.Event)
-	go func() {
-		defer close(ch)
-		r.started <- sess
-		<-r.release
-	}()
-	return ch
+func (h *sessionCaptureHandle) Submit(ctx context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	if err := ctx.Err(); err != nil {
+		return runtime.Submission{}, err
+	}
+	h.inputs = append(h.inputs, input)
+	h.sess.AddMessage(session.UserMessage(input.Content))
+	return runtime.Submission{SessionID: h.sess.ID, TurnID: "turn"}, nil
 }
 
 // backgroundSessionCaptureRuntime records the session handed to the runtime
@@ -51,10 +50,23 @@ func (r *backgroundSessionCaptureRuntime) EmitStartupInfo(_ context.Context, ses
 	<-r.release
 }
 
-func (r *backgroundSessionCaptureRuntime) RunSkillFork(_ context.Context, sess *session.Session, _ skillstool.RunSkillArgs, _ runtime.EventSink) (*tools.ToolCallResult, error) {
-	r.started <- sess
-	<-r.release
-	return nil, nil
+type backgroundSkillHandle struct {
+	projectionSession
+	runtime *backgroundSessionCaptureRuntime
+	sess    *session.Session
+}
+
+func (*backgroundSkillHandle) Skills(context.Context) ([]skills.Skill, error) { return nil, nil }
+func (*backgroundSkillHandle) ResolveSkillCommand(_ context.Context, input string) (string, error) {
+	return input, nil
+}
+
+func (h *backgroundSkillHandle) StartSkillFork(_ context.Context, _ string, _ skillstool.RunSkillArgs) error {
+	go func() {
+		h.runtime.started <- h.sess
+		<-h.runtime.release
+	}()
+	return nil
 }
 
 // TestAppBackgroundWorkSnapshotsSessionBeforeReplace covers every App entry
@@ -74,7 +86,7 @@ func TestAppBackgroundWorkSnapshotsSessionBeforeReplace(t *testing.T) {
 			app.reEmitStartupInfo(ctx)
 		}},
 		{name: "RunSkillFork", run: func(app *App, ctx context.Context, cancel context.CancelFunc) {
-			app.RunSkillFork(ctx, cancel, "skill", "task", nil)
+			require.NoError(t, app.StartSkillForkOperation(ctx, "operation", "skill", "task"))
 		}},
 	} {
 		t.Run(entryPoint.name, func(t *testing.T) {
@@ -84,9 +96,9 @@ func TestAppBackgroundWorkSnapshotsSessionBeforeReplace(t *testing.T) {
 				release: make(chan struct{}),
 			}
 			app := &App{
-				runtime: rt,
-				session: oldSession,
-				events:  make(chan tea.Msg, 16),
+				runtime:      rt,
+				currentState: sessionState{handle: &backgroundSkillHandle{runtime: rt, sess: oldSession}, session: oldSession},
+				events:       make(chan any, 16),
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			entryPoint.run(app, ctx, cancel)
@@ -106,117 +118,58 @@ func TestAppBackgroundWorkSnapshotsSessionBeforeReplace(t *testing.T) {
 }
 
 func TestAppRunKeepsWorkScopedToOriginalSession(t *testing.T) {
-	for _, entryPoint := range []struct {
-		name string
-		run  func(*App, context.Context, context.CancelFunc)
-	}{
-		{name: "Run", run: func(app *App, ctx context.Context, cancel context.CancelFunc) {
-			app.Run(ctx, cancel, "hello", nil)
-		}},
-		{name: "RunWithMessage", run: func(app *App, ctx context.Context, cancel context.CancelFunc) {
-			app.RunWithMessage(ctx, cancel, session.UserMessage("hello"))
-		}},
-	} {
-		t.Run(entryPoint.name, func(t *testing.T) {
+	for _, withMessage := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Run", true: "RunWithMessage"}[withMessage], func(t *testing.T) {
 			oldSession := session.New()
-			rt := &sessionCaptureRuntime{
-				started: make(chan *session.Session, 1),
-				release: make(chan struct{}),
+			handle := &sessionCaptureHandle{sess: oldSession}
+			a := &App{ctx: t.Context, runtime: &mockRuntime{}, currentState: sessionState{session: oldSession, handle: handle}, events: make(chan any, 4)}
+			if withMessage {
+				a.RunWithMessage(t.Context(), func() {}, session.UserMessage("hello"))
+			} else {
+				a.Run(t.Context(), func() {}, "hello", nil)
 			}
-			app := &App{
-				runtime: rt,
-				session: oldSession,
-				events:  make(chan tea.Msg, 4),
-			}
-			ctx, cancel := context.WithCancel(t.Context())
-			entryPoint.run(app, ctx, cancel)
-
-			require.Same(t, oldSession, <-rt.started)
 			newSession := session.New()
-			app.ReplaceSession(t.Context(), newSession)
-			close(rt.release)
-
-			event := <-app.events
-			stop, ok := event.(*runtime.StreamStoppedEvent)
-			require.True(t, ok)
-			assert.Equal(t, oldSession.ID, stop.SessionID)
+			a.ReplaceSession(t.Context(), newSession)
+			require.Len(t, handle.inputs, 1)
+			assert.Equal(t, "hello", handle.inputs[0].Content)
 			assert.Equal(t, 1, oldSession.MessageCount())
 			assert.Zero(t, newSession.MessageCount())
 		})
 	}
 }
 
-type signalingLocker struct {
-	locked   chan struct{}
-	release  chan struct{}
-	unlocked chan struct{}
-}
-
-func (l *signalingLocker) Lock() {
-	close(l.locked)
-	<-l.release
-}
-
-func (l *signalingLocker) Unlock() {
-	close(l.unlocked)
-}
-
-func TestAppRunDropsCanceledWorkWaitingForStreamGuard(t *testing.T) {
-	for _, entryPoint := range []struct {
-		name string
-		run  func(*App, context.Context, context.CancelFunc)
-	}{
-		{name: "Run", run: func(app *App, ctx context.Context, cancel context.CancelFunc) {
-			app.Run(ctx, cancel, "hello", nil)
-		}},
-		{name: "RunWithMessage", run: func(app *App, ctx context.Context, cancel context.CancelFunc) {
-			app.RunWithMessage(ctx, cancel, session.UserMessage("hello"))
-		}},
-	} {
-		t.Run(entryPoint.name, func(t *testing.T) {
-			oldSession := session.New()
-			guard := &signalingLocker{
-				locked:   make(chan struct{}),
-				release:  make(chan struct{}),
-				unlocked: make(chan struct{}),
-			}
-			rt := &sessionCaptureRuntime{
-				started: make(chan *session.Session, 1),
-				release: make(chan struct{}),
-			}
-			app := &App{
-				ctx:         func() context.Context { return t.Context() },
-				runtime:     rt,
-				session:     oldSession,
-				events:      make(chan tea.Msg, 4),
-				streamGuard: guard,
-			}
+// Admission cancellation is enforced by the handle; App no longer owns a stream guard.
+func TestAppRunDoesNotAdmitCanceledInput(t *testing.T) {
+	for _, withMessage := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Run", true: "RunWithMessage"}[withMessage], func(t *testing.T) {
+			sess := session.New()
+			handle := &sessionCaptureHandle{sess: sess}
+			a := &App{ctx: t.Context, runtime: &mockRuntime{}, currentState: sessionState{session: sess, handle: handle}, events: make(chan any, 4)}
 			ctx, cancel := context.WithCancel(t.Context())
-			entryPoint.run(app, ctx, cancel)
-			<-guard.locked
-			app.NewSession()
-			close(guard.release)
-			<-guard.unlocked
-
-			assert.Zero(t, oldSession.MessageCount())
-			assert.Zero(t, app.Session().MessageCount())
-			assert.Empty(t, rt.started)
+			cancel()
+			if withMessage {
+				a.RunWithMessage(ctx, cancel, session.UserMessage("hello"))
+			} else {
+				a.Run(ctx, cancel, "hello", nil)
+			}
+			assert.Empty(t, handle.inputs)
+			assert.Zero(t, sess.MessageCount())
 		})
 	}
 }
 
-type blockingTitleProvider struct {
+type lifecycleBlockingTitleProvider struct {
 	started chan struct{}
 	release chan struct{}
 }
 
-func (p *blockingTitleProvider) ID() modelsdev.ID {
+func (p *lifecycleBlockingTitleProvider) ID() modelsdev.ID {
 	return modelsdev.NewID("test", "title")
 }
 
-func (p *blockingTitleProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *lifecycleBlockingTitleProvider) BaseConfig() base.Config { return base.Config{} }
 
-func (p *blockingTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+func (p *lifecycleBlockingTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
 	close(p.started)
 	<-p.release
 	return &singleTitleStream{}, nil
@@ -239,22 +192,22 @@ func (s *singleTitleStream) Recv() (chat.MessageStreamResponse, error) {
 func (*singleTitleStream) Close() {}
 
 func TestGenerateTitleKeepsOriginalSession(t *testing.T) {
-	provider := &blockingTitleProvider{
+	provider := &lifecycleBlockingTitleProvider{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 	}
 	oldSession := session.New()
 	app := &App{
-		runtime:  &mockRuntime{},
-		session:  oldSession,
-		events:   make(chan tea.Msg, 1),
-		titleGen: sessiontitle.New(provider),
+		runtime:      &mockRuntime{},
+		currentState: sessionState{session: oldSession, handle: &titleSession{sess: oldSession}},
+		events:       make(chan any, 1),
+		titleGen:     sessiontitle.New(provider),
 	}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.generateTitle(t.Context(), oldSession, []string{"hello"})
+		app.generateTitle(t.Context(), app.state(), []string{"hello"})
 	}()
 	<-provider.started
 	newSession := session.New()
@@ -264,7 +217,5 @@ func TestGenerateTitleKeepsOriginalSession(t *testing.T) {
 
 	assert.Equal(t, "Original title", oldSession.TitleSnapshot())
 	assert.Empty(t, newSession.TitleSnapshot())
-	titleEvent, ok := (<-app.events).(*runtime.SessionTitleEvent)
-	require.True(t, ok)
-	assert.Equal(t, oldSession.ID, titleEvent.SessionID)
+	assert.Empty(t, app.events, "title events belong to the canonical handle observation, not a second App emission")
 }

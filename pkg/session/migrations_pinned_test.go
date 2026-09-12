@@ -2,11 +2,55 @@ package session
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
+
+func TestAsyncStateTablesCreatedByCatalogOnFreshDatabase(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.ExecContext(t.Context(), `CREATE TABLE sessions (id TEXT PRIMARY KEY, messages TEXT, created_at TEXT)`)
+	require.NoError(t, err)
+	require.NoError(t, NewMigrationManager(db).InitializeMigrations(t.Context()))
+
+	for _, tc := range []struct {
+		id    int
+		name  string
+		table string
+	}{{32, "032_add_subagent_trees_table", "subagent_trees"}, {33, "033_add_session_todos_table", "session_todos"}} {
+		var name string
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT name FROM migrations WHERE id = ?`, tc.id).Scan(&name))
+		assert.Equal(t, tc.name, name)
+		var table string
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tc.table).Scan(&table))
+		assert.Equal(t, tc.table, table)
+	}
+}
+
+func TestAsyncStateMigrationsAdoptLegacyTables(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.ExecContext(t.Context(), `
+		CREATE TABLE sessions (id TEXT PRIMARY KEY, messages TEXT, created_at TEXT);
+		CREATE TABLE subagent_trees (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, snapshot TEXT NOT NULL);
+		CREATE TABLE session_todos (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, todos TEXT NOT NULL);
+	`)
+	require.NoError(t, err)
+	require.NoError(t, NewMigrationManager(db).InitializeMigrations(t.Context()))
+
+	var count int
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM migrations WHERE id IN (32, 33)`).Scan(&count))
+	assert.Equal(t, 2, count)
+}
 
 // TestMigrationCatalogIsContentPinned is the append-only enforcement
 // reviewers asked for on PR #2646: "while it looks ok in this context,
@@ -39,7 +83,7 @@ func TestMigrationCatalogIsContentPinned(t *testing.T) {
 
 	got := digestMigrationCatalog(getAllMigrations())
 
-	const wantDigest = "e2d764e159e9c952596cdac552c860df2df3c90d5cf00fdac0ff4d9eda5b15ba"
+	const wantDigest = "a1c8418ba17590778d44cd1c22ba6b5ade0c29be3514b1775b6589286abe21d9"
 	if got != wantDigest {
 		t.Fatalf(`migration catalogue content has changed.
 

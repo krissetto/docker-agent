@@ -46,7 +46,7 @@ func TestWithCommandEvaluatorFactory(t *testing.T) {
 				})
 			}))
 			require.Zero(t, calls, "factory must remain lazy")
-			assert.Equal(t, name, ResolveCommand(t.Context(), r, "/test hello"))
+			assert.Equal(t, name, ResolveCommand(t.Context(), r, "root", "/test hello"))
 			assert.Equal(t, 1, calls)
 		})
 	}
@@ -62,21 +62,21 @@ func TestCommandEvaluatorOverridesGlobal(t *testing.T) {
 		calls++
 		return commandEvaluatorFunc(func(context.Context, string, []string) string { return "global" })
 	})
-	assert.Equal(t, "global", ResolveCommand(t.Context(), r, "/test"))
+	assert.Equal(t, "global", ResolveCommand(t.Context(), r, "root", "/test"))
 	assert.Equal(t, 1, calls, "registration after construction remains supported")
 
 	disabled := commandRuntime(t, WithCommandEvaluatorFactory(nil))
-	assert.Equal(t, "${args[0]}", ResolveCommand(t.Context(), disabled, "/test"))
+	assert.Equal(t, "${args[0]}", ResolveCommand(t.Context(), disabled, "root", "/test"))
 	assert.Equal(t, 1, calls)
 
 	local := commandRuntime(t, WithCommandEvaluatorFactory(func([]tools.Tool) CommandEvaluator {
 		return commandEvaluatorFunc(func(context.Context, string, []string) string { return "local" })
 	}))
-	assert.Equal(t, "local", ResolveCommand(t.Context(), local, "/test"))
+	assert.Equal(t, "local", ResolveCommand(t.Context(), local, "root", "/test"))
 	assert.Equal(t, 1, calls)
 
 	// Third-party Runtime implementations keep the global fallback.
 	mock := &mockRuntime{commands: types.Commands{"test": {Instruction: "${args[0]}"}}}
-	assert.Equal(t, "global", ResolveCommand(t.Context(), mock, "/test"))
+	assert.Equal(t, "global", ResolveCommand(t.Context(), mock, "root", "/test"))
 	assert.Equal(t, 2, calls)
 }

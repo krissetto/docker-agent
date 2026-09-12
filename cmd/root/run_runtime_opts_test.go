@@ -42,9 +42,7 @@ func TestRuntimeOptsPassesRunConfigWorkingDirToRuntime(t *testing.T) {
 	rt, err := runtime.New(t.Context(), loaded.Team, (&runExecFlags{}).runtimeOpts(loaded, runConfig, session.NewInMemorySessionStore(), "root")...)
 	require.NoError(t, err)
 
-	localRt, ok := rt.(*runtime.LocalRuntime)
-	require.True(t, ok)
-	got := reflect.ValueOf(localRt).Elem().FieldByName("workingDir").String()
+	got := reflect.ValueOf(rt).Elem().FieldByName("workingDir").String()
 
 	assert.Equal(t, workingDir, got)
 }

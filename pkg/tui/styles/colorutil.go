@@ -189,6 +189,17 @@ func MutedContrastFg(bg color.Color) color.Color {
 	return RGBToColor(rf+(tgt-rf)*s, gf+(tgt-gf)*s, bf+(tgt-bf)*s)
 }
 
+// Brighten returns c with its HSL lightness raised by amount (0..1), clamped
+// to white. Use it for hover/focus emphasis of already-colored text (e.g. an
+// agent accent color) without changing its hue.
+func Brighten(c color.Color, amount float64) color.Color {
+	r, g, b := ColorToRGB(c)
+	h, s, l := rgbToHSL(r, g, b)
+	l = math.Min(1, l+amount)
+	r, g, b = hslToRGB(h, s, l)
+	return RGBToColor(r, g, b)
+}
+
 // EnsureContrast returns fg unchanged if it already meets minIndicatorContrast
 // against bg. Otherwise it progressively blends fg toward white (on dark bg) or
 // black (on light bg) until the threshold is met, preserving the original hue direction.

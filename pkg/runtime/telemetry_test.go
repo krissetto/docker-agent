@@ -154,7 +154,7 @@ func TestRuntime_RecordsSessionStartAndEnd(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("hi"))
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	got := rec.snapshot()

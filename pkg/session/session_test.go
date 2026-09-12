@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,15 +12,20 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
 )
+
+type todoInstructionToolSet struct{}
+
+func (todoInstructionToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (todoInstructionToolSet) Instructions() string {
+	return "## Todo Tools\n\nTrack task progress with todos."
+}
 
 func todoToolSet(t *testing.T) tools.ToolSet {
 	t.Helper()
-	toolSet, err := todo.CreateToolSet(latest.Toolset{})
-	require.NoError(t, err)
-	return toolSet
+	return todoInstructionToolSet{}
 }
 
 func TestTrimMessagesWithToolCalls(t *testing.T) {
@@ -284,6 +290,63 @@ func TestGetMessages_CacheControl(t *testing.T) {
 
 	assert.Contains(t, messages[1].Content, "Todo Tools")
 	assert.True(t, messages[1].CacheControl)
+}
+
+func TestGetMessages_AsyncSubagentHarnessPromptFirst(t *testing.T) {
+	t.Parallel()
+
+	harness := subagent.HarnessPrompt([]subagent.AllowedSubagent{{Agent: "worker", Description: "Does work"}})
+	testAgent := agent.New("root", "user instructions",
+		agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}),
+		agent.WithAsyncHarnessPrompt(harness),
+		agent.WithToolSets(todoToolSet(t)),
+	)
+
+	messages := New().GetMessages(testAgent)
+	require.Len(t, messages, 3)
+
+	assert.True(t, strings.HasPrefix(messages[0].Content, "# Async subagents"))
+	assert.Contains(t, messages[0].Content, "message a colleague you")
+	assert.Contains(t, messages[0].Content, "- worker: Does work")
+	assert.Equal(t, "user instructions", messages[1].Content)
+	assert.Contains(t, messages[2].Content, "Todo Tools")
+	assert.False(t, messages[0].CacheControl)
+	assert.False(t, messages[1].CacheControl)
+	assert.True(t, messages[2].CacheControl)
+
+	count := 0
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, "# Async subagents") {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "harness prompt should not be duplicated as a toolset instruction")
+}
+
+func TestGetMessages_AsyncChildRolePrompt(t *testing.T) {
+	t.Parallel()
+	leaf := agent.New("leaf", "domain instructions")
+	messages := New(WithAsyncSubagent(true)).GetMessages(leaf)
+	require.Len(t, messages, 2)
+	assert.Contains(t, messages[0].Content, "# Spawned subagent role")
+	assert.Equal(t, "domain instructions", messages[1].Content)
+
+	rootMessages := New().GetMessages(leaf)
+	require.Len(t, rootMessages, 1)
+	assert.NotContains(t, rootMessages[0].Content, "Spawned subagent role")
+}
+
+func TestGetMessages_IgnoresAsyncHarnessPromptWithoutSubagents(t *testing.T) {
+	t.Parallel()
+
+	testAgent := agent.New("root", "instructions",
+		agent.WithAsyncHarnessPrompt(subagent.HarnessPrompt([]subagent.AllowedSubagent{{Agent: "worker"}})),
+	)
+
+	messages := New().GetMessages(testAgent)
+	require.Len(t, messages, 1)
+	assert.Equal(t, "instructions", messages[0].Content)
+	assert.NotContains(t, messages[0].Content, "# Async subagents")
 }
 
 func TestGetMessages_CacheControlWithSummary(t *testing.T) {
@@ -785,6 +848,45 @@ func TestTransferTaskPromptExcludesParents(t *testing.T) {
 	assert.NotContains(t, subAgentMsg, "planner", "should NOT list parent agent planner as a valid transfer target")
 }
 
+func TestTransferTaskPromptIsConciseAndSelfContained(t *testing.T) {
+	t.Parallel()
+
+	librarian := agent.New("librarian", "", agent.WithDescription("Library agent"))
+	root := agent.New("root", "You are the root agent", agent.WithDescription("Root agent"))
+	agent.WithSubAgents(librarian)(root)
+
+	messages := New().GetMessages(root)
+	var prompt string
+	for _, msg := range messages {
+		if msg.Role == chat.MessageRoleSystem && strings.Contains(msg.Content, "transfer_task") {
+			prompt = strings.Join(strings.Fields(msg.Content), " ")
+			break
+		}
+	}
+	require.NotEmpty(t, prompt)
+
+	for _, expected := range []string{
+		"only with one of the listed agent IDs: librarian",
+		"Delegate when another listed agent is best suited, or answer directly when you are",
+		"emit only the transfer_task tool call",
+		"In task, directly include the relevant context, constraints, absolute file paths, and expected output",
+		"Name: librarian | Description: Library agent",
+	} {
+		assert.Contains(t, prompt, expected)
+	}
+	for _, rejected := range []string{
+		"fresh handoff",
+		"fresh session",
+		"lacking context",
+		"conversation history",
+		"does not inherit",
+		"inherit your conversation",
+		"inheritance",
+	} {
+		assert.NotContains(t, strings.ToLower(prompt), rejected)
+	}
+}
+
 func TestNormalizeMessageContent(t *testing.T) {
 	t.Parallel()
 
@@ -904,6 +1006,41 @@ func TestNormalizeMessageContent(t *testing.T) {
 	}
 }
 
+func TestPromotePendingUserMessagePreservesLaterSummaryKeptTail(t *testing.T) {
+	t.Parallel()
+	pending := UserMessage("new turn")
+	pending.Pending, pending.Accepted, pending.TurnID = true, true, "turn-new"
+	sess := New(WithMessages([]Item{
+		NewMessageItem(UserMessage("older history")),
+		NewMessageItem(pending),
+		NewMessageItem(&Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "kept assistant"}}),
+		{Summary: "older summary", FirstKeptEntry: 2},
+	}))
+
+	require.True(t, sess.PromotePendingUserMessageByTurnID("turn-new"))
+	items := sess.MessagesSnapshot()
+	assert.Equal(t, 1, items[2].FirstKeptEntry)
+	messages := sess.GetMessages(agent.New("root", ""))
+	require.Len(t, messages, 3)
+	assert.Contains(t, messages[0].Content, "Session Summary: older summary")
+	assert.Equal(t, "kept assistant", messages[1].Content)
+	assert.Equal(t, "new turn", messages[2].Content)
+}
+
+func TestPromotePendingUserMessagePreservesSentinelBoundary(t *testing.T) {
+	t.Parallel()
+	pending := UserMessage("pending")
+	pending.Pending, pending.Accepted, pending.TurnID = true, true, "turn"
+	sess := New(WithMessages([]Item{
+		NewMessageItem(pending),
+		NewMessageItem(&Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "tail"}}),
+		{Summary: "summary", FirstKeptEntry: 3},
+	}))
+	require.True(t, sess.PromotePendingUserMessageByTurnID("turn"))
+	items := sess.MessagesSnapshot()
+	assert.Equal(t, 3, items[1].FirstKeptEntry)
+}
+
 func TestCompactionInput(t *testing.T) {
 	t.Parallel()
 
@@ -980,6 +1117,39 @@ func TestCompactionInput(t *testing.T) {
 		require.Len(t, messages, 3)
 		assert.Equal(t, []int{2, 3, 4}, sessIndices)
 		assert.Equal(t, len(items), itemCount)
+	})
+
+	t.Run("pending messages are excluded from compaction input", func(t *testing.T) {
+		t.Parallel()
+		pending := &Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "queued"}, Pending: true, Accepted: true, TurnID: "turn-2"}
+		sess := New(WithMessages([]Item{
+			newMsg(chat.MessageRoleUser, "included"),
+			NewMessageItem(pending),
+			newMsg(chat.MessageRoleAssistant, "reply"),
+		}))
+
+		messages, sessIndices, itemCount := sess.CompactionInput()
+		require.Len(t, messages, 2)
+		assert.Equal(t, []string{"included", "reply"}, []string{messages[0].Content, messages[1].Content})
+		assert.Equal(t, []int{0, 2}, sessIndices)
+		assert.Equal(t, 3, itemCount, "snapshot count still includes durable queue items")
+	})
+
+	t.Run("prior summary kept tail also excludes pending messages", func(t *testing.T) {
+		t.Parallel()
+		pending := &Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "queued-tail"}, Pending: true, Accepted: true}
+		sess := New(WithMessages([]Item{
+			newMsg(chat.MessageRoleUser, "kept"),
+			NewMessageItem(pending),
+			{Summary: "prior", FirstKeptEntry: 1},
+			newMsg(chat.MessageRoleAssistant, "new"),
+		}))
+
+		messages, sessIndices, _ := sess.CompactionInput()
+		require.Len(t, messages, 2)
+		assert.Contains(t, messages[0].Content, "Session Summary: prior")
+		assert.Equal(t, "new", messages[1].Content)
+		assert.Equal(t, []int{2, 3}, sessIndices)
 	})
 
 	t.Run("returned messages are independent copies safe to mutate", func(t *testing.T) {

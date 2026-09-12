@@ -143,7 +143,7 @@ func TestHarnessAgentResumesPersistedSession(t *testing.T) {
 
 	loaded, err := store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "thread-123", harnessSessionIDFor(loaded, rt.CurrentAgent()))
+	assert.Equal(t, "thread-123", harnessSessionIDFor(loaded, rt.currentAgent()))
 
 	useHarnessShim(t, "codex", `{"type":"thread.started","thread_id":"thread-123"}
 {"type":"item.completed","item":{"type":"agent_message","text":"second answer"}}
@@ -164,7 +164,7 @@ func TestHarnessAgentResumesPersistedSession(t *testing.T) {
 	loaded.AddMessage(session.UserMessage("third question"))
 	events := collectRuntimeEvents(t, rt, loaded)
 	assert.True(t, hasEventType(t, events, &ErrorEvent{}))
-	assert.Equal(t, "thread-123", harnessSessionIDFor(loaded, rt.CurrentAgent()))
+	assert.Equal(t, "thread-123", harnessSessionIDFor(loaded, rt.currentAgent()))
 }
 
 // TestHarnessRejectsImplicitOrMissingUserPrompt checks the genuine empty-prompt
@@ -245,7 +245,7 @@ func TestHarnessSubSessionIDSurvivesReconstruction(t *testing.T) {
 
 	reconstructed, err := store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "child-thread", harnessSessionIDFor(reconstructed, rt.CurrentAgent()))
+	assert.Equal(t, "child-thread", harnessSessionIDFor(reconstructed, rt.currentAgent()))
 }
 
 func TestHarnessToolCallCompletes(t *testing.T) {
@@ -376,7 +376,7 @@ func newHarnessRuntimeWithStore(t *testing.T, harnessType string, store session.
 func collectRuntimeEvents(t *testing.T, rt *LocalRuntime, sess *session.Session) []Event {
 	t.Helper()
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 	return events

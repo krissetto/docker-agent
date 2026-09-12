@@ -40,10 +40,12 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		}
 	}
 
+	resume := r.interactions.resumeChannel(sess.ID)
+	defer r.interactions.removeResume(sess.ID, resume)
 	d := &toolexec.Dispatcher{
 		Tracer:      r.tracer,
 		Hooks:       &hookDispatcher{r: r, events: events},
-		Resume:      r.resumeChan,
+		Resume:      resume,
 		AgentFor:    r.resolveSessionAgent,
 		Permissions: r.permissionCheckers,
 		Handlers:    handlers,
@@ -51,7 +53,7 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 			return r.recall(ctx, QueuedMessage{Content: message})
 		},
 	}
-	return d.Process(ctx, sess, calls, agentTools, &sinkEmitter{events: events})
+	return d.Process(ctx, sess, calls, agentTools, &sinkEmitter{runtime: r, events: events, sessionID: sess.ID})
 }
 
 // permissionCheckers returns the ordered list of permission checkers to
@@ -86,7 +88,9 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 // runtime's event channel; new dispatcher events grow this type in
 // lockstep with the [toolexec.Emitter] interface.
 type sinkEmitter struct {
-	events EventSink
+	runtime   *LocalRuntime
+	events    EventSink
+	sessionID string
 }
 
 func (e *sinkEmitter) EmitToolCall(toolCall tools.ToolCall, tool tools.Tool, agentName string) {
@@ -102,7 +106,15 @@ func (e *sinkEmitter) EmitToolCallResponse(toolCallID string, tool tools.Tool, r
 }
 
 func (e *sinkEmitter) EmitToolCallConfirmation(toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) {
-	e.events.Emit(ToolCallConfirmation(toolCall, tool, agentName, metadata))
+	event := ToolCallConfirmation(toolCall, tool, agentName, metadata).(*ToolCallConfirmationEvent)
+	event.SessionID = e.sessionID
+	event.RequestID = toolCall.ID
+	if e.runtime != nil {
+		if d, ok := e.runtime.sessionDrivers.Lookup(e.sessionID); ok {
+			d.RegisterInteraction(toolCall.ID, InteractionConfirmation, event)
+		}
+	}
+	e.events.Emit(event)
 }
 
 func (e *sinkEmitter) EmitHookBlocked(toolCall tools.ToolCall, tool tools.Tool, message, agentName string) {
@@ -111,6 +123,12 @@ func (e *sinkEmitter) EmitHookBlocked(toolCall tools.ToolCall, tool tools.Tool, 
 
 func (e *sinkEmitter) EmitMessageAdded(sessionID string, msg *session.Message, agentName string) {
 	e.events.Emit(MessageAdded(sessionID, msg, agentName))
+}
+
+// EmitMessageAddedAt implements [toolexec.PositionalEmitter], stamping the
+// session commit position viewers use as a reconciliation anchor.
+func (e *sinkEmitter) EmitMessageAddedAt(sessionID string, msg *session.Message, agentName string, position int) {
+	e.events.Emit(MessageAddedAt(sessionID, msg, agentName, position))
 }
 
 // hookDispatcher adapts the runtime's per-agent [hooks.Executor] machinery
@@ -134,31 +152,12 @@ func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *sessi
 	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source, safetyLabel)
 }
 
-// allowSourceFor maps a permission-checker source label to the
-// corresponding approval-decision source classifier. Thin wrapper kept
-// in the runtime package so tests can pin the stable mapping without
-// reaching into [toolexec]'s internals.
-func allowSourceFor(checkerSource string) string {
-	if checkerSource == "session permissions" {
-		return ApprovalSourceSessionPermissionsAllow
-	}
-	return ApprovalSourceTeamPermissionsAllow
-}
-
-// denySourceFor mirrors allowSourceFor for the deny path.
-func denySourceFor(checkerSource string) string {
-	if checkerSource == "session permissions" {
-		return ApprovalSourceSessionPermissionsDeny
-	}
-	return ApprovalSourceTeamPermissionsDeny
-}
-
 // addAgentMessage records a chat message in the session and emits the
 // resulting MessageAdded event. Used by the loop for assistant messages
 // and max-iteration stop messages. The dispatcher emits its own variant
 // directly via the [toolexec.Emitter] interface.
 func addAgentMessage(sess *session.Session, a *agent.Agent, msg *chat.Message, events EventSink) {
 	agentMsg := session.NewAgentMessage(a.Name(), msg)
-	sess.AddMessage(agentMsg)
-	events.Emit(MessageAdded(sess.ID, agentMsg, a.Name()))
+	pos := sess.AddMessageAt(agentMsg)
+	events.Emit(MessageAddedAt(sess.ID, agentMsg, a.Name(), pos))
 }

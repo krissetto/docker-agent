@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -13,178 +12,207 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
-	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
-	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
-	"github.com/docker/docker-agent/pkg/tui/components/notification"
-	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
-// newTestChatPage creates a minimal chatPage for testing queue behavior.
-// Note: This only initializes fields needed for queue testing. The nil app
-// means busy sends fall back to the local queue instead of steering.
-// processMessage cannot be called without full initialization.
+// newTestChatPage creates a session-bound page for presentation-focused tests.
 func newTestChatPage(t *testing.T) *chatPage {
 	t.Helper()
-	sessionState := &service.SessionState{}
-
-	return &chatPage{
-		sidebar:      sidebar.New(animation.NewRuntime(), t.Context(), sessionState),
-		sessionState: sessionState,
-		working:      true, // Start busy so messages get queued
-	}
+	sess := session.New()
+	a, _ := newSessionTestApp(t, sess, nil, nil)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+	return p
 }
 
 type immediateCommandMsg struct{ arg string }
 
-type queueTestRuntime struct{}
+type queueTestServices struct {
+	skillset *skillstool.ToolSet
+}
 
-func (queueTestRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
+// queueTestRuntime preserves the shared fixture name while exposing only app.Services.
+type queueTestRuntime = queueTestServices
+
+func (s queueTestServices) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
 	return runtime.CurrentAgentInfo{}
 }
-func (queueTestRuntime) CurrentAgentName(context.Context) string                 { return "root" }
-func (queueTestRuntime) SetCurrentAgent(context.Context, string) error           { return nil }
-func (queueTestRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
-func (queueTestRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus      { return nil }
-func (queueTestRuntime) RestartToolset(context.Context, string) error            { return nil }
-func (queueTestRuntime) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {
-}
-func (queueTestRuntime) EmitAgentInfo(context.Context, runtime.EventSink) {}
-func (queueTestRuntime) ResetStartupInfo()                                {}
-func (queueTestRuntime) RunStream(context.Context, *session.Session) <-chan runtime.Event {
-	ch := make(chan runtime.Event)
-	close(ch)
-	return ch
-}
 
-func (queueTestRuntime) Run(context.Context, *session.Session) ([]session.Message, error) {
-	return nil, nil
-}
-func (queueTestRuntime) Resume(context.Context, runtime.ResumeRequest) {}
-func (queueTestRuntime) ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any, ...string) error {
-	return nil
-}
-func (queueTestRuntime) SessionStore() session.Store { return nil }
-func (queueTestRuntime) Summarize(context.Context, *session.Session, string, runtime.EventSink) {
-}
-func (queueTestRuntime) PermissionsInfo() *runtime.PermissionsInfo { return nil }
-func (queueTestRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet {
+func (s queueTestServices) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (s queueTestServices) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
+
+func (s queueTestServices) RestartToolset(context.Context, string) error                         { return nil }
+func (s queueTestServices) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {}
+func (s queueTestServices) EmitAgentInfo(context.Context, runtime.EventSink)                     {}
+func (s queueTestServices) ResetStartupInfo()                                                    {}
+func (s queueTestServices) SessionStore() session.Store                                          { return nil }
+
+func (s queueTestServices) PermissionsInfo() *runtime.PermissionsInfo { return nil }
+
+func (s queueTestServices) CurrentAgentSkillsToolset() *skillstool.ToolSet { return s.skillset }
+
+func (s queueTestServices) CurrentMCPPrompts(context.Context) map[string]tools.PromptInfo {
 	return nil
 }
 
-func (queueTestRuntime) RunSkillFork(context.Context, *session.Session, skillstool.RunSkillArgs, runtime.EventSink) (*tools.ToolCallResult, error) {
-	return nil, nil
-}
-
-func (queueTestRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.PromptInfo {
-	return nil
-}
-
-func (queueTestRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
+func (s queueTestServices) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
 	return "", nil
 }
 
-func (queueTestRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error {
+func (s queueTestServices) UpdateSessionTitle(context.Context, *session.Session, string) error {
 	return nil
 }
-func (queueTestRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
-func (queueTestRuntime) Steer(context.Context, runtime.QueuedMessage) error     { return nil }
-func (queueTestRuntime) FollowUp(context.Context, runtime.QueuedMessage) error  { return nil }
-func (queueTestRuntime) SetAgentModel(context.Context, string, string) error    { return nil }
-func (queueTestRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
+func (s queueTestServices) OnToolsChanged(func(runtime.Event))    {}
+func (s queueTestServices) OnBackgroundEvent(func(runtime.Event)) {}
+
+type sessionTestSession struct {
+	runtime.UnsupportedSessionHandle
+	mu             sync.Mutex
+	id             string
+	state          runtime.SessionState
+	submits        []runtime.TurnInput
+	sends          []runtime.TurnInput
+	retries        int
+	sendErr        error
+	submitErr      error
+	observation    runtime.Observation
+	compactPrompts []string
+	compactErr     error
+	steerQueued    bool
+	cancelable     map[string]bool
+	withdrawErr    error
 }
 
-func (queueTestRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
-}
-func (queueTestRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (queueTestRuntime) SupportsModelSwitching() bool                          { return false }
-func (queueTestRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (queueTestRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (queueTestRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (queueTestRuntime) QueueStatus() runtime.QueueStatus                      { return runtime.QueueStatus{} }
-func (queueTestRuntime) TogglePause(context.Context) (bool, error)             { return false, nil }
-func (queueTestRuntime) Close() error                                          { return nil }
-
-var _ runtime.Runtime = queueTestRuntime{}
-
-// skillDispatchRuntime records how a skill slash command is ultimately
-// executed so tests can assert it reaches the right resolution path:
-// fork skills via RunSkillFork, inline skills via the regular RunStream path.
-type skillDispatchRuntime struct {
-	queueTestRuntime
-
-	skillset *skillstool.ToolSet
-
-	mu            sync.Mutex
-	forkCalls     []skillstool.RunSkillArgs
-	runStreamRuns int
-	lastRun       string
-}
-
-func (r *skillDispatchRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet {
-	return r.skillset
-}
-
-func (r *skillDispatchRuntime) RunSkillFork(_ context.Context, sess *session.Session, args skillstool.RunSkillArgs, sink runtime.EventSink) (*tools.ToolCallResult, error) {
-	r.mu.Lock()
-	r.forkCalls = append(r.forkCalls, args)
-	r.mu.Unlock()
-
-	sink.Emit(runtime.StreamStopped(sess.ID, "", ""))
-	return tools.ResultSuccess("done"), nil
-}
-
-func (r *skillDispatchRuntime) RunStream(_ context.Context, sess *session.Session) <-chan runtime.Event {
-	r.mu.Lock()
-	r.runStreamRuns++
-	if items := sess.GetAllMessages(); len(items) > 0 {
-		r.lastRun = items[len(items)-1].Message.Content
+func (s *sessionTestSession) CancelPendingMessage(_ context.Context, turnID string) (bool, error) {
+	if s.withdrawErr != nil {
+		return false, s.withdrawErr
 	}
-	r.mu.Unlock()
-
-	ch := make(chan runtime.Event, 1)
-	ch <- runtime.StreamStopped(sess.ID, "", "")
-	close(ch)
-	return ch
-}
-
-func (r *skillDispatchRuntime) forkCallCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.forkCalls)
-}
-
-func (r *skillDispatchRuntime) lastForkArgs() skillstool.RunSkillArgs {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.forkCalls) == 0 {
-		return skillstool.RunSkillArgs{}
+	if !s.cancelable[turnID] {
+		return false, nil
 	}
-	return r.forkCalls[len(r.forkCalls)-1]
+	delete(s.cancelable, turnID)
+	return true, nil
 }
 
-func (r *skillDispatchRuntime) runStreamCallCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.runStreamRuns
+func (s *sessionTestSession) ID() string      { return s.id }
+func (*sessionTestSession) AgentName() string { return "root" }
+func (s *sessionTestSession) Metadata() runtime.SessionMetadata {
+	return runtime.SessionMetadata{SessionID: s.id, AgentName: "root"}
 }
 
-func (r *skillDispatchRuntime) lastRunMessage() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lastRun
+func (s *sessionTestSession) Compact(_ context.Context, prompt string, sink runtime.EventSink) error {
+	if s.compactErr != nil {
+		return s.compactErr
+	}
+	s.compactPrompts = append(s.compactPrompts, prompt)
+	sink.Emit(runtime.SessionCompactionCompleted(s.id, runtime.CompactionOutcomeApplied, "root"))
+	return nil
+}
+
+func (s *sessionTestSession) ResolveSkillCommand(_ context.Context, input string) (string, error) {
+	if input == "/services please" {
+		return "Use the following skill.\n\nUser's request: please\n\n<skill name=\"services\">\nservice instructions\n</skill>", nil
+	}
+	return "", nil
+}
+
+func (s *sessionTestSession) Submit(_ context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.submitErr != nil {
+		return runtime.Submission{}, s.submitErr
+	}
+	s.submits = append(s.submits, input)
+	return runtime.Submission{SessionID: s.id, TurnID: "submit"}, nil
+}
+
+func (s *sessionTestSession) Retry(context.Context) (runtime.Submission, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retries++
+	return runtime.Submission{SessionID: s.id, TurnID: "retry"}, nil
+}
+
+func (s *sessionTestSession) Steer(_ context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sendErr != nil {
+		return runtime.Submission{}, s.sendErr
+	}
+	s.sends = append(s.sends, input)
+	disposition := runtime.SubmissionDisposition("")
+	if s.steerQueued {
+		disposition = runtime.SubmissionDispositionQueued
+	}
+	return runtime.Submission{SessionID: s.id, TurnID: "send", Disposition: disposition}, nil
+}
+
+func (s *sessionTestSession) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+	return s.observation, nil
+}
+
+func (s *sessionTestSession) Status(context.Context) (runtime.SessionStatus, error) {
+	return runtime.SessionStatus{SessionID: s.id, AgentName: "root", State: s.state, Pending: len(s.submits)}, nil
+}
+
+func (*sessionTestSession) Respond(context.Context, runtime.InteractionResponse) error {
+	return nil
+}
+
+func (s *sessionTestSession) Cancel(context.Context, string) (runtime.CancelResult, error) {
+	return runtime.CancelResult{SessionID: s.id, Outcome: runtime.CancelAccepted}, nil
+}
+
+func (s *sessionTestSession) submitted() []runtime.TurnInput {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]runtime.TurnInput(nil), s.submits...)
+}
+
+func (s *sessionTestSession) sent() []runtime.TurnInput {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]runtime.TurnInput(nil), s.sends...)
+}
+
+type sessionTestRuntime struct{ handle *sessionTestSession }
+
+func (r *sessionTestRuntime) CreateSession(_ context.Context, sess *session.Session, _ runtime.SessionBinding) (runtime.SessionHandle, error) {
+	if r.handle == nil {
+		r.handle = &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled}
+	}
+	return r.handle, nil
+}
+
+func (r *sessionTestRuntime) SessionByID(id string) (runtime.SessionHandle, error) {
+	if r.handle != nil && r.handle.id == id {
+		return r.handle, nil
+	}
+	return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "lookup"}
+}
+func (*sessionTestRuntime) DeleteSession(context.Context, string) error { return nil }
+
+func newSessionTestApp(t *testing.T, sess *session.Session, services *queueTestServices, handle *sessionTestSession, opts ...app.Opt) (*app.App, *sessionTestSession) {
+	t.Helper()
+	if services == nil {
+		services = &queueTestServices{}
+	}
+	if handle == nil {
+		handle = &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled}
+	}
+	sessions := &sessionTestRuntime{handle: handle}
+	opts = append([]app.Opt{app.WithRuntimeServices(services)}, opts...)
+	return app.New(t.Context(), sessions, sess, runtime.SessionBinding{}, opts...), handle
 }
 
 func TestQueueFlow_BusyAgent_ImmediateSlashCommandBypassesQueue(t *testing.T) {
@@ -215,7 +243,7 @@ func TestQueueFlow_BusyAgent_BangCommandBypassesQueue(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), func() *app.App { a, _ := newSessionTestApp(t, sess, nil, nil); return a }(), service.NewSessionState(sess)).(*chatPage)
 	p.working = true
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -247,7 +275,7 @@ func TestQueueFlow_SkillCommand_DispatchesOnceWithoutLooping(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), queueTestRuntime{}, sess), service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), func() *app.App { a, _ := newSessionTestApp(t, sess, nil, nil); return a }(), service.NewSessionState(sess)).(*chatPage)
 
 	calls := 0
 	p.commandParser = commands.NewParser(commands.Category{
@@ -282,131 +310,11 @@ func TestQueueFlow_SkillCommand_DispatchesOnceWithoutLooping(t *testing.T) {
 	assert.Equal(t, 1, calls, "BypassQueue message must not be re-parsed into the command again")
 }
 
-func TestQueueFlow_BusyAgent_QueuesMessage(t *testing.T) {
-	t.Parallel()
-
-	p := newTestChatPage(t)
-	// newTestChatPage already sets working=true
-
-	// Send first explicitly queued message while busy
-	msg1 := messages.SendMsg{Content: "first message", Queue: true}
-	_, cmd := p.handleSendMsg(msg1)
-
-	// Should be queued
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "first message", p.messageQueue[0].content)
-	// Command should be a notification (not processMessage)
-	assert.NotNil(t, cmd)
-
-	// Send second message while still busy
-	msg2 := messages.SendMsg{Content: "second message", Queue: true}
-	_, _ = p.handleSendMsg(msg2)
-
-	require.Len(t, p.messageQueue, 2)
-	assert.Equal(t, "first message", p.messageQueue[0].content)
-	assert.Equal(t, "second message", p.messageQueue[1].content)
-
-	// Send third message
-	msg3 := messages.SendMsg{Content: "third message", Queue: true}
-	_, _ = p.handleSendMsg(msg3)
-
-	require.Len(t, p.messageQueue, 3)
-}
-
-func TestQueueFlow_QueueFull_RejectsMessage(t *testing.T) {
-	t.Parallel()
-
-	p := newTestChatPage(t)
-	// newTestChatPage sets working=true
-
-	// Fill the queue to max
-	for i := range maxQueuedMessages {
-		msg := messages.SendMsg{Content: "message", Queue: true}
-		_, _ = p.handleSendMsg(msg)
-		assert.Len(t, p.messageQueue, i+1)
-	}
-
-	require.Len(t, p.messageQueue, maxQueuedMessages)
-
-	// Try to add one more - should be rejected
-	msg := messages.SendMsg{Content: "overflow message", Queue: true}
-	_, cmd := p.handleSendMsg(msg)
-
-	// Queue size should not change
-	assert.Len(t, p.messageQueue, maxQueuedMessages)
-	// Should return a warning notification command
-	assert.NotNil(t, cmd)
-}
-
-func TestQueueFlow_PopFromQueue(t *testing.T) {
-	t.Parallel()
-
-	p := newTestChatPage(t)
-
-	// Queue some messages
-	p.handleSendMsg(messages.SendMsg{Content: "first", Queue: true})
-	p.handleSendMsg(messages.SendMsg{Content: "second", Queue: true})
-	p.handleSendMsg(messages.SendMsg{Content: "third", Queue: true})
-
-	require.Len(t, p.messageQueue, 3)
-
-	// Manually pop messages (simulating what processNextQueuedMessage does internally)
-	// Pop first
-	popped := p.messageQueue[0]
-	p.messageQueue = p.messageQueue[1:]
-	p.syncQueueToSidebar()
-
-	assert.Equal(t, "first", popped.content)
-	require.Len(t, p.messageQueue, 2)
-	assert.Equal(t, "second", p.messageQueue[0].content)
-	assert.Equal(t, "third", p.messageQueue[1].content)
-
-	// Pop second
-	popped = p.messageQueue[0]
-	p.messageQueue = p.messageQueue[1:]
-
-	assert.Equal(t, "second", popped.content)
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "third", p.messageQueue[0].content)
-
-	// Pop last
-	popped = p.messageQueue[0]
-	p.messageQueue = p.messageQueue[1:]
-
-	assert.Equal(t, "third", popped.content)
-	assert.Empty(t, p.messageQueue)
-}
-
-func TestQueueFlow_ClearQueue(t *testing.T) {
-	t.Parallel()
-
-	p := newTestChatPage(t)
-	// newTestChatPage sets working=true
-
-	// Queue some messages
-	p.handleSendMsg(messages.SendMsg{Content: "first", Queue: true})
-	p.handleSendMsg(messages.SendMsg{Content: "second", Queue: true})
-	p.handleSendMsg(messages.SendMsg{Content: "third", Queue: true})
-
-	require.Len(t, p.messageQueue, 3)
-
-	// Clear the queue
-	_, cmd := p.handleClearQueue()
-
-	assert.Empty(t, p.messageQueue)
-	assert.NotNil(t, cmd) // Success notification
-
-	// Clearing empty queue
-	_, cmd = p.handleClearQueue()
-	assert.Empty(t, p.messageQueue)
-	assert.NotNil(t, cmd) // Info notification
-}
-
 func TestReadOnly_RejectsMessages(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
-	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	a := func() *app.App { a, _ := newSessionTestApp(t, sess, nil, nil, app.WithReadOnly()); return a }()
 	require.True(t, a.IsReadOnly())
 
 	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
@@ -421,7 +329,7 @@ func TestReadOnly_AllowsSlashCommands(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
-	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	a := func() *app.App { a, _ := newSessionTestApp(t, sess, nil, nil, app.WithReadOnly()); return a }()
 	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.commandParser = commands.NewParser(commands.Category{
 		Name: "Test",
@@ -486,55 +394,29 @@ func dispatchTypedSkill(t *testing.T, p *chatPage, content string) {
 	}
 }
 
-// TestHandleSendMsg_ForkSkillRunsViaFork proves a fork-mode skill slash
-// command reaches RunSkillFork with the parsed name/task and never loops.
-func TestHandleSendMsg_ForkSkillRunsViaFork(t *testing.T) {
+// TestHandleSendMsg_SessionNativeSubmit verifies an inline skill is resolved before
+// it is submitted to the session. Fork-mode skills are intentionally
+// session-native unsupported and must not silently use classic fork execution.
+func TestHandleSendMsg_SessionNativeSubmitAndUnsupportedFork(t *testing.T) {
 	t.Parallel()
 
-	skillSet := skillstool.New([]skills.Skill{{
-		Name:          "services",
-		Description:   "List services",
-		Context:       "fork",
-		InlineContent: "# Services\nList repository services.",
-	}}, t.TempDir())
-	rt := &skillDispatchRuntime{skillset: skillSet}
+	inline := skillstool.New([]skills.Skill{{Name: "services", Description: "List services", InlineContent: "# Services\nList repository services."}}, t.TempDir())
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	a, handle := newSessionTestApp(t, sess, &queueTestServices{skillset: inline}, nil)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.commandParser = skillCommandParser("services")
-
 	dispatchTypedSkill(t, p, "/services please")
+	require.Eventually(t, func() bool { return len(handle.submitted()) == 1 }, time.Second, 10*time.Millisecond)
+	require.Len(t, handle.submitted(), 1)
+	assert.Contains(t, handle.submitted()[0].Content, `<skill name="services">`)
+	assert.Contains(t, handle.submitted()[0].Content, "User's request: please")
 
-	require.Eventually(t, func() bool { return rt.forkCallCount() == 1 }, time.Second, 10*time.Millisecond)
-	assert.Equal(t, "services", rt.lastForkArgs().Name)
-	assert.Equal(t, "please", rt.lastForkArgs().Task)
-	assert.Zero(t, rt.runStreamCallCount(), "fork skills must not use the inline RunStream path")
-	assert.Zero(t, sess.MessageCount(), "fork skill dispatch must not append an inline user message")
-}
-
-// TestHandleSendMsg_InlineSkillRunsViaResolveInput proves an inline skill
-// slash command is expanded and sent through the regular RunStream path
-// (not the fork path) and never loops.
-func TestHandleSendMsg_InlineSkillRunsViaResolveInput(t *testing.T) {
-	t.Parallel()
-
-	skillSet := skillstool.New([]skills.Skill{{
-		Name:          "services",
-		Description:   "List services",
-		InlineContent: "# Services\nList repository services.",
-	}}, t.TempDir())
-	rt := &skillDispatchRuntime{skillset: skillSet}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.commandParser = skillCommandParser("services")
-
-	dispatchTypedSkill(t, p, "/services please")
-
-	require.Eventually(t, func() bool { return sess.MessageCount() == 1 }, time.Second, 10*time.Millisecond)
-	assert.Zero(t, rt.forkCallCount(), "inline skills must not use fork dispatch")
-	require.Equal(t, 1, rt.runStreamCallCount())
-	assert.Contains(t, rt.lastRunMessage(), `<skill name="services">`)
-	assert.Contains(t, rt.lastRunMessage(), "List repository services.")
-	assert.Contains(t, rt.lastRunMessage(), "User's request: please")
+	fork := skillstool.New([]skills.Skill{{Name: "worker", Description: "Fork", Context: "fork", InlineContent: "work"}}, t.TempDir())
+	forkApp, forkHandle := newSessionTestApp(t, session.New(), &queueTestServices{skillset: fork}, nil)
+	forkPage := New(animation.NewRuntime(), t.Context(), forkApp, service.NewSessionState(forkApp.Session())).(*chatPage)
+	forkPage.commandParser = skillCommandParser("worker")
+	dispatchTypedSkill(t, forkPage, "/worker task")
+	assert.Empty(t, forkHandle.submitted(), "unsupported fork must not fall back to parent Submit")
 }
 
 // TestReadOnly_RejectsBypassQueueCommands ensures resolved skill/agent
@@ -545,7 +427,7 @@ func TestReadOnly_RejectsBypassQueueCommands(t *testing.T) {
 	t.Parallel()
 
 	sess := session.New()
-	a := app.New(t.Context(), queueTestRuntime{}, sess, app.WithReadOnly())
+	a := func() *app.App { a, _ := newSessionTestApp(t, sess, nil, nil, app.WithReadOnly()); return a }()
 	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/myskill", BypassQueue: true})
@@ -556,267 +438,159 @@ func TestReadOnly_RejectsBypassQueueCommands(t *testing.T) {
 	assert.Nil(t, p.msgCancel, "read-only must not start a stream for a BypassQueue message")
 }
 
-// steerRecordingRuntime records Steer calls so tests can assert that busy
-// sends are injected into the ongoing stream instead of queued locally.
-type steerRecordingRuntime struct {
-	queueTestRuntime
-
-	mu        sync.Mutex
-	steerErr  error
-	steers    []runtime.QueuedMessage
-	followUps []runtime.QueuedMessage
-}
-
-func (r *steerRecordingRuntime) Steer(_ context.Context, msg runtime.QueuedMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.steerErr != nil {
-		return r.steerErr
-	}
-	r.steers = append(r.steers, msg)
-	return nil
-}
-
-func (r *steerRecordingRuntime) FollowUp(_ context.Context, msg runtime.QueuedMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.followUps = append(r.followUps, msg)
-	return nil
-}
-
-func (r *steerRecordingRuntime) CancelSteer(_ context.Context, id string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, msg := range r.steers {
-		if msg.ID != id {
-			continue
-		}
-		r.steers = append(r.steers[:i], r.steers[i+1:]...)
-		return true
-	}
-	return false
-}
-
-func (r *steerRecordingRuntime) CancelFollowUp(_ context.Context, id string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, msg := range r.followUps {
-		if msg.ID != id {
-			continue
-		}
-		r.followUps = append(r.followUps[:i], r.followUps[i+1:]...)
-		return true
-	}
-	return false
-}
-
-func (r *steerRecordingRuntime) followedUp() []runtime.QueuedMessage {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]runtime.QueuedMessage(nil), r.followUps...)
-}
-
-func (r *steerRecordingRuntime) steered() []runtime.QueuedMessage {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]runtime.QueuedMessage(nil), r.steers...)
-}
-
-func TestFollowUpFlow_BusyAgent_UsesRuntimeFollowUpQueue(t *testing.T) {
+func TestFollowUpFlow_BusyAgent_UsesSessionSubmit(t *testing.T) {
 	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "do this next", FollowUp: true})
-
 	require.NotNil(t, cmd)
 	assert.IsType(t, followUpSentMsg{}, cmd())
-	assert.Empty(t, p.messageQueue)
-	assert.Empty(t, rt.steered())
-	if assert.Len(t, rt.followedUp(), 1) {
-		assert.Equal(t, "do this next", rt.followedUp()[0].Content)
+	require.Len(t, handle.submitted(), 1)
+	assert.Equal(t, "do this next", handle.submitted()[0].Content)
+	status, err := handle.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, runtime.SessionStateRunning, status.State)
+	assert.Equal(t, 1, status.Pending)
+}
+
+func TestSteerFlow_BusyAgent_UsesSessionSend(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
+	require.NotNil(t, cmd)
+	assert.IsType(t, steerSentMsg{}, cmd())
+	require.Len(t, handle.sent(), 1)
+	assert.Equal(t, "extra context", handle.sent()[0].Content)
+}
+
+func TestSteerFlow_QueuedAdmissionUsesFollowUpToastPath(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, steerQueued: true})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "after compact"})
+	require.NotNil(t, cmd)
+	assert.IsType(t, followUpSentMsg{}, cmd())
+	require.Len(t, handle.sent(), 1)
+	assert.Empty(t, handle.submitted(), "queued steer remains a single driver admission")
+}
+
+func TestSteerFlow_ExplicitAndConfiguredQueueSkipSessionSend(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		mode     messages.SendMode
+		explicit bool
+	}{
+		{name: "explicit", explicit: true}, {name: "configured", mode: messages.SendModeQueue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := session.New()
+			a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(tc.mode)).(*chatPage)
+			p.working = true
+			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: tc.explicit})
+			require.NotNil(t, cmd)
+			assert.IsType(t, followUpSentMsg{}, cmd())
+			require.Len(t, handle.submitted(), 1)
+			assert.Equal(t, "for later", handle.submitted()[0].Content)
+			assert.Empty(t, p.messageQueue, "session-backed queue is projected only after admission")
+			assert.Empty(t, handle.sent())
+		})
 	}
 }
 
-// TestSteerFlow_BusyAgent_SteersMessage pins the issue #3547 contract: a
-// plain send while the agent is working attaches to the ongoing stream via
-// the runtime steer queue instead of waiting in the local TUI queue.
-func TestSteerFlow_BusyAgent_SteersMessage(t *testing.T) {
+func TestSteerFlow_SessionSendRejectedDoesNotSubmitOrQueueLocally(t *testing.T) {
 	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	rejected := &runtime.SessionError{Kind: runtime.SessionErrorCapacity, SessionID: sess.ID, Operation: "send", Limit: 1}
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, sendErr: rejected})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
-
-	require.NotNil(t, cmd)
-	assert.Empty(t, p.messageQueue, "steered messages must not enter the local queue")
-
-	// Run the async steer command and verify the runtime received the message.
-	result := cmd()
-	assert.IsType(t, steerSentMsg{}, result)
-	steered := rt.steered()
-	require.Len(t, steered, 1)
-	assert.Equal(t, "extra context", steered[0].Content)
-}
-
-func TestOptionUpRestoresAllPendingMessageTypes(t *testing.T) {
-	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.working = true
-
-	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "first steer"})
-	steerResult := steerCmd()
-	_, _ = p.Update(steerResult)
-	_, followCmd := p.handleSendMsg(messages.SendMsg{Content: "then follow up", FollowUp: true})
-	followResult := followCmd()
-	_, _ = p.Update(followResult)
-	p.enqueueMessage(messages.SendMsg{Content: "locally queued", Queue: true})
-
-	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
-
-	assert.Empty(t, rt.steered())
-	assert.Empty(t, rt.followedUp())
-	assert.Empty(t, p.pendingMessages)
-	assert.Empty(t, p.messageQueue)
-	msgs := runTimerCmd(t, cmd)
-	assert.Contains(t, msgs, messages.RestorePendingMessagesMsg{Content: "first steer\nthen follow up\nlocally queued"})
-	assert.Contains(t, msgs, messages.RequestFocusMsg{Target: messages.PanelEditor})
-}
-
-func TestConsumedSteerIsNotRestored(t *testing.T) {
-	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.working = true
-
-	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "already consumed"})
-	_, _ = p.Update(steerCmd())
-	require.Len(t, p.pendingMessages, 1)
-	p.consumePendingMessage("already consumed")
-
-	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
-
-	assert.Empty(t, p.pendingMessages)
-	assert.Contains(t, runTimerCmd(t, cmd), notification.ShowMsg{Text: "No pending messages", Type: notification.TypeInfo})
-}
-
-// TestSteerFlow_ExplicitQueue_SkipsSteering verifies the internal Queue
-// flag (used by fallbacks such as a rejected steer): a Queue-flagged send
-// while busy goes to the local queue and never touches the runtime steer
-// queue.
-func TestSteerFlow_ExplicitQueue_SkipsSteering(t *testing.T) {
-	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.working = true
-
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: true})
-
-	require.NotNil(t, cmd)
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "for later", p.messageQueue[0].content)
-	assert.Empty(t, rt.steered())
-}
-
-// TestSteerFlow_QueueSendMode_QueuesPlainSend verifies the /settings switch:
-// with the send mode set to queue, a plain send while busy goes to the local
-// queue instead of the runtime steer queue.
-func TestSteerFlow_QueueSendMode_QueuesPlainSend(t *testing.T) {
-	t.Parallel()
-
-	rt := &steerRecordingRuntime{}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess), WithSendMode(messages.SendModeQueue)).(*chatPage)
-	p.working = true
-
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later"})
-
-	require.NotNil(t, cmd)
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "for later", p.messageQueue[0].content)
-	assert.Empty(t, rt.steered())
-
-	// Switching back to steer mid-session restores steering.
-	p.SetSendMode(messages.SendModeSteer)
-	_, cmd = p.handleSendMsg(messages.SendMsg{Content: "right away"})
-	require.NotNil(t, cmd)
-	assert.IsType(t, steerSentMsg{}, cmd())
-	require.Len(t, rt.steered(), 1)
-	assert.Equal(t, "right away", rt.steered()[0].Content)
-}
-
-// TestSteerFlow_SteerRejected_FallsBackToQueue verifies that a steer
-// rejection (e.g. full runtime queue) re-routes the message to the local
-// queue while the agent is still working, so it is never dropped.
-func TestSteerFlow_SteerRejected_FallsBackToQueue(t *testing.T) {
-	t.Parallel()
-
-	rt := &steerRecordingRuntime{steerErr: errors.New("steer queue full")}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.working = true
-
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
-	require.NotNil(t, cmd)
-
 	failed, ok := cmd().(steerFailedMsg)
-	require.True(t, ok, "a rejected steer must come back as steerFailedMsg")
-	assert.Equal(t, "extra context", failed.original.Content)
-
+	require.True(t, ok)
+	require.ErrorIs(t, failed.err, rejected)
 	_, cmd = p.Update(failed)
 	require.NotNil(t, cmd)
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "extra context", p.messageQueue[0].content)
+	assert.Empty(t, handle.submitted(), "rejected steer must not become a different session command")
+	assert.Empty(t, p.messageQueue, "rejected steer must not create local queue truth")
 }
 
-// TestSteerFlow_ForkSkillWhileBusy_Queues verifies fork-mode skill commands
-// are never steered: they spawn their own sub-session stream, which cannot
-// attach to the running one, so they wait in the local queue instead.
-func TestSteerFlow_ForkSkillWhileBusy_Queues(t *testing.T) {
+func TestFollowUpFlow_SessionSubmitRejectedDoesNotQueueLocally(t *testing.T) {
 	t.Parallel()
-
-	skillSet := skillstool.New([]skills.Skill{{
-		Name:          "services",
-		Description:   "List services",
-		Context:       "fork",
-		InlineContent: "# Services\nList repository services.",
-	}}, t.TempDir())
-	rt := &skillDispatchRuntime{skillset: skillSet}
 	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	rejected := &runtime.SessionError{Kind: runtime.SessionErrorCapacity, SessionID: sess.ID, Operation: "submit", Limit: 1}
+	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, submitErr: rejected})
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.working = true
-
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/services please"})
-
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "later", FollowUp: true})
+	failed, ok := cmd().(followUpFailedMsg)
+	require.True(t, ok)
+	require.ErrorIs(t, failed.err, rejected)
+	_, cmd = p.Update(failed)
 	require.NotNil(t, cmd)
-	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "/services please", p.messageQueue[0].content)
-	assert.Zero(t, rt.forkCallCount(), "fork skill must not run while another stream is active")
+	assert.Empty(t, handle.submitted())
+	assert.Empty(t, p.messageQueue, "rejected submit must not create local queue truth")
 }
 
-// TestSteerFlow_NoApp_FallsBackToQueue documents the defensive fallback:
-// without an app there is no runtime to steer, so busy sends queue locally.
-func TestSteerFlow_NoApp_FallsBackToQueue(t *testing.T) {
+func TestSessionFixtureObserveRetryAndTypedUnsupported(t *testing.T) {
 	t.Parallel()
+	sess := session.New()
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	handle := &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled, observation: runtime.Observation{
+		Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Session: sess.Clone(), Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled}}},
+		Events:  events, Cancel: func() {},
+	}}
+	_, handle = newSessionTestApp(t, sess, nil, handle)
+	obs, err := handle.Observe(t.Context(), runtime.ObserveOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, sess.ID, obs.Primary().Status.SessionID)
+	_, err = handle.Retry(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, handle.retries)
+	var sessionErr *runtime.SessionError
+	unsupportedFork := &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "fork"}
+	require.ErrorAs(t, unsupportedFork, &sessionErr)
+	assert.Equal(t, runtime.SessionErrorUnsupported, sessionErr.Kind)
+}
+func (s *sessionTestSession) Release(context.Context) error { return nil }
 
-	p := newTestChatPage(t)
+func (*sessionTestSession) UpdateTitle(context.Context, string) error { return nil }
 
-	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "hello"})
-
-	require.NotNil(t, cmd)
+func TestOptionUpRecallsOnlyConfirmedWithdrawals(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, nil)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.messageQueue = []queuedMessage{{turnID: "consumed", content: "already sent"}, {turnID: "steer", content: "first"}, {turnID: "follow", content: "second"}}
+	handle.cancelable = map[string]bool{"steer": true, "follow": true}
+	msgs := runTimerCmd(t, p.restorePendingMessages())
+	assert.Contains(t, msgs, messages.RestorePendingMessagesMsg{Content: "first\nsecond"})
+	assert.Len(t, p.messageQueue, 3, "only canonical canceled events remove the projection")
+	_, _ = p.handleRuntimeEvent(runtime.PendingUserMessageCanceled(sess.ID, "steer", -1))
+	_, _ = p.handleRuntimeEvent(runtime.PendingUserMessageCanceled(sess.ID, "follow", -1))
 	require.Len(t, p.messageQueue, 1)
-	assert.Equal(t, "hello", p.messageQueue[0].content)
+	assert.Equal(t, "consumed", p.messageQueue[0].turnID)
+}
+
+func TestRecallErrorKeepsCanonicalPendingProjection(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	a, handle := newSessionTestApp(t, sess, nil, nil)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p.messageQueue = []queuedMessage{{turnID: "pending", content: "keep me"}}
+	handle.withdrawErr = runtime.ErrUnsupported
+	for _, msg := range runTimerCmd(t, p.restorePendingMessages()) {
+		_, restored := msg.(messages.RestorePendingMessagesMsg)
+		assert.False(t, restored)
+	}
+	assert.Len(t, p.messageQueue, 1)
 }

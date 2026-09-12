@@ -116,7 +116,7 @@ func TestRunStream_ImageOutputOnlyModel_MainStreamUnaffected(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("draw a cat"))
 	var content strings.Builder
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for _, ev := range runAndCollect(t, rt, sess) {
 		switch e := ev.(type) {
 		case *ErrorEvent:
 			t.Fatalf("main stream must stay successful, got ErrorEvent %q", e.Error)

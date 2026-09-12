@@ -93,7 +93,7 @@ func TestTurnEndFiresOnNormalStop(t *testing.T) {
 	rec := installTurnEndRecorder(t, rt, "test-turn-end-normal")
 
 	sess := session.New(session.WithUserMessage("hi"))
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	reasons := rec.snapshot()
@@ -149,7 +149,7 @@ func TestTurnEndFiresOnHookBlocked(t *testing.T) {
 	rec := installTurnEndRecorder(t, rt, "test-turn-end-blocked")
 
 	sess := session.New(session.WithUserMessage("hi"))
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	reasons := rec.snapshot()
@@ -188,7 +188,7 @@ func TestTurnEndFiresOnStreamError(t *testing.T) {
 	rec := installTurnEndRecorder(t, rt, "test-turn-end-error")
 
 	sess := session.New(session.WithUserMessage("hi"))
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	reasons := rec.snapshot()
@@ -301,7 +301,7 @@ func TestTurnEndFiresOnContextCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for range rt.RunStream(ctx, sess) {
+		for range rt.runExecution(ctx, sess) {
 		}
 	}()
 
@@ -376,7 +376,7 @@ func TestTurnEndFiresEveryIteration(t *testing.T) {
 		session.WithUserMessage("hi"),
 		session.WithToolsApproved(true),
 	)
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	reasons := rec.snapshot()

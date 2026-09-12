@@ -73,7 +73,7 @@ func TestBeforeLLMCallHookFiresOncePerLoopIteration(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
 
-	for range rt.RunStream(t.Context(), sess) {
+	for range rt.runExecution(t.Context(), sess) {
 	}
 
 	assert.Equal(t, int32(1), calls.Load(),
@@ -161,7 +161,7 @@ func TestMaxIterationsBuiltin_TripsAfterConfiguredLimit(t *testing.T) {
 	sess.Title = "max_iterations e2e"
 
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 
@@ -241,7 +241,7 @@ func TestMaxIterationsBuiltin_NoOpOnInvalidLimit(t *testing.T) {
 			sess.Title = "Unit Test"
 
 			var events []Event
-			for ev := range rt.RunStream(t.Context(), sess) {
+			for ev := range rt.runExecution(t.Context(), sess) {
 				events = append(events, ev)
 			}
 

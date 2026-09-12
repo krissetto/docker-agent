@@ -8,9 +8,8 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/gitbranch"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
@@ -78,12 +77,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	go readKeys(term.Reader(), keys, done)
 	go func() {
-		m.app.SubscribeWith(loopCtx, func(msg tea.Msg) {
+		m.app.Subscribe(loopCtx, func(msg any) {
 			select {
 			case events <- msg:
 			case <-done:
 			}
-		})
+		}, app.SubscribeOptions{PreserveSessionMetadata: true})
 	}()
 	go func() {
 		for {
@@ -188,12 +187,15 @@ type model struct {
 	usage        *ui.UsageTracker
 
 	busy                bool
+	lifecycle           lifecycle.State
 	spinnerFrame        int
 	runCancel           context.CancelFunc
 	cancelMarkerPending bool
 	queue               []ui.PendingUserMessage
 	pendingUsers        []ui.PendingUserMessage
 	ignoredUsers        []string
+	ownedSkillOperation string
+	ownedSkillStream    bool
 
 	quitting         bool
 	appName          string

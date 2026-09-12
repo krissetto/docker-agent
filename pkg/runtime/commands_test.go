@@ -21,6 +21,14 @@ type mockRuntime struct {
 	tools    []tools.Tool
 }
 
+func (m *mockRuntime) AgentCommands(context.Context, string) (types.Commands, error) {
+	return m.commands, nil
+}
+
+func (m *mockRuntime) AgentTools(context.Context, string) ([]tools.Tool, error) {
+	return m.tools, nil
+}
+
 func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) {
 	return m.tools, nil
 }
@@ -47,10 +55,6 @@ func (m *mockRuntime) RunStream(context.Context, *session.Session) <-chan Event 
 
 func (m *mockRuntime) Run(context.Context, *session.Session) ([]session.Message, error) {
 	return nil, nil
-}
-func (m *mockRuntime) Resume(context.Context, ResumeRequest) {}
-func (m *mockRuntime) ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any, ...string) error {
-	return nil
 }
 func (m *mockRuntime) SessionStore() session.Store { return nil }
 func (m *mockRuntime) Summarize(context.Context, *session.Session, string, EventSink) {
@@ -80,7 +84,6 @@ func (m *mockRuntime) Close() error                                           { 
 func (m *mockRuntime) Steer(context.Context, QueuedMessage) error             { return nil }
 func (m *mockRuntime) FollowUp(context.Context, QueuedMessage) error          { return nil }
 func (m *mockRuntime) QueueStatus() QueueStatus                               { return QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)              { return false, nil }
 func (m *mockRuntime) SetAgentModel(context.Context, string, string) error    { return nil }
 func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
 	return "", ErrUnsupported
@@ -107,7 +110,7 @@ func TestResolveCommand_SimpleCommand(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/test")
+	result := ResolveCommand(t.Context(), rt, "test", "/test")
 	assert.Equal(t, "This is the test instruction", result)
 }
 
@@ -127,7 +130,7 @@ func TestResolveCommand_NoEvaluatorRegistered(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/fix main.go")
+	result := ResolveCommand(t.Context(), rt, "test", "/fix main.go")
 	assert.Equal(t, "Fix the file ${args[0]}", result)
 }
 
@@ -138,7 +141,7 @@ func TestResolveCommand_CommandNotFound(t *testing.T) {
 		commands: types.Commands{},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/unknown")
+	result := ResolveCommand(t.Context(), rt, "test", "/unknown")
 	assert.Equal(t, "/unknown", result)
 }
 
@@ -151,7 +154,7 @@ func TestResolveCommand_NotACommand(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "regular message")
+	result := ResolveCommand(t.Context(), rt, "test", "regular message")
 	assert.Equal(t, "regular message", result)
 }
 
@@ -164,7 +167,7 @@ func TestResolveCommand_PositionalArgs(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/fix main.go --verbose")
+	result := ResolveCommand(t.Context(), rt, "test", "/fix main.go --verbose")
 	assert.Equal(t, "Fix the file main.go with options --verbose", result)
 }
 
@@ -177,7 +180,7 @@ func TestResolveCommand_PositionalArgsWithQuotes(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, `/search "hello world" ./src`)
+	result := ResolveCommand(t.Context(), rt, "test", `/search "hello world" ./src`)
 	assert.Equal(t, "Search for hello world in ./src", result)
 }
 
@@ -190,7 +193,7 @@ func TestResolveCommand_AllArgs(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/run arg1 arg2 arg3")
+	result := ResolveCommand(t.Context(), rt, "test", "/run arg1 arg2 arg3")
 	assert.Equal(t, "Run command with args: arg1 arg2 arg3", result)
 }
 
@@ -203,7 +206,7 @@ func TestResolveCommand_ArgsPlaceholder(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/run arg1 arg2 arg3")
+	result := ResolveCommand(t.Context(), rt, "test", "/run arg1 arg2 arg3")
 	assert.Equal(t, "Run command with args: arg1 arg2 arg3", result)
 }
 
@@ -216,7 +219,7 @@ func TestResolveCommand_ArgsPlaceholderEmpty(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/run")
+	result := ResolveCommand(t.Context(), rt, "test", "/run")
 	assert.Equal(t, "Run command with args: ", result)
 }
 
@@ -229,7 +232,7 @@ func TestResolveCommand_ArgsPlaceholderWithPositional(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/run arg1 arg2 arg3")
+	result := ResolveCommand(t.Context(), rt, "test", "/run arg1 arg2 arg3")
 	assert.Equal(t, "First: arg1, All: arg1 arg2 arg3", result)
 }
 
@@ -242,7 +245,7 @@ func TestResolveCommand_MissingArgs(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/fix file1")
+	result := ResolveCommand(t.Context(), rt, "test", "/fix file1")
 	// args[1] and args[2] should be replaced with empty strings via || operator
 	assert.Equal(t, "Fix file1 and  and ", result)
 }
@@ -264,7 +267,7 @@ func TestResolveCommand_ToolCommand(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/info")
+	result := ResolveCommand(t.Context(), rt, "test", "/info")
 	assert.Equal(t, "Result: hello from tool", result)
 }
 
@@ -286,7 +289,7 @@ func TestResolveCommand_ToolCommandWithArgs(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/greet")
+	result := ResolveCommand(t.Context(), rt, "test", "/greet")
 	assert.Contains(t, result, "Greeting:")
 	assert.Contains(t, result, "World")
 }
@@ -308,7 +311,7 @@ func TestResolveCommand_ToolCommandWithQuotedArgs(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/search")
+	result := ResolveCommand(t.Context(), rt, "test", "/search")
 	assert.Contains(t, result, "Files:")
 	assert.Contains(t, result, "hello world")
 }
@@ -323,7 +326,7 @@ func TestResolveCommand_ToolCommandNotFound(t *testing.T) {
 		tools: []tools.Tool{},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/fail")
+	result := ResolveCommand(t.Context(), rt, "test", "/fail")
 	assert.Contains(t, result, "Error")
 	assert.Contains(t, result, "not found")
 }
@@ -347,7 +350,7 @@ func TestResolveCommand_CombinedPositionalAndTool(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/check myfile.go")
+	result := ResolveCommand(t.Context(), rt, "test", "/check myfile.go")
 	assert.Equal(t, "Check myfile.go with result: check_output", result)
 }
 
@@ -361,7 +364,7 @@ func TestResolveCommand_ExtraArgsAppended(t *testing.T) {
 	}
 
 	// Commands without positional args get extra text appended
-	result := ResolveCommand(t.Context(), rt, "/simple with extra text")
+	result := ResolveCommand(t.Context(), rt, "test", "/simple with extra text")
 	assert.Equal(t, "Do the thing with extra text", result)
 }
 
@@ -603,7 +606,7 @@ func TestResolveCommand_NestedParentheses(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/calc 2+2")
+	result := ResolveCommand(t.Context(), rt, "test", "/calc 2+2")
 	assert.Contains(t, result, `sh -c 'echo $((2+2))'`)
 }
 
@@ -624,7 +627,7 @@ func TestResolveCommand_MultipleNestedParens(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/test")
+	result := ResolveCommand(t.Context(), rt, "test", "/test")
 	assert.Contains(t, result, `func(a(b(c)))`)
 }
 
@@ -637,7 +640,7 @@ func TestResolveCommand_ArgsJoinComma(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/test a b c")
+	result := ResolveCommand(t.Context(), rt, "test", "/test a b c")
 	assert.Equal(t, "Args: a,b,c", result)
 }
 
@@ -650,7 +653,7 @@ func TestResolveCommand_ArgsLength(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/test a b c")
+	result := ResolveCommand(t.Context(), rt, "test", "/test a b c")
 	assert.Equal(t, "Count: 3", result)
 }
 
@@ -663,7 +666,7 @@ func TestResolveCommand_ArgsSlice(t *testing.T) {
 		},
 	}
 
-	result := ResolveCommand(t.Context(), rt, "/test first second third")
+	result := ResolveCommand(t.Context(), rt, "test", "/test first second third")
 	assert.Equal(t, "Rest: second third", result)
 }
 
@@ -679,7 +682,7 @@ func TestLookupCommand_AgentTarget(t *testing.T) {
 		},
 	}
 
-	cmd, rest, ok := LookupCommand(t.Context(), rt, "/plan add a logout button")
+	cmd, rest, ok := LookupCommand(t.Context(), rt, "test", "/plan add a logout button")
 	assert.True(t, ok)
 	assert.Equal(t, "planner", cmd.Agent)
 	assert.Empty(t, cmd.Instruction)
@@ -698,7 +701,7 @@ func TestLookupCommand_URLTarget(t *testing.T) {
 		},
 	}
 
-	cmd, _, ok := LookupCommand(t.Context(), rt, "/feedback")
+	cmd, _, ok := LookupCommand(t.Context(), rt, "test", "/feedback")
 	assert.True(t, ok)
 	assert.Equal(t, "https://example.com/feedback", cmd.URL)
 	assert.Empty(t, cmd.Instruction)
@@ -709,7 +712,7 @@ func TestLookupCommand_NotACommand(t *testing.T) {
 
 	rt := &mockRuntime{commands: types.Commands{}}
 
-	_, _, ok := LookupCommand(t.Context(), rt, "hello there")
+	_, _, ok := LookupCommand(t.Context(), rt, "test", "hello there")
 	assert.False(t, ok)
 }
 
@@ -723,9 +726,9 @@ func TestResolveCommand_AgentOnlyForwardsArgs(t *testing.T) {
 	}
 
 	// With trailing args: forward verbatim to the target agent.
-	assert.Equal(t, "design a login flow", ResolveCommand(t.Context(), rt, "/plan design a login flow"))
+	assert.Equal(t, "design a login flow", ResolveCommand(t.Context(), rt, "test", "/plan design a login flow"))
 	// Without trailing args: empty so no message is sent after the switch.
-	assert.Empty(t, ResolveCommand(t.Context(), rt, "/plan"))
+	assert.Empty(t, ResolveCommand(t.Context(), rt, "test", "/plan"))
 }
 
 func TestResolveCommand_AgentWithInstruction(t *testing.T) {
@@ -742,6 +745,6 @@ func TestResolveCommand_AgentWithInstruction(t *testing.T) {
 
 	// When both instruction and agent are set, the instruction wins (the
 	// caller is responsible for switching the agent before sending it).
-	result := ResolveCommand(t.Context(), rt, "/plan add login")
+	result := ResolveCommand(t.Context(), rt, "test", "/plan add login")
 	assert.Equal(t, "Plan the work for: add login", result)
 }

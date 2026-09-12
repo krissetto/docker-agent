@@ -76,11 +76,11 @@ func checkMessageSent(msg tea.Msg) bool {
 // count: the step completes at the moment the user validates a tool call,
 // not before.
 func checkToolCallApproved(msg tea.Msg) bool {
-	resume, ok := msg.(dialog.RuntimeResumeMsg)
+	resume, ok := msg.(messages.InteractionResponseMsg)
 	if !ok {
 		return false
 	}
-	switch runtime.NormalizeResumeType(resume.Request.Type) {
+	switch runtime.NormalizeResumeType(resume.Response.Resume.Type) {
 	case runtime.ResumeTypeApprove, runtime.ResumeTypeApproveTool,
 		runtime.ResumeTypeApproveBalanced, runtime.ResumeTypeApproveAutonomous:
 		return true

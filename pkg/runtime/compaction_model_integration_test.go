@@ -53,7 +53,7 @@ func countCompactionStarts(events []Event) int {
 func drainRunStream(t *testing.T, rt *LocalRuntime, sess *session.Session) []Event {
 	t.Helper()
 	var events []Event
-	for ev := range rt.RunStream(t.Context(), sess) {
+	for ev := range rt.runExecution(t.Context(), sess) {
 		events = append(events, ev)
 	}
 	return events

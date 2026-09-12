@@ -4,12 +4,22 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 )
 
 // TestPendingSpinnerContext verifies the waiting-spinner label is scoped to
 // delegated streams: depth < 2 keeps the default playful spinner (empty
 // sender/label), while nested streams name the nearest parent → child pair and
 // expose the child as the accent-color sender.
+func streams(names []string) []lifecycle.Stream {
+	result := make([]lifecycle.Stream, len(names))
+	for i, name := range names {
+		result[i].AgentName = name
+	}
+	return result
+}
+
 func TestPendingSpinnerContext(t *testing.T) {
 	t.Parallel()
 
@@ -29,7 +39,7 @@ func TestPendingSpinnerContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			p := &chatPage{agentStack: tc.stack}
+			p := &chatPage{lifecycle: lifecycle.State{Streams: streams(tc.stack)}}
 			sender, label := p.pendingSpinnerContext()
 
 			assert.Equal(t, tc.wantSender, sender, "sender (accent agent)")

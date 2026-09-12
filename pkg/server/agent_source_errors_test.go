@@ -61,11 +61,8 @@ func TestAgentSourceHTTPStatus(t *testing.T) {
 		{"config unavailable", http.MethodGet, "/api/agents/broken", http.StatusBadGateway},
 		{"tool count missing", http.MethodGet, "/api/agents/missing/root/tools/count", http.StatusNotFound},
 		{"tool count unavailable", http.MethodGet, "/api/agents/broken/root/tools/count", http.StatusBadGateway},
-		{"run missing", http.MethodPost, "/api/sessions/" + sess.ID + "/agent/missing", http.StatusNotFound},
-		{"run unavailable", http.MethodPost, "/api/sessions/" + sess.ID + "/agent/broken", http.StatusBadGateway},
 		{"config invalid", http.MethodGet, "/api/agents/invalid", http.StatusInternalServerError},
 		{"tool count invalid", http.MethodGet, "/api/agents/invalid/root/tools/count", http.StatusInternalServerError},
-		{"run invalid", http.MethodPost, "/api/sessions/" + sess.ID + "/agent/invalid", http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.path, bytes.NewBufferString(`{"messages":[]}`))

@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"log/slog"
 	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -49,18 +48,6 @@ func (r *agentRouter) Set(name string) {
 	r.current.Store(&name)
 }
 
-// SetValidated checks that name exists in the team, then sets it as the
-// current agent. Returns the team's lookup error unchanged so callers
-// (e.g. the TUI's switch-agent flow) can propagate the same message.
-func (r *agentRouter) SetValidated(name string) error {
-	if _, err := r.team.Agent(name); err != nil {
-		return err
-	}
-	r.Set(name)
-	slog.Debug("Switched current agent", "agent", name)
-	return nil
-}
-
 // Current returns the current agent. The returned agent is non-nil
 // because NewLocalRuntime validates the initial name and Set callers
 // either use SetValidated or have already validated against the team.
@@ -69,12 +56,11 @@ func (r *agentRouter) Current() *agent.Agent {
 	return a
 }
 
-// ResolveSession returns the agent for sess: when sess pins a specific
-// agent (e.g. background agent tasks), that agent is returned directly
-// instead of reading the shared current-agent field; otherwise Current
-// is returned.
+// ResolveSession returns the explicitly pinned agent for sessions. Legacy
+// non-execution helpers may pass an unbound session and use the configured
+// default/current metadata; driver admission pins AgentName before execution.
 func (r *agentRouter) ResolveSession(sess *session.Session) *agent.Agent {
-	if sess.AgentName != "" {
+	if sess != nil && sess.AgentName != "" {
 		if a, err := r.team.Agent(sess.AgentName); err == nil {
 			return a
 		}

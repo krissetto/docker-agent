@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,8 +11,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -26,7 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/echolog"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/upstream"
@@ -44,7 +41,16 @@ type Server struct {
 }
 
 func New(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, opts ...SessionManagerOpt) (*Server, error) {
-	return NewWithManager(NewSessionManager(ctx, agentSources, sessionStore, refreshInterval, runConfig, opts...), authToken, WithMaxRequestBytes(maxRequestBytes)), nil
+	return newServer(ctx, sessionStore, runConfig, refreshInterval, agentSources, authToken, maxRequestBytes, "", opts...)
+}
+
+// NewWithCORS constructs an API server with strict opt-in browser access.
+func NewWithCORS(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, corsOrigin string, opts ...SessionManagerOpt) (*Server, error) {
+	return newServer(ctx, sessionStore, runConfig, refreshInterval, agentSources, authToken, maxRequestBytes, corsOrigin, opts...)
+}
+
+func newServer(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, corsOrigin string, opts ...SessionManagerOpt) (*Server, error) {
+	return NewWithManager(NewSessionManager(ctx, agentSources, sessionStore, refreshInterval, runConfig, opts...), authToken, WithMaxRequestBytes(maxRequestBytes), WithCORSOrigin(corsOrigin)), nil
 }
 
 const defaultMaxRequestBytes int64 = 1 << 20 // 1 MiB
@@ -54,6 +60,7 @@ type Option func(*serverOptions)
 
 type serverOptions struct {
 	maxRequestBytes int64
+	corsOrigin      string
 }
 
 // WithMaxRequestBytes sets the maximum request body size in bytes. Requests
@@ -61,6 +68,12 @@ type serverOptions struct {
 // values fall back to the default (1 MiB).
 func WithMaxRequestBytes(n int64) Option {
 	return func(o *serverOptions) { o.maxRequestBytes = n }
+}
+
+// WithCORSOrigin enables browser access for the exact, explicitly configured
+// HTTP(S) origin. Empty leaves CORS disabled.
+func WithCORSOrigin(origin string) Option {
+	return func(o *serverOptions) { o.corsOrigin = origin }
 }
 
 // NewWithManager builds a Server around an already-constructed SessionManager.
@@ -80,6 +93,14 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 	e.Use(echolog.RedactedRequestLogger())
 	e.Use(middleware.BodyLimit(strconv.FormatInt(maxBytes, 10)))
 	e.Use(echo.WrapMiddleware(upstream.Handler))
+	if o.corsOrigin != "" {
+		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+			AllowOrigins: []string{o.corsOrigin},
+			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+			AllowHeaders: []string{"Authorization", "Content-Type", "Accept"},
+			MaxAge:       86400,
+		}))
+	}
 
 	// Add bearer token middleware if token is configured
 	if authToken != "" {
@@ -101,34 +122,18 @@ func (s *Server) registerRoutes() {
 	group.GET("/agents", s.getAgents)
 	group.GET("/agents/:id", s.getAgentConfig)
 
-	group.GET("/sessions", s.getSessions)
-	group.GET("/sessions/:id", s.getSession)
-	group.GET("/sessions/:id/status", s.getSessionStatus)
-	group.GET("/sessions/:id/snapshot", s.getSessionSnapshot)
-	group.POST("/sessions/:id/resume", s.resumeSession)
 	group.POST("/sessions/:id/tools/toggle", s.toggleSessionYolo)
 	group.PATCH("/sessions/:id/safety-policy", s.updateSessionSafetyPolicy)
 	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions)
-	group.PATCH("/sessions/:id/title", s.updateSessionTitle)
 	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens)
-	group.PATCH("/sessions/:id/starred", s.setSessionStarred)
-	group.GET("/sessions/:id/models", s.getSessionModels)
-	group.POST("/sessions", s.createSession)
 	group.POST("/sessions/:id/fork", s.forkSession)
-	group.DELETE("/sessions/:id", s.deleteSession)
-	group.POST("/sessions/:id/agent/:agent", s.runAgent)
-	group.POST("/sessions/:id/agent/:agent/:agent_name", s.runAgent)
-	group.POST("/sessions/:id/elicitation", s.elicitation)
-	group.POST("/sessions/:id/steer", s.steerSession)
-	group.POST("/sessions/:id/followup", s.followUpSession)
-	group.GET("/sessions/:id/events", s.sessionEvents)
-	group.POST("/sessions/:id/messages", s.addMessage)
 	group.PATCH("/sessions/:id/messages/:msg_id", s.updateMessage)
 	group.POST("/sessions/:id/summaries", s.addSummary)
-	group.GET("/sessions/:id/queue", s.getSessionQueueStatus)
 	group.GET("/sessions/:id/recovery", s.getSessionRecoveryData)
 	group.POST("/sessions/batch/delete", s.batchDeleteSessions)
 	group.POST("/sessions/batch/export", s.batchExportSessions)
+
+	s.registerCanonicalSessionRoutes(group.Group("/sessions"))
 
 	group.GET("/agents/:id/:agent_name/tools/count", s.getAgentToolCount)
 
@@ -152,11 +157,31 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	if err := srv.Serve(ln); err != nil && ctx.Err() == nil {
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
 		slog.ErrorContext(ctx, "Failed to start server", "error", err)
 		return err
 	}
 
+	if ctx.Err() != nil {
+		<-shutdownDone
+	}
+
+	// Session runtimes built for this server outlive individual requests; stop
+	// them once no request can reach them anymore.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := s.sm.Shutdown(stopCtx); err != nil {
+		slog.ErrorContext(ctx, "Failed to shut down session runtimes", "error", err)
+	}
 	return nil
 }
 
@@ -256,52 +281,6 @@ func agentSourceHTTPError(operation string, err error) error {
 	}
 }
 
-func (s *Server) getSessions(c echo.Context) error {
-	if c.QueryParam("active") == "true" {
-		return c.JSON(http.StatusOK, s.sm.GetActiveSessions())
-	}
-
-	sessions, err := s.sm.GetSessions(c.Request().Context())
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to get sessions: %v", err))
-	}
-
-	responses := make([]api.SessionsResponse, len(sessions))
-	for i, sess := range sessions {
-		// The in-memory store hands back live session pointers, so read the
-		// mutable scalars through one locked snapshot each.
-		title := sess.TitleSnapshot()
-		inputTokens, outputTokens := sess.Usage()
-		responses[i] = api.SessionsResponse{
-			ID:           sess.ID,
-			Title:        title,
-			CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
-			NumMessages:  len(sess.GetAllMessages()),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			WorkingDir:   sess.WorkingDir,
-		}
-	}
-	return c.JSON(http.StatusOK, responses)
-}
-
-func (s *Server) createSession(c echo.Context) error {
-	var sessionTemplate session.Session
-	if err := c.Bind(&sessionTemplate); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	sess, err := s.sm.CreateSession(c.Request().Context(), &sessionTemplate)
-	if err != nil {
-		if errors.Is(err, ErrInvalidWorkingDir) {
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-		}
-		return agentSourceHTTPError("failed to create session", err)
-	}
-
-	return c.JSON(http.StatusOK, sess)
-}
-
 // forkSession creates a new session whose history is a deep copy of
 // an existing session up to (but excluding) the Nth user message. The
 // new session uses a fork-numbered title and starts with no runtime
@@ -334,83 +313,6 @@ func (s *Server) forkSession(c echo.Context) error {
 		WorkingDir:    forked.WorkingDir,
 		Permissions:   forked.ClonePermissions(),
 	})
-}
-
-func (s *Server) getSession(c echo.Context) error {
-	sess, err := s.sm.GetSession(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
-	}
-
-	title := sess.TitleSnapshot()
-	inputTokens, outputTokens := sess.Usage()
-	return c.JSON(http.StatusOK, api.SessionResponse{
-		ID:            sess.ID,
-		Title:         title,
-		CreatedAt:     sess.CreatedAt,
-		Messages:      sess.GetAllMessages(),
-		ToolsApproved: sess.ToolsApproved,
-		SafetyPolicy:  sess.SafetyPolicy,
-		InputTokens:   inputTokens,
-		OutputTokens:  outputTokens,
-		WorkingDir:    sess.WorkingDir,
-		Permissions:   sess.ClonePermissions(),
-	})
-}
-
-// getSessionStatus returns the session's current runtime state. With
-// ?wait=<duration> it blocks until the session's runtime is attached (ready
-// to accept follow-ups and produce events) before responding, so a client
-// that just launched a run can wait for that exact session instead of polling.
-func (s *Server) getSessionStatus(c echo.Context) error {
-	if v := c.QueryParam("wait"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid wait: %v", err))
-		}
-		if !s.sm.WaitSessionAttached(c.Request().Context(), c.Param("id"), min(d, maxAPITimeout)) {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, "session not ready within timeout")
-		}
-	}
-
-	status, err := s.sm.GetSessionStatus(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, fmt.Sprintf("session not found: %v", err))
-	}
-	return c.JSON(http.StatusOK, status)
-}
-
-// getSessionSnapshot returns the full state of a session in one response
-// (stored fields + live runtime state + last event sequence number) so a
-// client can rebuild its view and then tail /events?since=<last_event_seq>
-// without missing any transition.
-//
-// An unknown session yields a 404 whose body carries
-// [api.ErrCodeUnknownSession], so clients can tell "this server does not
-// have that session" (wait or recreate) from a route-less 404 produced by a
-// binary that predates this endpoint (upgrade/relaunch).
-func (s *Server) getSessionSnapshot(c echo.Context) error {
-	snapshot, err := s.sm.GetSessionSnapshot(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		return c.JSON(http.StatusNotFound, api.ErrorResponse{
-			Code:    api.ErrCodeUnknownSession,
-			Message: fmt.Sprintf("session not found: %v", err),
-		})
-	}
-	return c.JSON(http.StatusOK, snapshot)
-}
-
-func (s *Server) resumeSession(c echo.Context) error {
-	var req api.ResumeSessionRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if err := s.sm.ResumeSession(c.Request().Context(), c.Param("id"), req.Confirmation, req.Reason, req.ToolName); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to resume session: %v", err))
-	}
-
-	return c.JSON(http.StatusOK, map[string]string{"message": "session resumed"})
 }
 
 func (s *Server) toggleSessionYolo(c echo.Context) error {
@@ -454,119 +356,11 @@ func (s *Server) updateSessionPermissions(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "session permissions updated"})
 }
 
-func (s *Server) updateSessionTitle(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.UpdateSessionTitleRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if err := s.sm.UpdateSessionTitle(c.Request().Context(), sessionID, req.Title); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to update session title: %v", err))
-	}
-
-	return c.JSON(http.StatusOK, api.UpdateSessionTitleResponse{
-		ID:    sessionID,
-		Title: req.Title,
-	})
-}
-
-func (s *Server) deleteSession(c echo.Context) error {
-	sessionID := c.Param("id")
-
-	timeout := 10 * time.Second
-	if v := c.QueryParam("timeout"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid timeout: %v", err))
-		}
-		timeout = min(d, maxAPITimeout)
-	}
-
-	if err := s.sm.DeleteSession(c.Request().Context(), sessionID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to delete session: %v", err))
-	}
-
-	// When ?wait=true, block until the runtime's stream goroutine has
-	// fully exited (the streaming mutex is released) or the timeout fires.
-	if c.QueryParam("wait") == "true" {
-		if err := s.sm.WaitStopped(c.Request().Context(), sessionID, timeout); err != nil {
-			return c.JSON(http.StatusAccepted, map[string]string{"message": "session deleted, stop still in progress"})
-		}
-	}
-
-	return c.JSON(http.StatusOK, map[string]string{"message": "session deleted"})
-}
-
-func (s *Server) runAgent(c echo.Context) error {
-	sessionID := c.Param("id")
-	agentFilename := c.Param("agent")
-	// agent_name may be empty when the route /api/sessions/:id/agent/:agent
-	// is used. In that case, the session manager resolves the team's default
-	// agent (one explicitly named "root" if it exists, otherwise the first
-	// agent declared).
-	currentAgent := c.Param("agent_name")
-
-	slog.Debug("Running agent", "agent_filename", agentFilename, "session_id", sessionID, "current_agent", currentAgent)
-
-	var req api.RunAgentRequest
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	streamChan, err := s.sm.RunSession(c.Request().Context(), sessionID, agentFilename, currentAgent, req.Messages, req.Model)
-	if err != nil {
-		if errors.Is(err, ErrSessionBusy) {
-			return echo.NewHTTPError(http.StatusConflict, err.Error())
-		}
-		if errors.Is(err, ErrModelSwitchingNotSupported) {
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
-		}
-		return agentSourceHTTPError("failed to run session", err)
-	}
-
-	c.Response().Header().Set("Content-Type", "text/event-stream")
-	c.Response().Header().Set("Cache-Control", "no-cache")
-	c.Response().Header().Set("Connection", "keep-alive")
-	c.Response().WriteHeader(http.StatusOK)
-	for {
-		select {
-		case event, ok := <-streamChan:
-			if !ok {
-				return nil
-			}
-			data, err := json.Marshal(event)
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to marshal event: %v", err))
-			}
-			fmt.Fprintf(c.Response(), "data: %s\n\n", string(data))
-			c.Response().Flush()
-		case <-c.Request().Context().Done():
-			slog.DebugContext(c.Request().Context(), "Client disconnected from stream", "session_id", sessionID)
-			return nil
-		}
-	}
-}
-
-func (s *Server) elicitation(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.ResumeElicitationRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if err := s.sm.ResumeElicitation(c.Request().Context(), sessionID, req.Action, req.Content, req.ElicitationID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to resume elicitation: %v", err))
-	}
-
-	return c.JSON(http.StatusOK, nil)
-}
-
 // mcpOAuthCallback is the out-of-band entry point used by embedders
 // that receive an OAuth deeplink (e.g. a system-wide URL-scheme handler
 // or an OS-integrated launcher) and want to forward the resulting
 // {code, state} to docker-agent without going through the session-keyed
-// ResumeElicitation path.
+// session interaction response path.
 //
 // The state value is opaque, high-entropy and was generated in-process by
 // docker-agent's unmanaged OAuth flow (see GenerateState in
@@ -628,187 +422,13 @@ func (s *Server) mcpOAuthCallback(c echo.Context) error {
 	return c.JSON(http.StatusOK, nil)
 }
 
-func (s *Server) steerSession(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.SteerSessionRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if len(req.Messages) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "at least one message is required")
-	}
-
-	if err := s.sm.SteerSession(c.Request().Context(), sessionID, req.Messages); err != nil {
-		if strings.Contains(err.Error(), "queue full") {
-			c.Response().Header().Set("Retry-After", "1")
-			return echo.NewHTTPError(http.StatusTooManyRequests, "steer queue full")
-		}
-		return echo.NewHTTPError(http.StatusConflict, fmt.Sprintf("failed to steer session: %v", err))
-	}
-
-	return c.JSON(http.StatusAccepted, map[string]string{"status": "queued"})
-}
-
 // defaultEventsHeartbeatInterval is the default for [Server.heartbeatInterval].
 const defaultEventsHeartbeatInterval = 15 * time.Second
-
-// sessionEvents streams events for a session as Server-Sent Events. The
-// stream lasts until the client disconnects or the session ends.
-//
-// Each delivered event carries its monotonic sequence number in the SSE
-// "id:" field. A client that reconnects may resume from where it left off by
-// supplying the last sequence number it saw, either as the standard
-// Last-Event-ID request header (sent automatically by EventSource clients) or
-// as a ?since=<seq> query parameter. Buffered events newer than that point are
-// replayed before live tailing resumes. If the resume point has already been
-// evicted from the buffer, a {"type":"gap"} event is sent first so the client
-// knows to re-snapshot (GET /api/sessions/:id/snapshot) before continuing.
-//
-// End-of-session contract: when the session ends (the agent process exits or
-// the session is deleted) a terminal {"type":"session_exited"} event is sent
-// and the stream closes. A client that receives session_exited should stop. A
-// stream that closes WITHOUT a session_exited event indicates a transport
-// drop; the client should reconnect with its last id to replay and continue.
-//
-// Liveness contract: while connected, the stream emits an SSE comment
-// (": ping") every [Server.heartbeatInterval] even when the session is quiet.
-// A client that has seen at least one heartbeat can treat a prolonged silence
-// as a hung transport and reconnect, instead of waiting forever on a
-// connection that will never fail a read (e.g. across a paused VM).
-func (s *Server) sessionEvents(c echo.Context) error {
-	if !s.sm.HasEventSource(c.Param("id")) {
-		return echo.NewHTTPError(http.StatusNotFound, "no event source for session")
-	}
-
-	since := parseSinceParam(c)
-
-	c.Response().Header().Set("Content-Type", "text/event-stream")
-	c.Response().Header().Set("Cache-Control", "no-cache")
-	c.Response().Header().Set("Connection", "keep-alive")
-	c.Response().WriteHeader(http.StatusOK)
-	c.Response().Flush()
-
-	// Event writes and heartbeat writes come from different goroutines;
-	// interleaved partial frames would corrupt the stream, so serialize them.
-	var writeMu sync.Mutex
-
-	heartbeatCtx, stopHeartbeat := context.WithCancel(c.Request().Context())
-	heartbeatDone := make(chan struct{})
-	defer func() {
-		stopHeartbeat()
-		<-heartbeatDone
-	}()
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(s.heartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatCtx.Done():
-				return
-			case <-ticker.C:
-				writeMu.Lock()
-				fmt.Fprint(c.Response(), ": ping\n\n")
-				c.Response().Flush()
-				writeMu.Unlock()
-			}
-		}
-	}()
-
-	s.sm.StreamEvents(c.Request().Context(), c.Param("id"), since, func(seq uint64, event any) {
-		data, err := json.Marshal(event)
-		if err != nil {
-			return
-		}
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		// seq 0 marks a per-connection control event (e.g. gap) that is not
-		// part of the sequenced stream, so it carries no id.
-		if seq > 0 {
-			fmt.Fprintf(c.Response(), "id: %d\n", seq)
-		}
-		fmt.Fprintf(c.Response(), "data: %s\n\n", data)
-		c.Response().Flush()
-	})
-	return nil
-}
 
 // parseSinceParam resolves the resume point for an /events stream from the
 // ?since=<seq> query parameter, falling back to the Last-Event-ID header that
 // SSE clients replay automatically on reconnect. Returns nil when neither is
 // present or parseable, meaning "replay the current buffer, then tail".
-func parseSinceParam(c echo.Context) *uint64 {
-	raw := c.QueryParam("since")
-	if raw == "" {
-		raw = c.Request().Header.Get("Last-Event-ID")
-	}
-	if raw == "" {
-		return nil
-	}
-	seq, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return nil
-	}
-	return &seq
-}
-
-func (s *Server) followUpSession(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.SteerSessionRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if len(req.Messages) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "at least one message is required")
-	}
-
-	// An optional Idempotency-Key makes the request safe to retry: a repeat
-	// with the same key for this session is acknowledged without delivering
-	// the follow-up twice.
-	idempotencyKey := c.Request().Header.Get("Idempotency-Key")
-
-	streaming, duplicate, err := s.sm.FollowUpSession(c.Request().Context(), sessionID, req.Messages, idempotencyKey)
-	if err != nil {
-		if strings.Contains(err.Error(), "queue full") {
-			c.Response().Header().Set("Retry-After", "1")
-			return echo.NewHTTPError(http.StatusTooManyRequests, "follow-up queue full")
-		}
-		return echo.NewHTTPError(http.StatusConflict, fmt.Sprintf("failed to enqueue follow-up: %v", err))
-	}
-
-	status := "queued_streaming"
-	switch {
-	case duplicate:
-		status = "duplicate"
-	case !streaming:
-		status = "queued_idle"
-	}
-	return c.JSON(http.StatusAccepted, api.FollowUpResponse{Status: status, Duplicate: duplicate})
-}
-
-func (s *Server) addMessage(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.AddMessageRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if req.Message == nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "message is required")
-	}
-
-	if err := s.sm.AddMessage(c.Request().Context(), sessionID, req.Message); err != nil {
-		if errors.Is(err, ErrSessionBusy) {
-			return echo.NewHTTPError(http.StatusConflict, err.Error())
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to add message: %v", err))
-	}
-
-	return c.JSON(http.StatusCreated, map[string]string{"status": "added"})
-}
-
 func (s *Server) updateMessage(c echo.Context) error {
 	sessionID := c.Param("id")
 	msgID := c.Param("msg_id")
@@ -900,46 +520,6 @@ func (s *Server) updateSessionTokens(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
-}
-
-func (s *Server) setSessionStarred(c echo.Context) error {
-	sessionID := c.Param("id")
-	var req api.SetSessionStarredRequest
-	if err := c.Bind(&req); err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-	}
-
-	if err := s.sm.SetSessionStarred(c.Request().Context(), sessionID, req.Starred); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to set starred: %v", err))
-	}
-
-	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
-}
-
-// getSessionModels lists the models the user can pick from for the
-// session's current agent. Returns 404 if the session has no active runtime
-// (it must have been started at least once or be attached out-of-band)
-// or 422 if the runtime does not support model switching.
-func (s *Server) getSessionModels(c echo.Context) error {
-	sessionID := c.Param("id")
-
-	agentName, current, choices, err := s.sm.AvailableSessionModels(c.Request().Context(), sessionID)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrModelSwitchingNotSupported):
-			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
-		case errors.Is(err, ErrSessionNotRunning):
-			return echo.NewHTTPError(http.StatusNotFound, err.Error())
-		default:
-			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-		}
-	}
-
-	return c.JSON(http.StatusOK, runtime.SessionModelsResponse{
-		Agent:           agentName,
-		CurrentModelRef: current,
-		Models:          choices,
-	})
 }
 
 func (s *Server) batchDeleteSessions(c echo.Context) error {
@@ -1042,32 +622,27 @@ func (s *Server) getSessionRecoveryData(c echo.Context) error {
 	return c.JSON(http.StatusOK, data)
 }
 
-func (s *Server) getSessionQueueStatus(c echo.Context) error {
-	sessionID := c.Param("id")
-
-	// Get the session runtime to check queue status
-	sessionRuntime, ok := s.sm.runtimeSessions.Load(sessionID)
-	if !ok {
-		return echo.NewHTTPError(http.StatusNotFound, "session not found or not running")
+// ValidateCORSOrigin validates the strict single origin accepted by serve api.
+// Wildcards, regexes, and opaque origins (including "null") are intentionally
+// rejected; operators must name one HTTP(S) browser origin exactly.
+func ValidateCORSOrigin(origin string) error {
+	matcher, err := httpsec.ParseOrigins(origin)
+	if err != nil {
+		return err
 	}
-
-	queueStatus := sessionRuntime.runtime.QueueStatus()
-
-	resp := api.QueueDepthResponse{}
-	resp.Steer.Depth = queueStatus.SteerDepth
-	resp.Steer.Capacity = queueStatus.SteerCapacity
-	resp.Followup.Depth = queueStatus.FollowupDepth
-	resp.Followup.Capacity = queueStatus.FollowupCapacity
-
-	return c.JSON(http.StatusOK, resp)
+	if matcher.HasPatterns() || len(matcher.Literals()) != 1 || matcher.Literals()[0] == "*" {
+		return errors.New("must be one exact http(s) origin")
+	}
+	return nil
 }
 
 // BearerTokenMiddleware validates bearer token authentication
 func BearerTokenMiddleware(expectedToken string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Skip authentication for health and readiness endpoints
-			if c.Path() == "/health" || c.Path() == "/ready" {
+			// The demo document is inert and intentionally public; its API calls
+			// still pass through bearer authentication.
+			if c.Request().Method == http.MethodOptions || c.Path() == "/health" || c.Path() == "/ready" {
 				return next(c)
 			}
 

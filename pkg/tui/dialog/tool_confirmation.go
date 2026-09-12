@@ -38,17 +38,6 @@ const (
 	toolConfirmMinOptionWidth = 3
 )
 
-type (
-	RuntimeResumeMsg struct {
-		Request runtime.ResumeRequest
-	}
-)
-
-// ToolConfirmationResponse represents the user's response to tool confirmation
-type ToolConfirmationResponse struct {
-	Response string // "approve", "reject", or "approve-session"
-}
-
 // ConfirmationSessionState is the session-state surface the confirmation
 // dialog needs: the message list's surface for rendering the tool call, plus
 // the session-wide approval flip for the "all tools" decision.
@@ -366,22 +355,33 @@ func (d *toolConfirmationDialog) Init() tea.Cmd {
 	return d.scrollView.Init()
 }
 
+func (d *toolConfirmationDialog) response(request runtime.ResumeRequest) tuimessages.InteractionResponseMsg {
+	return tuimessages.InteractionResponseMsg{
+		SessionID: d.msg.SessionID,
+		Response: runtime.InteractionResponse{
+			InteractionID: d.msg.RequestID,
+			Kind:          runtime.InteractionConfirmation,
+			Resume:        request,
+		},
+	}
+}
+
 // executeAction dispatches a confirmation decision.
 func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (layout.Model, tea.Cmd) {
 	switch decision {
 	case toolconfirm.Approve:
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
-			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.Approve.Resume("", "")}),
+			core.CmdHandler(d.response(toolconfirm.Approve.Resume("", ""))),
 		)
 	case toolconfirm.Reject:
 		return d, core.CmdHandler(OpenDialogMsg{
-			Model: NewToolRejectionReasonDialog(),
+			Model: NewToolRejectionReasonDialog(d.msg.SessionID, d.msg.RequestID),
 		})
 	case toolconfirm.ApproveTool:
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
-			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveTool.Resume(d.permissionPattern, "")}),
+			core.CmdHandler(d.response(toolconfirm.ApproveTool.Resume(d.permissionPattern, ""))),
 		)
 	case toolconfirm.ApproveBalanced:
 		// A preempt/custom hook can raise a confirmation while the session
@@ -392,13 +392,13 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 		d.sessionState.SetYoloMode(false)
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
-			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveBalanced.Resume("", "")}),
+			core.CmdHandler(d.response(toolconfirm.ApproveBalanced.Resume("", ""))),
 		)
 	case toolconfirm.ApproveSession:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
-			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveSession.Resume("", "")}),
+			core.CmdHandler(d.response(toolconfirm.ApproveSession.Resume("", ""))),
 		)
 	}
 	return d, nil

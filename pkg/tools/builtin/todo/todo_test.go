@@ -10,6 +10,72 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+func TestTodoTool_InstructionsPreserveTruthfulState(t *testing.T) {
+	t.Parallel()
+
+	instructions := New().Instructions()
+	for _, guidance := range []string{
+		"prefer batch create_todos",
+		`Update status to "in-progress" before starting`,
+		`mark "completed" only when the work is actually finished`,
+		"Ending a turn to wait, ask a blocking question, or answer an unrelated request does not mean the task is done",
+		"Keep unfinished todos pending or in-progress while waiting or blocked",
+		"Batch multiple updates in a single update_todos call",
+	} {
+		assert.Contains(t, instructions, guidance)
+	}
+	assert.NotContains(t, instructions, "MUST")
+	assert.NotContains(t, instructions, "Never leave todos pending")
+}
+
+func TestTodoTool_IncompleteReminderDescribesActualState(t *testing.T) {
+	t.Parallel()
+
+	tool := New()
+	assert.Empty(t, tool.handler.incompleteReminder(t.Context()))
+	_, err := tool.handler.createTodos(t.Context(), CreateTodosArgs{
+		Descriptions: []string{"Finished", "Waiting on a child", "Blocked on a decision"},
+	})
+	require.NoError(t, err)
+	_, err = tool.handler.updateTodos(t.Context(), UpdateTodosArgs{
+		Updates: []Update{
+			{ID: "todo_1", Status: "completed"},
+			{ID: "todo_2", Status: "in-progress"},
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := tool.handler.listTodos(t.Context(), tools.ToolCall{}, nil)
+	require.NoError(t, err)
+	var output ListTodosOutput
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &output))
+	assert.Equal(t, "The following todos are still incomplete: (in-progress) [todo_2] Waiting on a child (pending) [todo_3] Blocked on a decision", output.Reminder)
+	require.Len(t, output.Todos, 3)
+	assert.Equal(t, "completed", output.Todos[0].Status)
+	assert.Equal(t, "in-progress", output.Todos[1].Status)
+	assert.Equal(t, "pending", output.Todos[2].Status)
+
+	_, err = tool.handler.updateTodos(t.Context(), UpdateTodosArgs{
+		Updates: []Update{
+			{ID: "todo_2", Status: "completed"},
+			{ID: "todo_3", Status: "completed"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, tool.handler.incompleteReminder(t.Context()))
+}
+
+func TestTodoTool_ResumesPersistedIDSequence(t *testing.T) {
+	storage := NewMemoryTodoStorage()
+	require.NoError(t, storage.Add(t.Context(), Todo{ID: "todo_41", Description: "old", Status: "pending"}))
+	tool := New(WithStorage(storage))
+	result, err := tool.handler.createTodo(t.Context(), CreateTodoArgs{Description: "new"})
+	require.NoError(t, err)
+	var output CreateTodoOutput
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &output))
+	assert.Equal(t, "todo_42", output.Created.ID)
+}
+
 func TestTodoTool_DisplayNames(t *testing.T) {
 	t.Parallel()
 	tool := New()

@@ -54,11 +54,13 @@ func TestCagentAPI_ListSessions(t *testing.T) {
 			require.NoError(t, err)
 			defer resp.Body.Close()
 
-			var sessions []Session
-			err = json.NewDecoder(resp.Body).Decode(&sessions)
+			var catalog struct {
+				Sessions []Session `json:"sessions"`
+			}
+			err = json.NewDecoder(resp.Body).Decode(&catalog)
 			require.NoError(t, err)
 
-			assert.Len(t, sessions, tc.expectedCount)
+			assert.Len(t, catalog.Sessions, tc.expectedCount)
 		})
 	}
 }

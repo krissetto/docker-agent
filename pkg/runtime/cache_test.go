@@ -31,7 +31,7 @@ func runWithCache(t *testing.T, c *cache.Cache, prov *messageRecordingProvider, 
 	require.NoError(t, err)
 	sess.Title = "cache test"
 
-	evCh := rt.RunStream(t.Context(), sess)
+	evCh := rt.runExecution(t.Context(), sess)
 	var events []Event
 	for ev := range evCh {
 		events = append(events, ev)

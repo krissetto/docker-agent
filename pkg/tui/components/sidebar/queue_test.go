@@ -27,8 +27,7 @@ func TestQueueSection_SingleMessage(t *testing.T) {
 	// Should contain the message
 	assert.Contains(t, result, "Hello world")
 
-	// Should contain the clear hint
-	assert.Contains(t, result, "Ctrl+X to clear")
+	assert.NotContains(t, result, "Ctrl+X to clear")
 
 	// Should use └ prefix for single (last) item
 	assert.Contains(t, result, "└")
@@ -52,8 +51,7 @@ func TestQueueSection_MultipleMessages(t *testing.T) {
 	assert.Contains(t, result, "Second")
 	assert.Contains(t, result, "Third")
 
-	// Should contain the clear hint
-	assert.Contains(t, result, "Ctrl+X to clear")
+	assert.NotContains(t, result, "Ctrl+X to clear")
 
 	// Should have tree-style prefixes
 	assert.Contains(t, result, "├") // For non-last items

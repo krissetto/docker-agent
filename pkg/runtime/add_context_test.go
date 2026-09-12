@@ -44,7 +44,7 @@ func TestRunStreamAddContext(t *testing.T) {
 
 			sess := session.New(session.WithUserMessage("hello"))
 			sess.Title = "add_context test"
-			for ev := range rt.RunStream(t.Context(), sess) {
+			for _, ev := range runAndCollect(t, rt, sess) {
 				if userEvent, ok := ev.(*UserMessageEvent); ok {
 					assert.Equal(t, "hello", userEvent.Message)
 				}

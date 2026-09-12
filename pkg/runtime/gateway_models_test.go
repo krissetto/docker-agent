@@ -99,7 +99,7 @@ func TestAvailableModels_GatewayDiscovery(t *testing.T) {
 
 	r := gatewayRuntime(server.URL, stubModelStore{db: catalogDB()})
 
-	choices := r.AvailableModels(t.Context())
+	choices := r.availableModels(t.Context(), "")
 	got := refs(choices)
 
 	assert.Contains(t, got, "root_model", "configured models must always be listed")
@@ -133,7 +133,7 @@ func TestAvailableModels_GatewayDiscoveryMetadata(t *testing.T) {
 	}}
 	r := gatewayRuntime(server.URL, store)
 
-	choices := r.AvailableModels(t.Context())
+	choices := r.availableModels(t.Context(), "")
 
 	var found *ModelChoice
 	for i := range choices {
@@ -157,7 +157,7 @@ func TestAvailableModels_GatewayUnsupportedFallsBackToCatalog(t *testing.T) {
 
 	r := gatewayRuntime(server.URL, stubModelStore{db: catalogDB()})
 
-	got := refs(r.AvailableModels(t.Context()))
+	got := refs(r.availableModels(t.Context(), ""))
 
 	assert.Contains(t, got, "root_model")
 	assert.Contains(t, got, "openai/catalog-only-model", "catalog must be used when the gateway doesn't support /v1/models")
@@ -173,7 +173,7 @@ func TestAvailableModels_GatewayEmptyListFallsBackToCatalog(t *testing.T) {
 
 	r := gatewayRuntime(server.URL, stubModelStore{db: catalogDB()})
 
-	got := refs(r.AvailableModels(t.Context()))
+	got := refs(r.availableModels(t.Context(), ""))
 
 	assert.Contains(t, got, "openai/catalog-only-model")
 }
@@ -190,8 +190,8 @@ func TestListGatewayModels_CachesResult(t *testing.T) {
 
 	r := gatewayRuntime(server.URL, stubModelStore{})
 
-	_ = r.AvailableModels(t.Context())
-	_ = r.AvailableModels(t.Context())
+	_ = r.availableModels(t.Context(), "")
+	_ = r.availableModels(t.Context(), "")
 
 	assert.Equal(t, int32(1), requests.Load(), "gateway must be queried once within the cache TTL")
 }
@@ -360,7 +360,7 @@ func TestAvailableModels_GatewayEmbeddingFilteredByCatalogFamily(t *testing.T) {
 	}}
 	r := gatewayRuntime(server.URL, store)
 
-	got := refs(r.AvailableModels(t.Context()))
+	got := refs(r.availableModels(t.Context(), ""))
 
 	assert.NotContains(t, got, "openai/some-vector-model", "embedding models identified by catalog family must be filtered")
 	assert.Contains(t, got, "openai/gpt-4o")
@@ -381,7 +381,7 @@ func TestAvailableModels_GatewayNonTextFilteredByCatalogModalities(t *testing.T)
 	}}
 	r := gatewayRuntime(server.URL, store)
 
-	got := refs(r.AvailableModels(t.Context()))
+	got := refs(r.availableModels(t.Context(), ""))
 
 	assert.NotContains(t, got, "openai/image-gen", "models whose catalog metadata declares non-text output must be filtered")
 	assert.Contains(t, got, "openai/gpt-4o")

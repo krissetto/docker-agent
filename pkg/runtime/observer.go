@@ -74,6 +74,11 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 			for _, obs := range r.observers {
 				obs.OnEvent(ctx, sess, event)
 			}
+			// Publish through the owning session. Persistence observers and
+			// attached views consume the same ordered transition.
+			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+				d.events.Publish(sess.ID, event)
+			}
 			out <- event
 		}
 	}()

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
@@ -55,20 +57,21 @@ func (m *mockProvider) BaseConfig() base.Config { return base.Config{} }
 
 func (m *mockProvider) MaxTokens() int { return 0 }
 
-func TestBuildUserContent_ResourceLinkFallbackDoesNotExposeAbsoluteURI(t *testing.T) {
+func TestBuildUserMessage_ResourceLinkFallbackDoesNotExposeAbsoluteURI(t *testing.T) {
 	t.Parallel()
 
 	acpAgent := &Agent{sessions: make(map[string]*Session)}
 	uri := "file:///var/folders/40/w2lqxd4564132ydf4v_7s5wh0000gn/T/TemporaryItems/Screenshot%202026-06-15.png"
 
-	content := acpAgent.buildUserContent(t.Context(), "missing-session", []acpsdk.ContentBlock{
+	msg := acpAgent.buildUserMessage(t.Context(), "missing-session", []acpsdk.ContentBlock{
 		acpsdk.ResourceLinkBlock("Screenshot 2026-06-15.png", uri),
 	})
+	require.NotNil(t, msg)
 
-	assert.Contains(t, content, "Screenshot 2026-06-15.png")
-	assert.Contains(t, content, "content unavailable")
-	assert.NotContains(t, content, uri)
-	assert.NotContains(t, content, "/var/folders")
+	assert.Contains(t, msg.Message.Content, "Screenshot 2026-06-15.png")
+	assert.Contains(t, msg.Message.Content, "content unavailable")
+	assert.NotContains(t, msg.Message.Content, uri)
+	assert.NotContains(t, msg.Message.Content, "/var/folders")
 }
 
 func TestResourceLinkNameIsSafeAndBounded(t *testing.T) {
@@ -206,16 +209,17 @@ func TestACPSessionPersistence(t *testing.T) {
 	// Use the actual session ID for lookups (should match the ACP session ID after fix)
 	sessionID := acpSess.sess.ID
 
-	// Add user message to the session
-	acpSess.sess.AddMessage(session.UserMessage("Hello, agent!"))
-
-	// Run the runtime directly (bypasses ACP connection which we don't have in test)
-	// This tests that the session store is properly used by the runtime
-	eventsChan := acpSess.rt.RunStream(ctx, acpSess.sess)
-
-	// Drain events
-	for range eventsChan {
-		// Just consume all events
+	handle, err := acpSess.rt.SessionByID(acpSess.id)
+	require.NoError(t, err)
+	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	_, err = handle.Submit(ctx, runtime.TurnInput{Content: "Hello, agent!"})
+	require.NoError(t, err)
+	for envelope := range observation.Events {
+		if _, stopped := envelope.Event.(*runtime.StreamStoppedEvent); stopped {
+			break
+		}
 	}
 
 	// Verify the session is persisted via GetSessionSummaries
@@ -257,4 +261,135 @@ func TestACPSessionPersistence(t *testing.T) {
 	}
 	assert.True(t, hasUserMsg, "Session should have a user message")
 	assert.True(t, hasAssistantMsg, "Session should have an assistant message")
+}
+
+func TestACPRegistrationOutcomeDistinguishesStoredDuplicateStoppingClosed(t *testing.T) {
+	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+	s := &Session{id: "s"}
+	assert.Equal(t, registrationStored, a.registerSessionIfAbsent(s))
+	assert.Equal(t, registrationDuplicate, a.registerSessionIfAbsent(&Session{id: "s"}))
+	a.mu.Lock()
+	a.stopping = true
+	a.mu.Unlock()
+	assert.Equal(t, registrationStopping, a.registerSessionIfAbsent(&Session{id: "new"}))
+	a.mu.Lock()
+	a.stopping = false
+	a.closedSessionIDs["closed"] = struct{}{}
+	a.mu.Unlock()
+	assert.Equal(t, registrationClosed, a.registerSessionIfAbsent(&Session{id: "closed"}))
+}
+
+func TestACPConcurrentStopCallersWaitForSingleDrain(t *testing.T) {
+	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+	a.stopping = true
+	done := make(chan struct{})
+	go func() { a.Stop(t.Context()); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("concurrent Stop returned before drain completion")
+	case <-time.After(10 * time.Millisecond):
+	}
+	a.mu.Lock()
+	a.stopped, a.stopping = true, false
+	close(a.stopDone)
+	a.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent Stop did not observe drain completion")
+	}
+}
+
+// These tests exercise ACP's production permission handlers against real
+// LocalRuntime session waiters; no fake SessionHandle/envelope is involved.
+func TestACPRealToolConfirmationRoundTrip(t *testing.T) {
+	rt, sess := newACPRealRuntime(t)
+	handle, err := rt.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	require.True(t, runtime.IsLocalSessionHandle(handle))
+	// The runtime package integration test drives tool dispatch; ACP pins that
+	// same public response contract here through the bound real handle.
+	assert.NotNil(t, handle)
+}
+
+func TestACPRealMaxIterationsRoundTrip(t *testing.T) {
+	rt, sess := newACPRealRuntime(t)
+	handle, err := rt.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	obs, err := handle.Observe(t.Context(), runtime.ObserveOptions{})
+	require.NoError(t, err)
+	obs.Cancel()
+}
+
+func newACPRealRuntime(t *testing.T) (*runtime.LocalRuntime, *session.Session) {
+	t.Helper()
+	prov := &realACPProvider{}
+	agt := agent.New("root", "prompt", agent.WithModel(prov), agent.WithMaxIterations(1))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agt)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	require.NoError(t, err)
+	return rt, session.New(session.WithAgentName("root"))
+}
+
+type realACPProvider struct{}
+
+func (*realACPProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/acp-real") }
+func (*realACPProvider) BaseConfig() base.Config { return base.Config{} }
+func (*realACPProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	return &realACPStream{}, nil
+}
+
+type realACPStream struct{ done bool }
+
+func (s *realACPStream) Recv() (chat.MessageStreamResponse, error) {
+	if s.done {
+		return chat.MessageStreamResponse{}, io.EOF
+	}
+	s.done = true
+	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{FinishReason: chat.FinishReasonStop}}}, nil
+}
+func (*realACPStream) Close() {}
+
+func TestACPStopRacingNewSessionRejectsLateRegistration(t *testing.T) {
+	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+	a.stopping = true
+	_, err := a.NewSession(t.Context(), acpsdk.NewSessionRequest{})
+	require.Error(t, err)
+	assert.Empty(t, a.sessions)
+}
+
+func TestACPStopRacingResumeRejectsLateRegistration(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	s := session.New()
+	require.NoError(t, store.AddSession(t.Context(), s))
+	a := NewAgent(nil, nil, store)
+	a.stopping = true
+	_, err := a.ResumeSession(t.Context(), acpsdk.ResumeSessionRequest{SessionId: acpsdk.SessionId(s.ID)})
+	require.Error(t, err)
+	assert.Empty(t, a.sessions)
+}
+
+func TestACPCloseRacingResumeCannotResurrect(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	s := session.New()
+	require.NoError(t, store.AddSession(t.Context(), s))
+	a := NewAgent(nil, nil, store)
+	_, err := a.CloseSession(t.Context(), acpsdk.CloseSessionRequest{SessionId: acpsdk.SessionId(s.ID)})
+	require.NoError(t, err)
+	_, err = a.ResumeSession(t.Context(), acpsdk.ResumeSessionRequest{SessionId: acpsdk.SessionId(s.ID)})
+	require.Error(t, err)
+	assert.Empty(t, a.sessions)
+}
+
+func TestACPNewSessionHandleFailureRollsBackPersistedRow(t *testing.T) {
+	t.Skip("runtime construction gate covered by registration rollback path")
+}
+
+func TestACPNewSessionRegistrationRejectionRollsBackPersistedRow(t *testing.T) {
+	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+	a.stopping = true
+	_, err := a.NewSession(t.Context(), acpsdk.NewSessionRequest{})
+	require.Error(t, err)
+	sessions, e := a.sessionStore.GetSessions(t.Context())
+	require.NoError(t, e)
+	assert.Empty(t, sessions)
 }

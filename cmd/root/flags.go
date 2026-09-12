@@ -43,7 +43,7 @@ func addRuntimeConfigFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig) 
 		"Public HTTPS URL to advertise as the OAuth `redirect_uri` for MCP servers "+
 			"running in unmanaged OAuth mode. When set, docker-agent drives the OAuth flow "+
 			"itself (PKCE + DCR + token exchange) and expects clients to return `{code, state}` "+
-			"via ResumeElicitation. When empty, the client is expected to perform the OAuth "+
+			"via the session interaction response. When empty, the client is expected to perform the OAuth "+
 			"flow and return an access token (legacy behavior).")
 }
 

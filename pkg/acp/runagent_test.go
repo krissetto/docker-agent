@@ -23,54 +23,98 @@ import (
 
 	agentpkg "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
-	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
-	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 const testSessionID = "acp-test-session"
 
-// fakeRuntime is a minimal runtime.Runtime for driving runAgent, adapted from
-// the mock in pkg/app/app_test.go: RunStream replays the configured events and
-// Resume records the requests it receives.
+// fakeRuntime is a minimal session runtime for driving runAgent.
 type fakeRuntime struct {
-	events []runtime.Event
-	// onRunStream runs synchronously when RunStream is called, before any
-	// event is delivered (e.g. to cancel the turn context).
-	onRunStream func()
+	runtime.UnsupportedSessionHandle
+	events    []runtime.Event
+	premature bool
+	// onSubmit runs synchronously before any event is delivered (for example,
+	// to cancel the turn context).
+	onSubmit func()
 
-	mu          sync.Mutex
-	resumeCalls []runtime.ResumeRequest
+	mu            sync.Mutex
+	resumeCalls   []runtime.ResumeRequest
+	stopWakeCalls int
 }
 
-var _ runtime.Runtime = (*fakeRuntime)(nil)
+var (
+	_ runtime.SessionRuntime = (*fakeRuntime)(nil)
+	_ runtime.SessionHandle  = (*fakeRuntime)(nil)
+)
 
-// RunStream returns a pre-filled closed channel so no producer goroutine can
-// leak when runAgent returns before draining all events.
-func (f *fakeRuntime) RunStream(context.Context, *session.Session) <-chan runtime.Event {
-	if f.onRunStream != nil {
-		f.onRunStream()
+func (f *fakeRuntime) CreateSession(context.Context, *session.Session, runtime.SessionBinding) (runtime.SessionHandle, error) {
+	return f, nil
+}
+func (f *fakeRuntime) SessionByID(string) (runtime.SessionHandle, error) { return f, nil }
+func (f *fakeRuntime) DeleteSession(context.Context, string) error       { return nil }
+func (f *fakeRuntime) ID() string                                        { return testSessionID }
+func (f *fakeRuntime) AgentName() string                                 { return "fake" }
+func (f *fakeRuntime) Metadata() runtime.SessionMetadata {
+	return runtime.SessionMetadata{SessionID: testSessionID, AgentName: "fake"}
+}
+
+func (f *fakeRuntime) Submit(ctx context.Context, _ runtime.TurnInput) (runtime.Submission, error) {
+	if f.onSubmit != nil {
+		f.onSubmit()
 	}
-	ch := make(chan runtime.Event, len(f.events))
-	for _, e := range f.events {
-		ch <- e
+	return runtime.Submission{SessionID: testSessionID, TurnID: "request-1"}, ctx.Err()
+}
+
+func (f *fakeRuntime) Retry(ctx context.Context) (runtime.Submission, error) {
+	return f.Submit(ctx, runtime.TurnInput{})
+}
+
+func (f *fakeRuntime) Steer(ctx context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	return f.Submit(ctx, input)
+}
+
+func (f *fakeRuntime) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+	ch := make(chan runtime.SessionEvent, len(f.events)+1)
+	for i, event := range f.events {
+		ch <- runtime.SessionEvent{Version: 1, SessionID: testSessionID, TurnID: "request-1", Sequence: uint64(i + 1), Event: event}
+	}
+	if !f.premature {
+		ch <- runtime.SessionEvent{Version: 1, SessionID: testSessionID, TurnID: "request-1", Sequence: uint64(len(f.events) + 1), Event: &runtime.StreamStoppedEvent{}}
 	}
 	close(ch)
-	return ch
+	return runtime.Observation{Events: ch, Cancel: func() {}}, nil
 }
 
-func (f *fakeRuntime) Resume(_ context.Context, req runtime.ResumeRequest) {
+func (f *fakeRuntime) Status(context.Context) (runtime.SessionStatus, error) {
+	return runtime.SessionStatus{SessionID: testSessionID}, nil
+}
+
+func (f *fakeRuntime) Respond(_ context.Context, response runtime.InteractionResponse) error {
+	response.Resume.RequestID = ""
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.resumeCalls = append(f.resumeCalls, req)
+	f.resumeCalls = append(f.resumeCalls, response.Resume)
+	return nil
+}
+
+func (f *fakeRuntime) Cancel(context.Context, string) (runtime.CancelResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopWakeCalls++
+	return runtime.CancelResult{SessionID: testSessionID, Outcome: runtime.CancelAccepted}, nil
+}
+
+func (f *fakeRuntime) stopWakes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopWakeCalls
 }
 
 func (f *fakeRuntime) resumeRequests() []runtime.ResumeRequest {
@@ -79,67 +123,12 @@ func (f *fakeRuntime) resumeRequests() []runtime.ResumeRequest {
 	return slices.Clone(f.resumeCalls)
 }
 
-func (f *fakeRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
-	return runtime.CurrentAgentInfo{}
-}
-func (f *fakeRuntime) CurrentAgentName(context.Context) string                 { return "fake" }
-func (f *fakeRuntime) SetCurrentAgent(context.Context, string) error           { return nil }
-func (f *fakeRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
-func (f *fakeRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus      { return nil }
-func (f *fakeRuntime) RestartToolset(context.Context, string) error            { return nil }
-func (f *fakeRuntime) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {
-}
-func (f *fakeRuntime) EmitAgentInfo(context.Context, runtime.EventSink) {}
-func (f *fakeRuntime) ResetStartupInfo()                                {}
-func (f *fakeRuntime) Run(context.Context, *session.Session) ([]session.Message, error) {
-	return nil, nil
-}
-
-func (f *fakeRuntime) ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any, ...string) error {
-	return nil
-}
-func (f *fakeRuntime) SessionStore() session.Store { return nil }
-func (f *fakeRuntime) Summarize(context.Context, *session.Session, string, runtime.EventSink) {
-}
-func (f *fakeRuntime) PermissionsInfo() *runtime.PermissionsInfo      { return nil }
-func (f *fakeRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet { return nil }
-func (f *fakeRuntime) RunSkillFork(context.Context, *session.Session, skillstool.RunSkillArgs, runtime.EventSink) (*tools.ToolCallResult, error) {
-	return nil, nil
-}
-
-func (f *fakeRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.PromptInfo {
-	return nil
-}
-
-func (f *fakeRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
-	return "", nil
-}
-
-func (f *fakeRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error {
-	return nil
-}
-func (f *fakeRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
-func (f *fakeRuntime) Steer(context.Context, runtime.QueuedMessage) error     { return nil }
-func (f *fakeRuntime) FollowUp(context.Context, runtime.QueuedMessage) error  { return nil }
-func (f *fakeRuntime) QueueStatus() runtime.QueueStatus                       { return runtime.QueueStatus{} }
-func (f *fakeRuntime) TogglePause(context.Context) (bool, error)              { return false, nil }
-func (f *fakeRuntime) SetAgentModel(context.Context, string, string) error    { return nil }
-func (f *fakeRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
-}
-
-func (f *fakeRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
-	return "", runtime.ErrUnsupported
-}
-func (f *fakeRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (f *fakeRuntime) SupportsModelSwitching() bool                          { return false }
-func (f *fakeRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (f *fakeRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (f *fakeRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (f *fakeRuntime) Close() error                                          { return nil }
-
 type blockingPromptRuntime struct {
 	fakeRuntime
+	conversation *session.Session
+	eventsCh     chan runtime.SessionEvent
+	turnID       string
+	cancelRun    func()
 
 	started       chan int
 	firstCanceled chan struct{}
@@ -149,34 +138,70 @@ type blockingPromptRuntime struct {
 	max           atomic.Int32
 }
 
-func (r *blockingPromptRuntime) RunStream(ctx context.Context, _ *session.Session) <-chan runtime.Event {
+func (r *blockingPromptRuntime) CreateSession(_ context.Context, sess *session.Session, _ runtime.SessionBinding) (runtime.SessionHandle, error) {
+	r.conversation = sess
+	return r, nil
+}
+
+func (r *blockingPromptRuntime) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.eventsCh = make(chan runtime.SessionEvent)
+	return runtime.Observation{Events: r.eventsCh, Cancel: func() {}}, nil
+}
+
+func (r *blockingPromptRuntime) Submit(ctx context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	if err := ctx.Err(); err != nil {
+		return runtime.Submission{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	call := int(r.calls.Add(1))
-	current := int(r.active.Add(1))
+	current := r.active.Add(1)
 	for {
 		old := r.max.Load()
-		if int32(current) <= old || r.max.CompareAndSwap(old, int32(current)) {
+		if current <= old || r.max.CompareAndSwap(old, current) {
 			break
 		}
 	}
+	r.conversation.AddMessage(session.UserMessage(input.Content))
+	r.turnID = fmt.Sprintf("request-%d", call)
+	done := make(chan struct{})
+	r.cancelRun = sync.OnceFunc(func() { close(done) })
+	ch := r.eventsCh
+	turnID := r.turnID
 	r.started <- call
-	ch := make(chan runtime.Event)
 	go func() {
 		defer close(ch)
-		defer r.active.Add(-1)
-		<-ctx.Done()
+		<-done
 		if call == 1 && r.releaseFirst != nil {
 			close(r.firstCanceled)
 			<-r.releaseFirst
 		}
+		r.active.Add(-1)
+		ch <- runtime.SessionEvent{TurnID: turnID, Event: &runtime.StreamStoppedEvent{}}
 	}()
-	return ch
+	return runtime.Submission{SessionID: testSessionID, TurnID: turnID}, nil
 }
 
-func newPromptTestAgent(t *testing.T, rt runtime.Runtime) (*Agent, *Session, *peerResponder) {
+func (r *blockingPromptRuntime) Cancel(_ context.Context, turnID string) (runtime.CancelResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if turnID == r.turnID && r.cancelRun != nil {
+		r.cancelRun()
+	}
+	return runtime.CancelResult{Outcome: runtime.CancelAccepted}, nil
+}
+
+func newPromptTestAgent(t *testing.T, rt runtime.SessionRuntime) (*Agent, *Session, *peerResponder) {
 	t.Helper()
 	fixture := newRunAgentFixture(t, &fakeRuntime{}, &captureWriter{})
 	fixture.agent.sessions = make(map[string]*Session)
-	sess := &Session{id: testSessionID, sess: session.New(), rt: rt}
+	fixture.agent.closedSessionIDs = make(map[string]struct{})
+	conversation := session.New(session.WithID(testSessionID))
+	handle, err := rt.CreateSession(t.Context(), conversation, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	sess := &Session{id: testSessionID, sess: conversation, rt: rt, session: handle}
 	fixture.agent.sessions[testSessionID] = sess
 	return fixture.agent, sess, fixture.peer
 }
@@ -229,9 +254,9 @@ func TestPrompt_EscapingGeneratedMediaCompletesWithoutElicitation(t *testing.T) 
 	rt, err := runtime.New(t.Context(), team.New(team.WithAgents(root)),
 		runtime.WithSessionCompaction(false), runtime.WithSessionStore(store))
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, rt.Close()) })
-	rt.OnElicitationRequest(func(runtime.Event) { t.Error("generated media escape must not elicit") })
-	agent, sess, peer := newPromptTestAgent(t, rt)
+	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, supervisor.Shutdown(context.Background())) })
+	agent, sess, peer := newPromptTestAgent(t, supervisor.Runtime())
 	sess.sess.ID = testSessionID
 	sess.sess.WorkingDir = workspace
 
@@ -587,7 +612,7 @@ func newRunAgentFixtureWithPermissions(t *testing.T, rt *fakeRuntime, out *captu
 
 	return &runAgentFixture{
 		agent: acpAgent,
-		sess:  &Session{id: testSessionID, sess: session.New(), rt: rt},
+		sess:  &Session{id: testSessionID, sess: session.New(), rt: rt, session: rt},
 		rt:    rt,
 		out:   out,
 		peer:  peer,
@@ -635,6 +660,14 @@ func agentMessageText(t *testing.T, update acpsdk.SessionUpdate) string {
 	require.NotNil(t, update.AgentMessageChunk)
 	require.NotNil(t, update.AgentMessageChunk.Content.Text)
 	return update.AgentMessageChunk.Content.Text.Text
+}
+
+func TestRunAgent_PrematureObservationCloseFails(t *testing.T) {
+	t.Parallel()
+
+	f := newRunAgentFixture(t, &fakeRuntime{premature: true}, &captureWriter{})
+	err := f.agent.runAgent(t.Context(), f.sess)
+	require.ErrorIs(t, err, runtimeclient.ErrTurnObservationEnded)
 }
 
 func TestRunAgent_EmitsAvailableCommandsFirst(t *testing.T) {
@@ -1198,7 +1231,7 @@ func TestRunAgent_ContextCancellationStopsEventLoop(t *testing.T) {
 	}}
 	// Cancel the turn after available commands were emitted but before the
 	// first event is consumed.
-	rt.onRunStream = cancel
+	rt.onSubmit = cancel
 	f := newRunAgentFixture(t, rt, &captureWriter{})
 
 	err := f.agent.runAgent(ctx, f.sess)
@@ -1209,3 +1242,7 @@ func TestRunAgent_ContextCancellationStopsEventLoop(t *testing.T) {
 	requireAvailableCommands(t, updates[0])
 	assert.Empty(t, rt.resumeRequests())
 }
+
+func (f *fakeRuntime) Release(context.Context) error { return nil }
+
+func (f *fakeRuntime) UpdateTitle(context.Context, string) error { return nil }

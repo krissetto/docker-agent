@@ -23,6 +23,15 @@ const (
 	accentBar = "▎"
 	// runningIndicator is shown before the title when the tab's session is streaming.
 	// Cycles through braille spinner frames when animated.
+	// attachedIndicator gives viewer tabs a stable identity independent of title.
+	attachedIndicator = "↳ "
+	// pendingIndicator is static: work has been admitted but has not begun.
+	pendingIndicator = "· "
+	// descendantIndicator identifies activity below this tab's own node.
+	descendantIndicator = "◇ "
+	// descendantAttentionIndicator is a single-cell combined state: nested work
+	// remains visible while warning color/bold still communicates attention.
+	descendantAttentionIndicator = "◆ "
 	// attentionIndicator is shown before the title when the tab needs attention,
 	// replacing the running indicator to signal that user action is required.
 	attentionIndicator = "! "
@@ -133,22 +142,42 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	content := bar
 	switch {
 	case info.NeedsAttention:
-		// Attention takes priority over running: replace the streaming dot
-		// with a warning-colored indicator so it's obvious the tab needs action.
+		// Attention normally wins. Descendant work uses one combined glyph rather
+		// than stacked indicators, preserving both semantics in the same cell.
 		attnFg := styles.EnsureContrast(styles.Warning, bgColor)
 		if role == dragRoleBystander {
 			attnFg = blendColors(attnFg, bgColor, dragBystanderDimAmount)
 		}
-		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(attentionIndicator)
-	case info.IsRunning && !info.IsActive:
+		indicator := attentionIndicator
+		if info.Activity == messages.TabActivityDescendantRunning {
+			indicator = descendantAttentionIndicator
+		}
+		content += lipgloss.NewStyle().Foreground(attnFg).Background(bgColor).Bold(true).Render(indicator)
+	case info.Activity != messages.TabActivityNone || info.IsRunning:
 		runFg := styles.EnsureContrast(styles.TabAccentFg, bgColor)
 		if role == dragRoleBystander {
 			runFg = blendColors(runFg, bgColor, dragBystanderDimAmount)
 		}
-		frame := animation.Card.FrameAt(elapsed)
-		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(frame + " ")
+		indicator := pendingIndicator
+		switch info.Activity {
+		case messages.TabActivityRunning:
+			indicator = animation.Card.FrameAt(elapsed) + " "
+		case messages.TabActivityDescendantRunning:
+			indicator = descendantIndicator
+		case messages.TabActivityNone:
+			// Backward-compatible callers setting only IsRunning.
+			indicator = animation.Card.FrameAt(elapsed) + " "
+		}
+		content += lipgloss.NewStyle().Foreground(runFg).Background(bgColor).Render(indicator)
 	default:
 		content += pad.Render(" ")
+	}
+	if info.IsAttached {
+		markerFg := styles.MutedContrastFg(bgColor)
+		if role == dragRoleBystander {
+			markerFg = blendColors(markerFg, bgColor, dragBystanderDimAmount)
+		}
+		content += lipgloss.NewStyle().Foreground(markerFg).Background(bgColor).Render(attachedIndicator)
 	}
 	content += titleSt.Render(title)
 

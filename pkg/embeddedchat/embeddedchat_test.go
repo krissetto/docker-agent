@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -38,7 +39,7 @@ func TestNewLoadsAgentAndWelcomeMessage(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.Equal(t, "Hello from embedded chat.", s.WelcomeMessage())
-	require.NotNil(t, s.Runtime())
+	require.NotNil(t, s.SessionRuntime())
 	require.NotNil(t, s.Conversation())
 }
 
@@ -81,7 +82,7 @@ func TestNewFromCodeBuiltTeam(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.Equal(t, "Hello from a code-built team.", s.WelcomeMessage())
-	require.NotNil(t, s.Runtime())
+	require.NotNil(t, s.SessionRuntime())
 	require.NotNil(t, s.Conversation())
 }
 
@@ -131,30 +132,76 @@ func TestInitialSessionResumesConversation(t *testing.T) {
 }
 
 type fakeRuntime struct {
+	dagentruntime.UnsupportedSessionHandle
 	events chan dagentruntime.Event
 
-	runCtxs      []context.Context
-	resumes      []dagentruntime.ResumeRequest
-	elicitations []tools.ElicitationAction
-	closed       bool
+	runCtxs       []context.Context
+	resumes       []dagentruntime.ResumeRequest
+	elicitations  []tools.ElicitationAction
+	closed        bool
+	stopWakeCalls int
 }
 
 func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{events: make(chan dagentruntime.Event, 8)}
 }
 
-func (f *fakeRuntime) RunStream(ctx context.Context, _ *session.Session) <-chan dagentruntime.Event {
+func (f *fakeRuntime) CreateSession(context.Context, *session.Session, dagentruntime.SessionBinding) (dagentruntime.SessionHandle, error) {
+	return f, nil
+}
+func (f *fakeRuntime) SessionByID(string) (dagentruntime.SessionHandle, error) { return f, nil }
+func (f *fakeRuntime) DeleteSession(context.Context, string) error             { return nil }
+func (f *fakeRuntime) ID() string                                              { return "session" }
+func (f *fakeRuntime) AgentName() string                                       { return "agent" }
+func (f *fakeRuntime) Metadata() dagentruntime.SessionMetadata {
+	return dagentruntime.SessionMetadata{}
+}
+
+func (f *fakeRuntime) Submit(context.Context, dagentruntime.TurnInput) (dagentruntime.Submission, error) {
+	return dagentruntime.Submission{SessionID: "session", TurnID: "request"}, nil
+}
+
+func (f *fakeRuntime) Retry(ctx context.Context) (dagentruntime.Submission, error) {
+	return f.Submit(ctx, dagentruntime.TurnInput{Retry: true})
+}
+
+func (f *fakeRuntime) Send(ctx context.Context, input dagentruntime.TurnInput) (dagentruntime.Submission, error) {
+	return f.Submit(ctx, input)
+}
+
+func (f *fakeRuntime) Observe(ctx context.Context, _ dagentruntime.ObserveOptions) (dagentruntime.Observation, error) {
 	f.runCtxs = append(f.runCtxs, ctx)
-	return f.events
+	out := make(chan dagentruntime.SessionEvent, 8)
+	go func() {
+		defer close(out)
+		for event := range f.events {
+			select {
+			case out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", Event: event}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", Event: &dagentruntime.StreamStoppedEvent{}}
+	}()
+	return dagentruntime.Observation{Events: out, Cancel: func() {}}, nil
 }
 
-func (f *fakeRuntime) Resume(_ context.Context, req dagentruntime.ResumeRequest) {
-	f.resumes = append(f.resumes, req)
+func (f *fakeRuntime) Status(context.Context) (dagentruntime.SessionStatus, error) {
+	return dagentruntime.SessionStatus{}, nil
 }
 
-func (f *fakeRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, _ map[string]any, _ ...string) error {
-	f.elicitations = append(f.elicitations, action)
+func (f *fakeRuntime) Respond(_ context.Context, response dagentruntime.InteractionResponse) error {
+	if response.Kind == dagentruntime.InteractionElicitation {
+		f.elicitations = append(f.elicitations, response.Elicitation.Action)
+	} else {
+		f.resumes = append(f.resumes, response.Resume)
+	}
 	return nil
+}
+
+func (f *fakeRuntime) Cancel(context.Context, string) (dagentruntime.CancelResult, error) {
+	f.stopWakeCalls++
+	return dagentruntime.CancelResult{Outcome: dagentruntime.CancelAccepted}, nil
 }
 
 func (f *fakeRuntime) Close() error {
@@ -162,8 +209,17 @@ func (f *fakeRuntime) Close() error {
 	return nil
 }
 
+type fakeSupervisor struct{ runtime *fakeRuntime }
+
+func (s *fakeSupervisor) Runtime() dagentruntime.SessionRuntime { return s.runtime }
+func (s *fakeSupervisor) Shutdown(context.Context) error {
+	s.runtime.closed = true
+	return nil
+}
+
 func newTestSession(rt *fakeRuntime) *Session {
-	return &Session{rt: rt, session: session.New()}
+	sess := session.New(session.WithAgentName("agent"))
+	return &Session{supervisor: &fakeSupervisor{runtime: rt}, rt: rt, handle: rt, conversation: sess}
 }
 
 func TestTranslateRuntimeEvent(t *testing.T) {
@@ -191,6 +247,20 @@ func TestTranslateRuntimeEvent(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestSessionSendCancellationClosesWithoutDone(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	ctx, cancel := context.WithCancel(t.Context())
+
+	out, err := s.Send(ctx, "hi")
+	require.NoError(t, err)
+	cancel()
+
+	assertClosed(t, out)
+	close(rt.events)
+}
+
 func TestSessionSendStreamsEventsAndDone(t *testing.T) {
 	t.Parallel()
 	rt := newFakeRuntime()
@@ -198,9 +268,9 @@ func TestSessionSendStreamsEventsAndDone(t *testing.T) {
 
 	out, err := s.Send(t.Context(), "hi")
 	require.NoError(t, err)
-	require.Len(t, s.session.Messages, 1)
+	require.Empty(t, s.conversation.Messages, "session submission owns transcript mutation")
 
-	rt.events <- dagentruntime.AgentChoice("agent", s.session.ID, "hello")
+	rt.events <- dagentruntime.AgentChoice("agent", s.conversation.ID, "hello")
 	require.Equal(t, "hello", receiveEvent(t, out).Text)
 
 	close(rt.events)
@@ -244,7 +314,7 @@ func TestSessionSendHandlesRuntimeErrorWithoutDone(t *testing.T) {
 	event := receiveEvent(t, out)
 	require.EqualError(t, event.Err, "boom")
 
-	rt.events <- dagentruntime.AgentChoice("agent", s.session.ID, "ignored")
+	rt.events <- dagentruntime.AgentChoice("agent", s.conversation.ID, "ignored")
 	close(rt.events)
 	assertClosed(t, out)
 }
@@ -309,6 +379,7 @@ func TestSessionCloseCancelsActiveRunAndClosesRuntime(t *testing.T) {
 
 	require.NoError(t, s.Close())
 	require.True(t, rt.closed)
+	assert.Zero(t, rt.stopWakeCalls, "runtime Close owns final session teardown")
 	require.Eventually(t, func() bool {
 		return errors.Is(rt.runCtxs[0].Err(), context.Canceled)
 	}, time.Second, time.Millisecond)
@@ -344,11 +415,12 @@ func TestSessionRestartCancelsRunAndReplacesConversation(t *testing.T) {
 
 	_, err := s.Send(t.Context(), "hi")
 	require.NoError(t, err)
-	oldSession := s.session
+	oldSession := s.conversation
 
 	require.NoError(t, s.Restart())
-	require.NotSame(t, oldSession, s.session)
-	require.Empty(t, s.session.Messages)
+	assert.Equal(t, 1, rt.stopWakeCalls)
+	require.NotSame(t, oldSession, s.conversation)
+	require.Empty(t, s.conversation.Messages)
 	require.Eventually(t, func() bool {
 		return errors.Is(rt.runCtxs[0].Err(), context.Canceled)
 	}, time.Second, time.Millisecond)
@@ -376,4 +448,16 @@ func assertClosed(t *testing.T, ch <-chan Event) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for embedded chat stream to close")
 	}
+}
+
+func (f *fakeRuntime) Release(context.Context) error { return nil }
+
+func (f *fakeRuntime) Attach(ctx context.Context, options dagentruntime.ObserveOptions) (dagentruntime.Observation, error) {
+	return f.Observe(ctx, options)
+}
+
+func (f *fakeRuntime) UpdateTitle(context.Context, string) error { return nil }
+
+func (f *fakeRuntime) Steer(ctx context.Context, input dagentruntime.TurnInput) (dagentruntime.Submission, error) {
+	return f.Send(ctx, input)
 }

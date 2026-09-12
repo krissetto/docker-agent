@@ -8,50 +8,73 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
-	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
-	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/version"
 )
 
-type activeRuntimes struct {
-	runtime  runtime.Runtime
-	done     <-chan struct{} // Closed when the session is deleted/detached. Nil for sessions without lifetime tracking.
-	cancel   context.CancelFunc
-	session  *session.Session        // The actual session object used by the runtime
-	titleGen *sessiontitle.Generator // Title generator (includes fallback models)
-
-	streaming   sync.Mutex  // Held while a RunStream is in progress; serialises concurrent requests
-	modelSwitch sync.Mutex  // Serialises model changes with manager-owned session persistence
-	deleting    atomic.Bool // Set before deletion waits for an in-flight model transaction
+type sessionRestoreLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
-// SessionManager manages sessions for HTTP and Connect-RPC servers.
+type sessionRestoreLockSet struct {
+	mu    sync.Mutex
+	locks map[string]*sessionRestoreLock
+}
+
+func newSessionRestoreLockSet() *sessionRestoreLockSet {
+	return &sessionRestoreLockSet{locks: make(map[string]*sessionRestoreLock)}
+}
+
+func (s *sessionRestoreLockSet) lock(key string) func() {
+	s.mu.Lock()
+	entry := s.locks[key]
+	if entry == nil {
+		entry = &sessionRestoreLock{}
+		s.locks[key] = entry
+	}
+	entry.refs++
+	s.mu.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(s.locks, key)
+			}
+		}()
+	}
+}
+
+func (s *sessionRestoreLockSet) length() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.locks)
+}
+
+type activeRuntimes struct {
+	handle   runtime.SessionHandle
+	registry runtime.SessionRuntime
+	session  *session.Session
+}
+
 type SessionManager struct {
 	runtimeSessions *concurrent.Map[string, *activeRuntimes]
-	deletedSessions *concurrent.Map[string, *activeRuntimes]
-	eventLogs       *concurrent.Map[string, *pumpedEventLog]
 	sessionStore    session.Store
 	Sources         config.Sources
 
@@ -64,75 +87,34 @@ type SessionManager struct {
 	// that open arbitrary host workspaces and was reverted (#3788).
 	sessionWorkingDirRoot string
 
-	// newRuntime, when non-nil, replaces runtime.New as the runtime
-	// constructor in runtimeForSession. Test seam: lets a build fail
-	// deterministically after the team has been loaded.
-	newRuntime func(context.Context, *team.Team, ...runtime.Opt) (runtime.Runtime, error)
+	// sessionRegistry is the default session registry. sessionRegistries enables
+	// explicit multi-source routing; session source identity is persisted in a
+	// namespaced attribute and used for every later lookup.
+	sessionRegistry   runtime.SessionRuntime
+	sessionRegistries map[string]runtime.SessionRuntime
 
-	// beforeRunModelSwitch is a test seam for the RunSession lock boundary.
-	beforeRunModelSwitch func()
+	// sessionRuntimeFactory, when set, builds the per-source registries above
+	// lazily (see WithSessionRuntimeFactory); ownedRegistries are the routers
+	// this manager built and must shut down.
+	sessionRuntimeFactory SessionRuntimeFactory
+	ownedRegistries       []*workspaceSessionRuntimes
 
-	// beforePersistActiveSession is a test seam for the persistence lock boundary.
-	beforePersistActiveSession func()
+	// sessionRestoreLocks serialize cold publication by durable root. Children share
+	// their root's lock because restoring one child reconstructs the whole tree.
+	sessionRestoreLocks *sessionRestoreLockSet
 
 	refreshInterval time.Duration
 
 	mux sync.Mutex
 
-	// eventLogsMu serialises event-log lifecycle transitions: on-demand
-	// creation (ensureEventLog), source attachment (RegisterEventSource) and
-	// teardown (dropEventLog), together with deletedEventLogs. Reads of
-	// eventLogs stay lock-free. It is a leaf lock: sm.mux may be held when
-	// acquiring it (DeleteSession/BatchDeleteSessions), never the reverse —
-	// ensureEventLog runs on runtime goroutines (elicitation sink callbacks)
-	// and must not need sm.mux.
-	eventLogsMu sync.Mutex
-
-	// deletedEventLogs tombstones the IDs of deleted sessions so a stale
-	// elicitation-sink closure — held by an in-flight or detached background
-	// elicitation that outlives DeleteSession — cannot lazily recreate an
-	// event log for a session that no longer exists (#3584 review). Entries
-	// are permanent: session IDs are never reused, and one string per deleted
-	// session is far cheaper than the leaked event log it prevents. Guarded
-	// by eventLogsMu.
-	deletedEventLogs map[string]struct{}
+	// serverCtx owns accepted background session operations after request return.
+	serverCtx context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
 
 	// sessionReady is closed once the first session is attached or created,
 	// signalling that the server is ready to accept session-scoped requests.
 	sessionReady     chan struct{}
 	sessionReadyOnce sync.Once
-
-	// pendingSafetyDefaults tracks sessions created by CreateSession in this
-	// process without any user/API safety choice. The author-declared YAML
-	// defaults (selected agent safety, then runtime.safety) are only known
-	// once the team is loaded, so they are applied when the first runtime is
-	// built for such a session (see applyAuthorSafetyDefault) and the ID is
-	// dropped. Older persisted sessions resumed with an empty mode never
-	// appear here and are never re-defaulted.
-	pendingSafetyDefaults *concurrent.Map[string, struct{}]
-
-	// followUpInjectors routes follow-ups and idle recalls for an attached
-	// session to its owner instead of queues that are only drained mid-stream.
-	// The injector starts a real turn whose events reach the owner and every
-	// SSE subscriber. Keyed by session ID; set via RegisterFollowUpInjector.
-	followUpInjectors *concurrent.Map[string, FollowUpInjector]
-
-	// followUpKeys deduplicates follow-up requests per session by their
-	// caller-supplied Idempotency-Key, so a retried request that already
-	// landed is not delivered twice. Created lazily per session.
-	followUpKeys *concurrent.Map[string, *idempotencyCache]
 }
-
-// EventSource pushes session events to send for the lifetime of ctx. The
-// callback is invoked from request goroutines (e.g. an SSE handler), so it
-// must be safe to call concurrently across requests.
-type EventSource func(ctx context.Context, send func(any))
-
-// FollowUpInjector delivers a follow-up or idle recall message to the
-// session's owner as if a user had submitted it, starting a real turn.
-// Registered by the attached control plane via
-// [SessionManager.RegisterFollowUpInjector].
-type FollowUpInjector func(ctx context.Context, content string)
 
 // SessionManagerOpt configures a SessionManager created by NewSessionManager.
 type SessionManagerOpt func(*SessionManager)
@@ -150,6 +132,26 @@ func WithSessionWorkingDirRoot(root string) SessionManagerOpt {
 	}
 }
 
+// WithSessionRuntime injects a session registry without exposing the legacy
+// runtime stream façade.
+func WithSessionRuntime(registry runtime.SessionRuntime) SessionManagerOpt {
+	return func(sm *SessionManager) { sm.sessionRegistry = registry }
+}
+
+// WithSessionRuntimes installs explicitly named registries for multi-source
+// session routing. The map is cloned so callers may safely release bootstrap
+// state after construction.
+func WithSessionRuntimes(registries map[string]runtime.SessionRuntime) SessionManagerOpt {
+	return func(sm *SessionManager) {
+		sm.sessionRegistries = maps.Clone(registries)
+		if len(registries) == 1 {
+			for _, registry := range registries {
+				sm.sessionRegistry = registry
+			}
+		}
+	}
+}
+
 // NewSessionManager creates a new session manager.
 func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore session.Store, refreshInterval time.Duration, runConfig *config.RuntimeConfig, opts ...SessionManagerOpt) *SessionManager {
 	loaders := make(config.Sources)
@@ -158,25 +160,45 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 	}
 
 	sm := &SessionManager{
-		runtimeSessions:       concurrent.NewMap[string, *activeRuntimes](),
-		deletedSessions:       concurrent.NewMap[string, *activeRuntimes](),
-		eventLogs:             concurrent.NewMap[string, *pumpedEventLog](),
-		deletedEventLogs:      make(map[string]struct{}),
-		followUpInjectors:     concurrent.NewMap[string, FollowUpInjector](),
-		followUpKeys:          concurrent.NewMap[string, *idempotencyCache](),
-		pendingSafetyDefaults: concurrent.NewMap[string, struct{}](),
-		sessionStore:          sessionStore,
-		Sources:               loaders,
-		refreshInterval:       refreshInterval,
-		runConfig:             runConfig,
-		sessionReady:          make(chan struct{}),
+		serverCtx:           ctx,
+		runtimeSessions:     concurrent.NewMap[string, *activeRuntimes](),
+		sessionRestoreLocks: newSessionRestoreLockSet(),
+		sessionStore:        sessionStore,
+		Sources:             loaders,
+		refreshInterval:     refreshInterval,
+		runConfig:           runConfig,
+		sessionReady:        make(chan struct{}),
 	}
 
 	for _, opt := range opts {
 		opt(sm)
 	}
 
+	if sm.sessionRuntimeFactory != nil && len(sm.sessionRegistries) == 0 {
+		sm.sessionRegistries = make(map[string]runtime.SessionRuntime, len(loaders))
+		for name, loader := range loaders {
+			router := newWorkspaceSessionRuntimes(ctx, loader, sm.sessionRuntimeFactory)
+			sm.sessionRegistries[name] = router
+			sm.ownedRegistries = append(sm.ownedRegistries, router)
+			if len(loaders) == 1 {
+				sm.sessionRegistry = router
+			}
+		}
+	}
+
 	return sm
+}
+
+// Shutdown stops every session runtime the manager built through its
+// SessionRuntimeFactory. Registries injected prebuilt stay with their owners.
+func (sm *SessionManager) Shutdown(ctx context.Context) error {
+	var errs []error
+	for _, router := range sm.ownedRegistries {
+		if err := router.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (sm *SessionManager) markReady() {
@@ -194,403 +216,12 @@ func (sm *SessionManager) WaitReady(ctx context.Context) error {
 	}
 }
 
-// pumpedEventLog couples an [eventLog] with the goroutine (the pump) that
-// feeds it from a registered [EventSource]. cancel stops the pump; the log
-// keeps buffering events for the session's lifetime so reconnecting clients
-// can replay.
-type pumpedEventLog struct {
-	log    *eventLog
-	cancel context.CancelFunc
-
-	// lazy marks a log created on demand by ensureEventLog: ring buffer
-	// only, no pump goroutine. RegisterEventSource adopts such a log (see
-	// there) instead of clobbering it.
-	lazy bool
-}
-
-// RegisterEventSource attaches an event source for sessionID and immediately
-// starts pumping its events into a per-session [eventLog]. It is used by
-// callers that own a runtime out-of-band (e.g. the TUI) so that HTTP clients
-// can subscribe to events — with sequence numbers and replay — via
-// GET /api/sessions/:id/events.
-//
-// The pump runs for the session's lifetime (until DeleteSession or the source
-// returns), buffering events even when no client is connected, so a client
-// that connects or reconnects later can replay what it missed.
-//
-// A lazily-created log (see ensureEventLog) that already exists for
-// sessionID — because an out-of-band event beat the source registration —
-// is adopted rather than replaced: its buffered events, sequence numbers
-// and connected listeners all survive, and only the lifetime owner changes.
-// The adopted entry's cancel becomes the pump cancel, whose deferred close
-// below ends the log — the exact same contract a brand-new attached source
-// gets. The lazy entry's old cancel closure held nothing but the log, so
-// dropping it leaks nothing.
-//
-// Registering for a deleted session is a no-op: like ensureEventLog, the
-// registration is serialised with dropEventLog under eventLogsMu and gated
-// on the deletedEventLogs tombstone, so a registration racing
-// DeleteSession/BatchDeleteSessions can neither store a log nobody will ever
-// tear down nor start a pump for a session that is gone — src is never
-// invoked. The pump context is only created after the tombstone check, so a
-// rejected registration leaves nothing behind to clean up.
-func (sm *SessionManager) RegisterEventSource(sessionID string, src EventSource) {
-	sm.eventLogsMu.Lock()
-	if _, deleted := sm.deletedEventLogs[sessionID]; deleted {
-		sm.eventLogsMu.Unlock()
-		return
-	}
-	var log *eventLog
-	if pe, ok := sm.eventLogs.Load(sessionID); ok && pe.lazy {
-		log = pe.log
-	} else {
-		log = newEventLog(defaultEventLogCapacity)
-	}
-	pumpCtx, cancel := context.WithCancel(context.Background())
-	sm.eventLogs.Store(sessionID, &pumpedEventLog{log: log, cancel: cancel})
-	sm.eventLogsMu.Unlock()
-
-	go func() {
-		defer log.close("session ended")
-		src(pumpCtx, log.append)
-	}()
-}
-
-// HasEventSource reports whether an event log is registered for sessionID.
-func (sm *SessionManager) HasEventSource(sessionID string) bool {
-	_, ok := sm.eventLogs.Load(sessionID)
-	return ok
-}
-
-// ensureEventLog returns sessionID's [pumpedEventLog], creating a bare one —
-// ring buffer only, no pump goroutine — if none is registered yet. An
-// existing log (e.g. one attached via RegisterEventSource) is always reused,
-// never replaced. Used by appendSessionEvent to give a session a replayable
-// event route even when it was never attached via RegisterEventSource (the
-// common case for a session created directly by the API server rather than
-// by an external embedder like the TUI).
-//
-// Returns nil — and creates nothing — once the session has been deleted:
-// creation is serialised with dropEventLog under eventLogsMu and gated on
-// the deletedEventLogs tombstone, so a stale elicitation-sink closure that
-// fires after DeleteSession cannot resurrect a log for a session whose
-// runtime is gone (its events would be permanently unanswerable) or leak
-// one nobody will ever tear down (#3584 review). The lock-free fast path is
-// safe without the tombstone check: a log that deletion is concurrently
-// tearing down is closed before it is removed, and appends to a closed log
-// are no-ops.
-//
-// cancel closes the log (delivering session_exited and disconnecting any
-// live listener) instead of being a no-op: there is no external source pump
-// to stop, but DeleteSession/BatchDeleteSessions call pe.cancel()
-// unconditionally expecting it to end the log's lifetime. A no-op here would
-// leave a connected GET /api/sessions/:id/events request on a lazily-created
-// log blocked forever after deletion — it would never see session_exited and
-// never close, contradicting the end-of-session contract documented on
-// Server.sessionEvents.
-func (sm *SessionManager) ensureEventLog(sessionID string) *pumpedEventLog {
-	if pe, ok := sm.eventLogs.Load(sessionID); ok {
-		return pe
-	}
-
-	sm.eventLogsMu.Lock()
-	defer sm.eventLogsMu.Unlock()
-	if _, deleted := sm.deletedEventLogs[sessionID]; deleted {
-		return nil
-	}
-	if pe, ok := sm.eventLogs.Load(sessionID); ok {
-		return pe
-	}
-	log := newEventLog(defaultEventLogCapacity)
-	pe := &pumpedEventLog{log: log, cancel: func() { log.close("session ended") }, lazy: true}
-	sm.eventLogs.Store(sessionID, pe)
-	return pe
-}
-
-// dropEventLog tombstones sessionID and tears down its event log, if any.
-// Serialised with ensureEventLog/RegisterEventSource under eventLogsMu so
-// that once it returns, no event log for sessionID exists or can ever be
-// created again — neither lazily nor via a source registration. Callers may
-// hold sm.mux (see eventLogsMu's lock ordering note).
-func (sm *SessionManager) dropEventLog(sessionID string) {
-	sm.eventLogsMu.Lock()
-	defer sm.eventLogsMu.Unlock()
-	sm.deletedEventLogs[sessionID] = struct{}{}
-	if pe, ok := sm.eventLogs.Load(sessionID); ok {
-		pe.cancel()
-		sm.eventLogs.Delete(sessionID)
-	}
-}
-
-// appendSessionEvent appends event to sessionID's event log, creating the
-// log on demand (see ensureEventLog) if this is the first out-of-band event
-// the session has ever produced. Events for a deleted session are dropped.
-func (sm *SessionManager) appendSessionEvent(sessionID string, event any) {
-	if pe := sm.ensureEventLog(sessionID); pe != nil {
-		pe.log.append(event)
-	}
-}
-
-// sessionElicitationSink returns the OnElicitationRequest handler that
-// runtimeForSession registers on every API/server-created runtime: it
-// appends the event to sessionID's (lazily created) event log, giving
-// out-of-band elicitations — chiefly from detached background jobs — a
-// session-scoped route to any client streaming GET /api/sessions/:id/events,
-// instead of the runtime treating an absent sink as "no UI" and
-// auto-declining (#3584). Split out as its own method so the exact wiring is
-// unit-testable without spinning up a real runtime/team.
-func (sm *SessionManager) sessionElicitationSink(sessionID string) func(runtime.Event) {
-	return func(ev runtime.Event) {
-		sm.appendSessionEvent(sessionID, ev)
-	}
-}
-
-// elicitationSinkMirror is the optional capability marking a runtime whose
-// OnElicitationRequest sink is the exactly-once delivery point for
-// elicitation requests even though the same event is ALSO best-effort
-// mirrored onto its RunStream channel (see
-// [runtime.LocalRuntime.MirrorsElicitationOnRunStream]). Consumers that copy
-// RunStream events into the session event log must skip that mirror copy or
-// the log would carry the same request twice. Runtimes without the
-// capability (e.g. RemoteRuntime, whose OnElicitationRequest is a no-op)
-// deliver ONLY via RunStream, so their copy must never be skipped.
-type elicitationSinkMirror interface {
-	MirrorsElicitationOnRunStream()
-}
-
-// LastEventSeq returns the most recent event sequence number for sessionID,
-// so a snapshot can advertise the exact point from which a client should tail.
-// Returns 0 and false when no event log exists.
-func (sm *SessionManager) LastEventSeq(sessionID string) (uint64, bool) {
-	pe, ok := sm.eventLogs.Load(sessionID)
-	if !ok {
-		return 0, false
-	}
-	return pe.log.lastSeq(), true
-}
-
-// RegisterFollowUpInjector registers fn as the follow-up delivery path for an
-// attached sessionID. When set, [SessionManager.FollowUpSession] routes
-// messages through fn (which feeds them to the TUI App so a real turn starts)
-// instead of the runtime follow-up queue. Used by the --listen control plane.
-func (sm *SessionManager) RegisterFollowUpInjector(sessionID string, fn FollowUpInjector) {
-	sm.followUpInjectors.Store(sessionID, fn)
-}
-
-type recallHandlerSetter interface {
-	SetRecallHandler(handler runtime.RecallHandler)
-}
-
-func (sm *SessionManager) registerRecallHandler(sessionID string, rt runtime.Runtime) {
-	setter, ok := rt.(recallHandlerSetter)
-	if !ok {
-		return
-	}
-	setter.SetRecallHandler(func(ctx context.Context, msg runtime.QueuedMessage) bool {
-		if err := sm.recallSession(ctx, sessionID, msg); err != nil {
-			slog.WarnContext(ctx, "Failed to handle tool recall", "session_id", sessionID, "error", err)
-			return false
-		}
-		return true
-	})
-}
-
-// StreamEvents replays and tails the events buffered for sessionID, calling
-// send for each one with its sequence number. When since is non-nil only
-// events newer than *since are replayed before tailing (see [eventLog.stream]
-// for the gap semantics). It blocks until ctx is cancelled, the session is
-// detached via [SessionManager.DeleteSession], or the source ends. Returns
-// false when no event log is registered.
-func (sm *SessionManager) StreamEvents(ctx context.Context, sessionID string, since *uint64, send func(seq uint64, event any)) bool {
-	pe, ok := sm.eventLogs.Load(sessionID)
-	if !ok {
-		return false
-	}
-	pe.log.stream(ctx, since, send)
-	return true
-}
-
-// AttachRuntime registers a pre-built runtime + session under sessionID so
-// that subsequent calls (RunSession, Steer, Resume...) reuse it instead of
-// building one from agentFilename. This is what lets a single in-process
-// runtime be shared between the TUI and an HTTP control plane.
-//
-// The internal cancellation signal is fired by [SessionManager.DeleteSession];
-// SSE streams and other lifetime-bound consumers use it (via
-// [SessionManager.StreamEvents]) to terminate when the session is detached.
-//
-// It returns the same lock RunSession and AddMessage/UpdateMessage already
-// use (via TryLock) to detect and reject concurrent mutations while a stream
-// is active. Callers that stream the attached runtime directly — bypassing
-// RunSession entirely, e.g. the TUI's App.Run/Retry/RunWithMessage calling
-// rt.RunStream itself — previously left that lock unheld for the whole
-// attached/TUI stream, so a concurrent AddMessage/UpdateMessage or
-// RunSession wrongly observed the session as idle instead of 409ing (#3590).
-// The caller must hold this lock for the duration of every direct RunStream
-// call (see the pkg/app WithStreamGuard option) so the busy check sees
-// attached streams too.
-func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, rt runtime.Runtime, sess *session.Session) sync.Locker {
-	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	rs := &activeRuntimes{
-		runtime: rt,
-		done:    ctx.Done(),
-		cancel:  cancel,
-		session: sess,
-	}
-	sm.runtimeSessions.Store(sessionID, rs)
-	sm.registerRecallHandler(sessionID, rt)
-	sm.markReady()
-	return &rs.streaming
-}
-
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
 	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.session != nil {
 		return rs.session.Clone(), nil
 	}
 	return sm.sessionStore.GetSession(ctx, id)
-}
-
-// WaitSessionAttached blocks until a runtime is attached for sessionID (i.e.
-// the session is ready to accept follow-ups and produce events), the timeout
-// elapses, or ctx is cancelled. It returns true once the session is attached.
-//
-// Unlike WaitReady, which fires as soon as *any* session is ready, this is
-// session-scoped: a client that launched a specific run can wait for exactly
-// that session instead of racing the server's startup.
-func (sm *SessionManager) WaitSessionAttached(ctx context.Context, sessionID string, timeout time.Duration) bool {
-	if _, ok := sm.runtimeSessions.Load(sessionID); ok {
-		return true
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			_, ok := sm.runtimeSessions.Load(sessionID)
-			return ok
-		case <-ticker.C:
-			if _, ok := sm.runtimeSessions.Load(sessionID); ok {
-				return true
-			}
-		}
-	}
-}
-
-// GetActiveSessions returns lightweight status for runtimes attached to this
-// server. Unlike GetSessions, it never reads historical sessions from disk.
-func (sm *SessionManager) GetActiveSessions() []api.SessionsResponse {
-	sessions := []api.SessionsResponse{}
-	sm.runtimeSessions.Range(func(_ string, rs *activeRuntimes) bool {
-		if rs.session == nil {
-			return true
-		}
-		streaming := !rs.streaming.TryLock()
-		if !streaming {
-			rs.streaming.Unlock()
-		}
-		title := rs.session.TitleSnapshot()
-		inputTokens, outputTokens := rs.session.Usage()
-		sessions = append(sessions, api.SessionsResponse{
-			ID:           rs.session.ID,
-			Title:        title,
-			CreatedAt:    rs.session.CreatedAt.Format(time.RFC3339),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			WorkingDir:   rs.session.WorkingDir,
-			Streaming:    streaming,
-		})
-		return true
-	})
-	return sessions
-}
-
-// GetSessionStatus returns a lightweight snapshot of the session's current
-// runtime state. Designed for late-joining SSE consumers that need to know
-// the session's state without waiting for the next event transition.
-func (sm *SessionManager) GetSessionStatus(ctx context.Context, id string) (*api.SessionStatusResponse, error) {
-	rs, ok := sm.runtimeSessions.Load(id)
-	if !ok {
-		return nil, fmt.Errorf("session %s not found", id)
-	}
-
-	sess := rs.session
-
-	// Probe streaming state: TryLock succeeds only when no RunStream is
-	// in progress. Immediately unlock so we don't interfere.
-	streaming := !rs.streaming.TryLock()
-	if !streaming {
-		rs.streaming.Unlock()
-	}
-
-	title := sess.TitleSnapshot()
-	inputTokens, outputTokens := sess.Usage()
-	return &api.SessionStatusResponse{
-		ID:           sess.ID,
-		Title:        title,
-		Streaming:    streaming,
-		Agent:        rs.runtime.CurrentAgentName(ctx),
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		NumMessages:  len(sess.GetAllMessages()),
-	}, nil
-}
-
-// GetSessionSnapshot returns the full, self-contained state of a session: its
-// stored fields plus, when an active runtime is attached, its live runtime
-// state (streaming, current agent) and the sequence number of the most recent
-// event on its /events stream. It is the resync primitive for the control
-// plane: a client reads the snapshot, then tails /events?since=<LastEventSeq>
-// to continue without a gap.
-func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*api.SessionSnapshotResponse, error) {
-	// Prefer the live in-memory session (it has the freshest messages and
-	// title) and fall back to the store when the session is not attached.
-	var sess *session.Session
-	streaming := false
-	agentName := ""
-	if rs, ok := sm.runtimeSessions.Load(id); ok {
-		sess = rs.session
-		agentName = rs.runtime.CurrentAgentName(ctx)
-		// Probe streaming state without interfering: TryLock succeeds only
-		// when no RunStream is in progress.
-		if rs.streaming.TryLock() {
-			rs.streaming.Unlock()
-		} else {
-			streaming = true
-		}
-	}
-	if sess == nil {
-		var err error
-		sess, err = sm.sessionStore.GetSession(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	lastSeq, _ := sm.LastEventSeq(id)
-
-	title := sess.TitleSnapshot()
-	inputTokens, outputTokens := sess.Usage()
-	return &api.SessionSnapshotResponse{
-		ID:            sess.ID,
-		Title:         title,
-		CreatedAt:     sess.CreatedAt,
-		WorkingDir:    sess.WorkingDir,
-		Messages:      sess.GetAllMessages(),
-		ToolsApproved: sess.ToolsApproved,
-		SafetyPolicy:  sess.SafetyPolicy,
-		Permissions:   sess.ClonePermissions(),
-		InputTokens:   inputTokens,
-		OutputTokens:  outputTokens,
-		Streaming:     streaming,
-		Agent:         agentName,
-		LastEventSeq:  lastSeq,
-		Cost:          sess.TotalCost(),
-	}, nil
 }
 
 // ErrInvalidWorkingDir marks a rejected client-supplied working_dir in
@@ -615,8 +246,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	}
 
 	// Carry a caller-supplied title (from the POST /api/sessions request body)
-	// into the new session. When set, RunSession's needsTitle check skips the
-	// LLM title-generation call and re-emits this title instead.
+	// into the new session. The title is persisted as supplied.
 	if title := strings.TrimSpace(sessionTemplate.Title); title != "" {
 		opts = append(opts, session.WithTitle(title))
 	}
@@ -670,8 +300,8 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	// Copy model-related fields from the template so callers can pin a
 	// specific model when creating a session over the API. The runtime
 	// will pick these up the first time it is built for the session
-	// (see runtimeForSession). Callers that want a model to also appear
-	// in the picker history should include it in CustomModelsUsed.
+	// These persisted fields are retained as session metadata; immutable session
+	// binding and per-turn model admission are enforced by the session API.
 	if len(sessionTemplate.AgentModelOverrides) > 0 {
 		sess.AgentModelOverrides = maps.Clone(sessionTemplate.AgentModelOverrides)
 	}
@@ -681,15 +311,6 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 
 	if err := sm.sessionStore.AddSession(ctx, sess); err != nil {
 		return nil, err
-	}
-
-	// The caller expressed no safety choice (no explicit policy, no legacy
-	// tools_approved): the author-declared YAML defaults may seed the mode,
-	// but they are only known once the team is loaded for the first run.
-	// Mark the session so the first runtime build applies them exactly once
-	// (see applyAuthorSafetyDefault); a template-supplied choice stands as-is.
-	if sess.GetSafetyPolicy() == "" {
-		sm.pendingSafetyDefaults.Store(sess.ID, struct{}{})
 	}
 
 	return sess, nil
@@ -865,141 +486,31 @@ func (sm *SessionManager) GetSessions(ctx context.Context) ([]*session.Session, 
 }
 
 // DeleteSession deletes a session by ID. It cancels the runtime context and
-// removes the session from all registries. Callers that need to wait for
-// the stream to fully stop should call WaitStopped afterwards.
+// removes the session from all registries.
 func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) error {
-	return sm.deleteSession(ctx, sessionID, true)
-}
-
-type deleteSessionFunc func(context.Context, string) error
-
-func runBatchDelete(ctx context.Context, sessionIDs []string, deleteSession deleteSessionFunc) (int, []string) {
-	deleted := 0
-	var failed []string
-	for _, sessionID := range sessionIDs {
-		if err := deleteSession(ctx, sessionID); err != nil {
-			failed = append(failed, sessionID)
-		} else {
-			deleted++
-		}
-	}
-	return deleted, failed
-}
-
-func (sm *SessionManager) deleteSession(ctx context.Context, sessionID string, trackStopped bool) error {
-	sm.mux.Lock()
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
-		sm.mux.Unlock()
 		return err
 	}
-	sessionRuntime, active := sm.runtimeSessions.Load(sess.ID)
-	if !active {
-		if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil {
-			sm.mux.Unlock()
+	registry := sm.sessionRegistry
+	if rs, ok := sm.runtimeSessions.Load(sessionID); ok {
+		registry = rs.registry
+	} else if source := sess.AttributesSnapshot()[sessionSourceAttribute]; source != "" {
+		registry = sm.sessionRegistries[source]
+		if registry == nil {
+			return &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: sessionID, Operation: "source"}
+		}
+	}
+	if registry != nil {
+		if err := registry.DeleteSession(ctx, sessionID); err != nil {
 			return err
 		}
-		sm.finishSessionDeletion(sess.ID, nil, trackStopped)
-		sm.mux.Unlock()
-		return nil
+		sm.runtimeSessions.Delete(sessionID)
 	}
-	sessionRuntime.deleting.Store(true)
-	sm.mux.Unlock()
-
-	sessionRuntime.modelSwitch.Lock()
-	if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil {
-		sessionRuntime.deleting.Store(false)
-		sessionRuntime.modelSwitch.Unlock()
+	if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
 		return err
 	}
-	sessionRuntime.modelSwitch.Unlock()
-
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-	sm.finishSessionDeletion(sess.ID, sessionRuntime, trackStopped)
 	return nil
-}
-
-// finishSessionDeletion removes manager state after the store row is gone.
-// The caller holds sm.mux.
-func (sm *SessionManager) finishSessionDeletion(sessionID string, sessionRuntime *activeRuntimes, trackStopped bool) {
-	if sessionRuntime != nil {
-		// Server-owned runtimes (done == nil) carry the manager's own
-		// elicitation sink (see runtimeForSession); clear it so a detached
-		// background job that elicits after this point hits the runtime's
-		// headless fast-decline path ("no sink means no UI") and terminates,
-		// instead of parking a waiter forever on a request nobody can answer
-		// or route anymore. Attached runtimes' sinks belong to their embedder
-		// (pkg/app) and outlive this session, so they are left alone.
-		if sessionRuntime.done == nil {
-			sessionRuntime.runtime.OnElicitationRequest(nil)
-		}
-		if sessionRuntime.cancel != nil {
-			sessionRuntime.cancel()
-		}
-		if current, ok := sm.runtimeSessions.Load(sessionID); ok && current == sessionRuntime {
-			sm.runtimeSessions.Delete(sessionID)
-		}
-		if trackStopped {
-			sm.deletedSessions.Store(sessionID, sessionRuntime)
-		}
-
-		if trackStopped {
-			// Background cleanup prevents leaks when the caller omits ?wait=true.
-			go func() {
-				ticker := time.NewTicker(100 * time.Millisecond)
-				defer ticker.Stop()
-				deadline := time.After(5 * time.Minute)
-				for {
-					if sessionRuntime.streaming.TryLock() {
-						sessionRuntime.streaming.Unlock()
-						sm.deletedSessions.Delete(sessionID)
-						return
-					}
-					select {
-					case <-deadline:
-						sm.deletedSessions.Delete(sessionID)
-						return
-					case <-ticker.C:
-					}
-				}
-			}()
-		}
-	}
-	sm.dropEventLog(sessionID)
-	sm.followUpInjectors.Delete(sessionID)
-	sm.followUpKeys.Delete(sessionID)
-	sm.pendingSafetyDefaults.Delete(sessionID)
-}
-
-// WaitStopped blocks until the session's runtime stream goroutine has fully
-// exited (streaming mutex released), the timeout fires, or ctx is cancelled
-// (e.g. client disconnect). It should be called after DeleteSession.
-// Returns nil when the stream has stopped.
-func (sm *SessionManager) WaitStopped(ctx context.Context, sessionID string, timeout time.Duration) error {
-	rs, ok := sm.deletedSessions.Load(sessionID)
-	if !ok {
-		return nil // already cleaned up
-	}
-
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		if rs.streaming.TryLock() {
-			rs.streaming.Unlock()
-			sm.deletedSessions.Delete(sessionID)
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("timeout waiting for session %s to stop", sessionID)
-		case <-ticker.C:
-		}
-	}
 }
 
 // ErrSessionBusy is returned when a session is already processing a request.
@@ -1009,449 +520,6 @@ var (
 	ErrAgentNotFound          = errors.New("agent source not found")
 	ErrAgentSourceUnavailable = errors.New("agent source unavailable")
 )
-
-// RunSession runs a session with the given messages.
-//
-// When modelOverride is non-empty, it is applied to the session's current
-// agent before any user messages are appended (and persisted via
-// SetSessionAgentModel) so the override is in effect for this turn and
-// every subsequent one. Validation happens before the messages are
-// recorded so a bad ref does not leave an orphaned user message in the
-// history.
-func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilename, currentAgent string, messages []api.Message, modelOverride string) (<-chan runtime.Event, error) {
-	sm.mux.Lock()
-	runtimeSession, exists := sm.runtimeSessions.Load(sessionID)
-
-	streamCtx, cancel := context.WithCancel(ctx)
-	var (
-		sess     *session.Session
-		titleGen *sessiontitle.Generator
-		err      error
-	)
-	if !exists {
-		sess, err = sm.sessionStore.GetSession(ctx, sessionID)
-		if err != nil {
-			sm.mux.Unlock()
-			cancel()
-			return nil, err
-		}
-
-		var rt runtime.Runtime
-		rt, titleGen, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
-		if err != nil {
-			sm.mux.Unlock()
-			cancel()
-			return nil, err
-		}
-		runtimeSession = &activeRuntimes{
-			runtime:  rt,
-			cancel:   cancel,
-			session:  sess,
-			titleGen: titleGen,
-		}
-		sm.runtimeSessions.Store(sessionID, runtimeSession)
-		sm.registerRecallHandler(sessionID, rt)
-		sm.markReady()
-	} else {
-		titleGen = runtimeSession.titleGen
-	}
-
-	// Reject the request immediately if the session is already streaming.
-	// This prevents interleaving user messages while a tool call is in
-	// progress, which would produce a tool_use without a matching
-	// tool_result and cause provider errors.
-	if !runtimeSession.streaming.TryLock() {
-		sm.mux.Unlock()
-		cancel()
-		return nil, ErrSessionBusy
-	}
-	// Track the current stream's cancel so DeleteSession aborts it — but only
-	// for server-owned entries. Attached runtimes (done != nil) keep their
-	// attach-lifetime cancel: DELETE must cancel the attach context, not the
-	// in-flight stream, which WaitStopped waits on to end naturally.
-	if runtimeSession.done == nil {
-		runtimeSession.cancel = cancel
-	}
-	sm.mux.Unlock()
-
-	// Model mutation may perform provider I/O. Coordinate it per session,
-	// outside sm.mux, while streaming excludes both direct and managed runs.
-	if sm.beforeRunModelSwitch != nil {
-		sm.beforeRunModelSwitch()
-	}
-	runtimeSession.modelSwitch.Lock()
-	defer runtimeSession.modelSwitch.Unlock()
-
-	if !sm.runtimeActive(sessionID, runtimeSession) {
-		runtimeSession.streaming.Unlock()
-		cancel()
-		return nil, ErrSessionNotRunning
-	}
-
-	if exists {
-		sess = runtimeSession.session
-	}
-
-	// Apply the model override (if any) before persisting the user
-	// messages so that an invalid ref does not leave an orphaned user
-	// message in the history. The streaming and modelSwitch locks keep the
-	// runtime, persisted snapshot, live session, and rollback in one transaction.
-	undoModelOverride, err := sm.applyRunModelOverride(ctx, runtimeSession, modelOverride)
-	if err != nil {
-		runtimeSession.streaming.Unlock()
-		cancel()
-		return nil, err
-	}
-
-	if modelOverride != "" {
-		if err := ctx.Err(); err != nil {
-			undoModelOverride(context.WithoutCancel(ctx))
-			runtimeSession.streaming.Unlock()
-			cancel()
-			return nil, err
-		}
-	}
-	if err := sm.applyAgentSwitchCommands(ctx, runtimeSession.runtime, messages); err != nil {
-		undoModelOverride(context.WithoutCancel(ctx))
-		runtimeSession.streaming.Unlock()
-		cancel()
-		return nil, err
-	}
-
-	// Now that we hold the streaming lock, it is safe to mutate the session.
-	// Collect user messages for potential title generation
-	var userMessages []string
-	for _, msg := range messages {
-		sess.AddMessage(session.UserMessage(msg.Content, msg.MultiContent...))
-		if msg.Content != "" {
-			userMessages = append(userMessages, msg.Content)
-		}
-	}
-
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		undoModelOverride(context.WithoutCancel(ctx))
-		runtimeSession.streaming.Unlock()
-		cancel()
-		return nil, err
-	}
-
-	// Update the session pointer so the runtime sees the latest messages.
-	runtimeSession.session = sess
-
-	streamChan := make(chan runtime.Event)
-
-	// Snapshot the title under sess.mu before launching the goroutine: both
-	// UpdateSessionTitle and a previous run's still-in-flight generateTitle
-	// write sess.Title via SetTitle, concurrently with this read.
-	titleToEmit := sess.TitleSnapshot()
-	needsTitle := titleToEmit == "" && len(userMessages) > 0 && titleGen != nil
-
-	go func() {
-		// Defers run LIFO: close(streamChan) last, so by the time the
-		// consumer's range loop terminates, streaming.Unlock has already
-		// fired. Otherwise a caller that immediately calls RunSession
-		// after draining the channel can race the Unlock and spuriously
-		// see ErrSessionBusy.
-		defer close(streamChan)
-		defer cancel()
-		defer runtimeSession.streaming.Unlock()
-
-		var titleEvents <-chan runtime.Event
-		if needsTitle {
-			ch := make(chan runtime.Event, 1)
-			titleEvents = ch
-			go func() {
-				defer close(ch)
-				sm.generateTitle(ctx, sess, titleGen, userMessages, ch)
-			}()
-		} else if titleToEmit != "" {
-			// Re-emit the existing title so late-joining SSE consumers
-			// and boards can pick it up without an extra API call.
-			if !sendStreamEvent(streamCtx, streamChan, runtime.SessionTitle(sess.ID, titleToEmit)) {
-				return
-			}
-		}
-
-		stream := runtimeSession.runtime.RunStream(streamCtx, sess)
-		for stream != nil {
-			select {
-			case event, ok := <-titleEvents:
-				titleEvents = nil
-				if ok && !sendStreamEvent(streamCtx, streamChan, event) {
-					return
-				}
-			case event, ok := <-stream:
-				if !ok {
-					stream = nil
-					continue
-				}
-				if streamCtx.Err() != nil || !sendStreamEvent(streamCtx, streamChan, event) {
-					return
-				}
-			}
-		}
-
-		// Forward a title that completed alongside the runtime without waiting
-		// for a slow title provider before finalizing the stream.
-		select {
-		case event, ok := <-titleEvents:
-			if ok && !sendStreamEvent(streamCtx, streamChan, event) {
-				return
-			}
-		default:
-		}
-
-		if err := sm.persistActiveSession(ctx, sessionID, runtimeSession, sess); err != nil {
-			return
-		}
-	}()
-
-	return streamChan, nil
-}
-
-func sendStreamEvent(ctx context.Context, events chan<- runtime.Event, event runtime.Event) bool {
-	select {
-	case events <- event:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (sm *SessionManager) runtimeActive(sessionID string, rs *activeRuntimes) bool {
-	if rs.deleting.Load() {
-		return false
-	}
-	active, ok := sm.runtimeSessions.Load(sessionID)
-	return ok && active == rs
-}
-
-// ResumeSession resumes a paused session with an optional rejection reason or tool name.
-func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirmation, reason, toolName string) error {
-	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
-		return errors.New("session not found")
-	}
-
-	rt.modelSwitch.Lock()
-	defer rt.modelSwitch.Unlock()
-	if !sm.runtimeActive(sessionID, rt) {
-		return ErrSessionNotRunning
-	}
-
-	// Mirror + persist mid-turn session mutations synchronously —
-	// PersistenceObserver only persists on OnRunStart. Legacy verbs
-	// (approve-session, approve-safe, approve-safer) are normalized
-	// so old clients keep working.
-	resumeType := runtime.NormalizeResumeType(runtime.ResumeType(confirmation))
-	if rt.session != nil {
-		mutated := false
-		switch resumeType {
-		case runtime.ResumeTypeApproveBalanced:
-			rt.session.SetSafetyPolicy(session.SafetyPolicyBalanced)
-			mutated = true
-		case runtime.ResumeTypeApproveAutonomous:
-			rt.session.SetSafetyPolicy(session.SafetyPolicyAutonomous)
-			mutated = true
-		case runtime.ResumeTypeApproveTool:
-			// Skip when toolName is empty — the dispatcher's own
-			// fallback (pending tool call name) isn't reachable here.
-			if toolName != "" {
-				rt.session.AppendPermissionAllow(toolName)
-				mutated = true
-			}
-		}
-		if mutated {
-			if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
-				slog.WarnContext(ctx, "failed to persist mid-turn session state",
-					"session_id", sessionID, "confirmation", confirmation, "err", err)
-			}
-		}
-	}
-
-	rt.runtime.Resume(ctx, runtime.ResumeRequest{
-		Type:     resumeType,
-		Reason:   reason,
-		ToolName: toolName,
-	})
-	return nil
-}
-
-// SteerSession enqueues user messages for mid-turn injection into a running
-// session. The messages are picked up by the agent loop after the current tool
-// calls finish but before the next LLM call. Returns an error if the session
-// is not actively running or if the steer buffer is full.
-func (sm *SessionManager) SteerSession(ctx context.Context, sessionID string, messages []api.Message) error {
-	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
-		return ErrSessionNotRunning
-	}
-
-	for _, msg := range messages {
-		if err := rt.runtime.Steer(ctx, runtime.QueuedMessage{
-			Content:      msg.Content,
-			MultiContent: msg.MultiContent,
-		}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// FollowUpSession enqueues user messages for end-of-turn processing in a
-// running session. Each message is popped one at a time after the current
-// turn finishes, giving each follow-up a full undivided agent turn.
-//
-// idempotencyKey, when non-empty, makes the call safe to retry: if a request
-// with the same key already landed for this session, this one is a no-op and
-// returns duplicate=true. The reservation is rolled back if delivery fails, so
-// a genuine failure stays retryable.
-//
-// When a follow-up injector is registered for the session (the --listen
-// control plane attaches one for the TUI App), messages are delivered through
-// it: the App submits them as normal user input, which starts a turn even when
-// the agent is idle and streams events to the TUI and every SSE subscriber.
-// The returned streaming flag is true in this case because a turn is (or is
-// about to be) running.
-//
-// Without an injector (headless server-owned sessions) the messages go to the
-// runtime follow-up queue. If no stream is currently running the messages are
-// still enqueued but are not consumed until the next RunSession starts a
-// stream; the returned boolean indicates whether a stream is active.
-func (sm *SessionManager) FollowUpSession(ctx context.Context, sessionID string, messages []api.Message, idempotencyKey string) (streaming, duplicate bool, err error) {
-	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
-		return false, false, ErrSessionNotRunning
-	}
-
-	if idempotencyKey != "" {
-		cache, _ := sm.followUpKeys.LoadOrStore(sessionID, newIdempotencyCache(defaultIdempotencyCapacity))
-		if cache.reserve(idempotencyKey) {
-			return false, true, nil
-		}
-		// Roll the reservation back if we end up returning an error, so the
-		// caller can safely retry a failed request with the same key.
-		defer func() {
-			if err != nil {
-				cache.release(idempotencyKey)
-			}
-		}()
-	}
-
-	// Attached session: hand the follow-up to its owner (the TUI App) so a
-	// real turn starts and events reach all subscribers.
-	if inject, ok := sm.followUpInjectors.Load(sessionID); ok {
-		for _, msg := range messages {
-			inject(ctx, msg.Content)
-		}
-		return true, false, nil
-	}
-
-	for _, msg := range messages {
-		if err := rt.runtime.FollowUp(ctx, runtime.QueuedMessage{
-			Content:      msg.Content,
-			MultiContent: msg.MultiContent,
-		}); err != nil {
-			return false, false, err
-		}
-	}
-
-	// Probe streaming state so the caller knows whether the follow-up
-	// will be consumed by the current turn or sit idle until the next.
-	streaming = !rt.streaming.TryLock()
-	if !streaming {
-		rt.streaming.Unlock()
-	}
-
-	return streaming, false, nil
-}
-
-func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, msg runtime.QueuedMessage) error {
-	if inject, ok := sm.followUpInjectors.Load(sessionID); ok {
-		inject(ctx, msg.Content)
-		return nil
-	}
-
-	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
-		return ErrSessionNotRunning
-	}
-	if !rt.streaming.TryLock() {
-		return rt.runtime.Steer(ctx, msg)
-	}
-
-	runCtx, runCancel := context.WithCancel(context.WithoutCancel(ctx))
-	rt.modelSwitch.Lock()
-	if !sm.runtimeActive(sessionID, rt) {
-		rt.modelSwitch.Unlock()
-		rt.streaming.Unlock()
-		runCancel()
-		return ErrSessionNotRunning
-	}
-	sess := rt.session
-	if sess == nil {
-		var err error
-		sess, err = sm.sessionStore.GetSession(ctx, sessionID)
-		if err != nil {
-			rt.modelSwitch.Unlock()
-			rt.streaming.Unlock()
-			runCancel()
-			return err
-		}
-	}
-	sess.AddMessage(session.UserMessage(msg.Content, msg.MultiContent...))
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		rt.modelSwitch.Unlock()
-		rt.streaming.Unlock()
-		runCancel()
-		return err
-	}
-	rt.session = sess
-	// Same rule as RunSession: never clobber an attached runtime's
-	// attach-lifetime cancel with a per-stream cancel.
-	if rt.done == nil {
-		rt.cancel = runCancel
-	}
-	rt.modelSwitch.Unlock()
-
-	_, skipMirroredElicitation := rt.runtime.(elicitationSinkMirror)
-	go func() {
-		defer rt.streaming.Unlock()
-		defer runCancel()
-		stream := rt.runtime.RunStream(runCtx, sess)
-		for event := range stream {
-			// Already appended exactly once via the OnElicitationRequest
-			// sink (see runtimeForSession); skip the best-effort RunStream
-			// mirror copy so the event log doesn't carry the same request
-			// twice (#3584).
-			if _, isElicitation := event.(*runtime.ElicitationRequestEvent); isElicitation && skipMirroredElicitation {
-				continue
-			}
-			if pe, ok := sm.eventLogs.Load(sessionID); ok {
-				pe.log.append(event)
-			}
-		}
-		if err := sm.persistActiveSession(context.WithoutCancel(ctx), sessionID, rt, sess); err != nil && !errors.Is(err, ErrSessionNotRunning) {
-			slog.WarnContext(ctx, "Failed to persist recalled session", "session_id", sessionID, "error", err)
-		}
-	}()
-
-	return nil
-}
-
-// ResumeElicitation resumes an elicitation request. elicitationID is
-// additive: pass "" to fall back to resolving the sole pending request.
-func (sm *SessionManager) ResumeElicitation(ctx context.Context, sessionID, action string, content map[string]any, elicitationID string) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-	rt, exists := sm.runtimeSessions.Load(sessionID)
-	if !exists {
-		return errors.New("session not found")
-	}
-
-	return rt.runtime.ResumeElicitation(ctx, tools.ElicitationAction(action), content, elicitationID)
-}
 
 // ToggleToolApproval toggles the legacy blanket tool approval for a
 // session. Routed through the safety mode (see [session.Session.ToggleYolo])
@@ -1525,17 +593,11 @@ func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionI
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 
-func (sm *SessionManager) persistActiveSession(ctx context.Context, sessionID string, rt *activeRuntimes, sess *session.Session) error {
-	return sm.updateActiveSession(ctx, sessionID, rt, sess, nil, nil)
-}
-
 func (sm *SessionManager) updateActiveSession(ctx context.Context, sessionID string, rt *activeRuntimes, sess *session.Session, update, rollback func()) error {
-	if sm.beforePersistActiveSession != nil {
-		sm.beforePersistActiveSession()
-	}
-	rt.modelSwitch.Lock()
-	defer rt.modelSwitch.Unlock()
-	if !sm.runtimeActive(sessionID, rt) || rt.session != sess {
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	current, active := sm.runtimeSessions.Load(sessionID)
+	if !active || current != rt || rt.session != sess {
 		return ErrSessionNotRunning
 	}
 	if update != nil {
@@ -1579,210 +641,6 @@ func (sm *SessionManager) UpdateSessionTitle(ctx context.Context, sessionID, tit
 // generateTitle generates a title for a session using the sessiontitle package.
 // The generated title is stored in the session and persisted to the store.
 // A SessionTitleEvent is emitted to notify clients.
-func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Session, gen *sessiontitle.Generator, userMessages []string, events chan<- runtime.Event) {
-	if gen == nil || len(userMessages) == 0 {
-		return
-	}
-
-	title, err := gen.Generate(ctx, sess.ID, userMessages)
-	if err != nil {
-		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", sess.ID, "error", err)
-		return
-	}
-
-	if title == "" {
-		return
-	}
-
-	// Persist only while this exact live session remains active.
-	rs, ok := sm.runtimeSessions.Load(sess.ID)
-	if !ok || sm.updateActiveSession(ctx, sess.ID, rs, sess, func() {
-		sess.SetTitle(title)
-	}, nil) != nil {
-		return
-	}
-
-	// Emit the title event
-	select {
-	case events <- runtime.SessionTitle(sess.ID, title):
-		slog.DebugContext(ctx, "Generated and emitted session title", "session_id", sess.ID, "title", title)
-	case <-ctx.Done():
-		slog.DebugContext(ctx, "Context cancelled while emitting title event", "session_id", sess.ID)
-	}
-}
-
-func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, err error) {
-	// Caller (RunSession) holds sm.mux and has already verified that no
-	// active runtime exists for this session. This function is purely a
-	// constructor: it must not touch sm.runtimeSessions, otherwise it would
-	// briefly publish a half-initialised activeRuntimes (e.g. without the
-	// cancel func) that other goroutines could observe.
-	//
-	// Every call is a cold-path construction (caller short-circuits
-	// cached hits), so a span here attributes per-request first-use
-	// latency (team load + runtime construction) without adding noise
-	// on warm paths.
-	ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/server").Start(
-		ctx, "session.runtime_init",
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attribute.String("gen_ai.conversation.id", sess.ID)),
-	)
-	defer func() {
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-		}
-		span.End()
-	}()
-
-	loadResult, err := sm.loadTeamWithConfig(ctx, agentFilename, rc, teamloader.WithWorkingDir(sess.WorkingDir))
-	if err != nil {
-		return nil, nil, err
-	}
-	t := loadResult.Team
-
-	// Resolve the team's default agent when no specific agent was requested.
-	agt, err := t.AgentOrDefault(currentAgent)
-	if err != nil {
-		return nil, nil, err
-	}
-	currentAgent = agt.Name()
-	sess.MaxIterations = agt.MaxIterations()
-	sess.MaxConsecutiveToolCalls = agt.MaxConsecutiveToolCalls()
-	sess.MaxOldToolCallTokens = agt.MaxOldToolCallTokens()
-	sess.MaxToolResultTokens = agt.MaxToolResultTokens()
-
-	// Select (but do not yet commit) the author-declared safety default:
-	// the selected agent's safety first, then the config-wide
-	// runtime.safety. Committing — mutating the session, persisting,
-	// consuming the pending marker — waits until the whole construction
-	// below has succeeded, so a failed build leaves the session eligible
-	// for a retry with a different config/agent whose default may differ
-	// (see applyAuthorSafetyDefault).
-	authorSafetyDefault := session.SafetyPolicy(agt.Safety())
-	if authorSafetyDefault == "" {
-		authorSafetyDefault = session.SafetyPolicy(t.RuntimeSafety())
-	}
-
-	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
-		Models:             loadResult.Models,
-		Providers:          loadResult.Providers,
-		ModelsGateway:      rc.ModelsGateway,
-		EncryptedConfig:    loadResult.EncryptedConfig,
-		EnvProvider:        rc.EnvProvider(),
-		ProviderRegistry:   loadResult.ProviderRegistry,
-		AgentDefaultModels: loadResult.AgentDefaultModels,
-	}
-	// Reuse the models.dev store the team loader already warmed so the
-	// /api/sessions/:id/models picker doesn't re-pay the cold catalog parse.
-	if store, storeErr := rc.ModelsDevStore(); storeErr == nil {
-		modelSwitcherCfg.ModelsStore = store
-	} else {
-		slog.WarnContext(ctx, "Failed to obtain shared models.dev store; runtime will use its own", "error", storeErr)
-	}
-
-	opts := []runtime.Opt{
-		runtime.WithCurrentAgent(currentAgent),
-		runtime.WithManagedOAuth(false),
-		runtime.WithUnmanagedOAuthRedirectURI(rc.MCPOAuthRedirectURI),
-		runtime.WithSessionStore(sm.sessionStore),
-		// Match the tracer scope used by the CLI; without this the
-		// API-server runtime's startSpan is a no-op so all the
-		// runtime.* spans go silent in HTTP-server mode.
-		runtime.WithTracer(otel.Tracer(version.AppName)),
-		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
-	}
-	newRuntime := runtime.New
-	if sm.newRuntime != nil {
-		newRuntime = sm.newRuntime
-	}
-	run, err := newRuntime(ctx, t, opts...)
-	if err != nil {
-		return nil, nil, err
-	}
-	// If any later construction step fails, close the runtime before
-	// returning: the caller only ever sees the error, so an unclosed
-	// runtime would leak its tool sets.
-	defer func() {
-		if err != nil {
-			if closeErr := run.Close(); closeErr != nil {
-				slog.WarnContext(ctx, "Failed to close runtime after failed construction", "session_id", sess.ID, "error", closeErr)
-			}
-		}
-	}()
-
-	// Give this session an out-of-band, session-scoped route for
-	// elicitations raised while nobody is synchronously reading this
-	// specific RunSession call's stream — most notably background jobs
-	// (run_background_agent) that outlive the request that started them.
-	// Without a sink, elicitationHandler's headless fast-decline path ("no
-	// sink means no UI") fires for every background elicitation raised
-	// through the API even though an HTTP client CAN answer it via POST
-	// /api/sessions/:id/elicitation. Appending to this session's event log
-	// makes the request replayable via GET /api/sessions/:id/events (lazily
-	// creating the log if this session was never attached with
-	// RegisterEventSource) and answerable through the existing elicitation
-	// route (#3584).
-	run.OnElicitationRequest(sm.sessionElicitationSink(sess.ID))
-
-	// Apply any stored per-agent model overrides so that a session
-	// resumed (or freshly created with overrides via CreateSession) uses
-	// the requested models instead of the agent's defaults.
-	overrides, _ := sess.ModelStateSnapshot()
-	applyStoredOverrides(ctx, sess.ID, run, overrides)
-
-	// May be nil when the agent has no configured title candidate; a nil
-	// generator skips title generation.
-	titleGen := sessiontitle.New(agt.TitleModels(ctx)...)
-
-	// Construction succeeded: the selected author default may now be
-	// committed and the pending marker consumed, exactly once.
-	sm.applyAuthorSafetyDefault(ctx, sess, authorSafetyDefault)
-
-	slog.DebugContext(ctx, "Runtime created for session", "session_id", sess.ID)
-
-	return run, titleGen, nil
-}
-
-// applyAuthorSafetyDefault seeds an API-created session that carries no
-// user safety choice with the author-declared YAML default selected by
-// runtimeForSession (the selected agent's safety first, then the
-// config-wide runtime.safety). It must only run once the session's first
-// runtime has been fully constructed: a failed build keeps the pending
-// marker and leaves the session untouched, so a retry — possibly with a
-// different config or agent — applies that configuration's default
-// instead. Only sessions this process created via CreateSession
-// (pendingSafetyDefaults) are seeded, so an older persisted session
-// resumed with an empty mode is never re-defaulted behind the user's
-// back. The marker is consumed even when no default applies: later
-// rebuilds and agent switches must not change an established mode.
-func (sm *SessionManager) applyAuthorSafetyDefault(ctx context.Context, sess *session.Session, policy session.SafetyPolicy) {
-	if _, pending := sm.pendingSafetyDefaults.Load(sess.ID); !pending {
-		return
-	}
-	sm.pendingSafetyDefaults.Delete(sess.ID)
-
-	// Re-check: the client may have chosen a mode between CreateSession and
-	// this first run (safety_policy update or the legacy tools_approved
-	// toggle); a user choice always wins over author defaults.
-	if sess.GetSafetyPolicy() != "" {
-		return
-	}
-	if policy == "" {
-		return
-	}
-
-	// SetSafetyPolicy keeps the legacy ToolsApproved flag in sync.
-	sess.SetSafetyPolicy(policy)
-	// Persist so the default survives resumes after this process exits.
-	// RunSession persists the session again right after building the
-	// runtime, so a failure here is logged rather than failing the run.
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		slog.WarnContext(ctx, "failed to persist author-declared safety default",
-			"session_id", sess.ID, "safety_policy", string(policy), "err", err)
-	}
-}
-
 func (sm *SessionManager) sourceLoadError(agentFilename string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
@@ -1804,22 +662,6 @@ func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, ru
 		return nil, sm.sourceLoadError(agentFilename, err)
 	}
 	return t, nil
-}
-
-// loadTeamWithConfig is like loadTeam but also returns the loaded model and
-// provider configuration so the runtime can be wired for model switching.
-func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig, opts ...teamloader.Opt) (*teamloader.LoadResult, error) {
-	agentSource, err := sm.resolveSource(agentFilename)
-	if err != nil {
-		return nil, err
-	}
-
-	allOpts := append(loaderdefaults.Opts(), opts...)
-	result, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
-	if err != nil {
-		return nil, sm.sourceLoadError(agentFilename, err)
-	}
-	return result, nil
 }
 
 // LoadAgentConfig loads an agent configuration through the same source
@@ -1871,114 +713,6 @@ func (sm *SessionManager) resolveSource(agentFilename string) (config.Source, er
 	return nil, fmt.Errorf("%w: agent not found: %s", ErrAgentNotFound, agentFilename)
 }
 
-// applyRunModelOverride applies modelRef to the runtime and live session.
-// The caller holds modelSwitch and persists the resulting session snapshot.
-// The returned undo restores both runtime and complete model state.
-func (sm *SessionManager) applyRunModelOverride(ctx context.Context, rs *activeRuntimes, modelRef string) (undo func(context.Context), err error) {
-	noop := func(context.Context) {}
-	if modelRef == "" {
-		return noop, nil
-	}
-	if !rs.runtime.SupportsModelSwitching() {
-		return noop, ErrModelSwitchingNotSupported
-	}
-
-	agentName := rs.runtime.CurrentAgentName(ctx)
-	sess := rs.session
-	var previousOverrides map[string]string
-	var previousCustomModels []string
-	if sess != nil {
-		previousOverrides, previousCustomModels = sess.ModelStateSnapshot()
-	}
-	prevOverride, hadPrev := previousOverrides[agentName]
-
-	if err := rs.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
-		return noop, err
-	}
-
-	if sess != nil {
-		sess.SetAgentModelOverride(agentName, modelRef)
-	}
-
-	undo = func(ctx context.Context) {
-		rollback := prevOverride
-		if !hadPrev {
-			rollback = ""
-		}
-		if rbErr := rs.runtime.SetAgentModel(ctx, agentName, rollback); rbErr != nil {
-			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "agent", agentName, "error", rbErr)
-		}
-		if sess != nil {
-			sess.ReplaceModelState(previousOverrides, previousCustomModels)
-		}
-	}
-	return undo, nil
-}
-
-// applyAgentSwitchCommands is the HTTP analogue of
-// pkg/cli/runner.PrepareUserMessage. Scoped to agent-switch commands so
-// expanding an instruction-only command doesn't silently rewrite text
-// existing HTTP callers send as literal user input.
-//
-// Two-pass: resolve every message against the pre-batch agent first,
-// then apply switches. This keeps each message's interpretation
-// consistent regardless of how earlier messages in the same batch might
-// have mutated the runtime.
-func (sm *SessionManager) applyAgentSwitchCommands(ctx context.Context, rt runtime.Runtime, messages []api.Message) error {
-	originalAgent := rt.CurrentAgentName(ctx)
-
-	type pending struct {
-		idx     int
-		target  string
-		content string
-	}
-	var switches []pending
-	for i := range messages {
-		if messages[i].Role != chat.MessageRoleUser {
-			continue
-		}
-		cmd, _, ok := runtime.LookupCommand(ctx, rt, messages[i].Content)
-		if !ok || cmd.Agent == "" {
-			continue
-		}
-		switches = append(switches, pending{
-			idx:     i,
-			target:  cmd.Agent,
-			content: runtime.ResolveCommand(ctx, rt, messages[i].Content),
-		})
-	}
-
-	for _, s := range switches {
-		if s.target != rt.CurrentAgentName(ctx) {
-			if err := rt.SetCurrentAgent(ctx, s.target); err != nil {
-				if rbErr := rt.SetCurrentAgent(ctx, originalAgent); rbErr != nil {
-					slog.WarnContext(ctx, "failed to restore agent after switch error; session may be on wrong agent",
-						"original_agent", originalAgent, "stuck_on", s.target, "err", rbErr)
-				}
-				return fmt.Errorf("switch agent to %q: %w", s.target, err)
-			}
-		}
-		messages[s.idx].Content = s.content
-	}
-	return nil
-}
-
-// applyStoredOverrides applies the persisted per-agent model overrides on
-// the freshly created runtime. Failures are logged at WARN and otherwise
-// ignored: a stored override that no longer resolves (e.g. because the
-// model was removed from the agent's config) must not prevent the
-// session from being resumed with the agent's default model.
-func applyStoredOverrides(ctx context.Context, sessionID string, run runtime.Runtime, overrides map[string]string) {
-	if len(overrides) == 0 || !run.SupportsModelSwitching() {
-		return
-	}
-	for agentName, modelRef := range overrides {
-		if err := run.SetAgentModel(ctx, agentName, modelRef); err != nil {
-			slog.WarnContext(ctx, "Failed to apply stored model override", "session_id", sessionID, "agent", agentName, "model", modelRef, "error", err)
-		}
-	}
-}
-
 // GetAgentToolCount loads the agent's team and returns the number of
 // tools available to the given agent. When agentName is empty, it
 // resolves to the team's default agent.
@@ -2006,59 +740,21 @@ func (sm *SessionManager) GetAgentToolCount(ctx context.Context, agentFilename, 
 	return len(agentTools), nil
 }
 
-// AddMessage adds a message to a session.
-//
-// It rejects the mutation with ErrSessionBusy while the session has an
-// active RunStream: session.Session.mu makes the append itself race-free,
-// but a message added mid-stream (mid-tool-call in particular) can still
-// desynchronize the in-flight turn from what the model/tools expect, so we
-// also reject at the API boundary. The busy check TryLocks the same
-// activeRuntimes.streaming lock RunSession/AttachRuntime use, and — unlike
-// a bare check-then-release probe — HOLDS it across the entire mutation
-// below, releasing only via defer once AddMessage returns. sm.mux alone
-// cannot close this gap: an attached runtime's stream (see AttachRuntime,
-// pkg/app's WithStreamGuard) only ever acquires streaming, never sm.mux, so
-// a stream that starts the instant after the TryLock check but before the
-// store write completes would otherwise interleave with it (#3590).
-func (sm *SessionManager) AddMessage(ctx context.Context, sessionID string, msg *session.Message) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	rt, ok := sm.runtimeSessions.Load(sessionID)
-	if ok {
-		if !rt.streaming.TryLock() {
-			return ErrSessionBusy
-		}
-		defer rt.streaming.Unlock()
-	}
-
-	_, err := sm.sessionStore.AddMessage(ctx, sessionID, msg)
-	if err != nil {
-		return err
-	}
-
-	// If the session is actively running, update the in-memory session
-	if ok && rt.session != nil {
-		rt.session.AddMessage(msg)
-	}
-
-	return nil
-}
-
 // UpdateMessage updates a message in a session.
 //
-// Rejected with ErrSessionBusy while the session has an active RunStream;
-// see AddMessage's comment for why the busy check holds streaming across
-// the whole mutation instead of releasing it right after the check.
+// Rejected with ErrSessionBusy while the session is starting or running.
 func (sm *SessionManager) UpdateMessage(ctx context.Context, sessionID, msgID string, msg *session.Message) error {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
 
 	if rt, ok := sm.runtimeSessions.Load(sessionID); ok {
-		if !rt.streaming.TryLock() {
+		status, err := rt.handle.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if status.State == runtime.SessionStateRunning || status.State == runtime.SessionStateQueued {
 			return ErrSessionBusy
 		}
-		defer rt.streaming.Unlock()
 	}
 
 	msgPos, err := strconv.ParseInt(msgID, 10, 64)
@@ -2085,175 +781,28 @@ func (sm *SessionManager) UpdateSessionTokens(ctx context.Context, sessionID str
 	return sm.sessionStore.UpdateSessionTokens(ctx, sessionID, inputTokens, outputTokens, cost)
 }
 
-// SetSessionStarred sets the starred status for a session.
-func (sm *SessionManager) SetSessionStarred(ctx context.Context, sessionID string, starred bool) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	return sm.sessionStore.SetSessionStarred(ctx, sessionID, starred)
-}
-
 // ErrModelSwitchingNotSupported is returned when the runtime backing a
 // session does not support runtime model switching (e.g. when the agent
 // was created without a ModelSwitcherConfig).
 var ErrModelSwitchingNotSupported = errors.New("model switching not supported by this runtime")
 
 // ErrSessionNotRunning is returned by methods that require an active
-// runtime for the session (i.e. RunSession must have been called or
-// AttachRuntime invoked) when none is found. HTTP handlers map this to
+// session for the session when none is found. HTTP handlers map this to
 // 404 to distinguish from other runtime errors.
 var ErrSessionNotRunning = errors.New("session not found or not running")
 
-// AvailableSessionModels returns the list of models available for the
-// session's current agent. The agent's name and the active model override
-// (if any) are returned alongside the choices so callers don't have to
-// peek into the runtime registry. A session-scoped runtime is required,
-// so the session must have been started at least once (RunSession called)
-// or be attached out-of-band via AttachRuntime.
-//
-// Each returned ModelChoice has IsCurrent set so the picker can highlight
-// the active selection without a second round-trip. When no override is
-// active, the agent's configured default carries IsCurrent=true; if the
-// override points at an inline provider/model not present in the agent
-// config, a synthetic choice is appended (mirrors App.AvailableModels via
-// the shared runtime.DecorateModelChoices helper).
-func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID string) (string, string, []runtime.ModelChoice, error) {
-	rs, ok := sm.runtimeSessions.Load(sessionID)
-	if !ok {
-		return "", "", nil, ErrSessionNotRunning
-	}
-
-	if !rs.runtime.SupportsModelSwitching() {
-		return "", "", nil, ErrModelSwitchingNotSupported
-	}
-
-	agentName := rs.runtime.CurrentAgentName(ctx)
-
-	// Model state is protected by Session.mu; modelSwitch only serializes runtime
-	// calls and store transactions for this active runtime.
-	if rs.deleting.Load() {
-		return "", "", nil, ErrSessionNotRunning
-	}
-	rs.modelSwitch.Lock()
-	current := ""
-	var customRefs []string
-	if rs.session != nil {
-		overrides, refs := rs.session.ModelStateSnapshot()
-		current = overrides[agentName]
-		customRefs = refs
-	}
-	rs.modelSwitch.Unlock()
-
-	choices := runtime.DecorateModelChoices(rs.runtime.AvailableModels(ctx), current, customRefs)
-	return agentName, current, choices, nil
-}
-
-// SetSessionAgentModel applies modelRef as the model override for the
-// current agent of the session and persists it. Pass an empty modelRef
-// to clear the override and revert to the agent's default model.
-//
-// On store-write failure the in-memory session state and the runtime
-// override are rolled back so the next call observes a consistent state.
-//
-// The HTTP server no longer exposes this directly: model overrides are
-// folded into the runAgent request body. The method is kept so in-process
-// callers (notably the TUI's App) can switch models without going through
-// HTTP.
-func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, modelRef string) (string, string, error) {
-	rs, ok := sm.runtimeSessions.Load(sessionID)
-	if !ok {
-		return "", "", ErrSessionNotRunning
-	}
-
-	if !rs.runtime.SupportsModelSwitching() {
-		return "", "", ErrModelSwitchingNotSupported
-	}
-
-	rs.modelSwitch.Lock()
-	defer rs.modelSwitch.Unlock()
-
-	if err := ctx.Err(); err != nil {
-		return "", "", err
-	}
-	if !sm.runtimeActive(sessionID, rs) {
-		return "", "", ErrSessionNotRunning
-	}
-
-	agentName := rs.runtime.CurrentAgentName(ctx)
-	sess := rs.session
-	var prevOverride string
-	var hadOverride bool
-	if sess != nil {
-		prevOverride, hadOverride = sess.AgentModelOverride(agentName)
-	}
-
-	if err := rs.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
-		return "", "", err
-	}
-
-	if sess == nil {
-		return agentName, modelRef, nil
-	}
-
-	if err := ctx.Err(); err != nil {
-		rollback := prevOverride
-		if !hadOverride {
-			rollback = ""
-		}
-		if rbErr := rs.runtime.SetAgentModel(context.WithoutCancel(ctx), agentName, rollback); rbErr != nil {
-			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", rbErr)
-		}
-		return "", "", err
-	}
-	if !sm.runtimeActive(sessionID, rs) {
-		rollback := prevOverride
-		if !hadOverride {
-			rollback = ""
-		}
-		if err := rs.runtime.SetAgentModel(context.WithoutCancel(ctx), agentName, rollback); err != nil {
-			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", err)
-		}
-		return "", "", ErrSessionNotRunning
-	}
-
-	// Persist a complete snapshot so model changes cannot discard messages or
-	// metadata added since the runtime was attached.
-	updatedSess := sess.Clone()
-	updatedSess.Origin = sess.Origin
-	if modelRef == "" {
-		delete(updatedSess.AgentModelOverrides, agentName)
-	} else {
-		if updatedSess.AgentModelOverrides == nil {
-			updatedSess.AgentModelOverrides = make(map[string]string)
-		}
-		updatedSess.AgentModelOverrides[agentName] = modelRef
-		if strings.Contains(modelRef, "/") && !slices.Contains(updatedSess.CustomModelsUsed, modelRef) {
-			updatedSess.CustomModelsUsed = append(updatedSess.CustomModelsUsed, modelRef)
-		}
-	}
-
-	if err := sm.sessionStore.UpdateSession(ctx, updatedSess); err != nil {
-		rollback := prevOverride
-		if !hadOverride {
-			rollback = ""
-		}
-		if rbErr := rs.runtime.SetAgentModel(ctx, agentName, rollback); rbErr != nil {
-			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", rbErr)
-		}
-		return "", "", fmt.Errorf("failed to persist model override: %w", err)
-	}
-
-	sess.SetAgentModelOverride(agentName, modelRef)
-
-	slog.DebugContext(ctx, "Updated session model override", "session_id", sessionID, "agent", agentName, "model", modelRef)
-	return agentName, modelRef, nil
-}
-
 // BatchDeleteSessions deletes multiple sessions in a single operation.
 func (sm *SessionManager) BatchDeleteSessions(ctx context.Context, sessionIDs []string) (int, []string) {
-	return runBatchDelete(ctx, sessionIDs, func(ctx context.Context, sessionID string) error {
-		return sm.deleteSession(ctx, sessionID, false)
-	})
+	deleted := 0
+	var failed []string
+	for _, id := range sessionIDs {
+		if err := sm.DeleteSession(ctx, id); err != nil {
+			failed = append(failed, id)
+		} else {
+			deleted++
+		}
+	}
+	return deleted, failed
 }
 
 // BatchExportSessions exports multiple sessions as JSON

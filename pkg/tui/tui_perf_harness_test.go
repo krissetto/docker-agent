@@ -3,7 +3,7 @@ package tui
 
 import (
 	"fmt"
-	"runtime"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	chatmsg "github.com/docker/docker-agent/pkg/chat"
+	agentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -59,7 +60,7 @@ func mixedHistorySession(count int) (*session.Session, int, int) {
 // wallClockRoot builds the harness root on the production wall-clock
 // animation runtime. Use it for perf and geometry tests that measure
 // wall-clock time or compare widths and counts rather than exact frames.
-func wallClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration, runtime.MemStats) {
+func wallClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration, goruntime.MemStats) {
 	tb.Helper()
 	return harnessRoot(tb, width, height, nil)
 }
@@ -77,7 +78,7 @@ func (frozenScheduler) Tick(time.Duration, func(time.Time) tea.Msg) tea.Cmd { re
 // that tests asserting exact frame equality across a message round trip cannot
 // be broken by a spinner tick landing between the two frames (which happens
 // readily under -race, where the loop is slow enough to straddle TickRate).
-func frozenClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration, runtime.MemStats) {
+func frozenClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration, goruntime.MemStats) {
 	tb.Helper()
 	return harnessRoot(tb, width, height, animation.NewRuntimeWithScheduler(frozenScheduler{}))
 }
@@ -88,7 +89,7 @@ func frozenClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration
 // keeps the wall runtime, but it only reads ar.Now() and never schedules a
 // tick itself (the harness discards Init()'s commands and EnsureRunning goes
 // through m.ar), so its clock stays at zero.
-func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appModel, time.Duration, runtime.MemStats) {
+func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appModel, time.Duration, goruntime.MemStats) {
 	tb.Helper()
 	if setter, ok := tb.(interface{ Setenv(key, value string) }); ok {
 		home := tb.TempDir()
@@ -97,7 +98,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	}
 	started := time.Now()
 	sess := &session.Session{ID: "profile", Title: "profile"}
-	a := app.New(tb.Context(), stubRuntime{}, sess)
+	a := app.New(tb.Context(), nil, sess, agentruntime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m := New(tb.Context(), nil, a, "", func() {}, WithHideSidebar()).(*appModel)
 	if ar != nil {
 		m.ar = ar
@@ -112,14 +113,17 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	_ = page.SetSize(width, height-9)
 	m.chatPages = map[string]chat.Page{}
 	m.sessionStates = map[string]*service.SessionState{}
-	m.supervisor.AddSession(tb.Context(), a, sess, "", nil)
+	_, err := m.supervisor.AddSession(tb.Context(), a, sess, "", nil)
+	if err != nil {
+		tb.Fatalf("add performance session: %v", err)
+	}
 	m.chatPages["profile"], m.sessionStates["profile"] = page, ss
 	m.chatPage, m.sessionState, m.application = page, ss, a
 	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
 	m.handleWindowResize(width, height)
 	_ = m.Init() // synchronously loads the session; returned one-shot commands are warm-up only
 	_ = m.View()
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
+	var memory goruntime.MemStats
+	goruntime.ReadMemStats(&memory)
 	return m, time.Since(started), memory
 }

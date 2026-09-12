@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/plans"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -73,7 +74,7 @@ func TestShowPlanBrowser_FIFOPlanFileDoesNotHang(t *testing.T) {
 	svc := plans.NewService(plan.NewFilesystemStorage(sharedDir))
 	WithPlansService(svc)(m)
 	sess := session.New()
-	m.application = app.New(t.Context(), stubRuntime{}, sess)
+	m.application = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m.sessionState = service.NewSessionState(sess)
 
 	mustCreatePlan(t, svc, "good", "content")

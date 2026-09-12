@@ -80,45 +80,17 @@ func TestElicitationWaiters_ResolveUnknownIDReturnsFalse(t *testing.T) {
 	assert.False(t, w.resolve("missing", ElicitationResult{}))
 }
 
-func TestElicitationWaiters_ResolveSingle_FallsBackForEmptyID(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	wt := w.register("only-one")
-
-	require.True(t, w.resolveSingle(ElicitationResult{Action: tools.ElicitationActionAccept}))
-	select {
-	case result := <-wt.ch:
-		assert.Equal(t, tools.ElicitationActionAccept, result.Action)
-	default:
-		t.Fatal("resolveSingle should have delivered to the sole pending waiter")
-	}
-}
-
 // TestElicitationWaiters_ResolveSingle_AmbiguousWithMultiplePending verifies
-// resolveSingle refuses to guess when more than one request is in flight —
-// the whole point of per-ID correlation is that an empty-ID caller cannot
-// safely disambiguate concurrent requests.
-func TestElicitationWaiters_ResolveSingle_AmbiguousWithMultiplePending(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	w.register("a")
-	w.register("b")
-
-	assert.False(t, w.resolveSingle(ElicitationResult{Action: tools.ElicitationActionAccept}))
-	assert.Equal(t, 2, w.count(), "an ambiguous resolveSingle must not consume either waiter")
-}
 
 func TestElicitationWaiters_Abandon(t *testing.T) {
 	t.Parallel()
 
 	var w elicitationWaiters
 	wt := w.register("a")
-	require.Equal(t, 1, w.count())
+	require.Equal(t, 1, elicitationWaiterCountForTest(&w))
 
 	w.abandon("a", wt)
-	assert.Equal(t, 0, w.count())
+	assert.Equal(t, 0, elicitationWaiterCountForTest(&w))
 	assert.False(t, w.resolve("a", ElicitationResult{}), "abandoned waiter must not be resolvable")
 }
 
@@ -140,7 +112,7 @@ func TestElicitationWaiters_DuplicateWireIDsDoNotCollide(t *testing.T) {
 	wtServerA := w.register("internal-a")
 	wtServerB := w.register("internal-b")
 
-	require.Equal(t, 2, w.count(), "distinct internal IDs must not collide even if the wire IDs would have")
+	require.Equal(t, 2, elicitationWaiterCountForTest(&w), "distinct internal IDs must not collide even if the wire IDs would have")
 
 	require.True(t, w.resolve("internal-a", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"who": "a"}}))
 	require.True(t, w.resolve("internal-b", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"who": "b"}}))
@@ -173,7 +145,7 @@ func TestElicitationWaiter_CancelWinsWhenFirst(t *testing.T) {
 	require.True(t, w.cancel("a", wt), "cancel must win when nothing resolved yet")
 	assert.False(t, w.resolve("a", ElicitationResult{Action: tools.ElicitationActionAccept}),
 		"a resolve racing after cancel already won must not report success")
-	assert.Equal(t, 0, w.count(), "cancel must remove the waiter from the registry")
+	assert.Equal(t, 0, elicitationWaiterCountForTest(&w), "cancel must remove the waiter from the registry")
 }
 
 // TestElicitationWaiter_ResolveWinsWhenFirst is the mirror image: resolve()
@@ -311,6 +283,260 @@ func TestElicitationBridge_SendBlocksUntilCtxDone(t *testing.T) {
 	assert.Less(t, elapsed, 2*time.Second, "send must not block substantially past the ctx deadline")
 }
 
+func TestSessionElicitationSubscribersRouteToNearestOpenAncestor(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	parent := session.New(session.WithID("parent"))
+	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
+	detached := session.New(session.WithID("detached"), session.WithParentID(child.ID))
+	rt.sessionDrivers.Get(parent)
+	rt.sessionDrivers.Get(child)
+	rt.sessionDrivers.Get(detached)
+
+	parentEvents := make(chan Event, 4)
+	childEvents := make(chan Event, 4)
+	fallbackEvents := make(chan Event, 4)
+	cancelParent, _ := rt.SubscribeSessionElicitations(parent.ID, parent.ParentID, func(event Event) bool { parentEvents <- event; return true })
+	defer cancelParent()
+	cancelChild, _ := rt.SubscribeSessionElicitations(child.ID, child.ParentID, func(event Event) bool { childEvents <- event; return true })
+	rt.OnElicitationRequest(func(event Event) { fallbackEvents <- event })
+
+	emit := func(id string) Event {
+		event := ElicitationRequest(id, "form", nil, "", id, "", id, nil, "root")
+		rt.emitElicitationRequest(event)
+		return event
+	}
+	parentEvent := emit(parent.ID)
+	childEvent := emit(child.ID)
+	detachedEvent := emit(detached.ID)
+
+	assert.Equal(t, parentEvent, <-parentEvents)
+	assert.Equal(t, childEvent, <-childEvents)
+	assert.Equal(t, detachedEvent, <-childEvents, "a detached descendant belongs to its nearest subscribed ancestor")
+	assert.Empty(t, fallbackEvents)
+	assert.Empty(t, parentEvents)
+	assert.Empty(t, childEvents)
+
+	cancelChild()
+	emittedAfterClose := emit(detached.ID)
+	assert.Equal(t, emittedAfterClose, <-parentEvents,
+		"closing the child App deterministically promotes ownership to the parent")
+
+	cancelParent()
+	unknown := emit("server-only")
+	assert.Equal(t, unknown, <-fallbackEvents, "non-App/server embedders retain the singleton fallback sink")
+}
+
+func TestSessionElicitationSinkAvailabilityIsRouteAware(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	open := session.New(session.WithID("open-root"))
+	unrelated := session.New(session.WithID("unrelated-root"))
+	rt.sessionDrivers.Get(open)
+	rt.sessionDrivers.Get(unrelated)
+	cancel, _ := rt.SubscribeSessionElicitations(open.ID, "", func(Event) bool { return true })
+	defer cancel()
+
+	assert.True(t, rt.hasElicitationSink(open.ID))
+	assert.False(t, rt.hasElicitationSink(unrelated.ID),
+		"an unrelated root must fast-decline rather than wait on another App's sink")
+}
+
+func TestSessionElicitationUnsubscribeWaitsForSelectedDelivery(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	parent := session.New(session.WithID("parent"))
+	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
+	rt.sessionDrivers.Get(parent)
+	rt.sessionDrivers.Get(child)
+
+	parentEvents := make(chan Event, 1)
+	cancelParent, _ := rt.SubscribeSessionElicitations(parent.ID, "", func(event Event) bool { parentEvents <- event; return true })
+	defer cancelParent()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	childEvents := make(chan Event, 1)
+	cancelChild, _ := rt.SubscribeSessionElicitations(child.ID, parent.ID, func(event Event) bool {
+		close(entered)
+		<-release
+		childEvents <- event
+		return true
+	})
+
+	event := ElicitationRequest("child", "form", nil, "", "eid", "", child.ID, nil, "root")
+	emitted := make(chan struct{})
+	go func() {
+		defer close(emitted)
+		rt.emitElicitationRequest(event)
+	}()
+	<-entered
+
+	unsubscribed := make(chan struct{})
+	go func() {
+		cancelChild()
+		close(unsubscribed)
+	}()
+	select {
+	case <-unsubscribed:
+		t.Fatal("unsubscribe returned while its selected callback was still in flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-emitted
+	<-unsubscribed
+	assert.Equal(t, event, <-childEvents, "the selected delivery completes before close returns")
+	assert.Empty(t, parentEvents)
+
+	rt.emitElicitationRequest(event)
+	assert.Equal(t, event, <-parentEvents, "later requests deterministically hand off to the ancestor")
+	assert.Empty(t, childEvents)
+}
+
+func TestSessionElicitationCallbackMayReenterRegistry(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New(session.WithID("reentrant"))
+	rt.sessionDrivers.Get(sess)
+	done := make(chan struct{})
+	cancel, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(Event) bool {
+		rt.OnElicitationRequest(func(Event) {})
+		nestedCancel, _ := rt.SubscribeSessionElicitations("nested", "", func(Event) bool { return true })
+		nestedCancel()
+		close(done)
+		return true
+	})
+	defer cancel()
+
+	rt.emitElicitationRequest(ElicitationRequest("request", "form", nil, "", "eid", "", sess.ID, nil, "root"))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback deadlocked while reentering the sink registry")
+	}
+}
+
+func TestSessionElicitationUnsubscribeCancelsBlockedCallback(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New(session.WithID("full-app-bus"))
+	rt.sessionDrivers.Get(sess)
+	ctx, cancelCtx := context.WithCancel(t.Context())
+	bus := make(chan Event, 1)
+	bus <- Warning("fill", "root")
+	entered := make(chan struct{})
+	cancelSink, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(event Event) bool {
+		close(entered)
+		select {
+		case bus <- event:
+		case <-ctx.Done():
+		}
+		return ctx.Err() == nil
+	})
+
+	emitted := make(chan struct{})
+	go func() {
+		defer close(emitted)
+		rt.emitElicitationRequest(ElicitationRequest("request", "form", nil, "", "eid", "", sess.ID, nil, "root"))
+	}()
+	<-entered
+	cancelCtx() // App teardown cancels its bridge before waiting on unsubscribe.
+	cancelSink()
+	select {
+	case <-emitted:
+	case <-time.After(time.Second):
+		t.Fatal("full App bus prevented teardown from releasing the callback lease")
+	}
+}
+
+func TestElicitationHandler_RejectedScopedDeliveryFastDeclinesThenHandsOff(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	parent := session.New(session.WithID("parent"))
+	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
+	rt.sessionDrivers.Get(parent)
+	rt.sessionDrivers.Get(child)
+
+	parentEvents := make(chan Event, 2)
+	cancelParent, _ := rt.SubscribeSessionElicitations(parent.ID, "", func(event Event) bool {
+		parentEvents <- event
+		req := event.(*ElicitationRequestEvent)
+		return rt.elicitationWaiters.resolve(req.ElicitationID, ElicitationResult{Action: tools.ElicitationActionAccept})
+	})
+	defer cancelParent()
+	childAttempts := make(chan Event, 1)
+	cancelChild, _ := rt.SubscribeSessionElicitations(child.ID, parent.ID, func(event Event) bool {
+		childAttempts <- event
+		return false // App bridge context was canceled/full; nothing was enqueued.
+	})
+
+	ctx := mcptools.WithoutInteractivePrompts(t.Context())
+	ctx = genai.WithConversationID(ctx, child.ID)
+	result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "first"})
+	require.NoError(t, err)
+	assert.Equal(t, tools.ElicitationActionDecline, result.Action)
+	require.Len(t, childAttempts, 1, "the stale child lease rejected actual delivery")
+	<-childAttempts
+	assert.Empty(t, parentEvents, "a rejected selected callback must not cross-deliver in the same emission")
+	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters), "rejected background delivery must not leave a waiter")
+
+	cancelChild()
+	result, err = rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "second"})
+	require.NoError(t, err)
+	assert.Equal(t, tools.ElicitationActionAccept, result.Action)
+	require.Len(t, parentEvents, 1, "after child removal, the next request hands off to its ancestor")
+	assert.Empty(t, childAttempts)
+	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters))
+}
+
+func TestElicitationHandler_BackgroundUnregisterAfterAvailabilityFastDeclines(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New(session.WithID("background"))
+	rt.sessionDrivers.Get(sess)
+	cancel, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(Event) bool { return true })
+	require.True(t, rt.hasElicitationSink(sess.ID), "barrier: availability was observed before unregister")
+	cancel()
+
+	ctx := mcptools.WithoutInteractivePrompts(t.Context())
+	ctx = genai.WithConversationID(ctx, sess.ID)
+	result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "confirm?"})
+	require.NoError(t, err)
+	assert.Equal(t, tools.ElicitationActionDecline, result.Action,
+		"atomic route acquisition must detect that the previously observed route is gone")
+	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters), "fast decline must abandon its waiter")
+}
+
+func TestSessionElicitationSubscribersConcurrentLifecycle(t *testing.T) {
+	t.Parallel()
+
+	rt := newElicitationTestRuntime(t)
+	sess := session.New(session.WithID("shared"))
+	rt.sessionDrivers.Get(sess)
+	event := ElicitationRequest("request", "form", nil, "", "eid", "", sess.ID, nil, "root")
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			cancel, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(Event) bool { return true })
+			cancel()
+		}()
+		go func() {
+			defer wg.Done()
+			rt.emitElicitationRequest(event)
+		}()
+	}
+	wg.Wait()
+}
+
 // TestElicitationBridge_SendNeverBlocksReliableSink is the end-to-end version
 // of the review-item-1 fix: a wedged bridge channel must not delay — let
 // alone block — elicitationHandler's reliable OnElicitationRequest sink
@@ -352,7 +578,7 @@ func TestElicitationBridge_SendNeverBlocksReliableSink(t *testing.T) {
 		t.Fatal("the reliable sink must not be blocked by a wedged bridge channel")
 	}
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
+	respondToElicitation(t, rt, ev, ElicitationResult{Action: tools.ElicitationActionAccept, Content: nil})
 
 	select {
 	case got := <-done:
@@ -420,7 +646,7 @@ func TestElicitationHandler_BackgroundWithSinkStillWaitsForResponse(t *testing.T
 	}
 	assert.Equal(t, "bg-sess-2", ev.SessionID, "the event must carry the originating (sub-)session ID")
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
+	respondToElicitation(t, rt, ev, ElicitationResult{Action: tools.ElicitationActionAccept, Content: nil})
 
 	select {
 	case got := <-done:
@@ -613,8 +839,8 @@ func TestConcurrentBackgroundElicitations_AllSurfaceAndRouteToCorrectWaiter(t *t
 	require.NotEmpty(t, worker2ID, "worker2's elicitation must have surfaced")
 	require.NotEqual(t, worker1ID, worker2ID, "concurrent elicitations must get distinct correlation IDs")
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "1"}, worker1ID))
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "2"}, worker2ID))
+	respondToElicitation(t, rt, reqs[worker1ID], ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"answer": "1"}})
+	respondToElicitation(t, rt, reqs[worker2ID], ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"answer": "2"}})
 
 	var got []*agenttool.RunResult
 	for range 2 {

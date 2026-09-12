@@ -61,7 +61,7 @@ Omit `lean` or set it to `false` to keep the full TUI as the default. You can st
 
 The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to steer the active turn, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on. Press <kbd>Alt</kbd>+<kbd>Up</kbd> to withdraw every still-pending steer/follow-up (and any locally queued message) back into the editor, concatenated in the order they were sent, so you can edit and resend them; messages the agent has already picked up are left alone.
 
-The lean TUI supports a focused set of slash commands: `/new`, `/sessions`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. Type `/model` (or `/model <provider/model>`) to switch the active model inline — the command opens a fuzzy-searchable list of available models. Type `/sessions` (or `/sessions <session-id>`) to browse and resume past sessions from the current working directory. Type `/copy` to copy the last assistant response to the clipboard.
+The lean TUI supports a focused set of slash commands: `/new`, `/sessions [session-id]`, `/load <session-id>`, `/delete <session-id>`, `/star [session-id] [off]`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. `/sessions` fuzzy-browses past sessions from the current working directory, while the ID-oriented commands use session/server-owned catalog and mutation paths so remote sessions remain supported. Type `/model` (or `/model <provider/model>`) to open a fuzzy-searchable model list or switch inline. Type `/copy` to copy the last assistant response to the clipboard.
 
 Prefix a message with `!` to run it as a shell command directly, without going through the agent — for example `!git status`. The command runs in your default shell and its output is shown inline in the transcript. Bang commands are disabled in read-only sessions.
 
@@ -82,7 +82,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/export`          | Export the session as HTML                                                           |
 | `/sessions`        | Browse and load past sessions                                                        |
 | `/plans`           | Browse and manage every [shared plan](../../tools/plan/index.md). Filter, open a detail view, refresh, export to a file, set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
-| `/model`           | Change the model for the current agent                                               |
+| `/model`           | Change the model for the current session. Refreshing the picker's catalog is a separate server capability; older servers still reload their existing model list. |
 | `/effort`          | Set the current model's reasoning-effort level (`/effort <none\|minimal\|low\|medium\|high\|xhigh\|max>`, or `/effort` alone to pick from the supported levels; reasoning models only). Press <kbd>Tab</kbd> after `/effort` and a space to complete a level the current model supports |
 | `/settings`        | Manage appearance, behavior, and notification preferences                           |
 | `/yolo`            | Toggle automatic tool call approval                                                  |
@@ -94,7 +94,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/drop`            | Remove an attached file from the session context (`/drop <path>`, or `/drop` alone to review and drop from the `/context` dialog). Press <kbd>Tab</kbd> after `/drop` and a space to complete an attached file's path |
 | `/cost`            | Show cost breakdown for this session. Includes a **By Agent** section (alongside **By Model**) showing cumulative cost per agent; unattributed usage and compaction spend appear in their own buckets. |
 | `/eval`            | Create an evaluation report                                                          |
-| `/pause`           | Pause/resume the runtime loop. While the agent is mid-request, the resize handle shows "Pausing…" until the in-flight request completes; once the loop is blocked the indicator changes to "⏸ Paused". Run `/pause` again to resume. |
+| `/pause`           | Pause/resume only the current session at an iteration boundary. Other sessions continue independently. While this session is mid-request, the resize handle shows "Pausing…" until the in-flight request completes; once blocked it changes to "⏸ Paused". Run `/pause` again to resume. |
 | `/tools`           | Show every toolset (with lifecycle state) and the tools they expose                  |
 | `/skills`          | List skills available to the current agent                                           |
 | `/toolset-restart` | Force a supervisor-driven reconnect of the named toolset (`/toolset-restart <name>`). Press <kbd>Tab</kbd> after `/toolset-restart` and a space to complete a toolset name; non-restartable toolsets are shown dimmed and cannot be selected. |
@@ -103,6 +103,8 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/exit`            | Exit the application (aliases: `/quit`, `/q`)                                        |
 
 Slash commands (both built-in and named) execute immediately when entered. Regular chat messages sent while the agent is working are steered into the ongoing stream by default: the agent picks them up mid-turn (they appear in the transcript at the point the agent sees them) without breaking the stream. Prefer the previous end-of-turn behavior? Switch **While agent is working** to `Queue` on the **Behavior** tab of `/settings`; queued messages are processed in order once the stream stops.
+
+Selecting another top-level agent creates a fresh session identity bound to that agent and clones the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
 
 Agent-defined commands (prompts, URL links, agent-switching shortcuts) are configured under `commands:` in the agent YAML — see [Custom Commands](../../configuration/commands/index.md) for the full reference, including how to hide commands with `--disable-commands`.
 
@@ -486,7 +488,6 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+Y     | Toggle YOLO mode (auto-approve tool calls)      |
 | Ctrl+O     | Toggle hide tool results                        |
 | Ctrl+Z     | Suspend TUI to background (resume with `fg`)    |
-| Ctrl+X     | Clear queued messages                           |
 | Escape     | Cancel current operation                        |
 | Enter      | Send message (or steer while the agent is running) |
 | Alt+Enter  | Queue a follow-up turn while the agent is running |
@@ -530,7 +531,6 @@ settings:
 | `toggle_hide_tool_results` | `ctrl+o`     | Toggle hiding tool results             |
 | `cycle_agent`              | `ctrl+s`     | Cycle to the next agent                |
 | `model_picker`             | `ctrl+m`     | Open the model picker                  |
-| `clear_queue`              | `ctrl+x`     | Clear queued messages                  |
 | `suspend`                  | `ctrl+z`     | Suspend the TUI                        |
 | `toggle_sidebar`           | `ctrl+b`     | Toggle the sidebar                     |
 | `edit_external`            | `ctrl+g`     | Edit input in an external editor       |

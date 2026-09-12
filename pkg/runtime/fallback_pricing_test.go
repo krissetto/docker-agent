@@ -101,7 +101,7 @@ func TestFallbackPricing(t *testing.T) {
 				var message *chat.Message
 				var usage *MessageUsage
 				var budget *BudgetStatus
-				for ev := range rt.RunStream(t.Context(), sess) {
+				for _, ev := range runAndCollect(t, rt, sess) {
 					switch ev := ev.(type) {
 					case *ErrorEvent:
 						t.Errorf("unexpected runtime error: %s", ev.Error)

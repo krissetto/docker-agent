@@ -57,6 +57,7 @@ func (s LiveSession) ShortID() string {
 type liveCompactionRequest struct {
 	additionalPrompt string
 	events           EventSink
+	done             func()
 }
 
 // liveSessionEntry tracks one active RunStream in the live-session registry.
@@ -166,12 +167,12 @@ func (r *LocalRuntime) LiveSessions(ctx context.Context, current *session.Sessio
 
 	var rows []LiveSession
 	if current != nil {
-		rows = append(rows, r.liveSessionRow(ctx, current, r.sessionAgentName(current), true))
+		rows = append(rows, r.liveSessionRow(r.sessionModelContext(ctx, current), current, r.sessionAgentName(current), true))
 	}
 
 	children := make([]LiveSession, 0, len(entries))
 	for _, entry := range entries {
-		children = append(children, r.liveSessionRow(ctx, entry.sess, entry.agentName, false))
+		children = append(children, r.liveSessionRow(r.sessionModelContext(ctx, entry.sess), entry.sess, entry.agentName, false))
 	}
 	slices.SortStableFunc(children, func(a, b LiveSession) int {
 		if c := cmp.Compare(a.AgentName, b.AgentName); c != 0 {
@@ -180,6 +181,16 @@ func (r *LocalRuntime) LiveSessions(ctx context.Context, current *session.Sessio
 		return cmp.Compare(a.SessionID, b.SessionID)
 	})
 	return append(rows, children...)
+}
+
+func (r *LocalRuntime) sessionModelContext(ctx context.Context, sess *session.Session) context.Context {
+	if sess == nil {
+		return ctx
+	}
+	if driver, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+		return driver.scopeModels(ctx)
+	}
+	return ctx
 }
 
 // liveSessionRow builds one team-view row from a session and its agent.
@@ -216,7 +227,11 @@ func (r *LocalRuntime) liveSessionRow(ctx context.Context, sess *session.Session
 //
 // It returns an error when sessionID is not a live session (unknown or
 // already finished) or when a request is already pending for it.
-func (r *LocalRuntime) CompactLiveSession(_ context.Context, sessionID, additionalPrompt string, events EventSink) error {
+func (r *LocalRuntime) CompactLiveSession(ctx context.Context, sessionID, additionalPrompt string, events EventSink) error {
+	return r.compactLiveSession(ctx, sessionID, additionalPrompt, events, nil)
+}
+
+func (r *LocalRuntime) compactLiveSession(_ context.Context, sessionID, additionalPrompt string, events EventSink, done func()) error {
 	if events == nil {
 		events = EventSinkFunc(func(Event) {})
 	}
@@ -228,7 +243,7 @@ func (r *LocalRuntime) CompactLiveSession(_ context.Context, sessionID, addition
 		return fmt.Errorf("session %s is not live (unknown or already finished)", sessionID)
 	}
 	select {
-	case entry.compactCh <- liveCompactionRequest{additionalPrompt: additionalPrompt, events: events}:
+	case entry.compactCh <- liveCompactionRequest{additionalPrompt: additionalPrompt, events: events, done: done}:
 		return nil
 	default:
 		return fmt.Errorf("a compaction request is already pending for session %s", sessionID)
@@ -256,6 +271,9 @@ func (r *LocalRuntime) runQueuedCompaction(ctx context.Context, entry *liveSessi
 // a completed/skipped event is synthesized, mirroring App.CompactSession's
 // behavior for the root /compact path.
 func (r *LocalRuntime) runLiveCompactionRequest(ctx context.Context, sess *session.Session, req liveCompactionRequest) {
+	if req.done != nil {
+		defer req.done()
+	}
 	// With ctx already cancelled (a teardown drain after Ctrl+C), attempting
 	// the compaction model call would fail immediately and emit a noisy
 	// started/failed pair. Consume the request and report a single terminal

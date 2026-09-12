@@ -128,10 +128,8 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// the new summary's estimated size.
 	preInputTokens, preOutputTokens := sess.Usage()
 
-	// Apply and persist the summary as one intrinsic successful-compaction step.
-	// Manual Summarize calls do not pass through the RunStream observer chain,
-	// while normal observed runs do; marking the emitted event as persisted
-	// keeps the observer from appending a duplicate row.
+	// Atomically persist metadata and summary before mutating the live session snapshot.
+	// PersistCompaction updates the supplied session only after durable success.
 	item := session.Item{
 		Summary:        result.Summary,
 		FirstKeptEntry: result.FirstKeptEntry,
@@ -139,9 +137,6 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		Model:          result.Model,
 		Usage:          summaryUsage(result),
 	}
-	// Atomically persist the metadata and summary before mutating the live
-	// session. A failed write is a failed compaction: no success summary event
-	// is emitted and the in-memory continuation remains unchanged.
 	if err := r.sessionStore.PersistCompaction(ctx, sess, result.InputTokens, 0, item); err != nil {
 		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
 		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))

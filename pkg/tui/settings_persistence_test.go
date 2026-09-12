@@ -19,6 +19,20 @@ func setupSettingsConfigTest(t *testing.T) {
 	t.Cleanup(func() { paths.SetConfigDir("") })
 }
 
+func saveTestSettings(layout messages.LayoutSettings, mode messages.SendMode) error {
+	settings := userconfig.Get()
+	return savePreferences(messages.Preferences{
+		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
+		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
+		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		CacheStablePrompts: settings.CacheStablePromptsEnabled(), WarnOnCacheMiss: settings.CacheMissWarningsEnabled(),
+		Lean: settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
+		Sound: settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
+		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
+	})
+}
+
 func TestLayoutSettingsFromConfig(t *testing.T) {
 	t.Parallel()
 
@@ -66,7 +80,7 @@ func TestSaveSettingsToUserConfig_RoundTrip(t *testing.T) {
 		HideSessionPath: true,
 		HideTools:       true,
 	}
-	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeQueue))
+	require.NoError(t, saveTestSettings(saved, messages.SendModeQueue))
 
 	assert.Equal(t, saved, layoutSettingsFromConfig(userconfig.Get().GetLayout()))
 	assert.Equal(t, messages.SendModeQueue, messages.ParseSendMode(userconfig.Get().GetBusySendMode()))
@@ -75,10 +89,10 @@ func TestSaveSettingsToUserConfig_RoundTrip(t *testing.T) {
 func TestSaveSettingsToUserConfig_DefaultsClearEntry(t *testing.T) {
 	setupSettingsConfigTest(t)
 
-	require.NoError(t, saveSettingsToUserConfig(messages.LayoutSettings{
+	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarTop,
 	}, messages.SendModeQueue))
-	require.NoError(t, saveSettingsToUserConfig(messages.LayoutSettings{
+	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
 	}, messages.SendModeSteer))
@@ -92,7 +106,7 @@ func TestSaveSettingsToUserConfig_DefaultsClearEntry(t *testing.T) {
 func TestSaveSettingsToUserConfig_OmitsDefaultPosition(t *testing.T) {
 	setupSettingsConfigTest(t)
 
-	require.NoError(t, saveSettingsToUserConfig(messages.LayoutSettings{
+	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
 		HideUsage:       true,
@@ -209,7 +223,7 @@ func TestSaveSettingsToUserConfig_HideSessionPathKeepsEntry(t *testing.T) {
 		SidebarInfoMode: messages.InfoModeCompact,
 		HideSessionPath: true,
 	}
-	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+	require.NoError(t, saveTestSettings(saved, messages.SendModeSteer))
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -227,7 +241,7 @@ func TestSavePreferences_DetailedInfoModeKeepsEntry(t *testing.T) {
 		SectionSpacing:  messages.SpacingNormal,
 		SidebarInfoMode: messages.InfoModeDetailed,
 	}
-	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+	require.NoError(t, saveTestSettings(saved, messages.SendModeSteer))
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -242,12 +256,12 @@ func TestSavePreferences_DetailedInfoModeKeepsEntry(t *testing.T) {
 func TestSavePreferences_CompactInfoModeClearsEntry(t *testing.T) {
 	setupSettingsConfigTest(t)
 
-	require.NoError(t, saveSettingsToUserConfig(messages.LayoutSettings{
+	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
 		SidebarInfoMode: messages.InfoModeDetailed,
 	}, messages.SendModeSteer))
-	require.NoError(t, saveSettingsToUserConfig(messages.LayoutSettings{
+	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
 		SidebarInfoMode: messages.InfoModeCompact,
@@ -268,7 +282,7 @@ func TestSavePreferences_ActiveAgentsOnlyRoundTrip(t *testing.T) {
 		SidebarInfoMode:  messages.InfoModeCompact,
 		ActiveAgentsOnly: true,
 	}
-	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+	require.NoError(t, saveTestSettings(saved, messages.SendModeSteer))
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -281,7 +295,7 @@ func TestSavePreferences_ActiveAgentsOnlyRoundTrip(t *testing.T) {
 	// Turning the filter back off restores the all-default layout and clears
 	// the entry entirely.
 	saved.ActiveAgentsOnly = false
-	require.NoError(t, saveSettingsToUserConfig(saved, messages.SendModeSteer))
+	require.NoError(t, saveTestSettings(saved, messages.SendModeSteer))
 	cfg, err = userconfig.Load()
 	require.NoError(t, err)
 	assert.Nil(t, cfg.GetSettings().Layout, "the default (off) filter is not written out")

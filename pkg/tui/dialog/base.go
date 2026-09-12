@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -100,11 +101,35 @@ func ContentEndRow(dialogRow, dialogHeight int) int {
 	return dialogRow + dialogHeight - 1 - frameBottom
 }
 
-// CloseWithElicitationResponse returns a command that closes the dialog and sends an elicitation response.
-func CloseWithElicitationResponse(action tools.ElicitationAction, content map[string]any, elicitationID string) tea.Cmd {
+// ElicitationRef correlates an elicitation dialog with the runtime request it
+// answers: the session that raised it, the interaction the response must
+// name, and the elicitation's own id. Answers without SessionID/RequestID
+// cannot be routed to a session.
+type ElicitationRef struct {
+	SessionID     string
+	RequestID     string
+	ElicitationID string
+}
+
+// ElicitationRefFor extracts the correlation of an elicitation request event.
+func ElicitationRefFor(ev *runtime.ElicitationRequestEvent) ElicitationRef {
+	return ElicitationRef{SessionID: ev.SessionID, RequestID: ev.RequestID, ElicitationID: ev.ElicitationID}
+}
+
+// CloseWithElicitationResponse returns a command that closes the dialog and
+// sends the elicitation response for ref.
+func CloseWithElicitationResponse(action tools.ElicitationAction, content map[string]any, ref ElicitationRef) tea.Cmd {
 	return tea.Sequence(
 		core.CmdHandler(CloseDialogMsg{}),
-		core.CmdHandler(messages.ElicitationResponseMsg{Action: action, Content: content, ElicitationID: elicitationID}),
+		core.CmdHandler(messages.InteractionResponseMsg{
+			SessionID: ref.SessionID,
+			Response: runtime.InteractionResponse{
+				InteractionID: ref.RequestID,
+				Kind:          runtime.InteractionElicitation,
+				ElicitationID: ref.ElicitationID,
+				Elicitation:   runtime.ElicitationResult{Action: action, Content: content},
+			},
+		}),
 	)
 }
 

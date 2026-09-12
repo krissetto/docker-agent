@@ -11,12 +11,41 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 )
+
+type TemporaryError struct{ Err error }
+
+func (e *TemporaryError) Error() string   { return e.Err.Error() }
+func (e *TemporaryError) Unwrap() error   { return e.Err }
+func (e *TemporaryError) Temporary() bool { return true }
+
+func IsTemporary(err error) bool {
+	var temporary interface{ Temporary() bool }
+	return errors.As(err, &temporary) && temporary.Temporary()
+}
+
+func classifySQLiteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// Keep the generic session surface independent of a concrete SQLite
+	// implementation. SQLite drivers expose Code on their errors; the low byte
+	// is the stable primary result code (5=BUSY, 6=LOCKED).
+	var sqliteErr interface{ Code() int }
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5, 6:
+			return &TemporaryError{Err: err}
+		}
+	}
+	return err
+}
 
 var (
 	ErrEmptyID        = errors.New("session ID cannot be empty")
@@ -108,6 +137,9 @@ type Store interface {
 	// AddMessage adds a message to a session at the next position.
 	// Returns the ID of the created message item.
 	AddMessage(ctx context.Context, sessionID string, msg *Message) (int64, error)
+	// PromotePendingUserMessage atomically clears pending session state and moves
+	// the correlated input to the durable transcript tail before execution.
+	PromotePendingUserMessage(ctx context.Context, sessionID, turnID string) error
 
 	// UpdateMessage updates a message belonging to sessionID by its ID.
 	// This is called on each streaming delta to keep the persisted message
@@ -152,6 +184,8 @@ type InMemorySessionStore struct {
 	generatedFiles *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
 	generatedBlobs *concurrent.Map[string, []byte]        // keyed by generatedFileKey
 	messageID      atomic.Int64                           // counter for message IDs, incremented via Add(1)
+	todos          *concurrent.Map[string, []Todo]
+	todosMu        sync.Mutex
 }
 
 func NewInMemorySessionStore() Store {
@@ -159,6 +193,7 @@ func NewInMemorySessionStore() Store {
 		sessions:       concurrent.NewMap[string, *Session](),
 		generatedFiles: concurrent.NewMap[string, GeneratedFile](),
 		generatedBlobs: concurrent.NewMap[string, []byte](),
+		todos:          concurrent.NewMap[string, []Todo](),
 	}
 }
 
@@ -239,6 +274,7 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 	s.sessions.Delete(id)
 	s.deleteGeneratedFiles(id)
 	s.deleteGeneratedBlobs(id)
+	s.todos.Delete(id)
 	return nil
 }
 
@@ -331,6 +367,20 @@ func (s *InMemorySessionStore) AddMessage(_ context.Context, sessionID string, m
 	return id, nil
 }
 
+func (s *InMemorySessionStore) PromotePendingUserMessage(_ context.Context, sessionID, turnID string) error {
+	sess, ok := s.sessions.Load(sessionID)
+	if !ok {
+		return ErrNotFound
+	}
+	for position, item := range sess.MessagesSnapshot() {
+		if item.Message != nil && item.Message.Pending && item.Message.TurnID == turnID {
+			sess.PromotePendingUserMessage(position)
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
 // UpdateMessage updates a message belonging to sessionID by its ID.
 func (s *InMemorySessionStore) UpdateMessage(_ context.Context, sessionID string, messageID int64, msg *Message) error {
 	if sessionID == "" {
@@ -367,9 +417,10 @@ func (s *InMemorySessionStore) AddSubSession(_ context.Context, parentSessionID 
 	if !exists {
 		return ErrNotFound
 	}
-	subSession.ParentID = parentSessionID
-	s.sessions.Store(subSession.ID, subSession)
-	parent.AddSubSession(subSession)
+	snapshot := subSession.Clone()
+	snapshot.ParentID = parentSessionID
+	s.sessions.Store(snapshot.ID, snapshot)
+	parent.AddSubSession(snapshot)
 	return nil
 }
 
@@ -463,7 +514,46 @@ type querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// SQLiteSessionStore implements Store using SQLite
+func (s *InMemorySessionStore) LoadTodos(_ context.Context, sessionID string) ([]Todo, error) {
+	if sessionID == "" {
+		return nil, ErrEmptyID
+	}
+	if _, ok := s.sessions.Load(sessionID); !ok {
+		return nil, ErrNotFound
+	}
+	items, _ := s.todos.Load(sessionID)
+	return slices.Clone(items), nil
+}
+
+func (s *InMemorySessionStore) SaveTodos(_ context.Context, sessionID string, todos []Todo) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
+	if _, ok := s.sessions.Load(sessionID); !ok {
+		return ErrNotFound
+	}
+	s.todos.Store(sessionID, slices.Clone(todos))
+	return nil
+}
+
+func (s *InMemorySessionStore) MutateTodos(ctx context.Context, sessionID string, fn func([]Todo) ([]Todo, error)) ([]Todo, error) {
+	s.todosMu.Lock()
+	defer s.todosMu.Unlock()
+	items, err := s.LoadTodos(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	items, err = fn(items)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.SaveTodos(ctx, sessionID, items); err != nil {
+		return nil, err
+	}
+	return slices.Clone(items), nil
+}
+
+// SQLiteSessionStore implements Store using SQLite.
 type SQLiteSessionStore struct {
 	db *sql.DB
 }
@@ -587,6 +677,11 @@ func NewSQLiteSessionStoreFromDB(ctx context.Context, db *sql.DB) (*SQLiteSessio
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}
+	// Callers may supply a raw *sql.DB without sqliteutil's DSN pragmas.
+	// Enforce referential integrity before creating feature side tables.
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return nil, fmt.Errorf("enabling sqlite foreign keys: %w", err)
+	}
 	if err := setupAndMigrate(ctx, db); err != nil {
 		return nil, err
 	}
@@ -606,7 +701,7 @@ func setupAndMigrate(ctx context.Context, db *sql.DB) error {
 		)
 	`)
 	if err != nil {
-		return err
+		return classifySQLiteError(err)
 	}
 
 	migrationManager := NewMigrationManager(db)
@@ -631,14 +726,29 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		return ErrEmptyID
 	}
 
+	fields, err := sessionPersistedFieldsOf(session)
+	if err != nil {
+		return classifySQLiteError(err)
+	}
+
 	// Use a transaction to insert session and its items
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return classifySQLiteError(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := s.addSessionTx(ctx, tx, session); err != nil {
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO sessions (
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
+			custom_models_used, thinking, parent_id, instruction_context, attributes, starred
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
+		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
+		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
+		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON, session.Starred)
+	if err != nil {
 		return err
 	}
 
@@ -649,7 +759,7 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		}
 	}
 
-	return tx.Commit()
+	return classifySQLiteError(tx.Commit())
 }
 
 // scanSession scans a single row into a Session struct.
@@ -752,6 +862,9 @@ type sessionItemRow struct {
 	agentName      sql.NullString
 	messageJSON    sql.NullString
 	implicit       bool
+	actorPending   bool
+	actorAccepted  bool
+	actorTurnID    string
 	subsessionID   sql.NullString
 	summaryText    sql.NullString
 	firstKeptEntry int
@@ -765,7 +878,7 @@ type sessionItemRow struct {
 // loadSession when resolving sub-sessions inside a transaction.
 func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, sessionID string) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT position, item_type, agent_name, message_json, implicit, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
+		`SELECT position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
 	if err != nil {
 		return nil, err
@@ -777,7 +890,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	var rawRows []sessionItemRow
 	for rows.Next() {
 		var row sessionItemRow
-		if err := rows.Scan(&row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
+		if err := rows.Scan(&row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
 			return nil, err
 		}
 		rawRows = append(rawRows, row)
@@ -804,6 +917,9 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 					AgentName: row.agentName.String,
 					Message:   chatMsg,
 					Implicit:  row.implicit,
+					Pending:   row.actorPending,
+					Accepted:  row.actorAccepted,
+					TurnID:    row.actorTurnID,
 				},
 			})
 
@@ -997,6 +1113,14 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Explicit cleanup also covers caller-supplied pools without foreign keys.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM session_todos WHERE session_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM subagent_trees WHERE session_id = ?", id); err != nil {
+		return err
+	}
+
 	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -1115,7 +1239,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	// Note: Messages are NOT persisted here. They are persisted via events
 	// (UserMessageEvent, MessageAddedEvent, etc.) to avoid duplication.
 
-	return tx.Commit()
+	return classifySQLiteError(tx.Commit())
 }
 
 // SetSessionStarred sets the starred status of a session.
@@ -1174,9 +1298,9 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 
 	// Insert a new message at the next position
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?)`,
-		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit)
+		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?, ?, ?, ?)`,
+		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID)
 	if err != nil {
 		return 0, fmt.Errorf("inserting message: %w", err)
 	}
@@ -1190,6 +1314,44 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 	return id, nil
 }
 
+func (s *SQLiteSessionStore) PromotePendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return classifySQLiteError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var rawPosition, position, itemCount int
+	if err := tx.QueryRowContext(ctx, `SELECT target.position,
+		(SELECT COUNT(*) FROM session_items earlier WHERE earlier.session_id = target.session_id AND earlier.position < target.position),
+		(SELECT COUNT(*) FROM session_items WHERE session_id = ?)
+		FROM session_items target WHERE target.session_id = ? AND target.actor_pending = 1 AND target.actor_turn_id = ?`, sessionID, sessionID, turnID).Scan(&rawPosition, &position, &itemCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return classifySQLiteError(err)
+	}
+	// Keep summary boundaries stable under the same move-to-tail transform used
+	// by Session.promotePendingUserMessageLocked.
+	if _, err := tx.ExecContext(ctx, `UPDATE session_items SET first_kept_entry = first_kept_entry - 1
+		WHERE session_id = ? AND summary_text IS NOT NULL AND ? < first_kept_entry AND first_kept_entry < ?`, sessionID, position, itemCount); err != nil {
+		return classifySQLiteError(err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE session_items
+		SET actor_pending = 0, position = (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?)
+		WHERE session_id = ? AND position = ? AND actor_pending = 1 AND actor_turn_id = ?`, sessionID, sessionID, rawPosition, turnID)
+	if err != nil {
+		return classifySQLiteError(err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return classifySQLiteError(err)
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return classifySQLiteError(tx.Commit())
+}
+
 // UpdateMessage updates a message belonging to sessionID by its ID.
 func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *Message) error {
 	if sessionID == "" {
@@ -1201,8 +1363,8 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE session_items SET message_json = ?, implicit = ? WHERE session_id = ? AND id = ?`,
-		string(msgJSON), msg.Implicit, sessionID, messageID)
+		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ? WHERE session_id = ? AND id = ?`,
+		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", err)
 	}
@@ -1233,26 +1395,24 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 		_ = tx.Rollback()
 	}()
 
-	// 1. Set parent_id on sub-session
-	subSession.ParentID = parentSessionID
-
-	// 2. Insert sub-session as a new session row
-	if err := s.addSessionTx(ctx, tx, subSession); err != nil {
-		return fmt.Errorf("inserting sub-session: %w", err)
+	// Persist from an immutable snapshot. AddSubSession may run while the
+	// child is still winding down, and store implementations must not mutate
+	// or iterate over a live session owned by the runtime.
+	snapshot := subSession.Clone()
+	snapshot.ParentID = parentSessionID
+	if err := s.upsertSubSessionTx(ctx, tx, snapshot); err != nil {
+		return err
 	}
 
-	// 3. Recursively add all items from the sub-session
-	for i, item := range subSession.Messages {
-		if err := s.addItemTx(ctx, tx, subSession.ID, i, item); err != nil {
-			return fmt.Errorf("inserting sub-session item %d: %w", i, err)
-		}
-	}
-
-	// 4. Add reference in parent's items
+	// Add the reference in the parent's items, once: repeat persists of the
+	// same sub-session must not duplicate it in the parent's transcript.
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO session_items (session_id, position, item_type, subsession_id)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'subsession', ?)`,
-		parentSessionID, parentSessionID, subSession.ID)
+		 SELECT ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'subsession', ?
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM session_items WHERE session_id = ? AND item_type = 'subsession' AND subsession_id = ?
+		 )`,
+		parentSessionID, parentSessionID, subSession.ID, parentSessionID, subSession.ID)
 	if err != nil {
 		return fmt.Errorf("inserting subsession reference: %w", err)
 	}
@@ -1260,8 +1420,30 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 	return tx.Commit()
 }
 
-// addSessionTx inserts a session within a transaction.
-func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, session *Session) error {
+// upsertSubSessionTx writes a sub-session snapshot within a transaction: the
+// session row is upserted (it may already exist from an earlier turn's
+// persist or a title update) and its items are replaced wholesale, recursing
+// into nested sub-sessions.
+func (s *SQLiteSessionStore) upsertSubSessionTx(ctx context.Context, tx *sql.Tx, subSession *Session) error {
+	if err := s.upsertSessionRowTx(ctx, tx, subSession); err != nil {
+		return fmt.Errorf("upserting sub-session: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_items WHERE session_id = ?`, subSession.ID); err != nil {
+		return fmt.Errorf("clearing sub-session items: %w", err)
+	}
+	for i, item := range subSession.Messages {
+		if err := s.addItemTx(ctx, tx, subSession.ID, i, item); err != nil {
+			return fmt.Errorf("inserting sub-session item %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// upsertSessionRowTx inserts or updates a session row within a transaction.
+// Used for sub-session snapshots, whose row may already exist from an
+// earlier turn's persist or a title update.
+func (s *SQLiteSessionStore) upsertSessionRowTx(ctx context.Context, tx *sql.Tx, session *Session) error {
 	fields, err := sessionPersistedFieldsOf(session)
 	if err != nil {
 		return err
@@ -1273,7 +1455,25 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   origin = excluded.origin,
+		   title = excluded.title,
+		   tools_approved = excluded.tools_approved,
+		   safety_policy = excluded.safety_policy,
+		   input_tokens = excluded.input_tokens,
+		   output_tokens = excluded.output_tokens,
+		   cost = excluded.cost,
+		   send_user_message = excluded.send_user_message,
+		   max_iterations = excluded.max_iterations,
+		   working_dir = excluded.working_dir,
+		   starred = excluded.starred,
+		   permissions = excluded.permissions,
+		   agent_model_overrides = excluded.agent_model_overrides,
+		   custom_models_used = excluded.custom_models_used,
+		   parent_id = excluded.parent_id,
+		   instruction_context = excluded.instruction_context,
+		   attributes = excluded.attributes`,
 		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
@@ -1297,24 +1497,16 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 		return err
 
 	case item.SubSession != nil:
-		// Recursively add the sub-session
-		subSession := item.SubSession
-		subSession.ParentID = sessionID
-
-		if err := s.addSessionTx(ctx, tx, subSession); err != nil {
-			return fmt.Errorf("inserting nested sub-session: %w", err)
-		}
-
-		for i, subItem := range subSession.Messages {
-			if err := s.addItemTx(ctx, tx, subSession.ID, i, subItem); err != nil {
-				return fmt.Errorf("inserting nested sub-session item %d: %w", i, err)
-			}
+		// Nested sub-sessions are already cloned with the outer snapshot.
+		item.SubSession.ParentID = sessionID
+		if err := s.upsertSubSessionTx(ctx, tx, item.SubSession); err != nil {
+			return fmt.Errorf("upserting nested sub-session: %w", err)
 		}
 
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, subsession_id)
 			 VALUES (?, ?, 'subsession', ?)`,
-			sessionID, position, subSession.ID)
+			sessionID, position, item.SubSession.ID)
 		return err
 
 	case item.Summary != "":

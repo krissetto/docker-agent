@@ -69,13 +69,21 @@ func globalCommandFactory() CommandEvaluatorFactory {
 // This includes ${args}, ${args[N]}, ${args.join(...)}, ${args.length}, etc.
 var argsPlaceholderRegex = regexp.MustCompile(`\$\{args[^}]*\}`)
 
+// CommandSource resolves immutable command-preparation data for one configured
+// agent. Implementations must not consult or mutate a process-wide current
+// agent.
+type CommandSource interface {
+	AgentCommands(ctx context.Context, agentName string) (types.Commands, error)
+	AgentTools(ctx context.Context, agentName string) ([]tools.Tool, error)
+}
+
 // LookupCommand parses userInput as a /command invocation and returns the
 // matching command along with its trailing arguments. The boolean is false
 // when userInput doesn't start with '/' or doesn't match a configured
 // command. Callers that need both the resolved instruction and the original
 // command metadata (e.g. its target agent) typically call LookupCommand to
 // inspect the command before calling ResolveCommand.
-func LookupCommand(ctx context.Context, rt Runtime, userInput string) (cmd types.Command, rest string, ok bool) {
+func LookupCommand(ctx context.Context, source CommandSource, agentName, userInput string) (cmd types.Command, rest string, ok bool) {
 	if !strings.HasPrefix(userInput, "/") {
 		return types.Command{}, "", false
 	}
@@ -83,7 +91,12 @@ func LookupCommand(ctx context.Context, rt Runtime, userInput string) (cmd types
 	head, tail, _ := strings.Cut(userInput, " ")
 	commandName := head[1:]
 
-	command, found := rt.CurrentAgentInfo(ctx).Commands[commandName]
+	commands, err := source.AgentCommands(ctx, agentName)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to get immutable agent commands", "agent", agentName, "error", err)
+		return types.Command{}, "", false
+	}
+	command, found := commands[commandName]
 	if !found {
 		return types.Command{}, "", false
 	}
@@ -104,8 +117,8 @@ func LookupCommand(ctx context.Context, rt Runtime, userInput string) (cmd types
 // caller can forward them to the target sub-agent after switching. When the
 // command has no instruction and no arguments, the result is the empty
 // string, signalling "no message to send".
-func ResolveCommand(ctx context.Context, rt Runtime, userInput string) string {
-	command, rest, ok := LookupCommand(ctx, rt, userInput)
+func ResolveCommand(ctx context.Context, source CommandSource, agentName, userInput string) string {
+	command, rest, ok := LookupCommand(ctx, source, agentName, userInput)
 	if !ok {
 		return userInput
 	}
@@ -124,7 +137,7 @@ func ResolveCommand(ctx context.Context, rt Runtime, userInput string) string {
 	// We execute JS first to prevent tool output (from !tool commands) from being evaluated as JS,
 	// which would be a security vulnerability (injection).
 	factory := globalCommandFactory()
-	if local, ok := rt.(interface {
+	if local, ok := source.(interface {
 		CommandEvaluatorFactory() CommandEvaluatorFactory
 	}); ok {
 		factory = local.CommandEvaluatorFactory()
@@ -133,14 +146,14 @@ func ResolveCommand(ctx context.Context, rt Runtime, userInput string) string {
 		if strings.Contains(instruction, "${") {
 			slog.WarnContext(ctx, "No JavaScript evaluator registered; ${...} expressions left unexpanded (call jscommands.Register to enable them)")
 		}
-	} else if agentTools, err := rt.CurrentAgentTools(ctx); err != nil {
+	} else if agentTools, err := source.AgentTools(ctx, agentName); err != nil {
 		slog.WarnContext(ctx, "Failed to get agent tools for JS expression execution", "error", err)
 	} else {
 		instruction = factory(agentTools).Evaluate(ctx, instruction, args)
 	}
 
 	// Execute tool commands and substitute their output (legacy !tool() syntax)
-	instruction = executeToolCommands(ctx, rt, instruction)
+	instruction = executeToolCommands(ctx, source, agentName, instruction)
 
 	// Append remaining text if no placeholders were used
 	if rest != "" && !argsPlaceholderRegex.MatchString(command.Instruction) {
@@ -270,13 +283,13 @@ func isWordChar(b byte) bool {
 }
 
 // executeToolCommands executes !tool_name(arg=value) patterns and replaces them with output.
-func executeToolCommands(ctx context.Context, rt Runtime, instruction string) string {
+func executeToolCommands(ctx context.Context, source CommandSource, agentName, instruction string) string {
 	commands := parseToolCommands(instruction)
 	if len(commands) == 0 {
 		return instruction
 	}
 
-	agentTools, err := rt.CurrentAgentTools(ctx)
+	agentTools, err := source.AgentTools(ctx, agentName)
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to get agent tools for command execution", "error", err)
 		return instruction

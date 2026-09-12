@@ -57,8 +57,11 @@ func newRoutedTestModel(t *testing.T, makePage func(sess *session.Session, routi
 
 	sv := supervisor.New(nil)
 	sessA, sessB := session.New(), session.New()
-	activeID = sv.AddSession(t.Context(), nil, sessA, "", nil)
-	backgroundID = sv.AddSession(t.Context(), nil, sessB, "", nil)
+	var err error
+	activeID, err = sv.AddSession(t.Context(), nil, sessA, "", nil)
+	require.NoError(t, err)
+	backgroundID, err = sv.AddSession(t.Context(), nil, sessB, "", nil)
+	require.NoError(t, err)
 	m.supervisor = sv
 	require.Equal(t, activeID, sv.ActiveID())
 
@@ -110,7 +113,7 @@ func newRealChatPage(t *testing.T, sess *session.Session, routingID string) chat
 	t.Helper()
 	ss := service.NewSessionState(sess)
 	ss.SetCurrentAgentName("root")
-	page := chat.New(animation.NewRuntime(), t.Context(), app.New(t.Context(), stubRuntime{}, sess), ss)
+	page := chat.New(animation.NewRuntime(), t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), ss)
 	page.SetRoutingID(routingID)
 	_ = page.SetSize(140, 40)
 	t.Cleanup(func() {

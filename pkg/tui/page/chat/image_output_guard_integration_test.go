@@ -151,7 +151,7 @@ func TestImageOutputGuard_RuntimeToTUI_RejectsBeforeDispatchAndClearsSpinner(t *
 
 	sessForPage := session.New()
 	p := New(animation.NewRuntime(), t.Context(),
-		app.New(t.Context(), queueTestRuntime{}, sessForPage),
+		app.New(t.Context(), nil, sessForPage, runtime.SessionBinding{}, app.WithRuntimeServices(queueTestServices{})),
 		service.NewSessionState(sessForPage)).(*chatPage)
 
 	rec := &recordingMessages{Model: p.messages}

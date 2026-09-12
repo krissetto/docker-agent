@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -18,6 +19,7 @@ import (
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -77,7 +79,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		switch {
 		case err == nil:
 			sess = existing
-			sess.AddMessage(session.UserMessage(message))
+			sess.AgentName = agentName
 			sess.SetSafetyPolicy(servesafety.ResumeCeiling(sess.GetSafetyPolicy(), safety.Policy))
 			sess.NonInteractive = true
 		case !errors.Is(err, session.ErrNotFound):
@@ -96,7 +98,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 				sess = session.New(
 					session.WithID(sessionID),
 					session.WithOrigin("a2a"),
-					session.WithUserMessage(message),
+					session.WithAgentName(agentName),
 					session.WithMaxIterations(a.MaxIterations()),
 					session.WithMaxConsecutiveToolCalls(a.MaxConsecutiveToolCalls()),
 					session.WithMaxOldToolCallTokens(a.MaxOldToolCallTokens()),
@@ -110,8 +112,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		}
 
 		// Create runtime
-		rt, err := runtime.New(ctx, t,
-			runtime.WithCurrentAgent(agentName),
+		rt, err := runtime.NewLocalRuntime(ctx, t,
 			runtime.WithSessionStore(sessStore),
 			// Match the tracer scope used by `cmd/root/run.go` so
 			// MCP / A2A / API spans share the same instrumentation
@@ -127,8 +128,35 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			return
 		}
 
-		// Run the agent and collect events
-		eventsChan := rt.RunStream(ctx, sess)
+		supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+		defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+		sessionRuntime := supervisor.Runtime()
+
+		// Re-adopt any persisted subagent swarm so a resumed conversation's
+		// send_message / read_subagent keep working.
+		if restorer, ok := sessionRuntime.(runtime.TreeRestorer); ok {
+			if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
+				yield(nil, fmt.Errorf("restore subagent tree for A2A session %s: %w", sess.ID, err))
+				return
+			}
+		}
+
+		handle, err := sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
+		if err != nil {
+			yield(nil, fmt.Errorf("bind A2A session: %w", err))
+			return
+		}
+		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		if err != nil {
+			yield(nil, fmt.Errorf("observe A2A session: %w", err))
+			return
+		}
+		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: message})
+		if err != nil {
+			observation.Cancel()
+			yield(nil, fmt.Errorf("submit A2A message: %w", err))
+			return
+		}
 
 		// Track accumulated content for chunked responses
 		var contentBuilder strings.Builder
@@ -150,10 +178,11 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 
 		// Convert docker agent events to ADK events and yield them
 
-		for event := range eventsChan {
+		termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+			event := envelope.Event
 			if ctx.Ended() {
 				slog.Debug("Invocation ended, stopping agent", "agent", agentName)
-				return
+				return runtimeclient.TurnTerminate, nil
 			}
 
 			switch e := event.(type) {
@@ -172,22 +201,30 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 				}
 
 				if !yield(adkEvent, nil) {
-					return
+					return runtimeclient.TurnTerminate, nil
 				}
 
 			case *runtime.ErrorEvent:
-				// Yield error and stop
-
-				yield(nil, fmt.Errorf("%s", e.Error))
-				return
+				// Yield error and stop.
+				return runtimeclient.TurnTerminate, errors.New(e.Error)
 
 			case *runtime.StreamStoppedEvent:
-				// Send final complete event with all accumulated content
+				// Send final complete event with all accumulated content.
 				if contentBuilder.Len() > 0 {
 					yield(finalEvent(), nil)
-					return
 				}
 			}
+			return runtimeclient.TurnContinue, nil
+		})
+		if termination.Err != nil {
+			if errors.Is(termination.Err, context.Canceled) && ctx.Ended() {
+				return
+			}
+			yield(nil, fmt.Errorf("observe A2A session: %w", termination.Err))
+			return
+		}
+		if termination.Stopped || termination.Terminated {
+			return
 		}
 
 		// The channel closed without a StreamStoppedEvent: the runtime bounds

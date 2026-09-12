@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -17,7 +18,7 @@ func TestApp_NewSession_PreservesWorkingDir(t *testing.T) {
 	initialSess := session.New(
 		session.WithWorkingDir("/projects/myapp"),
 	)
-	app := New(t.Context(), rt, initialSess)
+	app := New(t.Context(), nil, initialSess, runtime.SessionBinding{}, WithRuntimeServices(rt))
 	require.Equal(t, "/projects/myapp", app.Session().WorkingDir)
 
 	app.NewSession()
@@ -38,7 +39,7 @@ func TestApp_NewSession_PreservesAllSessionFlags(t *testing.T) {
 		session.WithHideToolResults(true),
 		session.WithWorkingDir("/work"),
 	)
-	app := New(t.Context(), rt, initialSess)
+	app := New(t.Context(), nil, initialSess, runtime.SessionBinding{}, WithRuntimeServices(rt))
 
 	app.NewSession()
 

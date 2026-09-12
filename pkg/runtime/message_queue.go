@@ -14,13 +14,24 @@ type QueuedMessage struct {
 	ID           string
 	Content      string
 	MultiContent []chat.MessagePart
+	// RequestID correlates session-native submissions with the events produced
+	// while processing them. Legacy queue callers may leave it empty.
+	RequestID string
+	// AcceptedPosition is the immutable observation position reported when the
+	// input was admitted. Runtime execution never uses it for identity.
+	AcceptedPosition int
+	// AcceptedPersisted records whether admission reached the configured session
+	// store. Durable promotion is required only for such accepted inputs.
+	AcceptedPersisted bool
+	// Retry requests a fresh turn from existing transcript without appending
+	// user input. It remains an ordinary bounded session mailbox item.
+	Retry bool
 }
 
-// PendingMessageCanceler is implemented by runtimes that can withdraw queued
-// messages before the agent loop consumes them.
+// PendingMessageCanceler is implemented by session handles that can withdraw
+// accepted input before promotion. Active-turn cancellation is separate.
 type PendingMessageCanceler interface {
-	CancelSteer(ctx context.Context, id string) bool
-	CancelFollowUp(ctx context.Context, id string) bool
+	CancelPendingMessage(ctx context.Context, turnID string) (bool, error)
 }
 
 // RecallHandler delivers a tool-produced message through an embedder-owned

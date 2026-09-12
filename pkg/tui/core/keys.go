@@ -23,7 +23,6 @@ type KeyMap struct {
 	ToggleHideToolResults key.Binding
 	CycleAgent            key.Binding
 	ModelPicker           key.Binding
-	ClearQueue            key.Binding
 	Suspend               key.Binding
 	ToggleSidebar         key.Binding
 	EditExternal          key.Binding
@@ -89,7 +88,6 @@ func DefaultKeyMap() KeyMap {
 		ToggleHideToolResults: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("Ctrl+o", "toggle hide tool results")),
 		CycleAgent:            key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("Ctrl+s", "cycle agent")),
 		ModelPicker:           key.NewBinding(key.WithKeys("ctrl+m"), key.WithHelp("Ctrl+m", "model picker")),
-		ClearQueue:            key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("Ctrl+x", "clear queue")),
 		Suspend:               key.NewBinding(key.WithKeys("ctrl+z"), key.WithHelp("Ctrl+z", "suspend")),
 		ToggleSidebar:         key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("Ctrl+b", "toggle sidebar")),
 		EditExternal:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("Ctrl+g", "edit in external editor")),
@@ -120,7 +118,6 @@ func actionMapFor(keys *KeyMap) []actionEntry {
 		{"toggle_hide_tool_results", &keys.ToggleHideToolResults, "toggle hide tool results"},
 		{"cycle_agent", &keys.CycleAgent, "cycle agent"},
 		{"model_picker", &keys.ModelPicker, "model picker"},
-		{"clear_queue", &keys.ClearQueue, "clear queue"},
 		{"suspend", &keys.Suspend, "suspend"},
 		{"toggle_sidebar", &keys.ToggleSidebar, "toggle sidebar"},
 		{"edit_external", &keys.EditExternal, "edit in external editor"},

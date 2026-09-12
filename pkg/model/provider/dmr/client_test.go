@@ -21,6 +21,53 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
+func TestNewClientFailsWhenExplicitConfigurationIsRejected(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`runtime flag "--reasoning-preserve" is not allowed for backend "llama.cpp"`))
+	}))
+	defer server.Close()
+
+	cfg := &latest.ModelConfig{
+		Provider: "dmr",
+		Model:    "shared",
+		BaseURL:  server.URL + "/engines/v1",
+		ProviderOpts: map[string]any{
+			"context_size": int64(1048576),
+			"runtime_flags": []any{
+				"--ctx-size", "1048576",
+				"--spec-type", "draft-mtp",
+				"--reasoning-preserve",
+				"--image-min-tokens", "1024",
+			},
+		},
+	}
+
+	_, err := NewClient(t.Context(), cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to configure DMR model")
+	assert.Contains(t, err.Error(), `runtime flag "--reasoning-preserve" is not allowed`)
+}
+
+func TestNewClientKeepsBestEffortConfigureCompatibilityWithoutExplicitOptions(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(t.Context(), &latest.ModelConfig{
+		Provider: "dmr",
+		Model:    "shared",
+		BaseURL:  server.URL + "/engines/v1",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, client)
+}
+
 func TestNewClientWithExplicitBaseURL(t *testing.T) {
 	t.Parallel()
 
@@ -1111,6 +1158,21 @@ func TestParseMode(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must be a string")
 	})
+}
+
+func TestParseRuntimeFlagsPreservesJSONArrayItem(t *testing.T) {
+	t.Parallel()
+
+	const jsonArg = `{"reasoning_effort":"high","preserve_thinking":true}`
+	got := parseRuntimeFlags(map[string]any{
+		"runtime_flags": []any{"--spec-type", "draft-mtp", "--chat-template-kwargs", jsonArg},
+	})
+	require.Equal(t, []string{"--spec-type", "draft-mtp", "--chat-template-kwargs", jsonArg}, got)
+
+	var kwargs map[string]any
+	require.NoError(t, json.Unmarshal([]byte(got[3]), &kwargs))
+	assert.Equal(t, "high", kwargs["reasoning_effort"])
+	assert.Equal(t, true, kwargs["preserve_thinking"])
 }
 
 func TestParseRawRuntimeFlags(t *testing.T) {

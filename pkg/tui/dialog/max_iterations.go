@@ -7,10 +7,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -25,15 +25,17 @@ type maxIterationsDialog struct {
 	BaseDialog
 
 	maxIterations int
-	app           *app.App
+	sessionID     string
+	requestID     string
 	keyMap        ConfirmKeyMap
 }
 
 // NewMaxIterationsDialog creates a new max iterations confirmation dialog
-func NewMaxIterationsDialog(maxIterations int, appInstance *app.App) Dialog {
+func NewMaxIterationsDialog(maxIterations int, sessionID, requestID string) Dialog {
 	return &maxIterationsDialog{
 		maxIterations: maxIterations,
-		app:           appInstance,
+		sessionID:     sessionID,
+		requestID:     requestID,
 		keyMap:        DefaultConfirmKeyMap(),
 	}
 }
@@ -59,13 +61,21 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			func() (layout.Model, tea.Cmd) {
 				return d, tea.Sequence(
 					core.CmdHandler(CloseDialogMsg{}),
-					core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApprove()}),
+					core.CmdHandler(messages.InteractionResponseMsg{
+						SessionID: d.sessionID,
+						Response: runtime.InteractionResponse{InteractionID: d.requestID,
+							Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeApprove()},
+					}),
 				)
 			},
 			func() (layout.Model, tea.Cmd) {
 				return d, tea.Sequence(
 					core.CmdHandler(CloseDialogMsg{}),
-					core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeReject("")}),
+					core.CmdHandler(messages.InteractionResponseMsg{
+						SessionID: d.sessionID,
+						Response: runtime.InteractionResponse{InteractionID: d.requestID,
+							Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")},
+					}),
 				)
 			},
 		)

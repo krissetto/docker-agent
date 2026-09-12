@@ -1156,7 +1156,7 @@ func rebuildStyles() {
 		Background(BackgroundAlt).
 		Bold(true)
 
-	AssistantMessageStyle = BaseMessageStyle.Padding(0, 1)
+	AssistantMessageStyle = BaseMessageStyle.Padding(0, 3, 0, 1)
 
 	WelcomeMessageStyle = BaseMessageStyle.
 		BorderStyle(lipgloss.DoubleBorder()).
@@ -1269,7 +1269,7 @@ func rebuildStyles() {
 	// Tool call styles
 	ToolMessageStyle = BaseStyle.Foreground(TextMutedGray)
 	ToolErrorMessageStyle = BaseStyle.Foreground(ErrorStrong)
-	ToolName = ToolMessageStyle.Foreground(TextMutedGray).Padding(0, 1)
+	ToolName = ToolMessageStyle.Foreground(TextMutedGray).Padding(0, 3, 0, 1)
 	ToolNameError = ToolName.
 		Foreground(ErrorStrong).
 		Background(ErrorDark)
@@ -1355,7 +1355,7 @@ func rebuildStyles() {
 	CompletionBoxStyle = BaseStyle.
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(BorderSecondary).
-		Padding(0, 1)
+		Padding(0, 3, 0, 1)
 
 	CompletionNormalStyle = BaseStyle.Foreground(TextPrimary).Bold(true)
 	CompletionSelectedStyle = CompletionNormalStyle.Foreground(White).Background(MobyBlue)
@@ -1370,7 +1370,7 @@ func rebuildStyles() {
 	AgentBadgeStyle = BaseStyle.
 		Foreground(AgentBadgeFg).
 		Background(AgentBadgeBg).
-		Padding(0, 1)
+		Padding(0, 3, 0, 1)
 
 	ThinkingBadgeStyle = BaseStyle.
 		Foreground(TextMuted).

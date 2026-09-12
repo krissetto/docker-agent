@@ -15,7 +15,7 @@ import (
 )
 
 type runtimeDecorator struct {
-	runtime.Runtime
+	runtime.CommandSource
 
 	factory func() runtime.CommandEvaluatorFactory
 }
@@ -40,8 +40,8 @@ func TestCommandEvaluatorThroughDecorator(t *testing.T) {
 			r, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), runtime.WithCommandEvaluatorFactory(factory))
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, r.Close()) })
-			wrapped := runtimeDecorator{Runtime: r, factory: r.CommandEvaluatorFactory}
-			assert.Equal(t, expected, runtime.ResolveCommand(t.Context(), wrapped, "/test hello"))
+			wrapped := runtimeDecorator{CommandSource: r, factory: r.CommandEvaluatorFactory}
+			assert.Equal(t, expected, runtime.ResolveCommand(t.Context(), wrapped, "root", "/test hello"))
 		})
 	}
 }

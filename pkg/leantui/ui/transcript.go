@@ -28,6 +28,7 @@ type PendingUserMessage struct {
 	ID      string
 	Display string
 	Content string
+	TurnID  string
 	Kind    PendingUserKind
 }
 
@@ -71,12 +72,25 @@ func NewTranscript() *Transcript {
 	return &Transcript{toolz: NewToolTracker()}
 }
 
+func (t *Transcript) Clear() {
+	t.blocks = nil
+	t.ClearActive()
+}
+
 // ClearActive drops the live region (the streamed block and any in-flight tool
 // calls) while keeping the committed scrollback intact. Used when starting a
 // new session.
 func (t *Transcript) ClearActive() {
 	t.pending = nil
 	t.toolz.Reset()
+}
+
+func (t *Transcript) AddUser(content string) {
+	t.AddBlock(func(w int) []string { return RenderUserLines(content, w) })
+}
+
+func (t *Transcript) AddAssistant(content string) {
+	t.AddBlock(func(w int) []string { return RenderAssistantLines(content, w) })
 }
 
 // AddBlock appends a finalized, lazily-rendered block to the conversation.

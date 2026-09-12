@@ -36,7 +36,7 @@ func newPlansTestModel(t *testing.T) (*appModel, plans.Service) {
 	WithPlansService(svc)(m)
 
 	sess := session.New()
-	m.application = app.New(t.Context(), stubRuntime{}, sess)
+	m.application = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m.sessionState = service.NewSessionState(sess)
 	return m, svc
 }
@@ -424,8 +424,10 @@ func TestPlanChangedEvent_BackgroundSessionStillRefreshes(t *testing.T) {
 	mustCreatePlan(t, svc, "release", "content")
 
 	sv := supervisor.New(nil)
-	activeID := sv.AddSession(t.Context(), nil, session.New(), "", nil)
-	backgroundID := sv.AddSession(t.Context(), nil, session.New(), "", nil)
+	activeID, err := sv.AddSession(t.Context(), nil, session.New(), "", nil)
+	require.NoError(t, err)
+	backgroundID, err := sv.AddSession(t.Context(), nil, session.New(), "", nil)
+	require.NoError(t, err)
 	m.supervisor = sv
 	require.Equal(t, activeID, sv.ActiveID())
 	m.chatPages[backgroundID] = &mockChatPage{}

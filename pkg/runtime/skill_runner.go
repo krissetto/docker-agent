@@ -108,22 +108,16 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 		"task", prepared.Task,
 	)
 
-	// Apply the skill's optional model override for the sub-session.
-	// On failure we log and fall back to the agent's current model;
-	// restore is CAS-safe and always non-nil.
-	if prepared.Model != "" {
-		restore, err := r.WithAgentModel(ctx, ca, prepared.Model)
-		defer restore()
-		if err != nil {
-			slog.WarnContext(ctx, "Failed to apply skill model override; using current model",
-				"agent", ca,
-				"skill", prepared.SkillName,
-				"model", prepared.Model,
-				"error", err,
-			)
+	// Resolve the skill provider as execution context, never as a shared Agent
+	// override. The child driver will capture this explicit binding.
+	childModel := prepared.Model
+	if childModel == "" {
+		if parentDriver, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+			childModel = parentDriver.ModelRef()
 		}
 	}
 
+	toolsApproved, safetyPolicy, permissions := sess.SafetySettings()
 	// Skills are sub-sessions of the caller, not delegations, so the
 	// runtime's currentAgent stays put and the delegation lineage is
 	// inherited unchanged (no DelegationLineage: not a delegation edge).
@@ -133,13 +127,14 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
 		SubSessionConfig: SubSessionConfig{
 			Task:                prepared.Task,
+			Model:               childModel,
 			SystemMessage:       skills.BuildSkillSystemMessage(prepared, sess.AttachedFilesSnapshot()),
 			ImplicitUserMessage: skills.BuildSkillUserMessage(prepared),
 			AgentName:           ca,
 			Title:               "Skill: " + prepared.SkillName,
-			ToolsApproved:       sess.IsToolsApproved(),
-			SafetyPolicy:        sess.GetSafetyPolicy(),
-			Permissions:         sess.ClonePermissions(),
+			ToolsApproved:       toolsApproved,
+			SafetyPolicy:        safetyPolicy,
+			Permissions:         permissions,
 			NonInteractive:      sess.NonInteractive,
 			PinAgent:            sess.AgentName != "",
 			ExcludedTools:       []string{skills.ToolNameRunSkill},

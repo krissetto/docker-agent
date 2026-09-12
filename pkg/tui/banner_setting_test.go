@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
@@ -29,7 +30,7 @@ func bannerVisible(t *testing.T, m *appModel) bool {
 	t.Helper()
 	sess := session.New()
 	page := chat.New(animation.NewRuntime(), t.Context(),
-		app.New(t.Context(), stubRuntime{}, sess), service.NewSessionState(sess), m.chatPageOpts()...)
+		app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), service.NewSessionState(sess), m.chatPageOpts()...)
 	page.SetSize(160, 40)
 	return strings.Contains(ansi.Strip(page.View()), tuibanner.Lines[0])
 }
@@ -86,7 +87,7 @@ func TestNew_AppliesPersistedShowBannerAtStartup(t *testing.T) {
 	}))
 
 	sess := session.New()
-	m := New(t.Context(), nil, app.New(t.Context(), stubRuntime{}, sess), dir, func() {}).(*appModel)
+	m := New(t.Context(), nil, app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), dir, func() {}).(*appModel)
 	t.Cleanup(m.cleanupManagedResources)
 
 	assert.False(t, m.showBanner)

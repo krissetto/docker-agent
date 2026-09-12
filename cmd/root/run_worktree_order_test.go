@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -40,12 +41,14 @@ func (b *workdirRecordingBackend) CreateSessionRequest(workingDir string) runtim
 	return runtime.CreateSessionRequest{WorkingDir: workingDir}
 }
 
-func (b *workdirRecordingBackend) CreateSession(context.Context, *teamloader.LoadResult, runtime.CreateSessionRequest) (runtime.Runtime, *session.Session, func(), error) {
-	return nil, nil, func() {}, nil
+func (b *workdirRecordingBackend) CreateSession(context.Context, *teamloader.LoadResult, runtime.CreateSessionRequest) (app.Services, runtime.SessionRuntime, *session.Session, func(), error) {
+	return nil, nil, nil, func() {}, nil
 }
 
-func (b *workdirRecordingBackend) Spawner(runtime.Runtime) tui.SessionSpawner { return nil }
-func (b *workdirRecordingBackend) Close() error                               { return nil }
+func (b *workdirRecordingBackend) Spawner(app.Services, runtime.SessionRuntime) tui.SessionSpawner {
+	return nil
+}
+func (b *workdirRecordingBackend) Close() error { return nil }
 
 func (b *workdirRecordingBackend) ResumeWorkingDir(context.Context) (string, bool) {
 	return "", false

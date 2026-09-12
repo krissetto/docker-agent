@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"sync"
 	"time"
 
@@ -130,6 +131,18 @@ func WithSubAgents(subAgents ...*Agent) Opt {
 		for _, subAgent := range subAgents {
 			subAgent.parents = append(subAgent.parents, a)
 		}
+	}
+}
+
+func WithAsyncSubagents(refs ...latest.SubagentRef) Opt {
+	return func(a *Agent) {
+		a.asyncSubagents = slices.Clone(refs)
+	}
+}
+
+func WithAsyncHarnessPrompt(prompt string) Opt {
+	return func(a *Agent) {
+		a.asyncHarnessPrompt = prompt
 	}
 }
 

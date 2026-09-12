@@ -254,7 +254,7 @@ func (t *ToolSet) Instructions() string {
 - Relative paths resolve from the working directory; absolute paths and ".." work as expected
 - Prefer read_multiple_files over sequential read_file calls
 - Use search_files_content to locate code or text across files
-- Use exclude patterns in searches and max_depth in directory_tree to limit output`)
+- Limit output by giving directory_tree a narrow directory path and using exclude patterns in search_files_content`)
 	if d := t.allowList.describe(); d != "" {
 		fmt.Fprintf(&b, "\n- These tools are restricted to paths under: %s. Any other path is rejected without touching the filesystem.", d)
 	}

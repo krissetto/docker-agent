@@ -1,0 +1,27 @@
+# Only compilation inputs and the two runtime assets enter this kit's context.
+**
+!go.mod
+!go.sum
+!main.go
+!cmd/**/*.go
+!pkg/**/*.go
+!pkg/app/export/export.css
+!pkg/app/export/export.html
+!pkg/app/export/export.js
+!pkg/chatserver/openapi.json
+!pkg/compaction/prompts/compaction-system.txt
+!pkg/compaction/prompts/compaction-user.txt
+!pkg/config/sources/builtin-agents/*.yaml
+!pkg/creator/instructions.txt
+!pkg/evaluation/Dockerfile.template
+!pkg/evaluation/Dockerfile.custom.template
+!pkg/modelsdev/snapshot.json
+!pkg/modelsdev/snapshot_date.txt
+!pkg/safety/safety_patterns.json
+!pkg/tools/builtin/mcpcatalog/servers.json
+!pkg/tui/styles/themes/*.yaml
+!examples/sbx/async-subagents/launch.sh
+!examples/sbx/async-subagents/hackerspace.yaml
+**/*_test.go
+**/testdata/**
+**/fixtures/**

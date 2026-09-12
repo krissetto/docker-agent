@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,64 +167,6 @@ func TestServer_WithMaxRequestBytesZeroFallback(t *testing.T) {
 	}
 }
 
-func TestServer_ListActiveSessionsIsLightweightAndIncludesStreaming(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	store := session.NewInMemorySessionStore()
-	historical := session.New(session.WithWorkingDir("/historical"))
-	require.NoError(t, store.AddSession(ctx, historical))
-
-	idle := session.New(session.WithWorkingDir("/work"))
-	running := session.New(session.WithWorkingDir("/work"))
-	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
-	sm.AttachRuntime(ctx, idle.ID, &fakeRuntime{}, idle)
-	runningGuard := sm.AttachRuntime(ctx, running.ID, &fakeRuntime{}, running)
-	runningGuard.Lock()
-	defer runningGuard.Unlock()
-
-	srv := NewWithManager(sm, "")
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/sessions?active=true", http.NoBody)
-	rec := httptest.NewRecorder()
-	srv.e.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var sessions []api.SessionsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sessions))
-	require.Len(t, sessions, 2, "stored sessions without an attached runtime are excluded")
-	assert.ElementsMatch(t, []api.SessionsResponse{
-		{ID: idle.ID, CreatedAt: idle.CreatedAt.Format(time.RFC3339), WorkingDir: "/work"},
-		{ID: running.ID, CreatedAt: running.CreatedAt.Format(time.RFC3339), WorkingDir: "/work", Streaming: true},
-	}, sessions)
-}
-
-func TestServer_ListActiveSessionsEmptyIsArray(t *testing.T) {
-	t.Parallel()
-
-	sm := NewSessionManager(t.Context(), config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
-	srv := NewWithManager(sm, "")
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/sessions?active=true", http.NoBody)
-	rec := httptest.NewRecorder()
-	srv.e.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `[]`, rec.Body.String())
-}
-
-func TestServer_ListSessions(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	lnPath := startServer(t, ctx, prepareAgentsDir(t, "pirate.yaml"))
-
-	buf := httpGET(t, ctx, lnPath, "/api/sessions")
-
-	var sessions []api.SessionsResponse
-	unmarshal(t, buf, &sessions)
-
-	assert.Empty(t, sessions)
-}
-
 func prepareAgentsDir(t *testing.T, testFiles ...string) string {
 	t.Helper()
 
@@ -326,104 +267,6 @@ func unmarshal(t *testing.T, buf []byte, v any) {
 	require.NoError(t, err)
 }
 
-func TestServer_UpdateSessionTitle(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	store := session.NewInMemorySessionStore()
-	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
-
-	// Create a session first
-	createResp := httpDo(t, ctx, http.MethodPost, lnPath, "/api/sessions", map[string]any{})
-	var createdSession session.Session
-	unmarshal(t, createResp, &createdSession)
-	require.NotEmpty(t, createdSession.ID)
-
-	// Update the session title
-	newTitle := "My Custom Title"
-	updateResp := httpDo(t, ctx, http.MethodPatch, lnPath, "/api/sessions/"+createdSession.ID+"/title", api.UpdateSessionTitleRequest{Title: newTitle})
-	var titleResp api.UpdateSessionTitleResponse
-	unmarshal(t, updateResp, &titleResp)
-
-	assert.Equal(t, createdSession.ID, titleResp.ID)
-	assert.Equal(t, newTitle, titleResp.Title)
-
-	// Verify the session was updated in the store
-	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+createdSession.ID)
-	var sessionResp api.SessionResponse
-	unmarshal(t, getResp, &sessionResp)
-
-	assert.Equal(t, newTitle, sessionResp.Title)
-}
-
-// TestServer_CreateSessionWorkingDirWithSeparators pins the removal of a
-// Copilot-autofix validation that rejected any working_dir containing path
-// separators or an absolute path: POST /api/sessions must accept a real
-// host directory (which always contains separators) and store it on the
-// session. Only a raw working_dir containing ".." is rejected up front.
-// Containment stays opt-in via WithSessionWorkingDirRoot (CodeQL alert
-// #57); the unrestricted default is intentional (#3788).
-func TestServer_CreateSessionWorkingDirWithSeparators(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
-	srv := NewWithManager(sm, "")
-
-	wd := t.TempDir()
-	require.True(t, strings.ContainsAny(wd, `/\`))
-
-	body, err := json.Marshal(map[string]any{"working_dir": wd})
-	require.NoError(t, err)
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/sessions", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	srv.e.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var created session.Session
-	unmarshal(t, rec.Body.Bytes(), &created)
-	require.NotEmpty(t, created.ID)
-	assert.Equal(t, wd, created.WorkingDir)
-
-	stored, err := sm.GetSession(ctx, created.ID)
-	require.NoError(t, err)
-	assert.Equal(t, wd, stored.WorkingDir)
-}
-
-// TestServer_CreateSessionWorkingDirDotDotRejected pins the HTTP mapping of
-// the raw ".." rejection: POST /api/sessions with a traversal-carrying
-// working_dir must answer 400 (ErrInvalidWorkingDir), not 500, and create
-// no session.
-func TestServer_CreateSessionWorkingDirDotDotRejected(t *testing.T) {
-	t.Parallel()
-
-	ctx := t.Context()
-	sm := NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
-	srv := NewWithManager(sm, "")
-
-	wd := t.TempDir() + string(filepath.Separator) + ".."
-	body, err := json.Marshal(map[string]any{"working_dir": wd})
-	require.NoError(t, err)
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/sessions", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	srv.e.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	var errResp struct {
-		Message string `json:"message"`
-	}
-	unmarshal(t, rec.Body.Bytes(), &errResp)
-	assert.Contains(t, errResp.Message, `must not contain ".."`)
-
-	sessions, err := sm.GetSessions(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, sessions)
-}
-
 // TestServer_GetSessionsRace pins the data-race fix for the GET
 // /api/sessions and GET /api/sessions/:id handlers (#3591): the in-memory
 // store hands them live *session.Session pointers, so reading
@@ -468,15 +311,15 @@ func TestServer_GetSessionsRace(t *testing.T) {
 	})
 
 	for range 25 {
-		var sessions []api.SessionsResponse
-		unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions"), &sessions)
-		require.Len(t, sessions, 1)
-		assert.Equal(t, sess.ID, sessions[0].ID)
-		assert.Equal(t, 2*sessions[0].InputTokens, sessions[0].OutputTokens)
+		var catalog sessionCatalogDTO
+		unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions"), &catalog)
+		require.Len(t, catalog.Sessions, 1)
+		assert.Equal(t, sess.ID, catalog.Sessions[0].SessionID)
+		assert.Equal(t, 2*catalog.Sessions[0].InputTokens, catalog.Sessions[0].OutputTokens)
 
-		var single api.SessionResponse
+		var single sessionResourceDTO
 		unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions/"+sess.ID), &single)
-		assert.Equal(t, sess.ID, single.ID)
+		assert.Equal(t, sess.ID, single.SessionID)
 		assert.Equal(t, 2*single.InputTokens, single.OutputTokens)
 	}
 	close(done)
@@ -522,10 +365,9 @@ func TestServer_ForkSession(t *testing.T) {
 	assert.Equal(t, "hi there", forked.Messages[1].Message.Content)
 
 	// Fork must be persisted server-side so a subsequent GET returns it.
-	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+forked.ID)
-	var fetched api.SessionResponse
-	unmarshal(t, getResp, &fetched)
-	assert.Equal(t, forked.ID, fetched.ID)
+	var fetched sessionResourceDTO
+	unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions/"+forked.ID), &fetched)
+	assert.Equal(t, forked.ID, fetched.SessionID)
 	assert.Equal(t, "Original (fork 1)", fetched.Title)
 
 	// Forking past the last user message (no "full clone" shortcut) must
@@ -617,4 +459,44 @@ func (s mockStore) GetSessions(context.Context) ([]*session.Session, error) {
 
 func (s mockStore) GetSessionSummaries(context.Context) ([]session.Summary, error) {
 	return nil, nil
+}
+
+func TestServerStrictOptInCORS(t *testing.T) {
+	t.Parallel()
+	const origin = "http://127.0.0.1:18081"
+	srv := NewWithManager(nil, "secret", WithCORSOrigin(origin))
+
+	preflight := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/sessions", http.NoBody)
+	preflight.Header.Set("Origin", origin)
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflight.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	preflightRec := httptest.NewRecorder()
+	srv.e.ServeHTTP(preflightRec, preflight)
+	require.Equal(t, http.StatusNoContent, preflightRec.Code, preflightRec.Body.String())
+	assert.Equal(t, origin, preflightRec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, preflightRec.Header().Get("Access-Control-Allow-Methods"), http.MethodDelete)
+	assert.Contains(t, strings.ToLower(preflightRec.Header().Get("Access-Control-Allow-Headers")), "authorization")
+
+	allowed := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/ping", http.NoBody)
+	allowed.Header.Set("Origin", origin)
+	allowed.Header.Set("Authorization", "Bearer secret")
+	allowedRec := httptest.NewRecorder()
+	srv.e.ServeHTTP(allowedRec, allowed)
+	assert.Equal(t, http.StatusOK, allowedRec.Code)
+	assert.Equal(t, origin, allowedRec.Header().Get("Access-Control-Allow-Origin"))
+
+	rejected := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/sessions", http.NoBody)
+	rejected.Header.Set("Origin", "http://127.0.0.1:9999")
+	rejected.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	rejectedRec := httptest.NewRecorder()
+	srv.e.ServeHTTP(rejectedRec, rejected)
+	assert.Empty(t, rejectedRec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestValidateCORSOrigin(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, ValidateCORSOrigin("http://127.0.0.1:18081"))
+	for _, invalid := range []string{"*", "null", "~.*", "http://one.test,https://two.test"} {
+		assert.Error(t, ValidateCORSOrigin(invalid), invalid)
+	}
 }

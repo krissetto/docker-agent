@@ -33,7 +33,7 @@ $ docker agent serve api myorg/coder --pull-interval 10
 
 ## Endpoints
 
-All endpoints are under the `/api` prefix.
+Most endpoints are under the `/api` prefix. The process health and readiness probes are the exceptions: `/health` and `/ready` are top-level routes.
 
 ### Agents
 
@@ -41,6 +41,7 @@ All endpoints are under the `/api` prefix.
 | ------ | ----------------- | --------------------------------- |
 | `GET`  | `/api/agents`     | List all available agents         |
 | `GET`  | `/api/agents/:id` | Get an agent's full configuration |
+| `GET`  | `/api/agents/:id/:agent_name/tools/count` | Count the named agent's available tools |
 
 Each agent entry in the `GET /api/agents` response contains:
 
@@ -55,70 +56,119 @@ Each agent entry in the `GET /api/agents` response contains:
 
 For an agent loaded from a remote HTTP(S) configuration source, endpoints that need to load that source return `502 Bad Gateway` when fetching it fails. A missing configured agent returns `404 Not Found`; invalid source URLs or configuration return `500 Internal Server Error`.
 
-### Sessions
+### Canonical sessions
 
-| Method   | Path                                | Description                                             |
-| -------- | ----------------------------------- | ------------------------------------------------------- |
-| `GET`    | `/api/sessions`                     | List all sessions. Pass `?active=true` to return only runtimes attached to this server, with lightweight `working_dir` and `streaming` status and no session-history read. |
-| `POST`   | `/api/sessions`                     | Create a new session. Accepts an optional `title` field — when set, it is stored and LLM title generation is skipped. |
-| `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions)     |
-| `GET`    | `/api/sessions/:id/status`          | Lightweight runtime state (streaming, title, agent, tokens). Requires an attached runtime. |
-| `GET`    | `/api/sessions/:id/snapshot`        | Full state in one call (stored fields + runtime state + `last_event_seq`) for gapless resync — see [Reconnecting without gaps](#reconnecting-without-gaps). |
-| `GET`    | `/api/sessions/:id/events`          | Live session event stream (SSE) with sequence numbers and replay. Available for a run attached via [`--listen`](#listen), or once a session has raised at least one out-of-band event (e.g. a background job's elicitation, answered via `POST .../elicitation`), which creates a session-scoped event log on demand carrying such out-of-band events — see [Session event stream](#session-event-stream-and-reconnection) for what each kind of log contains. |
-| `DELETE` | `/api/sessions/:id`                 | Delete a session                                        |
-| `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
-| `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |
-| `POST`   | `/api/sessions/:id/fork`            | Fork a session at a user message — creates a new session with messages `[0, message_index)` of the parent (see [Session Forking](#session-forking)) |
-| `POST`   | `/api/sessions/:id/messages`        | Append a message directly to a session's history (bypasses the model). Returns `409 Conflict` while the session has an active run (see [Agent Execution](#agent-execution)). |
-| `PATCH`  | `/api/sessions/:id/messages/:msg_id` | Update an existing message by ID. Returns `409 Conflict` while the session has an active run. |
-| `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
-| `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
-| `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request. Pass the `elicitation_id` from the `elicitation_request` event to target a specific concurrent request; omitted, it resolves the sole pending one. |
-| `POST`   | `/api/sessions/:id/steer`           | Inject messages into a running turn (pre-empts current) |
-| `POST`   | `/api/sessions/:id/followup`        | Enqueue messages to run after the current turn finishes (supports an `Idempotency-Key` — see [Idempotent follow-ups](#idempotent-follow-ups)). |
-| `GET`    | `/api/sessions/:id/models`          | List available models for the session's current agent   |
+Session execution has one API surface:
 
-### Agent Execution
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` / `POST` | `/api/sessions` | Catalog sessions (`?active=true` lists attached sessions without reading stored history) / create a session-bound session (`source`, `agent_name`, optional `model`, `title`, `working_dir`, `safety_policy`, `tools_approved`, `permissions`). |
+| `GET` / `DELETE` | `/api/sessions/:id` | Inspect or delete the session. Legacy stored rows remain inspectable but are not attachable. |
+| `GET` | `/api/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
+| `GET` | `/api/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
+| `GET` | `/api/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
+| `POST` | `/api/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
+| `POST` | `/api/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |
+| `POST` | `/api/sessions/:id/cancel` | Cancel the active or named `turn_id` without closing the session. |
+| `POST` | `/api/sessions/:id/retry` | Retry the last failed settled turn. |
+| `PATCH` | `/api/sessions/:id/title` | Session-ordered durable title change. |
+| `GET` | `/api/sessions/:id/tree` | Authoritative subtree rooted at any session node; metrics are cumulative per node and can be summed for a subtree rollup. |
+| `GET` | `/api/sessions/:id/todos` | Current session-keyed todo snapshot. SQLite-backed runtimes persist it; other stores may provide volatile storage. `shared: true` toolsets use the stable root-session ID so agents in one tree share a list without cross-root leakage. |
+| `POST` | `/api/sessions/:id/compact` | Compact the session at its execution boundary. |
+| `POST` | `/api/sessions/:id/compact/:target` | Compact a live target in the same session tree. |
+| `GET` | `/api/sessions/:id/context` | Inspect context-window composition. |
+| `GET` | `/api/sessions/:id/live-sessions` | List live sessions visible from this session. |
+| `GET` / `POST` | `/api/sessions/:id/skills` / `/api/sessions/:id/skills/run` | List skills or start a fork skill. |
+| `GET` / `POST` | `/api/sessions/:id/models` / `/api/sessions/:id/models/refresh` | List or refresh available models. |
+| `PATCH` | `/api/sessions/:id/model` | Change the session's pinned model. |
+| `GET` / `PATCH` | `/api/sessions/:id/thinking-level` | Read or set the thinking level. |
+| `POST` | `/api/sessions/:id/thinking-level/cycle` | Cycle to the next thinking level. |
+| `POST` | `/api/sessions/:id/pause` | Toggle iteration-boundary pause. |
+| `POST` | `/api/sessions/:id/switch-agent` | Branch into a new session bound to another agent. |
+| `PATCH` | `/api/sessions/:id/starred` | Set starred state. |
+| `DELETE` | `/api/sessions/:id/attachments` | Remove an attachment. |
 
-| Method | Path                                       | Description                                                                          |
-| ------ | ------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `POST` | `/api/sessions/:id/agent/:agent`           | Run the root agent for a session (SSE stream)                                        |
-| `POST` | `/api/sessions/:id/agent/:agent/:name`     | Run a specific named agent (SSE stream)                                              |
-| `GET`  | `/api/agents/:id/:agent_name/tools/count`  | Count tools currently available to `:agent_name` (accounts for deferred toolsets).   |
+Legacy-compatible session routes remain available for existing clients:
 
-**Path parameters:**
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/sessions/:id/tools/toggle` | Toggle tool auto-approval. |
+| `PATCH` | `/api/sessions/:id/safety-policy` | Update safety policy. |
+| `PATCH` | `/api/sessions/:id/permissions` | Update permissions. |
+| `PATCH` | `/api/sessions/:id/tokens` | Update persisted token/cost totals. |
+| `POST` | `/api/sessions/:id/fork` | Fork before a user message. |
+| `PATCH` | `/api/sessions/:id/messages/:msg_id` | Update a persisted message. |
+| `POST` | `/api/sessions/:id/summaries` | Add a persisted summary. |
+| `GET` | `/api/sessions/:id/recovery` | Read recovery data. |
+| `POST` | `/api/sessions/batch/delete` | Delete sessions in a batch. |
+| `POST` | `/api/sessions/batch/export` | Export sessions in a batch. |
 
-- **`:agent`** — The agent identifier, which is the **config filename without the `.yaml` extension**. This must match the filename passed to `docker agent serve api`. For example, if you start the server with `docker agent serve api my-assistant.yaml`, the agent identifier is `my-assistant`. When serving a directory of YAML files, each file becomes a separate agent identified by its filename without the extension.
-- **`:name`** _(optional)_ — The name of a specific sub-agent defined in a multi-agent configuration. If omitted, the request targets the `root` agent. For example, in a config that defines agents named `root`, `coder`, and `reviewer`, use `/api/sessions/:id/agent/my-config/coder` to run the `coder` sub-agent directly.
+Todo state is mutated through the configured todo tools; the API endpoint is a
+read-only projection and is not a direct todo mutation surface. SQLite persistence
+survives restart. Memory/custom backends retain their own durability guarantees.
 
-**Examples:**
+A session created with `working_dir` runs on a runtime whose toolsets operate
+in that directory (the server builds one runtime per source and working
+directory, and rebuilds for new sessions when `--pull-interval` refreshes the
+source). Without `safety_policy` or `tools_approved` the session starts in the
+agent's author-declared safety mode, exactly like a fresh local session.
+
+There are no separate resume, elicitation, steer, follow-up, execution-stream,
+or direct transcript-mutation routes. All execution is session-owned and all
+interactive responses are correlated by the envelope's immutable
+`interaction_id`.
+
+### Sending and observing a turn
 
 ```bash
-# Single-agent config: my-assistant.yaml
-# Start: docker agent serve api my-assistant.yaml
-# Run the root agent:
-curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/my-assistant \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role": "user", "content": "Hello!"}]}'
+SID=$(curl -s -X POST http://localhost:8080/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_name":"root"}' | jq -r .session_id)
 
-# Multi-agent config: team.yaml (defines agents: root, coder, reviewer)
-# Start: docker agent serve api team.yaml
-# Run the root agent:
-curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/team \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role": "user", "content": "Review this PR"}]}'
+curl -N http://localhost:8080/api/sessions/$SID/events &
+curl -X POST http://localhost:8080/api/sessions/$SID/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"submit","content":"Hello"}'
+```
 
-# Run a specific sub-agent (reviewer):
-curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/team/reviewer \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role": "user", "content": "Review this PR"}]}'
+The SSE stream always starts with a versioned `snapshot`, emits zero or more
+replayed `event` messages, then a `ready` message whose cursor matches the
+snapshot. Live event envelopes carry monotonically increasing sequence IDs,
+`turn_id`, and (for interactions) `interaction_id`. `stream_stopped` settles
+one turn; it is not transport EOF.
+
+Reconnect with either `?since=<last sequence>` or `Last-Event-ID`. A retained
+cursor is replayed before `ready`. A `gap` envelope is a hard resnapshot
+barrier. When `DELETE /api/sessions/:id` closes an attached stream, the stream
+emits a terminal `stream_stopped` event with reason `deleted` before transport
+EOF. Clients should consume that terminal event rather than treating EOF alone
+as successful deletion.
+
+Use `/api/sessions/:id/events?tree=true` for a rooted multiplexed stream. It
+rejects cursors, emits a fresh snapshot for every current node, then events
+with per-session sequences, and observes descendants added later. It emits no
+SSE IDs. Reconnect without a cursor for fresh snapshots and events from then.
+Observer disconnect never stops sessions. `POST /api/sessions` accepts optional
+`parent_session_id`; such children begin idle. Tree nodes expose
+`needs_attention` and `waiting_on` (`failed`, `approve tool`, or `answer
+question`, in that precedence). `/children` is removed.
+
+To answer an interaction:
+
+```bash
+curl -X POST http://localhost:8080/api/sessions/$SID/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"interaction_id":"<from envelope>","kind":"confirmation","confirmation":"approve"}'
 ```
 
 ### Health
 
 | Method | Path        | Description                               |
 | ------ | ----------- | ----------------------------------------- |
-| `GET`  | `/api/ping` | Health check — returns `{"status": "ok"}` |
+| `GET`  | `/health` | Process health check — returns `{"status": "ok"}`. |
+| `GET`  | `/ready` | Store readiness and active-session count. |
+| `GET`  | `/api/ping` | API health check — returns `{"status": "ok"}`. |
+| `GET`  | `/api/ready` | Wait until at least one session is registered; accepts `?timeout=<duration>`. |
 
 ### OAuth
 
@@ -126,70 +176,14 @@ curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/team/reviewer \
 | ------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST` | `/api/mcp-oauth/callback` | Deliver an OAuth deeplink callback to a pending unmanaged OAuth flow. Success path: `?state=<state>&code=<code>`; authorization-server error path: `?state=<state>&error=<error>&error_description=<desc>`. Returns 400 if `state` is missing or neither `code` nor `error` is provided; 404 if no flow is awaiting that `state`. See [Remote MCP OAuth](../remote-mcp/index.md) for details. |
 
-## Streaming Responses
+## Workflow summary
 
-The agent execution endpoints (`POST /api/sessions/:id/agent/:agent`) return **Server-Sent Events (SSE)**. The request body is a JSON object with a `messages` array and an optional `model` field. Setting `model` applies a persistent per-agent override on the session before the turn starts (subsequent turns reuse it). An empty or omitted `model` leaves the existing override untouched. (Each event is a JSON object representing a runtime event — remember that `:agent` is the config filename without the `.yaml` extension.):
-
-```bash
-# Send a message and stream the response
-# (assuming the server was started with: docker agent serve api my-agent.yaml)
-$ curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/my-agent \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role": "user", "content": "Hello!"}]}'
-
-# Same call, but switch the agent's model for this turn (and persist it):
-$ curl -N -X POST http://localhost:8080/api/sessions/$SID/agent/my-agent \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello!"}],"model":"openai/gpt-4o"}'
-
-# Response (SSE stream):
-data: {"type":"stream_started","session_id":"...","agent":"root"}
-data: {"type":"agent_choice","content":"Hello! How","agent":"root"}
-data: {"type":"agent_choice","content":" can I help","agent":"root"}
-data: {"type":"agent_choice","content":" you today?","agent":"root"}
-data: {"type":"stream_stopped","session_id":"...","agent":"root"}
-```
-
-Event types include:
-
-- `stream_started` / `stream_stopped` — Agent execution lifecycle
-- `agent_choice` — Streamed text content (partial responses)
-- `tool_call` — Agent requesting tool execution
-- `tool_call_confirmation` — Tool call waiting for user approval
-- `tool_call_response` — Tool execution result
-- `plan_changed` — A shared plan was created, updated, or deleted through the plan toolset. The payload carries the plan's `scope`, `name`, `action`, and `version` — never its content. Shared plans are deliberately process-global: every active stream served by the same process subscribes to the same shared plan notifier and receives the event regardless of which session performed the mutation, and the payload does not identify the mutating session (read the plan's `author` metadata for collaborative attribution).
-- `error` — Error during execution
-
-## Typical Workflow
-
-1. **List agents** — `GET /api/agents` to discover available agents
-2. **Create session** — `POST /api/sessions` to start a conversation
-3. **Send message** — `POST /api/sessions/:id/agent/:agent` with user messages
-4. **Stream response** — Read SSE events as the agent processes
-5. **Handle confirmations** — If a tool call needs approval, `POST /api/sessions/:id/resume`
-6. **Continue** — Send follow-up messages to the same session
-
-```bash
-# 1. List available agents
-$ curl http://localhost:8080/api/agents
-[{"name":"my-agent","multi":false,"description":"A helpful assistant","commands":["deploy","review"]}]
-
-# 2. Create a session
-$ curl -X POST http://localhost:8080/api/sessions \
-  -H "Content-Type: application/json" -d '{}'
-{"id":"abc-123","title":"","created_at":"..."}
-
-# Create a session with a pre-supplied title (skips LLM title generation)
-$ curl -X POST http://localhost:8080/api/sessions \
-  -H "Content-Type: application/json" -d '{"title":"deploy check"}'
-{"id":"def-456","title":"deploy check","created_at":"..."}
-# title preserved; LLM title generation skipped
-
-# 3. Run the agent with a message
-$ curl -N -X POST http://localhost:8080/api/sessions/abc-123/agent/my-agent \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"What files are in the current directory?"}]}'
-```
+1. Discover sources and sessions with `GET /api/sessions`.
+2. Create a session-bound session.
+3. Attach SSE and establish the snapshot/replay/ready barrier.
+4. Submit input through `messages` with the desired mode.
+5. Correlate and answer interaction envelopes through `responses`.
+6. Reconnect from the last cursor; resnapshot on a gap; surface terminal errors.
 
 ## CLI Flags
 
@@ -237,112 +231,42 @@ Sessions are stored in a SQLite database (default: `session.db` in the current d
 By default, tool calls require approval. In the API workflow:
 
 1. Agent makes a tool call → server emits a `tool_call_confirmation` event
-2. Client reviews and sends `POST /api/sessions/:id/resume` with the decision
+2. Client reviews and sends `POST /api/sessions/:id/responses` with the envelope `interaction_id`, kind, and decision
 3. Execution continues based on approval/denial
 
 Toggle auto-approve with `POST /api/sessions/:id/tools/toggle` for automated workflows.
 
 ## Driving a running TUI with `--listen` {#listen}
 
-The same session API can be exposed by an **interactive run** so an external
-process can drive it — send follow-up prompts, observe progress, read the
-title — without scraping the terminal. Start a normal run and add `--listen`:
+An interactive run can expose the same canonical session API with
+`--listen`. Send input through `/messages` using `submit` or `steer`
+mode and observe it through the versioned session SSE stream. Attached and
+headless servers use the same snapshot/replay/ready/gap contract described
+above; transport closure without a terminal error is not successful turn
+completion.
 
 ```bash
-# Expose this run's control plane on a TCP port...
-$ docker agent run agent.yaml --listen 127.0.0.1:8080
-
-# ...or on a unix socket (no port to allocate; access is gated by file
-# permissions). npipe:// (Windows) and fd:// are also accepted.
-$ docker agent run agent.yaml --listen unix:///tmp/my-run.sock
+docker agent run agent.yaml --listen 127.0.0.1:8080
+curl -X POST http://127.0.0.1:8080/api/sessions/$SID/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"submit","content":"Now add tests"}'
+curl -N -H 'Last-Event-ID: 42' \
+  http://127.0.0.1:8080/api/sessions/$SID/events
 ```
 
-The run keeps its interactive TUI; the control plane runs alongside it. A
-follow-up delivered over HTTP is processed exactly as if it had been typed
-into the TUI: it starts a turn even when the agent is idle, generates the
-session title on the first turn, and streams the resulting events to both the
-terminal and every connected API client.
-
-```bash
-# Send a follow-up to the attached run (SID is the --session id):
-$ curl -X POST http://127.0.0.1:8080/api/sessions/$SID/followup \
-    -H 'Content-Type: application/json' \
-    -d '{"messages":[{"content":"Now add tests"}]}'
-```
+The run keeps its interactive TUI; accepted input is executed by the session
+owner and observed by both the terminal and connected API clients. Disconnecting
+an SSE client cancels only its observation, not the accepted turn.
 
 > [!NOTE]
 > **Discovering a run**
 >
-> Each run started with `--listen` writes a discovery record to `<data-dir>/runs/<pid>.json` containing its address and initial session id, so a supervising process can find a live run by session id, pid, or address. TUI tabs opened later are separate sessions attached to the same control plane; use `GET /api/sessions?active=true` on that address to enumerate them and read their `streaming` state without loading session history.
+> Each run started with `--listen` writes a discovery record to `<data-dir>/runs/<pid>.json` containing its address and initial session ID. Tabs opened later are separate sessions on the same control plane; use `GET /api/sessions?active=true` to enumerate them without loading session history.
 
 > [!WARNING]
-> **This control plane has a fixed 1 MiB request-body cap and no built-in authentication**
+> **The attached control plane has a fixed 1 MiB request-body cap and no built-in authentication**
 >
-> Unlike the standalone `docker agent serve api` process above, an attached run's `--listen` control plane exposes neither `--max-request-size` nor `--auth-token`: every request is capped at a fixed, non-configurable 1 MiB body (returning HTTP 413 above it — see [Troubleshooting: HTTP 413](../../community/troubleshooting/index.md#http-413-request-body-too-large)), and there is no bearer token to require. If you need a configurable cap, built-in bearer auth, or a network-reachable listener, run a standalone `docker agent serve api` deployment instead. Otherwise, keep `--listen` on loopback, a unix socket, or behind an authenticating reverse proxy.
-
-## Session event stream and reconnection
-
-`GET /api/sessions/:id/events` is a **Server-Sent Events** stream of the
-session's runtime events — `stream_started`, `agent_choice`, `tool_call`,
-`session_title`, `token_usage`, `stream_stopped`, and so on. Unlike the
-per-request stream returned by the agent-execution endpoint, it is
-session-scoped and survives across turns, so a client can watch a session for
-its whole lifetime. It is available for a run attached via
-[`--listen`](#listen), and — since a session-scoped event log is created on
-demand the first time a session raises an out-of-band event, such as an
-`elicitation_request` from a background job — for any API-created session
-that has produced at least one (see the
-[Sessions endpoint table](#sessions) above). The two kinds of log differ in
-coverage: a `--listen` run feeds its full runtime event stream into the log,
-while an on-demand log for an API-created session carries the session's
-out-of-band events — not necessarily all ordinary turn events, which flow on
-the per-request SSE stream of the [agent-execution](#agent-execution)
-request that runs the turn.
-
-Each event carries a monotonic **sequence number** in the SSE `id:` field, and
-the server buffers recent events. This makes the stream resumable:
-
-- **Resume after a drop** — reconnect with the standard `Last-Event-ID` header
-  (sent automatically by browser `EventSource` clients) or a `?since=<seq>`
-  query parameter. Buffered events newer than that point are replayed before
-  live tailing resumes, so nothing is missed.
-- **Gap signal** — if the resume point has already fallen out of the buffer, the
-  server sends a single `{"type":"gap"}` event (with no id) before the replay.
-  The client should re-fetch the snapshot to resync, then continue tailing.
-- **End of session** — when the session is ended server-side (for example via
-  `DELETE /api/sessions/:id`) the server sends a terminal
-  `{"type":"session_exited"}` event and closes the stream; a client that
-  receives it should stop. A stream that closes **without** `session_exited` is
-  a dropped connection — including the run process itself exiting — so reconnect
-  with the last id; if the run is gone the reconnection simply fails.
-
-### Reconnecting without gaps
-
-`GET /api/sessions/:id/snapshot` returns the session's full state in one
-response — stored fields (messages, tokens, permissions), live runtime state
-(`streaming`, current `agent`), and `last_event_seq`: the sequence number of
-the most recent event. Pair it with the event stream for an exact, gapless
-resync:
-
-```bash
-# 1. Read the full state and the stream position it corresponds to.
-$ SEQ=$(curl -s http://127.0.0.1:8080/api/sessions/$SID/snapshot | jq .last_event_seq)
-
-# 2. Tail everything that happens after that point (replaying anything that
-#    occurred between the two calls).
-$ curl -N "http://127.0.0.1:8080/api/sessions/$SID/events?since=$SEQ"
-```
-
-This snapshot-then-tail pattern lets a client (or a client that just
-restarted) rebuild a session's state and keep it correct without polling.
-
-### Waiting for readiness
-
-`GET /api/sessions/:id/status` reports a session's runtime state. Add
-`?wait=<duration>` (e.g. `?wait=10s`) to block until that specific session's
-runtime is attached and ready to accept follow-ups, then return its status, or
-`503` on timeout. This is session-scoped, unlike `GET /api/ready`, which fires
-as soon as any session is ready.
+> Unlike `docker agent serve api`, `--listen` exposes neither `--max-request-size` nor `--auth-token`. Keep it on loopback, a unix socket, or behind an authenticating reverse proxy. Use a standalone API server when you need a configurable cap or built-in bearer authentication.
 
 ## Session Forking
 
@@ -372,27 +296,13 @@ $ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
 - Out-of-range ordinals (negative, or at/past the user-message count) return `400 Bad Request`.
 - An ordinal that resolves to a user message inside a sub-session returns `400 Bad Request`. A sub-session is a nested session created when a multi-agent config delegates work to a child agent; its messages are embedded within the parent session's message list and cannot be used as a fork boundary.
 
-## Idempotent follow-ups
+## Reliable queued messages
 
-`POST /api/sessions/:id/followup` accepts an optional `Idempotency-Key`
-header, making the request safe to retry after a network timeout. A repeat
-with a key already seen for the session is acknowledged without delivering the
-follow-up again:
-
-```bash
-$ curl -X POST http://127.0.0.1:8080/api/sessions/$SID/followup \
-    -H 'Content-Type: application/json' \
-    -H 'Idempotency-Key: 7f3a-...' \
-    -d '{"messages":[{"content":"Ship it"}]}'
-# => {"status":"queued_streaming","duplicate":false}
-# A retry with the same key => {"status":"duplicate","duplicate":true}
-```
-
-The response `status` is `queued_streaming` (a turn is running or starting),
-`queued_idle` (delivered to an idle headless session, runs on the next turn),
-or `duplicate`.
-
-> [!NOTE]
-> **See also**
->
-> For interactive use, see the [Terminal UI](../tui/index.md). For agent-to-agent communication, see [A2A Protocol](../a2a/index.md) and [ACP](../acp/index.md). For MCP integration, see [MCP Mode](../mcp-mode/index.md). For an OpenAI-compatible chat-completions API, see the [Chat Server](../chat-server/index.md).
+A successful `POST /api/sessions/:id/messages` is the acceptance boundary. If a
+turn is already running, submit mode durably appends the input to that session's
+bounded FIFO mailbox and returns `disposition: "queued"`; clients must not
+resubmit merely because execution has not started yet. The response's immutable
+`turn_id` identifies the accepted input. Observe that turn through the ordered
+SSE journal, reconnecting from the last sequence when transport closes. A `gap`
+requires a fresh snapshot before continuing. Capacity, stopped-session, and
+persistence failures are returned as errors and are not acceptance.

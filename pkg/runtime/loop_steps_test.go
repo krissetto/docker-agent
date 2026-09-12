@@ -111,7 +111,7 @@ func TestEnforceMaxIterations_Interactive_ApproveExtends(t *testing.T) {
 
 	// Pre-load an approval onto the resume channel so enforceMaxIterations
 	// returns immediately instead of blocking on user input.
-	go func() { rt.resumeChan <- ResumeApprove() }()
+	go func() { rt.interactions.resumeChannel(sess.ID) <- ResumeApprove() }()
 
 	newMax, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
 
@@ -126,7 +126,7 @@ func TestEnforceMaxIterations_Interactive_RejectStops(t *testing.T) {
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { rt.resumeChan <- ResumeReject("no thanks") }()
+	go func() { rt.interactions.resumeChannel(sess.ID) <- ResumeReject("no thanks") }()
 
 	_, decision := rt.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
 

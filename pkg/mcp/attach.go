@@ -8,7 +8,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -49,6 +48,15 @@ func AttachServer(ctx context.Context, addr, sessionID string) (*mcp.Server, err
 		return nil, fmt.Errorf("client for %s: %w", addr, err)
 	}
 
+	transport, err := runtime.NewSessionTransport(client)
+	if err != nil {
+		return nil, fmt.Errorf("session transport for %s: %w", addr, err)
+	}
+	handle, err := transport.SessionByID(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session %s: %w", sessionID, err)
+	}
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "docker-agent (attached)",
 		Version: version.Version,
@@ -58,12 +66,12 @@ func AttachServer(ctx context.Context, addr, sessionID string) (*mcp.Server, err
 		Name:        "send",
 		Description: fmt.Sprintf("Send a message to the running docker-agent session %s.", sessionID),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SendInput) (*mcp.CallToolResult, SendOutput, error) {
-		msgs := []api.Message{{Content: in.Message}}
+		input := runtime.TurnInput{Content: in.Message}
 		var err error
 		if in.FollowUp {
-			err = client.FollowUpSession(ctx, sessionID, msgs)
+			_, err = handle.Submit(ctx, input)
 		} else {
-			err = client.SteerSession(ctx, sessionID, msgs)
+			_, err = handle.Steer(ctx, input)
 		}
 		if err != nil {
 			return nil, SendOutput{}, err
