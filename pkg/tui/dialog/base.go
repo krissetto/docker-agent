@@ -1,19 +1,50 @@
 package dialog
 
 import (
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
+
+// Close-button rendering constants.
+const (
+	dialogCloseGlyph   = "✕"
+	dialogCloseInset   = 1
+	confirmEnterSuffix = " ↵"
+)
+
+// ConfirmButtonFocus tracks which button is focused in Yes/No confirmation dialogs.
+type ConfirmButtonFocus int
+
+const (
+	ConfirmFocusNo ConfirmButtonFocus = iota
+	ConfirmFocusYes
+)
+
+// ConfirmKeyAction is the outcome returned by HandleConfirmKey.
+type ConfirmKeyAction int
+
+const (
+	ConfirmKeyNone ConfirmKeyAction = iota
+	ConfirmKeyConfirmed
+	ConfirmKeyCancelled
+	ConfirmKeyFocusToggled
+)
+
+var confirmFocusToggleKeys = key.NewBinding(key.WithKeys("tab", "shift+tab", "left", "right"))
 
 // ConfirmKeyMap defines key bindings for confirmation dialogs (Yes/No).
 type ConfirmKeyMap struct {
@@ -38,7 +69,38 @@ func DefaultConfirmKeyMap() ConfirmKeyMap {
 // BaseDialog provides common functionality for dialog implementations.
 // It handles size management, position calculation, and common UI patterns.
 type BaseDialog struct {
-	width, height int
+	scrollviews                    []scrollviewRegistration
+	responseSent                   bool
+	width, height                  int
+	closeHovered                   bool
+	visualDirty                    bool
+	confirmFocus                   ConfirmButtonFocus
+	confirmBtnNoX, confirmBtnNoW   int
+	confirmBtnYesX, confirmBtnYesW int
+}
+
+type scrollviewRegistration struct {
+	model      *scrollview.Model
+	generation uint64
+}
+
+func (b *BaseDialog) newScrollview(opts ...scrollview.Option) *scrollview.Model {
+	view := scrollview.New(opts...)
+	b.scrollviews = append(b.scrollviews, scrollviewRegistration{model: view, generation: view.VisualGeneration()})
+	return view
+}
+
+// CancelDialogCmd is the default semantic cancellation transaction. Stateful
+// dialogs override it when cancellation must emit additional messages.
+func (b *BaseDialog) CancelDialogCmd() tea.Cmd { return core.CmdHandler(CloseDialogMsg{}) }
+
+// claimResponse prevents repeated input from answering before the close command arrives.
+func (b *BaseDialog) claimResponse() bool {
+	if b.responseSent {
+		return false
+	}
+	b.responseSent = true
+	return true
 }
 
 // SetSize updates the dialog dimensions.
@@ -56,6 +118,177 @@ func (b *BaseDialog) Width() int {
 // Height returns the current height.
 func (b *BaseDialog) Height() int {
 	return b.height
+}
+
+// HandleConfirmKey provides keyboard parity for confirmation pills.
+func (b *BaseDialog) HandleConfirmKey(msg tea.KeyPressMsg, keyMap ConfirmKeyMap) ConfirmKeyAction {
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))), key.Matches(msg, keyMap.No):
+		return ConfirmKeyCancelled
+	case key.Matches(msg, keyMap.Yes):
+		return ConfirmKeyConfirmed
+	case key.Matches(msg, confirmFocusToggleKeys):
+		if b.confirmFocus == ConfirmFocusYes {
+			b.confirmFocus = ConfirmFocusNo
+		} else {
+			b.confirmFocus = ConfirmFocusYes
+		}
+		return ConfirmKeyFocusToggled
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+		if b.confirmFocus == ConfirmFocusYes {
+			return ConfirmKeyConfirmed
+		}
+		return ConfirmKeyCancelled
+	}
+	return ConfirmKeyNone
+}
+
+// ConfirmAndClose closes before dispatching the confirmed action.
+func ConfirmAndClose(cmd tea.Cmd) tea.Cmd {
+	closeCmd := func() tea.Msg { return CloseDialogMsg{} }
+	if cmd == nil {
+		return closeCmd
+	}
+	return tea.Sequence(closeCmd, cmd)
+}
+
+// RenderConfirmButtons renders centered, terminal-cell-addressable action pills.
+func (b *BaseDialog) RenderConfirmButtons(contentWidth int) string {
+	button := lipgloss.NewStyle().Padding(0, 2).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
+	focused := lipgloss.NewStyle().Padding(0, 2).Bold(true).Foreground(styles.SelectedFg).Background(styles.Selected)
+	noLabel, yesLabel := "No", "Yes"
+	noStyle, yesStyle := button, button
+	if b.confirmFocus == ConfirmFocusYes {
+		yesLabel += confirmEnterSuffix
+		yesStyle = focused
+	} else {
+		noLabel += confirmEnterSuffix
+		noStyle = focused
+	}
+	no, yes := noStyle.Render(noLabel), yesStyle.Render(yesLabel)
+	b.confirmBtnNoW, b.confirmBtnYesW = lipgloss.Width(no), lipgloss.Width(yes)
+	const gap = 2
+	b.confirmBtnNoX = max(0, (contentWidth-b.confirmBtnNoW-gap-b.confirmBtnYesW)/2)
+	b.confirmBtnYesX = b.confirmBtnNoX + b.confirmBtnNoW + gap
+	return strings.Repeat(" ", b.confirmBtnNoX) + no + strings.Repeat(" ", gap) + yes
+}
+
+// DialogLayout captures rendered bounds for chrome hit testing.
+//
+//nolint:revive // Explicit name distinguishes dialog layout from generic layouts.
+type DialogLayout struct {
+	View                    string
+	Row, Col, Width, Height int
+}
+
+func NewDialogLayout(view string, row, col int) DialogLayout {
+	return DialogLayout{View: view, Row: row, Col: col, Width: lipgloss.Width(view), Height: lipgloss.Height(view)}
+}
+
+// CloseButtonHit reports whether a click hit the top-right close control.
+func (b *BaseDialog) CloseButtonHit(msg tea.MouseClickMsg, dl DialogLayout) bool {
+	return msg.Y == dl.Row+styles.DialogStyle.GetBorderTopSize() && msg.X == dl.Col+dl.Width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
+}
+
+// ResetCloseHover clears pointer-derived chrome state at a dialog lifecycle
+// boundary. A dialog must not inherit hover merely because the pointer has not
+// moved since another dialog occupied the same cells.
+func (b *BaseDialog) ResetCloseHover() {
+	b.closeHovered = false
+}
+
+// HandleMouseMotion updates close-control hover state.
+func (b *BaseDialog) HandleMouseMotion(x, y int, dl DialogLayout) bool {
+	hovered := b.CloseButtonHit(tea.MouseClickMsg{X: x, Y: y}, dl)
+	changed := hovered != b.closeHovered
+	b.closeHovered = hovered
+	b.visualDirty = b.visualDirty || changed
+	return changed
+}
+
+// MarkVisualDirty records an explicit pointer-driven visible mutation.
+func (b *BaseDialog) MarkVisualDirty() { b.visualDirty = true }
+
+// TakeVisualDirty reports and clears pointer-driven visible mutation state.
+func (b *BaseDialog) TakeVisualDirty() bool {
+	dirty := b.visualDirty
+	for i := range b.scrollviews {
+		child := &b.scrollviews[i]
+		generation := child.model.VisualGeneration()
+		dirty = dirty || generation != child.generation
+		child.generation = generation
+	}
+	b.visualDirty = false
+	return dirty
+}
+
+// HandleConfirmButtonsClick performs exact terminal-cell pill hit testing.
+func (b *BaseDialog) HandleConfirmButtonsClick(msg tea.MouseClickMsg, dl DialogLayout, style lipgloss.Style, onYes tea.Cmd) tea.Cmd {
+	lines := strings.Split(ansi.Strip(dl.View), "\n")
+	buttonRow := -1
+	for i, v := range slices.Backward(lines) {
+		if strings.Contains(v, "No") && strings.Contains(v, "Yes") {
+			buttonRow = dl.Row + i
+			break
+		}
+	}
+	if msg.Y != buttonRow {
+		return nil
+	}
+	relX := msg.X - dl.Col - style.GetBorderLeftSize() - style.GetPaddingLeft()
+	if relX >= b.confirmBtnNoX && relX < b.confirmBtnNoX+b.confirmBtnNoW {
+		return func() tea.Msg { return CloseDialogMsg{} }
+	}
+	if relX >= b.confirmBtnYesX && relX < b.confirmBtnYesX+b.confirmBtnYesW {
+		return ConfirmAndClose(onYes)
+	}
+	return nil
+}
+
+// RenderCard renders dialog content with the shared top-right close control.
+func (b *BaseDialog) RenderCard(style lipgloss.Style, dialogWidth int, content string) string {
+	return renderCloseControl(style.Width(dialogWidth).Render(content), b.closeHovered)
+}
+
+func renderCloseControl(view string, hovered bool) string {
+	lines := strings.Split(view, "\n")
+	line := styles.DialogStyle.GetBorderTopSize()
+	if line < 0 || line >= len(lines) {
+		return strings.Join(lines, "\n")
+	}
+	glyphStyle := styles.NoStyle.Foreground(styles.TextSecondary)
+	if hovered {
+		glyphStyle = glyphStyle.Foreground(styles.Error).Bold(true)
+	}
+	glyph := glyphStyle.Render(dialogCloseGlyph)
+	target := lipgloss.Width(ansi.Strip(lines[line])) - styles.DialogStyle.GetBorderRightSize() - 1 - dialogCloseInset
+	if idx := visibleColumnByteIndex(lines[line], target); idx >= 0 {
+		_, size := utf8.DecodeRuneInString(lines[line][idx:])
+		lines[line] = lines[line][:idx] + glyph + lines[line][idx+size:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func visibleColumnByteIndex(s string, target int) int {
+	col := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+			continue
+		}
+		if col == target {
+			return i
+		}
+		_, n := utf8.DecodeRuneInString(s[i:])
+		i += n
+		col++
+	}
+	return -1
 }
 
 // ComputeDialogWidth calculates dialog width based on screen percentage with bounds.
@@ -195,10 +428,11 @@ func HelpKeysWidth(bindings ...string) int {
 	return lipgloss.Width(helpKeysLine(bindings...))
 }
 
-// HandleQuit checks for the configured quit key and returns tea.Quit if matched.
+// HandleQuit handles a quit key locally as semantic cancellation. The root
+// owns opening exit confirmation when no dialog is active.
 func HandleQuit(msg tea.KeyPressMsg) tea.Cmd {
 	if key.Matches(msg, core.GetKeys().Quit) {
-		return tea.Quit
+		return core.CmdHandler(CloseDialogMsg{})
 	}
 	return nil
 }

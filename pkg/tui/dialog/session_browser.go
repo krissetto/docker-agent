@@ -191,10 +191,13 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 		}
 	}
 
+	base := BaseDialog{}
+	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
 	d := &sessionBrowserDialog{
+		BaseDialog:   base,
 		textInput:    ti,
 		sessions:     nonEmptySessions,
-		scrollview:   scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		scrollview:   scrollviewView,
 		workspace:    newWorkspaceMatcher(workspaceDir),
 		workspaceDir: workspaceDisplayDir(workspaceDir),
 		keyMap: sessionBrowserKeyMap{
@@ -588,7 +591,6 @@ func (d *sessionBrowserDialog) View() string {
 		}
 		secondHelpLine = append(secondHelpLine, "ctrl+g", workspaceDesc)
 	}
-	secondHelpLine = append(secondHelpLine, "esc", "close")
 
 	content := NewContent(regionWidth).
 		AddTitle(title).

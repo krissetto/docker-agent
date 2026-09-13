@@ -23,6 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/fake"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -118,7 +121,13 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 // sidebar, and promote it only once the first stream stops, producing a second
 // turn with its own answer. The switch must also be persisted to user config.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
-	d := newStreamingTUI(t)
+	closed := make(chan bool, 1)
+	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions(), func(model tea.Model) tea.Model {
+		return &settingsCloseObserver{Model: model, closed: closed}
+	})
+	if runtime.GOOS == "windows" {
+		tuitest.WithTimeout(30 * time.Second)(d)
+	}
 
 	// Flip the send mode on the Behavior tab of /settings: open the dialog,
 	// switch tab, cycle Steer → Queue, apply.
@@ -137,6 +146,14 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(cfg), "busy_send_mode: queue")
 
+	// The toast acknowledges persistence, not the end of the modal close fade.
+	select {
+	case deferred := <-closed:
+		require.True(t, deferred, "settings cleanup must wait beyond the close request")
+	case <-time.After(10 * time.Second):
+		t.Fatal("settings did not finish closing before editor input")
+	}
+
 	d.Type("What's 2+2?").
 		Enter().
 		Send(tea.PasteMsg{Content: "Also, what's 3+3?"}).
@@ -154,4 +171,89 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
 		WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))
+}
+
+// settingsCloseObserver exposes the real manager cleanup boundary only to this test.
+type settingsCloseObserver struct {
+	tea.Model
+
+	closed               chan bool
+	settings             *settingsCleanupObserver
+	armed, closeDeferred bool
+	once                 sync.Once
+}
+
+func (m *settingsCloseObserver) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch event := msg.(type) {
+	case messages.OpenSettingsDialogMsg:
+		m.armed = true
+	case dialog.OpenDialogMsg:
+		if m.armed {
+			m.armed = false
+			m.settings = &settingsCleanupObserver{Dialog: event.Model}
+			event.Model = m.settings
+			msg = event
+		}
+	}
+	updated, cmd := m.Model.Update(msg)
+	m.Model = updated
+	if _, closing := msg.(dialog.CloseDialogMsg); closing && m.settings != nil {
+		m.closeDeferred = !m.settings.cleaned
+	}
+	if m.settings != nil && m.settings.cleaned {
+		// Cleanup runs inside Update; publish only after the manager removed the layer.
+		m.once.Do(func() { m.closed <- m.closeDeferred })
+	}
+	return m, cmd
+}
+
+func (m *settingsCloseObserver) SetProgram(p *tea.Program) {
+	if owner, ok := m.Model.(interface{ SetProgram(p *tea.Program) }); ok {
+		owner.SetProgram(p)
+	}
+}
+
+func (m *settingsCloseObserver) Shutdown() {
+	if owner, ok := m.Model.(interface{ Shutdown() }); ok {
+		owner.Shutdown()
+	}
+}
+
+type settingsCleanupObserver struct {
+	dialog.Dialog
+
+	cleaned bool
+}
+
+func (d *settingsCleanupObserver) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	updated, cmd := d.Dialog.Update(msg)
+	d.Dialog = updated.(dialog.Dialog)
+	return d, cmd
+}
+
+func (d *settingsCleanupObserver) Cleanup() {
+	if !d.cleaned {
+		dialog.CleanupDialog(d.Dialog)
+		d.cleaned = true
+	}
+}
+
+func (d *settingsCleanupObserver) CancelDialogCmd() tea.Cmd {
+	if closer, ok := d.Dialog.(dialog.SemanticCloser); ok {
+		return closer.CancelDialogCmd()
+	}
+	return nil
+}
+
+func (d *settingsCleanupObserver) ResetCloseHover() {
+	if resetter, ok := d.Dialog.(interface{ ResetCloseHover() }); ok {
+		resetter.ResetCloseHover()
+	}
+}
+
+func (d *settingsCleanupObserver) TakeVisualDirty() bool {
+	if visual, ok := d.Dialog.(interface{ TakeVisualDirty() bool }); ok {
+		return visual.TakeVisualDirty()
+	}
+	return false
 }

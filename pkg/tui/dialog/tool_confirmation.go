@@ -26,7 +26,7 @@ import (
 const (
 	toolConfirmDialogWidthPercent  = 70 // Dialog width as percentage of screen
 	toolConfirmDialogHeightPercent = 80 // Max dialog height as percentage of screen
-	toolConfirmMinScrollHeight     = 5  // Minimum height for the scroll view
+	toolConfirmMinContentRows      = 1  // Keep an empty/degenerate tool card visible
 	toolConfirmEmptyLinesBefore    = 2  // Empty lines before question
 	toolConfirmEmptyLinesAfter     = 1  // Empty lines after question
 
@@ -108,11 +108,17 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 		metadataHeight = lipgloss.Height(metadata) + 1
 	}
 
-	// Calculate available height for scroll view
 	frameHeight := styles.DialogStyle.GetVerticalFrameSize()
 	fixedContentHeight := titleHeight + separatorHeight + toolConfirmEmptyLinesBefore + questionHeight + toolConfirmEmptyLinesAfter + optionsHeight + safetyHeight + metadataHeight
-	availableHeight := max(maxDialogHeight-frameHeight-fixedContentHeight, toolConfirmMinScrollHeight)
-	d.scrollView.SetSize(contentWidth, availableHeight)
+
+	// Size the tool card from its decoded, width-aware rendered rows. The
+	// available viewport is only an upper bound; assigning it directly makes a
+	// one-command confirmation inherit 80% of the terminal height.
+	maxToolRows := max(0, maxDialogHeight-frameHeight-fixedContentHeight)
+	d.scrollView.SetSize(contentWidth, maxToolRows)
+	contentRows := d.scrollView.RenderedContentHeight()
+	visibleRows := min(max(contentRows, toolConfirmMinContentRows), maxToolRows)
+	d.scrollView.SetSize(contentWidth, visibleRows)
 
 	return nil
 }
@@ -366,8 +372,26 @@ func (d *toolConfirmationDialog) response(request runtime.ResumeRequest) tuimess
 	}
 }
 
+// OutsideClickDismissCmd keeps this mandatory decision open on outside clicks.
+func (d *toolConfirmationDialog) OutsideClickDismissCmd() tea.Cmd { return nil }
+
+// CancelDialogCmd implements SemanticCloser for every non-affirmative shared
+// dismissal path (outside click, close control, Escape, and Ctrl-C).
+func (d *toolConfirmationDialog) CancelDialogCmd() tea.Cmd {
+	if !d.claimResponse() {
+		return nil
+	}
+	return tea.Sequence(
+		core.CmdHandler(CloseDialogMsg{}),
+		core.CmdHandler(d.response(toolconfirm.Reject.Resume("", ""))),
+	)
+}
+
 // executeAction dispatches a confirmation decision.
 func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (layout.Model, tea.Cmd) {
+	if decision != toolconfirm.Reject && !d.claimResponse() {
+		return d, nil
+	}
 	switch decision {
 	case toolconfirm.Approve:
 		return d, tea.Sequence(
@@ -419,6 +443,7 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		}
 
@@ -544,3 +569,15 @@ func (d *toolConfirmationDialog) Position() (row, col int) {
 	dialogHeight := lipgloss.Height(renderedDialog)
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
 }
+
+// DialogClosable reports that this mandatory decision has no generic close chrome.
+func (d *toolConfirmationDialog) DialogClosable() bool { return false }
+
+// StopAnimations releases subscriptions without changing the pending decision.
+func (d *toolConfirmationDialog) StopAnimations() {
+	if d.scrollView != nil {
+		d.scrollView.StopAnimations()
+	}
+}
+
+func (d *toolConfirmationDialog) Cleanup() { d.StopAnimations() }

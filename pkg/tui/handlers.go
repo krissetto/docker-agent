@@ -88,7 +88,9 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	// Replace the session in the app and rebuild all per-session components.
 	m.application.ReplaceSession(ctx, newSess)
 	m.initSessionComponents(activeID, m.application, newSess)
-	m.dialogMgr = dialog.New()
+	m.dialogMgr.Cleanup()
+	m.dialogMgr = dialog.New(m.ar)
+	m.modelPickerGeneration++
 
 	// Restore sidebar settings
 	m.chatPage.SetSidebarSettings(sidebarSettings)
@@ -432,7 +434,9 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 	}
 	m.initSessionComponents(newSess.ID, m.application, newSess)
 	commitApp()
-	m.dialogMgr = dialog.New()
+	m.dialogMgr.Cleanup()
+	m.dialogMgr = dialog.New(m.ar)
+	m.modelPickerGeneration++
 	m.persistActiveTab(newSess.ID)
 	return m, tea.Sequence(m.chatPage.Init(), m.resizeAll(), m.editor.Focus())
 }
@@ -697,11 +701,31 @@ func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
 	if !m.application.SupportsModelSwitching() {
 		return m, notification.InfoCmd("Model switching is unavailable for this session")
 	}
-	models := m.application.AvailableModels(m.ctx())
-	if len(models) == 0 {
+	m.modelPickerGeneration++
+	m.modelPickerApp = m.application
+	appRef, ctx := m.application, m.ctx()
+	generation, sessionID := m.modelPickerGeneration, appRef.Session().ID
+	return m, func() tea.Msg {
+		return messages.ModelPickerLoadedMsg{Models: appRef.AvailableModels(ctx), SessionID: sessionID, Generation: generation}
+	}
+}
+
+func (m *appModel) modelPickerResultCurrent(sessionID string, generation uint64) bool {
+	return generation != 0 && generation == m.modelPickerGeneration && m.application == m.modelPickerApp &&
+		m.application != nil && m.application.Session() != nil && m.application.Session().ID == sessionID
+}
+
+func (m *appModel) handleModelPickerLoaded(msg messages.ModelPickerLoadedMsg) (tea.Model, tea.Cmd) {
+	if !m.modelPickerResultCurrent(msg.SessionID, msg.Generation) {
+		return m, nil
+	}
+	if msg.Err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load models: %v", msg.Err))
+	}
+	if len(msg.Models) == 0 {
 		return m, notification.InfoCmd("No models available for selection")
 	}
-	return m, core.CmdHandler(dialog.OpenDialogMsg{Model: dialog.NewModelPickerDialog(models)})
+	return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewModelPickerDialog(msg.Models)})
 }
 
 func (m *appModel) handleRefreshModelPicker(query string) (tea.Model, tea.Cmd) {
@@ -709,27 +733,34 @@ func (m *appModel) handleRefreshModelPicker(query string) (tea.Model, tea.Cmd) {
 		return m, notification.InfoCmd("Model switching is unavailable for this session")
 	}
 	ctx := m.ctx()
+	m.modelPickerGeneration++
+	m.modelPickerApp = m.application
+	appRef := m.application
+	generation, sessionID := m.modelPickerGeneration, appRef.Session().ID
 	return m, tea.Batch(
 		notification.InfoCmd("Refreshing models…"),
 		func() tea.Msg {
 			catalogRefreshed := false
 			var err error
-			if m.application.SupportsModelCatalogRefresh() {
-				err = m.application.RefreshModelsCatalog(ctx)
+			if appRef.SupportsModelCatalogRefresh() {
+				err = appRef.RefreshModelsCatalog(ctx)
 				catalogRefreshed = err == nil
 			}
 			if errors.Is(err, runtime.ErrUnsupported) {
 				err = nil
 			}
 			if err != nil {
-				return messages.ModelPickerRefreshedMsg{Query: query, Err: err}
+				return messages.ModelPickerRefreshedMsg{SessionID: sessionID, Generation: generation, Query: query, Err: err}
 			}
-			return messages.ModelPickerRefreshedMsg{Models: m.application.AvailableModels(ctx), Query: query, CatalogRefreshed: catalogRefreshed}
+			return messages.ModelPickerRefreshedMsg{SessionID: sessionID, Generation: generation, Models: appRef.AvailableModels(ctx), Query: query, CatalogRefreshed: catalogRefreshed}
 		},
 	)
 }
 
 func (m *appModel) handleModelPickerRefreshed(msg messages.ModelPickerRefreshedMsg) (tea.Model, tea.Cmd) {
+	if !m.modelPickerResultCurrent(msg.SessionID, msg.Generation) {
+		return m, nil
+	}
 	if msg.Err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to refresh models catalog: %v", msg.Err))
 	}
@@ -744,7 +775,7 @@ func (m *appModel) handleModelPickerRefreshed(msg messages.ModelPickerRefreshedM
 	}
 	return m, tea.Batch(
 		notification.SuccessCmd(toast),
-		core.CmdHandler(dialog.OpenDialogMsg{Model: modelDialog}),
+		m.updateDialogCmd(dialog.OpenDialogMsg{Model: modelDialog}),
 	)
 }
 
@@ -1004,7 +1035,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 		m.imageWriter.SetEnabled(preferences.RenderImages)
 		tuiimage.SetRenderingEnabled(m.imageWriter.RenderingEnabled())
 	}
-	m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength)
+	cmd = tea.Batch(cmd, m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength))
 	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}), m.resizeAll())
 
 	if err := savePreferences(preferences); err != nil {

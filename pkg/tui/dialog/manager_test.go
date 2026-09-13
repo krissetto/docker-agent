@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/plans"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 )
 
 // TestManagerBackgroundDialog verifies that opening a dialog with a non-nil
@@ -15,7 +16,8 @@ import (
 func TestManagerBackgroundDialog(t *testing.T) {
 	t.Parallel()
 
-	mgr := New().(*manager)
+	mgr := New(animation.NewRuntime()).(*manager)
+	mgr.SetSize(80, 24)
 
 	assert.False(t, mgr.Open(), "manager starts empty")
 	assert.False(t, mgr.TopIsBackground(), "empty manager has no background dialog")
@@ -44,15 +46,19 @@ func TestManagerBackgroundDialog(t *testing.T) {
 	assert.Same(t, event, mgr.TopBackgroundEvent(), "TopBackgroundEvent returns the originating event")
 	assert.Same(t, bg, mgr.TopDialog(), "TopDialog returns the background instance")
 
-	// Closing the top reveals the modal dialog underneath.
+	// Closing completes through the animated lifecycle, then reveals the modal.
 	mgr.handleClose()
+	mgr.stack[len(mgr.stack)-1].anim.Cancel()
+	mgr.handleTick(animation.TickMsg{})
 	assert.True(t, mgr.Open(), "manager still has the modal dialog underneath")
 	assert.False(t, mgr.TopIsBackground(), "underneath is the modal dialog, not background")
 	assert.Nil(t, mgr.TopBackgroundEvent())
 	assert.Same(t, modal, mgr.TopDialog())
 
-	// Closing again empties the stack.
+	// Closing again empties the stack after its lifecycle completes.
 	mgr.handleClose()
+	mgr.stack[len(mgr.stack)-1].anim.Cancel()
+	mgr.handleTick(animation.TickMsg{})
 	assert.False(t, mgr.Open())
 	assert.False(t, mgr.TopIsBackground())
 	assert.Nil(t, mgr.TopBackgroundEvent())
@@ -64,7 +70,8 @@ func TestManagerBackgroundDialog(t *testing.T) {
 func TestManagerHasDialog(t *testing.T) {
 	t.Parallel()
 
-	mgr := New().(*manager)
+	mgr := New(animation.NewRuntime()).(*manager)
+	mgr.SetSize(80, 24)
 	isExit := func(d Dialog) bool {
 		_, ok := d.(*exitConfirmationDialog)
 		return ok
@@ -98,7 +105,8 @@ func TestManagerClosePlanDetail(t *testing.T) {
 
 	t.Run("closes the matching top detail once, duplicates are no-ops", func(t *testing.T) {
 		t.Parallel()
-		mgr := New().(*manager)
+		mgr := New(animation.NewRuntime()).(*manager)
+		mgr.SetSize(80, 24)
 		browser := NewPlanBrowserDialog(plans.ListResult{})
 		mgr.handleOpen(OpenDialogMsg{Model: browser})
 		mgr.handleOpen(OpenDialogMsg{Model: newDetail()})
@@ -112,12 +120,13 @@ func TestManagerClosePlanDetail(t *testing.T) {
 
 		mgr.handleClose()
 		mgr.Update(ClosePlanDetailMsg{Ref: ref})
-		assert.False(t, mgr.Open(), "a close on an empty stack is a no-op")
+		assert.False(t, mgr.HasActiveDialog(), "a close with no active dialog is a no-op")
 	})
 
 	t.Run("a detail showing another plan is left alone", func(t *testing.T) {
 		t.Parallel()
-		mgr := New().(*manager)
+		mgr := New(animation.NewRuntime()).(*manager)
+		mgr.SetSize(80, 24)
 		other := NewPlanDetailDialog(plans.Plan{Scope: plans.ScopeShared, Name: "other"})
 		mgr.handleOpen(OpenDialogMsg{Model: other})
 
@@ -127,7 +136,8 @@ func TestManagerClosePlanDetail(t *testing.T) {
 
 	t.Run("a non-detail dialog on top is left alone", func(t *testing.T) {
 		t.Parallel()
-		mgr := New().(*manager)
+		mgr := New(animation.NewRuntime()).(*manager)
+		mgr.SetSize(80, 24)
 		mgr.handleOpen(OpenDialogMsg{Model: newDetail()})
 		help := NewHelpDialog(nil)
 		mgr.handleOpen(OpenDialogMsg{Model: help})

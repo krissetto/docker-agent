@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 type tuiModelProvider struct{ cfg latest.ModelConfig }
@@ -59,7 +60,11 @@ func TestModelSwitchHandlersSupportedOpenSelectReset(t *testing.T) {
 	m, worker := newModelSwitchHandlerTest(t)
 
 	_, cmd := m.handleOpenModelPicker()
-	assert.True(t, hasMsg[dialog.OpenDialogMsg](collectMsgs(cmd)))
+	loaded, ok := cmd().(messages.ModelPickerLoadedMsg)
+	require.True(t, ok)
+	_, _ = m.Update(loaded)
+	assert.True(t, m.dialogMgr.Open())
+	t.Cleanup(m.dialogMgr.Cleanup)
 
 	_, cmd = m.handleChangeModel("other")
 	require.NotNil(t, cmd)
@@ -87,4 +92,28 @@ func TestModelSwitchHandlersUnsupportedNotice(t *testing.T) {
 	note, ok = firstOfType[notification.ShowMsg](collectMsgs(cmd))
 	require.True(t, ok)
 	assert.Contains(t, note.Text, "unavailable")
+}
+
+func TestModelPickerLoadedDispatchRejectsStaleOriginAndGeneration(t *testing.T) {
+	m, _ := newModelSwitchHandlerTest(t)
+	t.Cleanup(m.dialogMgr.Cleanup)
+	_, oldCmd := m.handleOpenModelPicker()
+	_, currentCmd := m.handleOpenModelPicker()
+	old := oldCmd().(messages.ModelPickerLoadedMsg)
+	current := currentCmd().(messages.ModelPickerLoadedMsg)
+	_, cmd := m.Update(old)
+	require.Nil(t, cmd)
+	require.False(t, m.dialogMgr.Open())
+	wrong := current
+	wrong.SessionID = "other-session"
+	_, cmd = m.Update(wrong)
+	require.Nil(t, cmd)
+	require.False(t, m.dialogMgr.Open())
+	_, _ = m.Update(current)
+	require.True(t, m.dialogMgr.HasDialog(func(d dialog.Dialog) bool { return d != nil }))
+	m.dialogMgr.Cleanup()
+	m.modelPickerGeneration++
+	_, cmd = m.Update(current)
+	require.Nil(t, cmd)
+	require.False(t, m.dialogMgr.Open())
 }

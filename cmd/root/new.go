@@ -120,16 +120,10 @@ func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.Sessio
 
 	a := app.New(ctx, sessions, sess, binding, opts...)
 
-	coalescer := tuiinput.NewWheelCoalescer()
-	filter := func(model tea.Model, msg tea.Msg) tea.Msg {
-		wheelMsg, ok := msg.(tea.MouseWheelMsg)
-		if !ok {
-			return msg
-		}
-		if coalescer.Handle(wheelMsg) {
-			return nil
-		}
-		return msg
+	coalescer := tuiinput.NewMouseCoalescer()
+	defer coalescer.Stop()
+	filter := func(_ tea.Model, msg tea.Msg) tea.Msg {
+		return coalescer.Filter(msg)
 	}
 
 	if cleanup == nil {

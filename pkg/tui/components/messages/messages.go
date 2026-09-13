@@ -169,6 +169,24 @@ type Model interface {
 	SubagentNodeAt(x, y int) (subagent.NodeID, bool)
 	InputReferenceAt(x, y int) (lifecycle.InputReference, bool)
 	RefreshInputReferences()
+	RenderedContentHeight() int
+}
+
+type visualSelectionKey struct {
+	active              bool
+	startLine, startCol int
+	endLine, endCol     int
+}
+
+type transcriptFrameKey struct {
+	scrollbarDragging                   bool
+	contentGeneration, segmentsRevision uint64
+	width, height, offset, total, slack int
+	selection                           visualSelectionKey
+	hoveredURL                          hoveredURL
+	hasHoveredURL                       bool
+	copiedFlash                         copiedFlash
+	hasCopiedFlash                      bool
 }
 
 // renderedItem represents a cached rendered message with position information
@@ -244,7 +262,11 @@ type model struct {
 	totalHeight       int                       // Total height of all content in lines
 	renderDirty       bool                      // True when rendered content needs rebuild
 
-	visualGeneration uint64
+	visualGeneration  uint64
+	contentGeneration uint64
+	segmentsRevision  uint64
+	lastFrameKey      transcriptFrameKey
+	lastFrameOutput   string
 
 	selection selectionState
 
@@ -796,6 +818,11 @@ func (m *model) View() string {
 		return ""
 	}
 
+	frameKey := m.transcriptFrameKey()
+	if m.lastFrameOutput != "" && frameKey == m.lastFrameKey {
+		return m.lastFrameOutput
+	}
+
 	// Use virtual total height; a segmented active suffix is intentionally not
 	// flattened into renderedLines.
 	totalLines := m.totalHeight + m.bottomSlack
@@ -843,9 +870,36 @@ func (m *model) View() string {
 				visibleLines[i] = line + strings.Repeat(" ", contentWidth-width)
 			}
 		}
-		return m.scrollview.ViewWithPaddedLines(visibleLines)
+		return m.finishFrame(frameKey, m.scrollview.ViewWithPaddedLines(visibleLines))
 	}
-	return m.scrollview.ViewWithRestyledLines(visibleLines)
+	return m.finishFrame(frameKey, m.scrollview.ViewWithRestyledLines(visibleLines))
+}
+
+func (m *model) transcriptFrameKey() transcriptFrameKey {
+	frame := transcriptFrameKey{
+		scrollbarDragging: m.scrollview.IsDragging(),
+		contentGeneration: m.contentGeneration, segmentsRevision: m.segmentsRevision,
+		width: m.width, height: m.height, offset: m.scrollOffset,
+		total: m.totalHeight, slack: m.bottomSlack,
+		selection: visualSelectionKey{
+			active: m.selection.active, startLine: m.selection.startLine,
+			startCol: m.selection.startCol, endLine: m.selection.endLine, endCol: m.selection.endCol,
+		},
+	}
+	if m.hoveredURL != nil {
+		frame.hoveredURL, frame.hasHoveredURL = *m.hoveredURL, true
+	}
+	if m.copiedFlash != nil {
+		frame.copiedFlash, frame.hasCopiedFlash = *m.copiedFlash, true
+	}
+	return frame
+}
+
+func (m *model) finishFrame(frame transcriptFrameKey, output string) string {
+	// Retain only the immediately preceding frame: repeated View calls hit,
+	// while any intervening visual state is rendered rather than retained.
+	m.lastFrameKey, m.lastFrameOutput = frame, output
+	return output
 }
 
 func (m *model) renderedLine(global int) string {
@@ -1063,6 +1117,19 @@ func (m *model) Help() help.KeyMap {
 // Scrolling methods
 // invalidateView must be called after any state change that can affect View output.
 func (m *model) invalidateView() { m.visualGeneration++ }
+
+func (m *model) invalidateFrameContent() {
+	m.contentGeneration++
+	m.segmentsRevision++
+	m.lastFrameOutput = ""
+	// Incremental refresh may reuse the same backing array with different widths.
+	m.scrollview.InvalidateComposeCache()
+}
+
+func (m *model) RenderedContentHeight() int {
+	m.ensureAllItemsRendered()
+	return m.totalHeight
+}
 
 func (m *model) VisualGeneration() uint64 { return m.visualGeneration }
 
@@ -1510,6 +1577,7 @@ func (m *model) ensureAllItemsRendered() {
 		return
 	}
 
+	m.invalidateFrameContent()
 	if len(m.views) == 0 {
 		m.renderedLines = nil
 		m.totalHeight = 0
@@ -1562,8 +1630,8 @@ func (m *model) ensureAllItemsRendered() {
 	m.renderDirty = false
 }
 
-//nolint:unparam // Boolean result is retained for cache-refresh callers.
 func (m *model) refreshRenderedItem(index int) bool {
+	m.invalidateFrameContent()
 	wasAtBottom := m.isAtBottom()
 	if m.renderDirty || (len(m.renderedLines) == 0 && m.activeSegments == nil) || len(m.lineOffsets) != len(m.views) || index < 0 || index >= len(m.views) {
 		m.invalidateItem(index)
@@ -1681,6 +1749,7 @@ func (m *model) invalidateItem(index int) {
 }
 
 func (m *model) invalidateAllItems() {
+	m.invalidateFrameContent()
 	m.renderedItems.Clear()
 	m.activeSegments = nil
 	m.renderedLines = nil

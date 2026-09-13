@@ -1,3 +1,4 @@
+//nolint:gocritic // Dialog command returns intentionally preserve Bubble Tea evaluation shape.
 package dialog
 
 import (
@@ -48,6 +49,16 @@ func (d *URLElicitationDialog) Init() tea.Cmd {
 	return nil
 }
 
+func (d *URLElicitationDialog) CancelDialogCmd() tea.Cmd {
+	return d.respond(tools.ElicitationActionCancel)
+}
+
+// OutsideClickDismissCmd cancels exactly like Escape, atomically closing the
+// dialog and answering the runtime waiter.
+func (d *URLElicitationDialog) OutsideClickDismissCmd() tea.Cmd {
+	return d.respond(tools.ElicitationActionCancel)
+}
+
 func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -55,7 +66,7 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
-			return d, cmd
+			return d, d.CancelDialogCmd()
 		}
 		switch {
 		case key.Matches(msg, d.keyMap.Yes):
@@ -72,15 +83,30 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, cmd
 		}
 	case tea.MouseClickMsg:
+		if msg.Button != tea.MouseLeft {
+			return d, nil
+		}
+		view := d.View()
+		row, col := d.CenterDialog(view)
+		if d.CloseButtonHit(msg, NewDialogLayout(view, row, col)) {
+			return d, d.respond(tools.ElicitationActionCancel)
+		}
 		if d.url != "" {
 			cmd := d.openURLInBrowser()
 			return d, cmd
 		}
+	case tea.MouseMotionMsg:
+		view := d.View()
+		row, col := d.CenterDialog(view)
+		d.HandleMouseMotion(msg.X, msg.Y, NewDialogLayout(view, row, col))
 	}
 	return d, nil
 }
 
 func (d *URLElicitationDialog) respond(action tools.ElicitationAction) tea.Cmd {
+	if !d.claimResponse() {
+		return nil
+	}
 	return CloseWithElicitationResponse(action, nil, d.ref)
 }
 
@@ -121,7 +147,7 @@ func (d *URLElicitationDialog) View() string {
 
 	content.AddHelp("Press Y when you have completed the action, or N to decline.")
 	content.AddSpace()
-	content.AddHelpKeys("Y", "confirm", "N", "decline", "o", "open", "esc", "cancel")
+	content.AddHelpKeys("Y", "confirm", "N", "decline", "o", "open")
 
-	return styles.DialogStyle.Width(dialogWidth).Render(content.Build())
+	return d.RenderCard(styles.DialogStyle, dialogWidth, content.Build())
 }

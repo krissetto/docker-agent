@@ -157,9 +157,12 @@ func NewPlanBrowserDialog(result plans.ListResult) Dialog {
 	ti.CharLimit = 100
 	ti.SetWidth(50)
 
+	base := BaseDialog{}
+	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
 	d := &planBrowserDialog{
+		BaseDialog:     base,
 		filterInput:    ti,
-		scrollview:     scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		scrollview:     scrollviewView,
 		keyMap:         defaultPlanBrowserKeyMap(),
 		now:            time.Now,
 		lastClickIndex: -1,

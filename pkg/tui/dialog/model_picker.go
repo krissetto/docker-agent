@@ -394,7 +394,7 @@ func (d *modelPickerDialog) View() string {
 		AddSeparator().
 		AddContent(details).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", d.refresh.Help().Key, d.refresh.Help().Desc, "esc", "cancel").
+		AddHelpKeys("↑/↓", "navigate", "enter", "select", d.refresh.Help().Key, d.refresh.Help().Desc).
 		Build()
 	contentBuildDuration := time.Since(contentBuildStart)
 

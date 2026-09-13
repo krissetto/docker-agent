@@ -101,11 +101,35 @@ var (
 	TabActiveFg   color.Color
 	TabInactiveFg color.Color
 	TabBorder     color.Color
+
+	// EditorBg and related values provide shared shell/editor semantic colors.
+	EditorBg       color.Color
+	CardBg         color.Color
+	ShellBg        color.Color
+	TabHoverBg     color.Color
+	TabHoverFg     color.Color
+	TabDragBg      color.Color
+	TabDragFg      color.Color
+	TabBusy        color.Color
+	ContextEmpty   color.Color
+	ContextFill    color.Color
+	ContextText    color.Color
+	Resize         color.Color
+	ResizeHover    color.Color
+	ResizeActive   color.Color
+	Hint           color.Color
+	Focus          color.Color
+	Disabled       color.Color
+	StatusAdjacent color.Color
 )
 
 // Base Styles
 const (
-	AppPadding = 1 // Symmetric left/right padding used by AppStyle and EditorStyle
+	AppPadding = 1 // Symmetric left/right padding used by AppStyle
+
+	// EditorHMargin is the number of terminal columns between the terminal
+	// edge and the coloured editor background on each side.
+	EditorHMargin = 2
 
 	// DoubleClickThreshold is the maximum time between clicks to register as a double-click
 	DoubleClickThreshold = 400 * time.Millisecond
@@ -448,11 +472,11 @@ var (
 			Color: Accent,
 		},
 	}
-	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
+	EditorStyle = BaseStyle.Margin(0, EditorHMargin).Padding(1, AppPadding, 1, AppPadding).Background(EditorBg)
 	// SuggestionGhostStyle renders inline auto-complete hints in a muted tone.
 	// Use a distinct grey so suggestion text is visually separate from the user's input.
 	// NOTE: Rebuilt by ApplyTheme() using theme's suggestion_ghost color.
-	SuggestionGhostStyle = BaseStyle.Foreground(TextMutedGray)
+	SuggestionGhostStyle = BaseStyle.Foreground(TextMutedGray).Background(EditorBg)
 	// SuggestionCursorStyle renders the first character of a suggestion inside the cursor.
 	// Uses the same blue accent background as the normal cursor, with ghost-colored foreground text.
 	// NOTE: Rebuilt by ApplyTheme().
@@ -485,14 +509,14 @@ var (
 // Resize Handle Style
 var (
 	ResizeHandleStyle = BaseStyle.
-				Foreground(BorderSecondary)
+				Foreground(Resize)
 
 	ResizeHandleHoverStyle = BaseStyle.
-				Foreground(Info).
+				Foreground(ResizeHover).
 				Bold(true)
 
 	ResizeHandleActiveStyle = BaseStyle.
-				Foreground(TextBright).
+				Foreground(ResizeActive).
 				Bold(true)
 )
 

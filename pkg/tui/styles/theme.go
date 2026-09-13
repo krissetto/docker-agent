@@ -270,6 +270,27 @@ type ThemeColors struct {
 	TabBorder       string `yaml:"tab_border,omitempty"`      // Tab left/right border color
 	Placeholder     string `yaml:"placeholder,omitempty"`
 
+	// Shared shell/editor semantic colors. Built-in themes define these
+	// explicitly so component chrome never falls back to the page background.
+	EditorBg       string `yaml:"editor_bg,omitempty"`
+	CardBg         string `yaml:"card_bg,omitempty"`
+	ShellBg        string `yaml:"shell_bg,omitempty"`
+	TabHoverBg     string `yaml:"tab_hover_bg,omitempty"`
+	TabHoverFg     string `yaml:"tab_hover_fg,omitempty"`
+	TabDragBg      string `yaml:"tab_drag_bg,omitempty"`
+	TabDragFg      string `yaml:"tab_drag_fg,omitempty"`
+	TabBusy        string `yaml:"tab_busy,omitempty"`
+	ContextEmpty   string `yaml:"context_empty,omitempty"`
+	ContextFill    string `yaml:"context_fill,omitempty"`
+	ContextText    string `yaml:"context_text,omitempty"`
+	Resize         string `yaml:"resize,omitempty"`
+	ResizeHover    string `yaml:"resize_hover,omitempty"`
+	ResizeActive   string `yaml:"resize_active,omitempty"`
+	Hint           string `yaml:"hint,omitempty"`
+	Focus          string `yaml:"focus,omitempty"`
+	Disabled       string `yaml:"disabled,omitempty"`
+	StatusAdjacent string `yaml:"status_adjacent,omitempty"`
+
 	// Badge colors
 	BadgeAccent  string `yaml:"badge_accent,omitempty"`  // Accent badge (e.g., purple highlights)
 	BadgeInfo    string `yaml:"badge_info,omitempty"`    // Info badge (e.g., cyan)
@@ -901,6 +922,60 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if override.Placeholder != "" {
 		result.Placeholder = override.Placeholder
 	}
+	if override.EditorBg != "" {
+		result.EditorBg = override.EditorBg
+	}
+	if override.CardBg != "" {
+		result.CardBg = override.CardBg
+	}
+	if override.ShellBg != "" {
+		result.ShellBg = override.ShellBg
+	}
+	if override.TabHoverBg != "" {
+		result.TabHoverBg = override.TabHoverBg
+	}
+	if override.TabHoverFg != "" {
+		result.TabHoverFg = override.TabHoverFg
+	}
+	if override.TabDragBg != "" {
+		result.TabDragBg = override.TabDragBg
+	}
+	if override.TabDragFg != "" {
+		result.TabDragFg = override.TabDragFg
+	}
+	if override.TabBusy != "" {
+		result.TabBusy = override.TabBusy
+	}
+	if override.ContextEmpty != "" {
+		result.ContextEmpty = override.ContextEmpty
+	}
+	if override.ContextFill != "" {
+		result.ContextFill = override.ContextFill
+	}
+	if override.ContextText != "" {
+		result.ContextText = override.ContextText
+	}
+	if override.Resize != "" {
+		result.Resize = override.Resize
+	}
+	if override.ResizeHover != "" {
+		result.ResizeHover = override.ResizeHover
+	}
+	if override.ResizeActive != "" {
+		result.ResizeActive = override.ResizeActive
+	}
+	if override.Hint != "" {
+		result.Hint = override.Hint
+	}
+	if override.Focus != "" {
+		result.Focus = override.Focus
+	}
+	if override.Disabled != "" {
+		result.Disabled = override.Disabled
+	}
+	if override.StatusAdjacent != "" {
+		result.StatusAdjacent = override.StatusAdjacent
+	}
 	// Badge colors
 	if override.BadgeAccent != "" {
 		result.BadgeAccent = override.BadgeAccent
@@ -1101,6 +1176,24 @@ func ApplyTheme(theme *Theme) {
 	TabActiveFg = lipgloss.Color(c.TabActiveFg)
 	TabInactiveFg = lipgloss.Color(c.TabInactiveFg)
 	TabBorder = lipgloss.Color(c.TabBorder)
+	EditorBg = lipgloss.Color(c.EditorBg)
+	CardBg = lipgloss.Color(c.CardBg)
+	ShellBg = lipgloss.Color(c.ShellBg)
+	TabHoverBg = lipgloss.Color(c.TabHoverBg)
+	TabHoverFg = lipgloss.Color(c.TabHoverFg)
+	TabDragBg = lipgloss.Color(c.TabDragBg)
+	TabDragFg = lipgloss.Color(c.TabDragFg)
+	TabBusy = lipgloss.Color(c.TabBusy)
+	ContextEmpty = lipgloss.Color(c.ContextEmpty)
+	ContextFill = lipgloss.Color(c.ContextFill)
+	ContextText = lipgloss.Color(c.ContextText)
+	Resize = lipgloss.Color(c.Resize)
+	ResizeHover = lipgloss.Color(c.ResizeHover)
+	ResizeActive = lipgloss.Color(c.ResizeActive)
+	Hint = lipgloss.Color(c.Hint)
+	Focus = lipgloss.Color(c.Focus)
+	Disabled = lipgloss.Color(c.Disabled)
+	StatusAdjacent = lipgloss.Color(c.StatusAdjacent)
 
 	// Rebuild all derived styles
 	rebuildStyles()
@@ -1310,8 +1403,8 @@ func rebuildStyles() {
 		},
 	}
 
-	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
-	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
+	EditorStyle = BaseStyle.Margin(0, EditorHMargin).Padding(1, AppPadding, 1, AppPadding).Background(EditorBg)
+	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost)).Background(EditorBg)
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 
 	// Attachment styles
@@ -1326,9 +1419,9 @@ func rebuildStyles() {
 	ThumbActiveStyle = lipgloss.NewStyle().Foreground(TextBright).Background(BackgroundAlt)
 
 	// Resize handle styles
-	ResizeHandleStyle = BaseStyle.Foreground(BorderSecondary)
-	ResizeHandleHoverStyle = BaseStyle.Foreground(Info).Bold(true)
-	ResizeHandleActiveStyle = BaseStyle.Foreground(TextBright).Bold(true)
+	ResizeHandleStyle = BaseStyle.Foreground(Resize)
+	ResizeHandleHoverStyle = BaseStyle.Foreground(ResizeHover).Bold(true)
+	ResizeHandleActiveStyle = BaseStyle.Foreground(ResizeActive).Bold(true)
 
 	// Notification styles
 	NotificationStyle = BaseStyle.

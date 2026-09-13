@@ -1,3 +1,4 @@
+//nolint:gocritic // Dialog command returns intentionally preserve Bubble Tea evaluation shape.
 package dialog
 
 import (
@@ -108,6 +109,13 @@ func themeSortKeys(t ThemeChoice) pickerSortKeys {
 
 func (d *themePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
+func (d *themePickerDialog) CancelDialogCmd() tea.Cmd {
+	return tea.Sequence(
+		closeDialogCmd(),
+		core.CmdHandler(messages.ThemeCancelPreviewMsg{OriginalRef: d.originalThemeRef}),
+	)
+}
+
 func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
@@ -146,10 +154,7 @@ func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
-			return d, tea.Sequence(
-				closeDialogCmd(),
-				core.CmdHandler(messages.ThemeCancelPreviewMsg{OriginalRef: d.originalThemeRef}),
-			)
+			return d, d.CancelDialogCmd()
 		case key.Matches(msg, d.keyMap.Up):
 			cmd := d.navigateAndPreview(-1)
 			return d, cmd
@@ -264,7 +269,7 @@ func (d *themePickerDialog) View() string {
 		AddSeparator().
 		AddContent(scrollableContent).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "cancel").
+		AddHelpKeys("↑/↓", "navigate", "enter", "select").
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)

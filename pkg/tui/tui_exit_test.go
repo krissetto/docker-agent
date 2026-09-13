@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tour"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -247,8 +248,11 @@ func newTestModel(tb testing.TB) (*appModel, *mockEditor) {
 	tb.Helper()
 	page := &mockChatPage{}
 	ed := &mockEditor{}
+	ar := animation.NewRuntime()
 
 	m := &appModel{
+		ar:                      ar,
+		tabBar:                  tabbar.New(ar, 0),
 		ctx:                     tb.Context,
 		chatPages:               map[string]chat.Page{"test": page},
 		sessionStates:           map[string]*service.SessionState{},
@@ -260,7 +264,7 @@ func newTestModel(tb testing.TB) (*appModel, *mockEditor) {
 		editor:                  ed,
 		transcriber:             &fakeTranscriber{},
 		notification:            notification.New(),
-		dialogMgr:               dialog.New(),
+		dialogMgr:               dialog.New(ar),
 		completions:             completion.New(),
 		tour:                    tour.New(),
 	}
@@ -811,4 +815,14 @@ func TestExitSafetyNet_GracefulShutdown(t *testing.T) {
 	assert.True(t, cleanupCalled)
 	mu.Unlock()
 	assert.False(t, exitCalled.Load(), "exitFunc must not fire on graceful shutdown")
+}
+
+func (m *mockEditor) BannerView(int) string     { return "" }
+func (m *mockEditor) ContentLineCount() int     { return 1 }
+func (m *mockEditor) ToggleContextBar()         {}
+func (m *mockEditor) SetContextBarFocused(bool) {}
+func (m *mockEditor) IsContextBarFocused() bool { return false }
+func (m *mockEditor) HasContextBar() bool       { return false }
+func (m *mockEditor) AttachmentAtPosition(int, int) (editor.AttachmentPreview, bool) {
+	return editor.AttachmentPreview{}, false
 }

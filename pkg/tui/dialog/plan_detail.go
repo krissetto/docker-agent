@@ -71,14 +71,17 @@ var (
 // NewPlanDetailDialog creates the detail dialog for a plan fetched through
 // the pkg/plans service (content included).
 func NewPlanDetailDialog(p plans.Plan) Dialog {
+	base := BaseDialog{}
+	scrollviewView := base.newScrollview(
+		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
+		scrollview.WithReserveScrollbarSpace(true),
+	)
 	return &planDetailDialog{
-		plan: p,
-		scrollview: scrollview.New(
-			scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
-			scrollview.WithReserveScrollbarSpace(true),
-		),
-		keyMap: defaultPlanDetailKeyMap(),
-		now:    time.Now,
+		BaseDialog: base,
+		plan:       p,
+		scrollview: scrollviewView,
+		keyMap:     defaultPlanDetailKeyMap(),
+		now:        time.Now,
 	}
 }
 

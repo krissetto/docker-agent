@@ -248,19 +248,16 @@ func TestFilePickerHelpKeysRows(t *testing.T) {
 	assert.Equal(t, []string{
 		"↑/↓", "navigate",
 		"enter", "select",
-		"esc", "close",
 		"alt+h", "show hidden",
-	}, row1)
-	assert.Equal(t, []string{
 		"alt+i", "show ignored",
-	}, row2)
+	}, row1)
+	assert.Empty(t, row2)
 
 	// Wide dialog: every shortcut fits on a single row.
 	row1, row2 = d.filePickerHelpKeysRows(200)
 	assert.Equal(t, []string{
 		"↑/↓", "navigate",
 		"enter", "select",
-		"esc", "close",
 		"alt+h", "show hidden",
 		"alt+i", "show ignored",
 	}, row1)
@@ -273,15 +270,17 @@ func TestFilePickerHelpKeysRows(t *testing.T) {
 
 	// showIgnored on.
 	d.showIgnored = true
-	_, row2 = d.filePickerHelpKeysRows(20)
-	assert.Contains(t, row2, "hide ignored")
+	row1, row2 = d.filePickerHelpKeysRows(20)
+	assert.Contains(t, row1, "hide ignored")
+	assert.Empty(t, row2)
 
 	// Both off again.
 	d.showHidden = false
 	d.showIgnored = false
 	row1, row2 = d.filePickerHelpKeysRows(20)
 	assert.Contains(t, row1, "show hidden")
-	assert.Contains(t, row2, "show ignored")
+	assert.Contains(t, row1, "show ignored")
+	assert.Empty(t, row2)
 }
 
 func TestFilePickerDirectoriesListedBeforeFiles(t *testing.T) {

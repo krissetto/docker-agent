@@ -53,7 +53,6 @@ func defaultMCPPromptInputKeyMap() mcpPromptInputKeyMap {
 		),
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
-			key.WithHelp("esc", "cancel"),
 		),
 		Tab: key.NewBinding(
 			key.WithKeys("tab"),
@@ -236,7 +235,7 @@ func (d *MCPPromptInputDialog) View() string {
 		}
 	}
 
-	help := RenderHelpKeys(contentWidth, "↑/↓", "navigate", "enter", "execute", "esc", "cancel")
+	help := RenderHelpKeys(contentWidth, "↑/↓", "navigate", "enter", "execute")
 
 	parts := []string{title}
 	if description != "" {

@@ -55,6 +55,26 @@ colors:
   tab_inactive_fg: "#DB7093" # Rose
   tab_border: "#FFB3D9"      # Pastel pink
   placeholder: "#DB7093"     # Rose
+  # Shared shell/editor semantic colors
+  editor_bg: "#262626"
+  card_bg: "#262626"
+  shell_bg: "#1c1c1c"
+  tab_hover_bg: "#262626"
+  tab_hover_fg: "#FF69B4"
+  tab_drag_bg: "#E6A8CF"
+  tab_drag_fg: "#1c1c1c"
+  tab_busy: "#DB7093"
+  context_empty: "#1c1c1c"
+  context_fill: "#FFFFFF"
+  context_text: "#DB7093"
+  resize: "#DB7093"
+  resize_hover: "#FFFFFF"
+  resize_active: "#FF69B4"
+  hint: "#DB7093"
+  focus: "#FFB3D9"
+  disabled: "#7a5570"
+  status_adjacent: "#FFFFFF"
+
   
   # Badge colors
   badge_accent: "#98D8C8"    # Pastel green (for start)

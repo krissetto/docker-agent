@@ -59,7 +59,7 @@ func TestURLElicitationDialog_View(t *testing.T) {
 	assert.Contains(t, view, "Please visit the URL")
 	assert.Contains(t, view, "https://example.com/callback")
 	assert.Contains(t, view, "confirm")
-	assert.Contains(t, view, "cancel")
+	assert.NotContains(t, view, "cancel")
 	assert.Contains(t, view, "open") // New "open" key binding
 }
 

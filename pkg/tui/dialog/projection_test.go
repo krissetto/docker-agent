@@ -10,7 +10,7 @@ import (
 )
 
 func TestReconcileInteractionsPreservesLiveDraftAndUnrelatedDialogs(t *testing.T) {
-	mgr := New().(*manager)
+	mgr := New(newDialogRuntime()).(*manager)
 	stale := &runtime.MaxIterationsReachedEvent{SessionID: "s", RequestID: "stale"}
 	live := &runtime.MaxIterationsReachedEvent{SessionID: "s", RequestID: "live"}
 	other := &runtime.MaxIterationsReachedEvent{SessionID: "other", RequestID: "stale"}

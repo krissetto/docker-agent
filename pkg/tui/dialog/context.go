@@ -56,16 +56,16 @@ func NewContextDialog(breakdown *runtime.ContextBreakdown, liveSessions ...runti
 	if breakdown == nil {
 		breakdown = &runtime.ContextBreakdown{}
 	}
+	base := BaseDialog{}
+	view := base.newScrollview(scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()), scrollview.WithReserveScrollbarSpace(true))
 	d := &contextDialog{
+		BaseDialog:   base,
 		breakdown:    breakdown,
 		liveSessions: liveSessions,
 		selected:     -1,
-		scrollview: scrollview.New(
-			scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
-			scrollview.WithReserveScrollbarSpace(true),
-		),
+		scrollview:   view,
 		keyMap: contextDialogKeyMap{
-			Close:   key.NewBinding(key.WithKeys("esc", "q"), key.WithHelp("Esc", "close")),
+			Close:   key.NewBinding(key.WithKeys("esc", "q")),
 			Copy:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy")),
 			Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑", "select")),
 			Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓", "select")),
@@ -724,7 +724,7 @@ func (d *contextDialog) helpKeys() []string {
 	if len(d.breakdown.AttachedFiles) > 0 {
 		keys = append(keys, "d", "drop")
 	}
-	return append(keys, "c", "copy", "Esc", "close")
+	return append(keys, "c", "copy")
 }
 
 // ---------------------------------------------------------------------------

@@ -2,9 +2,11 @@ package tabbar
 
 import (
 	"image/color"
+	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -95,9 +97,12 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	if title == "" {
 		title = defaultTabTitle
 	}
-	if r := []rune(title); len(r) > maxTitleLen {
-		title = string(r[:maxTitleLen-1]) + "…"
+	maxTitleLen = max(1, maxTitleLen)
+	titleBudget := maxTitleLen
+	if info.NeedsAttention || info.Activity != messages.TabActivityNone || info.IsRunning {
+		titleBudget--
 	}
+	title = ansi.Truncate(title, titleBudget, "…")
 
 	// Pick colors based on focus state.
 	var bgColor, fgColor, barColor color.Color
@@ -179,7 +184,7 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		}
 		content += lipgloss.NewStyle().Foreground(markerFg).Background(bgColor).Render(attachedIndicator)
 	}
-	content += titleSt.Render(title)
+	content += titleSt.Render(title) + pad.Render(strings.Repeat(" ", max(0, titleBudget-lipgloss.Width(title))))
 
 	mainEnd := lipgloss.Width(content)
 
@@ -194,3 +199,6 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 		width:       width,
 	}
 }
+
+// FixedTabWidth is the stable width before an attached session identity marker.
+func FixedTabWidth(maxTitleLen int) int { return max(1, maxTitleLen) + 5 }

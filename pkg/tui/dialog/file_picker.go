@@ -399,7 +399,6 @@ func (d *filePickerDialog) filePickerHelpKeysRows(contentWidth int) (row1, row2 
 	all := []string{
 		"↑/↓", "navigate",
 		"enter", "select",
-		"esc", "close",
 		"alt+h", hiddenLabel,
 		"alt+i", ignoredLabel,
 	}

@@ -34,7 +34,6 @@ func defaultExitConfirmationKeyMap() exitConfirmationKeyMap {
 		),
 		Esc: key.NewBinding(
 			key.WithKeys("esc"),
-			key.WithHelp("Esc", "cancel"),
 		),
 	}
 }
@@ -57,6 +56,22 @@ func (d *exitConfirmationDialog) Init() tea.Cmd {
 	return nil
 }
 
+func (d *exitConfirmationDialog) layout() DialogLayout {
+	view := d.View()
+	row, col := d.CenterDialog(view)
+	return NewDialogLayout(view, row, col)
+}
+
+// confirmExitCmd performs the affirmative exit transaction. Only the Yes
+// button/key paths may call it.
+func confirmExitCmd() tea.Cmd {
+	return ConfirmAndClose(core.CmdHandler(ExitConfirmedMsg{}))
+}
+
+// OutsideClickDismissCmd cancels the confirmation like Escape/X. An outside
+// click is dismissal only and can never confirm exit.
+func (d *exitConfirmationDialog) OutsideClickDismissCmd() tea.Cmd { return d.CancelDialogCmd() }
+
 // Update handles messages for the exit confirmation dialog.
 func (d *exitConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -64,15 +79,29 @@ func (d *exitConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			dl := d.layout()
+			if d.CloseButtonHit(msg, dl) {
+				return d, func() tea.Msg { return CloseDialogMsg{} }
+			}
+			if cmd := d.HandleConfirmButtonsClick(msg, dl, styles.DialogStyle.Padding(1, 2), core.CmdHandler(ExitConfirmedMsg{})); cmd != nil {
+				return d, cmd
+			}
+		}
+
+	case tea.MouseMotionMsg:
+		d.HandleMouseMotion(msg.X, msg.Y, d.layout())
+		return d, nil
+
 	case tea.KeyPressMsg:
-		switch {
-		case key.Matches(msg, d.keyMap.Yes):
-			return d, tea.Sequence(
-				core.CmdHandler(CloseDialogMsg{}),
-				core.CmdHandler(ExitConfirmedMsg{}),
-			)
-		case key.Matches(msg, d.keyMap.No), key.Matches(msg, d.keyMap.Esc):
-			return d, core.CmdHandler(CloseDialogMsg{})
+		switch d.HandleConfirmKey(msg, ConfirmKeyMap{Yes: d.keyMap.Yes, No: d.keyMap.No}) {
+		case ConfirmKeyConfirmed:
+			return d, confirmExitCmd()
+		case ConfirmKeyCancelled:
+			return d, func() tea.Msg { return CloseDialogMsg{} }
+		case ConfirmKeyFocusToggled:
+			return d, nil
 		}
 	}
 
@@ -95,11 +124,8 @@ func (d *exitConfirmationDialog) View() string {
 		AddSpace().
 		AddQuestion("Do you want to exit?").
 		AddSpace().
-		AddHelpKeys("Y", "yes", "N", "no").
+		AddContent(d.RenderConfirmButtons(contentWidth)).
 		Build()
 
-	return styles.DialogStyle.
-		Padding(1, 2).
-		Width(dialogWidth).
-		Render(content)
+	return d.RenderCard(styles.DialogStyle.Padding(1, 2), dialogWidth, content)
 }

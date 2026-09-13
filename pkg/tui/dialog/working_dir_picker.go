@@ -185,7 +185,12 @@ func NewWorkingDirPickerDialog(ctx context.Context, recentDirs, favoriteDirs []s
 		}
 	}
 
+	base := BaseDialog{}
+	pinnedScrollView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	recentScrollView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	browseScrollView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
 	d := &workingDirPickerDialog{
+		BaseDialog:   base,
 		ctx:          func() context.Context { return context.WithoutCancel(ctx) },
 		textInput:    ti,
 		section:      sectionBrowse,
@@ -195,9 +200,9 @@ func NewWorkingDirPickerDialog(ctx context.Context, recentDirs, favoriteDirs []s
 		favoriteSet:  favSet,
 		tuiStore:     store,
 		keyMap:       defaultPickerKeyMap(),
-		pinnedScroll: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
-		recentScroll: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
-		browseScroll: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		pinnedScroll: pinnedScrollView,
+		recentScroll: recentScrollView,
+		browseScroll: browseScrollView,
 	}
 
 	d.rebuildPinnedEntries()
@@ -745,7 +750,7 @@ func (d *workingDirPickerDialog) helpKeys() []string {
 	if label := d.pinHelpLabel(); label != "" {
 		keys = append(keys, "ctrl+p", label)
 	}
-	return append(keys, "esc", "cancel")
+	return keys
 }
 
 func (d *workingDirPickerDialog) renderTabs(width int) string {

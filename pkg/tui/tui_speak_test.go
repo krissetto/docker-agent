@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -62,7 +63,7 @@ func newSpeakTestModel(tb testing.TB, ft *fakeTranscriber) *appModel {
 		chatPage:                page,
 		editor:                  ed,
 		transcriber:             ft,
-		dialogMgr:               dialog.New(),
+		dialogMgr:               dialog.New(animation.NewRuntime()),
 	}
 }
 

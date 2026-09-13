@@ -45,7 +45,7 @@ colors:
   
   # UI element colors
   line_number: "#565F89"
-  separator: "#414868"
+  separator: "#D4D4D8"
   selected: "#2A3B5C"        # Darker blue-gray - selected items background (for warm white text)
   selected_fg: "#D4D4D8"     # Warm white - text on selected items, menu highlights
   suggestion_ghost: "#6B6B6B"
@@ -55,6 +55,26 @@ colors:
   tab_inactive_fg: "#808080"
   tab_border: "#9A88C0"      # Lavender border
   placeholder: "#808080"
+  # Shared shell/editor semantic colors
+  editor_bg: "#25252c"
+  card_bg: "#363640"
+  shell_bg: "#282c34"
+  tab_hover_bg: "#363640"
+  tab_hover_fg: "#D4D4D8"
+  tab_drag_bg: "#2A3B5C"
+  tab_drag_fg: "#D4D4D8"
+  tab_busy: "#D4D4D8"
+  context_empty: "#282c34"
+  context_fill: "#9ECAB8"
+  context_text: "#D4D4D8"
+  resize: "#D4D4D8"
+  resize_hover: "#9ECAB8"
+  resize_active: "#D4D4D8"
+  hint: "#D4D4D8"
+  focus: "#D4D4D8"
+  disabled: "#6A6A6A"
+  status_adjacent: "#9A9A9A"
+
   
   # Badge colors
   badge_accent: "#D4D4D8"    # Warm white

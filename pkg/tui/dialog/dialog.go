@@ -1,14 +1,21 @@
+//nolint:gocritic // Dialog command returns intentionally preserve Bubble Tea evaluation shape.
 package dialog
 
 import (
 	"slices"
+	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // OpenDialogMsg is sent to open a new dialog.
@@ -34,6 +41,9 @@ type ReconcileInteractionsMsg struct {
 // CloseDialogMsg is sent to close the current (topmost) dialog
 type CloseDialogMsg struct{}
 
+// HideDialogMsg fades the current dialog out without cleaning up its state.
+type HideDialogMsg struct{}
+
 // CloseAllDialogsMsg is sent to close all dialogs in the stack
 type CloseAllDialogsMsg struct{}
 
@@ -51,12 +61,31 @@ type Dialog interface {
 	Position() (int, int) // Returns (row, col) for dialog placement
 }
 
+// OutsideClickDismisser allows mandatory dialogs to explicitly ignore the
+// default outside-left-click cancellation policy. Returning nil keeps the
+// dialog open. Outside clicks must never perform an affirmative action.
+type OutsideClickDismisser interface {
+	OutsideClickDismissCmd() tea.Cmd
+}
+
+type SemanticCloser interface {
+	CancelDialogCmd() tea.Cmd
+}
+
+type ClosePolicy interface{ DialogClosable() bool }
+
 // Manager manages the dialog stack and rendering
 type Manager interface {
 	layout.Model
 
 	GetLayers() []*lipgloss.Layer
+	GetLayerInfos() []styles.LayerInfo
 	Open() bool
+	HasActiveDialog() bool
+	Closing() bool
+	// Cleanup immediately cancels animation leases, cleans dialog resources,
+	// and resets the manager. Call it before replacing a manager instance.
+	Cleanup()
 	TopIsExitConfirmation() bool
 	// TopIsBackground reports whether the topmost dialog is a background
 	// dialog (i.e. it should not block tab navigation).
@@ -75,13 +104,18 @@ type Manager interface {
 	// visiting bottom to top. Unlike TopDialog it also sees dialogs buried
 	// under other dialogs, e.g. a plan browser under a help dialog.
 	HasDialog(pred func(Dialog) bool) bool
+	// TakeVisualDirty reports and clears an explicit pointer-driven visible mutation.
+	TakeVisualDirty() bool
 }
 
 // dialogEntry pairs a dialog with its drag offset so the two stay in sync.
 type dialogEntry struct {
-	dialog  Dialog
-	offsetX int // accumulated horizontal drag displacement
-	offsetY int // accumulated vertical drag displacement
+	*animatedDialog
+
+	cancelPending bool
+	closeHovered  bool // hover belongs to this stack entry's open lifecycle
+	offsetX       int  // accumulated horizontal drag displacement
+	offsetY       int  // accumulated vertical drag displacement
 	// originatingEvent is the runtime event that caused this dialog to open,
 	// when applicable. A non-nil value marks the dialog as a background
 	// dialog (see OpenDialogMsg.OriginatingEvent).
@@ -100,15 +134,21 @@ type dragState struct {
 
 // manager implements Manager
 type manager struct {
+	runtime       *animation.Runtime
 	width, height int
 	stack         []dialogEntry
 	drag          dragState
 	projections   map[string]*lifecycle.Projection
+	closeHovered  bool //nolint:unused // Retained as lifecycle hover state for concrete dialogs.
+	visualDirty   bool
 }
 
 // New creates a new dialog component manager
-func New() Manager {
-	return &manager{}
+func New(runtime *animation.Runtime) Manager {
+	if runtime == nil {
+		panic("dialog: nil animation runtime")
+	}
+	return &manager{runtime: runtime}
 }
 
 // Init initializes the dialog component
@@ -118,6 +158,13 @@ func (d *manager) Init() tea.Cmd {
 
 // Update handles messages and updates dialog state
 func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	// A closing entry remains rendered and modal, but must not receive any
+	// terminal input. Non-input messages (for example async results) continue
+	// to reach the same dialog instance until its close animation completes.
+	if (len(d.stack) == 0 || d.Closing() || d.stack[len(d.stack)-1].cancelPending) && isUserInputMsg(msg) {
+		return d, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		d.width = msg.Width
@@ -136,15 +183,26 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		d.projections[msg.SessionID] = msg.Projection
 		d.stack = slices.DeleteFunc(d.stack, func(entry dialogEntry) bool {
 			key := entry.interactionKey
-			return key.SessionID == msg.SessionID && key.InteractionID != "" && !msg.Projection.HasInteraction(key)
+			if key.SessionID == msg.SessionID && key.InteractionID != "" && !msg.Projection.HasInteraction(key) {
+				entry.cancel()
+				CleanupDialog(entry.dialog)
+				return true
+			}
+			return false
 		})
+		d.drag.active = false
 		return d, nil
+	case animation.TickMsg:
+		return d.handleTick(msg)
 
 	case OpenDialogMsg:
 		return d.handleOpen(msg)
 
 	case CloseDialogMsg:
-		return d.handleClose()
+		return d.beginClose(false)
+
+	case HideDialogMsg:
+		return d.beginClose(true)
 
 	case ClosePlanDetailMsg:
 		return d.handleClosePlanDetail(msg)
@@ -153,21 +211,44 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d.handleCloseAll()
 
 	case tea.MouseClickMsg:
-		if msg.Button == tea.MouseLeft && d.handleDragStart(msg.X, msg.Y) {
+		if d.pointerSuppressed() {
 			return d, nil
 		}
-		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
-		return d, cmd
+		adjusted := d.adjustMouseMsg(msg)
+		if msg.Button == tea.MouseLeft {
+			if cmd := d.handleOutsideClickDismiss(msg); cmd != nil {
+				return d, cmd
+			}
+			// The close control gets first refusal; other title clicks drag.
+			if d.closeButtonHit(msg.X, msg.Y) {
+				return d, d.semanticCloseTop()
+			}
+			if d.handleDragStart(msg.X, msg.Y) {
+				return d, nil
+			}
+		}
+		return d, d.forwardToTop(adjusted)
 
 	case tea.MouseMotionMsg:
+		top := len(d.stack) - 1
+		hovered := d.closeButtonHit(msg.X, msg.Y)
+		d.visualDirty = d.visualDirty || hovered != d.stack[top].closeHovered
+		d.stack[top].closeHovered = hovered
+		if d.pointerSuppressed() {
+			return d, nil
+		}
 		if d.drag.active {
-			d.handleDragMotion(msg.X, msg.Y)
+			d.visualDirty = d.handleDragMotion(msg.X, msg.Y) || d.visualDirty
 			return d, nil
 		}
 		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
 		return d, cmd
 
 	case tea.MouseReleaseMsg:
+		if d.pointerSuppressed() {
+			d.drag.active = false
+			return d, nil
+		}
 		if d.drag.active {
 			d.drag.active = false
 			return d, nil
@@ -175,9 +256,34 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
 		return d, cmd
 
+	case messages.WheelCoalescedMsg:
+		if d.pointerSuppressed() {
+			return d, nil
+		}
+		return d, d.forwardToTop(msg)
+
 	case tea.MouseWheelMsg:
+		if d.pointerSuppressed() {
+			return d, nil
+		}
 		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
+		d.takeTopVisualDirty()
 		return d, cmd
+	case tea.KeyPressMsg:
+		// Ctrl-C normally cancels the current dialog. The exit confirmation is
+		// the critical exception: a second Ctrl-C confirms exit even while its
+		// opening animation is running. Other opening input remains subject to
+		// the existing dialog semantics and pointer suppression.
+		if key.Matches(msg, core.GetKeys().Quit) {
+			if d.TopIsExitConfirmation() {
+				return d, d.forwardToTop(msg)
+			}
+			return d, d.semanticCloseTop()
+		}
+		if msg.Code == tea.KeyEscape && dialogClosable(d.stack[len(d.stack)-1].dialog) {
+			return d, d.semanticCloseTop()
+		}
+		return d, d.forwardToTop(msg)
 	}
 
 	if _, ok := msg.(Broadcastable); ok {
@@ -195,7 +301,7 @@ func (d *manager) View() string {
 	if len(d.stack) == 0 {
 		return ""
 	}
-	return d.stack[len(d.stack)-1].dialog.View()
+	return d.entryView(&d.stack[len(d.stack)-1])
 }
 
 // broadcastToAll sends a message to every dialog in the stack and batches the resulting commands.
@@ -204,20 +310,39 @@ func (d *manager) broadcastToAll(msg tea.Msg) tea.Cmd {
 	for i := range d.stack {
 		u, cmd := d.stack[i].dialog.Update(msg)
 		d.stack[i].dialog = u.(Dialog)
-		cmds = append(cmds, cmd)
+		cmds = append(cmds, cmd, d.stack[i].retarget("broadcast:"+stringType(msg), d.width, d.height))
 	}
 	return tea.Batch(cmds...)
 }
 
 // forwardToTop forwards a message to the topmost dialog and returns the resulting command.
 func (d *manager) forwardToTop(msg tea.Msg) tea.Cmd {
+	return d.forwardToTopWithRetarget(msg, true)
+}
+
+func (d *manager) forwardToTopWithoutRetarget(msg tea.Msg) tea.Cmd {
+	return d.forwardToTopWithRetarget(msg, false)
+}
+
+func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 	if len(d.stack) == 0 {
 		return nil
 	}
 	top := len(d.stack) - 1
 	u, cmd := d.stack[top].dialog.Update(msg)
 	d.stack[top].dialog = u.(Dialog)
-	return cmd
+	d.takeTopVisualDirty()
+	if !retarget {
+		return cmd
+	}
+	resizeCmd := d.stack[top].retarget("update:"+stringType(msg), d.width, d.height)
+	if resizeCmd == nil {
+		return cmd
+	}
+	if cmd == nil {
+		return resizeCmd
+	}
+	return tea.Batch(cmd, resizeCmd)
 }
 
 // titleZoneHeight is the number of rows from the top of a dialog that form
@@ -234,7 +359,7 @@ func (d *manager) handleDragStart(x, y int) bool {
 	top := len(d.stack) - 1
 	e := &d.stack[top]
 
-	row, col := e.dialog.Position()
+	row, col := e.position(d.width, d.height)
 	row += e.offsetY
 	col += e.offsetX
 	w := lipgloss.Width(e.dialog.View())
@@ -259,13 +384,22 @@ func (d *manager) handleDragStart(x, y int) bool {
 }
 
 // handleDragMotion updates the drag offset during a drag operation.
-func (d *manager) handleDragMotion(x, y int) {
+func (d *manager) handleDragMotion(x, y int) bool {
 	if len(d.stack) == 0 {
-		return
+		return false
 	}
 	e := &d.stack[len(d.stack)-1]
-	e.offsetX = d.drag.origDX + (x - d.drag.startX)
-	e.offsetY = d.drag.origDY + (y - d.drag.startY)
+	oldX, oldY := e.offsetX, e.offsetY
+	row, col := e.position(d.width, d.height)
+	view := e.view()
+	w, h := lipgloss.Width(view), lipgloss.Height(view)
+	proposedX := d.drag.origDX + (x - d.drag.startX)
+	proposedY := d.drag.origDY + (y - d.drag.startY)
+	maxCol := max(0, d.width-w)
+	maxRow := max(0, d.height-h)
+	e.offsetX = min(max(proposedX, -col), maxCol-col)
+	e.offsetY = min(max(proposedY, -row), maxRow-row)
+	return oldX != e.offsetX || oldY != e.offsetY
 }
 
 // adjustMouseMsg adjusts mouse coordinates in a message to account for the drag offset
@@ -300,12 +434,93 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 	return msg
 }
 
+// closeButtonHit reports whether screen coordinates hit the one-cell close
+// control on the top border of the topmost dialog.
+func (d *manager) closeButtonHit(x, y int) bool {
+	if len(d.stack) == 0 || !dialogClosable(d.stack[len(d.stack)-1].dialog) {
+		return false
+	}
+	e := d.stack[len(d.stack)-1]
+	row, col := e.position(d.width, d.height)
+	row += e.offsetY
+	col += e.offsetX
+	width := lipgloss.Width(e.view())
+	return y == row+styles.DialogStyle.GetBorderTopSize() &&
+		x == col+width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
+}
+
+func dialogClosable(dialog Dialog) bool {
+	if policy, ok := dialog.(ClosePolicy); ok {
+		return policy.DialogClosable()
+	}
+	return true
+}
+
+func (d *manager) semanticCloseTop() tea.Cmd {
+	if len(d.stack) == 0 {
+		return nil
+	}
+	top := &d.stack[len(d.stack)-1]
+	if top.cancelPending || top.closing {
+		return nil
+	}
+	top.cancelPending = true
+	closer, ok := top.dialog.(SemanticCloser)
+	if !ok {
+		return core.CmdHandler(CloseDialogMsg{})
+	}
+	return closer.CancelDialogCmd()
+}
+
+func (d *manager) entryView(e *dialogEntry) string {
+	view := e.viewWithChrome(dialogClosable(e.dialog), e.closeHovered)
+	return clampRenderedFrame(view, d.width, d.height)
+}
+
+func clampRenderedFrame(view string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// handleOutsideClickDismiss applies cancellation on an outside left click
+// while preserving each entry's drag offset. Mandatory dialogs may opt out;
+// no outside click is allowed to select an affirmative action.
+func (d *manager) handleOutsideClickDismiss(msg tea.MouseClickMsg) tea.Cmd {
+	if len(d.stack) == 0 {
+		return nil
+	}
+	e := d.stack[len(d.stack)-1]
+	row, col := e.position(d.width, d.height)
+	row += e.offsetY
+	col += e.offsetX
+	view := e.view()
+	if msg.X >= col && msg.X < col+lipgloss.Width(view) && msg.Y >= row && msg.Y < row+lipgloss.Height(view) {
+		return nil
+	}
+	if dismisser, ok := e.dialog.(OutsideClickDismisser); ok {
+		return dismisser.OutsideClickDismissCmd()
+	}
+	return d.semanticCloseTop()
+}
+
+func resetDialogCloseHover(dialog Dialog) {
+	if resetter, ok := dialog.(interface{ ResetCloseHover() }); ok {
+		resetter.ResetCloseHover()
+	}
+}
+
 // handleOpen processes dialog opening requests and adds to stack
 func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	key := lifecycle.InteractionIdentity(msg.OriginatingEvent)
-	if key.InteractionID != "" && slices.ContainsFunc(d.stack, func(entry dialogEntry) bool { return lifecycle.InteractionIdentity(entry.originatingEvent) == key }) {
-		return d, nil
-	}
 	if msg.OriginatingEvent == nil {
 		if child, ok := msg.Model.(*multiChoiceDialog); ok {
 			if correlation, ok := child.config.Context.(messages.InteractionResponseMsg); ok {
@@ -316,32 +531,75 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	if head, ok := d.projections[key.SessionID]; ok && key.InteractionID != "" && !head.HasInteraction(key) {
 		return d, nil
 	}
+	resetDialogCloseHover(msg.Model)
+	// A hidden dialog can be reopened before its close completes. Reuse the
+	// existing wrapper so there is one rendered layer and the fade reverses
+	// smoothly while preserving offsets and originating metadata.
+	for i := len(d.stack) - 1; i >= 0; i-- {
+		entry := &d.stack[i]
+		if entry.dialog == msg.Model && entry.closing && entry.hiding {
+			entry.originatingEvent = msg.OriginatingEvent
+			entry.interactionKey = key
+			entry.cancelPending = false
+			cmd := entry.reopen(d.width, d.height)
+			reopened := *entry
+			d.stack = append(slices.Delete(d.stack, i, i+1), reopened)
+			return d, cmd
+		}
+	}
+
+	if msg.OriginatingEvent != nil && key.InteractionID != "" && slices.ContainsFunc(d.stack, func(entry dialogEntry) bool { return lifecycle.InteractionIdentity(entry.originatingEvent) == key }) {
+		return d, nil
+	}
+
+	if bindable, ok := msg.Model.(interface {
+		BindAnimationRuntime(runtime *animation.Runtime)
+	}); ok {
+		bindable.BindAnimationRuntime(d.runtime)
+	}
+	initCmd := msg.Model.Init()
+
+	// Size the concrete dialog before the shared wrapper measures its rendered
+	// target. Content-derived dialogs (notably tool confirmation) otherwise
+	// begin from their zero-size fallback and retarget on the first tick.
+	_, sizeCmd := msg.Model.Update(tea.WindowSizeMsg{
+		Width:  d.width,
+		Height: d.height,
+	})
+	animated, animationCmd := newAnimatedDialog(d.runtime, msg.Model, d.width, d.height)
 	d.stack = append(d.stack, dialogEntry{
-		dialog:           msg.Model,
+		animatedDialog:   animated,
 		originatingEvent: msg.OriginatingEvent,
 		interactionKey:   key,
 	})
 
-	var cmds []tea.Cmd
-	cmd := msg.Model.Init()
-	cmds = append(cmds, cmd)
-
-	_, cmd = msg.Model.Update(tea.WindowSizeMsg{
-		Width:  d.width,
-		Height: d.height,
-	})
-	cmds = append(cmds, cmd)
-
-	return d, tea.Batch(cmds...)
+	return d, tea.Batch(initCmd, sizeCmd, animationCmd)
 }
 
-// handleClose processes dialog closing requests (pops top dialog from stack)
 func (d *manager) handleClose() (layout.Model, tea.Cmd) {
-	if len(d.stack) > 0 {
-		d.stack = d.stack[:len(d.stack)-1]
+	return d.beginClose(false)
+}
+
+func (d *manager) beginClose(hiding bool) (layout.Model, tea.Cmd) {
+	if len(d.stack) == 0 || d.stack[len(d.stack)-1].closing {
+		return d, nil
 	}
 	d.drag.active = false
-	return d, nil
+	top := len(d.stack) - 1
+	d.stack[top].closeHovered = false
+	if stopper, ok := d.stack[top].dialog.(interface{ StopAnimations() }); ok {
+		stopper.StopAnimations()
+	}
+	resetDialogCloseHover(d.stack[top].dialog)
+	cmd := d.stack[top].startClose(hiding)
+	if !d.stack[top].anim.Running() {
+		return d.handleTick(animation.TickMsg{})
+	}
+	return d, cmd
+}
+
+func (d *manager) handleHide() (layout.Model, tea.Cmd) {
+	return d.beginClose(true)
 }
 
 // handleClosePlanDetail pops the top dialog only when it is a plan detail
@@ -350,22 +608,90 @@ func (d *manager) handleClose() (layout.Model, tea.Cmd) {
 // at apply time makes the close idempotent: duplicates for the same vanished
 // plan cannot pop a second dialog.
 func (d *manager) handleClosePlanDetail(msg ClosePlanDetailMsg) (layout.Model, tea.Cmd) {
-	if viewer, ok := d.TopDialog().(PlanDetailViewer); ok && viewer.PlanRef() == msg.Ref {
-		return d.handleClose()
+	if len(d.stack) == 0 {
+		return d, nil
+	}
+	if viewer, ok := d.stack[len(d.stack)-1].dialog.(PlanDetailViewer); ok && viewer.PlanRef() == msg.Ref {
+		top := len(d.stack) - 1
+		d.stack[top].cancel()
+		CleanupDialog(d.stack[top].dialog)
+		d.stack = d.stack[:top]
+		d.drag.active = false
+		return d, nil
 	}
 	return d, nil
 }
 
 // handleCloseAll closes all dialogs in the stack
 func (d *manager) handleCloseAll() (layout.Model, tea.Cmd) {
+	for i := range d.stack {
+		d.stack[i].cancel()
+		CleanupDialog(d.stack[i].dialog)
+	}
 	d.stack = nil
 	d.drag.active = false
 	return d, nil
 }
 
-// Open returns true if there is at least one active dialog
+// Cleanup immediately releases every dialog and animation owned by the
+// manager. Integrators replacing a Manager must call Cleanup on the old
+// instance first; unlike a fade-out, this reset is synchronous.
+func (d *manager) Cleanup() {
+	d.handleCloseAll()
+}
+
+// handleTick advances lifecycle transitions and removes completed closes.
+func (d *manager) handleTick(msg animation.TickMsg) (layout.Model, tea.Cmd) {
+	for i := range d.stack {
+		if d.stack[i].opening() || d.stack[i].closing {
+			msg.MarkDirty()
+			break
+		}
+	}
+	remaining := d.stack[:0]
+	var cmds []tea.Cmd
+	for i := range d.stack {
+		entry := &d.stack[i]
+		finished, cmd := entry.tick("animation-tick", d.width, d.height)
+		cmds = append(cmds, cmd)
+		if finished {
+			if !entry.hiding {
+				CleanupDialog(entry.dialog)
+			}
+			continue
+		}
+		remaining = append(remaining, *entry)
+	}
+	clear(d.stack[len(remaining):])
+	d.stack = remaining
+	if d.Closing() || len(d.stack) == 0 {
+		return d, tea.Batch(cmds...)
+	}
+	cmds = append(cmds, d.forwardToTopWithoutRetarget(msg))
+	return d, tea.Batch(cmds...)
+}
+
+// Open returns true if there is at least one rendered dialog
 func (d *manager) Open() bool {
 	return len(d.stack) > 0
+}
+
+// HasActiveDialog reports whether a non-closing dialog remains.
+func (d *manager) HasActiveDialog() bool {
+	return len(d.stack) > 0 && !d.stack[len(d.stack)-1].closing
+}
+
+// Closing reports whether the visually topmost dialog is fading out.
+func (d *manager) Closing() bool {
+	return len(d.stack) > 0 && d.stack[len(d.stack)-1].closing
+}
+
+func (d *manager) pointerSuppressed() bool {
+	if len(d.stack) == 0 {
+		return false
+	}
+	top := d.stack[len(d.stack)-1]
+	return top.opening() || top.closing
 }
 
 // TopIsExitConfirmation returns true if the topmost dialog is the exit
@@ -383,7 +709,7 @@ func (d *manager) TopIsExitConfirmation() bool {
 // TopIsBackground returns true if the topmost dialog is a background dialog
 // (opened with a non-nil OriginatingEvent). See OpenDialogMsg for semantics.
 func (d *manager) TopIsBackground() bool {
-	if len(d.stack) == 0 {
+	if len(d.stack) == 0 || d.stack[len(d.stack)-1].closing {
 		return false
 	}
 	return d.stack[len(d.stack)-1].originatingEvent != nil
@@ -393,7 +719,7 @@ func (d *manager) TopIsBackground() bool {
 // dialog, or nil if the top dialog is not a background dialog or the dialog
 // stack is empty.
 func (d *manager) TopBackgroundEvent() tea.Msg {
-	if len(d.stack) == 0 {
+	if len(d.stack) == 0 || d.stack[len(d.stack)-1].closing {
 		return nil
 	}
 	return d.stack[len(d.stack)-1].originatingEvent
@@ -402,7 +728,7 @@ func (d *manager) TopBackgroundEvent() tea.Msg {
 // TopDialog returns the topmost dialog instance, or nil if the dialog stack
 // is empty.
 func (d *manager) TopDialog() Dialog {
-	if len(d.stack) == 0 {
+	if !d.HasActiveDialog() {
 		return nil
 	}
 	return d.stack[len(d.stack)-1].dialog
@@ -417,6 +743,21 @@ func (d *manager) HasDialog(pred func(Dialog) bool) bool {
 		}
 	}
 	return false
+}
+
+func (d *manager) takeTopVisualDirty() {
+	if len(d.stack) == 0 {
+		return
+	}
+	if dirty, ok := d.stack[len(d.stack)-1].dialog.(interface{ TakeVisualDirty() bool }); ok {
+		d.visualDirty = dirty.TakeVisualDirty() || d.visualDirty
+	}
+}
+
+func (d *manager) TakeVisualDirty() bool {
+	dirty := d.visualDirty
+	d.visualDirty = false
+	return dirty
 }
 
 func (d *manager) SetSize(width, height int) tea.Cmd {
@@ -446,11 +787,24 @@ func (d *manager) GetLayers() []*lipgloss.Layer {
 	}
 
 	layers := make([]*lipgloss.Layer, 0, len(d.stack))
-	for _, e := range d.stack {
-		view := e.dialog.View()
-		row, col := e.dialog.Position()
+	for i := range d.stack {
+		e := &d.stack[i]
+		view := d.entryView(e)
+		row, col := e.position(d.width, d.height)
 		layers = append(layers, lipgloss.NewLayer(view).X(col+e.offsetX).Y(row+e.offsetY))
 	}
+	return layers
+}
 
+func (d *manager) GetLayerInfos() []styles.LayerInfo {
+	if len(d.stack) == 0 {
+		return nil
+	}
+	layers := make([]styles.LayerInfo, 0, len(d.stack))
+	for i := range d.stack {
+		e := &d.stack[i]
+		row, col := e.position(d.width, d.height)
+		layers = append(layers, styles.LayerInfo{Content: d.entryView(e), X: col + e.offsetX, Y: row + e.offsetY})
+	}
 	return layers
 }

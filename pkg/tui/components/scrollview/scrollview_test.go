@@ -62,7 +62,7 @@ func TestComposeMatchesJoinHorizontal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			m := New(WithReserveScrollbarSpace(tt.reserveSpace))
+			m := New(WithReserveScrollbarSpace(tt.reserveSpace), WithFadeEffectDisabled())
 			m.SetSize(40, 10)
 
 			content := make([]string, tt.totalHeight)

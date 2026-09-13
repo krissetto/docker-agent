@@ -38,7 +38,7 @@ func defaultPickerKeyMap() pickerKeyMap {
 		Up:     key.NewBinding(key.WithKeys("up", "ctrl+k"), key.WithHelp("↑/ctrl+k", "up")),
 		Down:   key.NewBinding(key.WithKeys("down", "ctrl+j"), key.WithHelp("↓/ctrl+j", "down")),
 		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "execute")),
-		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
+		Escape: key.NewBinding(key.WithKeys("esc")),
 	}
 }
 
@@ -97,6 +97,8 @@ type pickerCore struct {
 	keyMap     pickerKeyMap
 	layout     pickerLayout
 
+	listHeight func(int) int
+
 	selected int
 
 	// Double-click detection
@@ -114,9 +116,12 @@ func newPickerCore(layout pickerLayout, placeholder string) pickerCore {
 	ti.CharLimit = 256
 	ti.SetWidth(50)
 
+	base := BaseDialog{}
+	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
 	return pickerCore{
+		BaseDialog:     base,
 		textInput:      ti,
-		scrollview:     scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		scrollview:     scrollviewView,
 		keyMap:         defaultPickerKeyMap(),
 		layout:         layout,
 		lastClickIndex: -1,
@@ -131,9 +136,9 @@ func newPickerCore(layout pickerLayout, placeholder string) pickerCore {
 // Content width subtracts horizontal chrome and reserved scrollbar columns.
 func (p *pickerCore) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
 	l := p.layout
-	dialogWidth = max(min(p.Width()*l.WidthPercent/100, l.MaxWidth), l.MinWidth)
-	maxHeight = min(p.Height()*l.HeightPercent/100, l.MaxHeight)
-	contentWidth = dialogWidth - pickerHorizontalChrome - p.scrollview.ReservedCols()
+	dialogWidth = min(max(min(p.Width()*l.WidthPercent/100, l.MaxWidth), l.MinWidth), max(1, p.Width()))
+	maxHeight = min(min(p.Height()*l.HeightPercent/100, l.MaxHeight), max(1, p.Height()))
+	contentWidth = max(1, dialogWidth-pickerHorizontalChrome-p.scrollview.ReservedCols())
 	return dialogWidth, maxHeight, contentWidth
 }
 
@@ -145,7 +150,10 @@ func (p *pickerCore) regionWidth(contentWidth int) int {
 // Position returns the centred (row, col) of the dialog on screen.
 func (p *pickerCore) Position() (row, col int) {
 	dialogWidth, maxHeight, _ := p.dialogSize()
-	return CenterPosition(p.Width(), p.Height(), dialogWidth, maxHeight)
+	listHeight := p.visibleListHeight(max(1, maxHeight-p.layout.ListOverhead))
+	contentHeight := min(maxHeight, p.layout.ListOverhead+listHeight)
+	renderedHeight := min(p.Height(), contentHeight+styles.DialogStyle.GetVerticalFrameSize())
+	return CenterPosition(p.Width(), p.Height(), dialogWidth, renderedHeight)
 }
 
 // SetSize updates dialog dimensions and reconfigures the scrollview region.
@@ -155,6 +163,13 @@ func (p *pickerCore) SetSize(width, height int) tea.Cmd {
 	visLines := max(1, maxHeight-p.layout.ListOverhead)
 	p.scrollview.SetSize(p.regionWidth(contentWidth), visLines)
 	return cmd
+}
+
+func (p *pickerCore) visibleListHeight(maxListHeight int) int {
+	if p.listHeight != nil {
+		return p.listHeight(maxListHeight)
+	}
+	return maxListHeight
 }
 
 // updateScrollviewPosition repositions the scrollview for accurate mouse

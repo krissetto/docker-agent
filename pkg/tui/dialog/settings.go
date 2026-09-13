@@ -345,6 +345,8 @@ func (d *settingsDialog) apply() tea.Cmd {
 	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.ApplySettingsMsg{Preferences: d.current}))
 }
 
+func (d *settingsDialog) CancelDialogCmd() tea.Cmd { return d.cancel() }
+
 func (d *settingsDialog) cancel() tea.Cmd {
 	if d.current.Layout == d.original.Layout {
 		return closeDialogCmd()
@@ -366,8 +368,8 @@ func (d *settingsDialog) View() string {
 	default:
 		d.renderAppearanceTab(content, inner)
 	}
-	content.AddSpace().AddHelpKeys("↑/↓", "navigate", "←/→", "change", "tab", "switch tab", "enter", "apply", "esc", "cancel")
-	return styles.DialogStyle.Width(width).Render(content.Build())
+	content.AddSpace().AddHelpKeys("↑/↓", "navigate", "←/→", "change", "tab", "switch tab", "enter", "apply")
+	return styles.DialogStyle.Width(width).MaxHeight(max(1, d.Height())).Render(content.Build())
 }
 
 func (d *settingsDialog) renderTabBar(width int) string {

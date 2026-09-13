@@ -114,7 +114,7 @@ func (d *effortPickerDialog) View() string {
 		AddSpace().
 		AddContent(lipgloss.JoinVertical(lipgloss.Left, rows...)).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "cancel").
+		AddHelpKeys("↑/↓", "navigate", "enter", "select").
 		Build()
 
 	return styles.DialogStyle.Width(width).Render(content)

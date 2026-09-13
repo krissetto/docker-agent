@@ -19,7 +19,9 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -695,6 +697,12 @@ func TestPlanRefresh_BuriedDetailSuppressesErrorsUntilSurfaced(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			m, svc := newPlansTestModel(t)
+			m.ar = animation.NewRuntimeWithScheduler(&rootImmediateScheduler{now: time.Unix(1, 0)})
+			m.dialogMgr.Cleanup()
+			m.dialogMgr = dialog.New(m.ar)
+			m.tabBar = tabbar.New(m.ar, 0)
+			t.Cleanup(m.dialogMgr.Cleanup)
+			t.Cleanup(m.ar.Stop)
 			p := mustCreatePlan(t, svc, "release", "content")
 			WithPlansService(&failingGetPlansService{
 				Service: svc,
@@ -720,6 +728,23 @@ func TestPlanRefresh_BuriedDetailSuppressesErrorsUntilSurfaced(t *testing.T) {
 			// plan.
 			updated, _ := m.dialogMgr.Update(dialog.CloseDialogMsg{})
 			m.dialogMgr = updated.(dialog.Manager)
+			require.True(t, m.dialogMgr.Closing())
+			require.Nil(t, m.dialogMgr.TopDialog(), "closing help still covers the plan detail")
+			duringClose := runPlanFlow(t, m, messages.RefreshPlansMsg{})
+			assert.Empty(t, notificationTexts(duringClose), "a closing cover must not surface buried errors")
+			_, closedDuringFade := firstOfType[dialog.ClosePlanDetailMsg](duringClose)
+			assert.False(t, closedDuringFade)
+
+			// Drive the shared root clock; issuing Close alone does not surface a dialog.
+			for ticks := 0; m.dialogMgr.Closing() && ticks < 30; ticks++ {
+				tickCmd := m.ar.EnsureRunning()
+				require.NotNil(t, tickCmd)
+				_, _ = m.Update(tickCmd())
+			}
+			require.False(t, m.dialogMgr.Closing(), "cover fade must settle")
+			detail, ok := m.dialogMgr.TopDialog().(dialog.PlanDetailViewer)
+			require.True(t, ok, "the detail must actually surface before refreshing")
+			require.Equal(t, plans.SharedRef("release"), detail.PlanRef())
 
 			msgs := runPlanFlow(t, m, messages.RefreshPlansMsg{})
 			closeMsg, closed := firstOfType[dialog.ClosePlanDetailMsg](msgs)

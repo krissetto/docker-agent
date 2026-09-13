@@ -46,7 +46,7 @@ colors:
   
   # UI element colors
   line_number: "#6272a4"
-  separator: "#44475a"
+  separator: "#6272a4"
   selected: "#44475a"
   selected_fg: "#ffffff"
   suggestion_ghost: "#6272a4"
@@ -56,7 +56,27 @@ colors:
   tab_inactive_fg: "#6272a4"
   tab_border: "#bd93f9"
 
-  placeholder: "#6272a4"
+  placeholder: "#f8f8f2"
+  # Shared shell/editor semantic colors
+  editor_bg: "#44475a"
+  card_bg: "#44475a"
+  shell_bg: "#282a36"
+  tab_hover_bg: "#44475a"
+  tab_hover_fg: "#f8f8f2"
+  tab_drag_bg: "#44475a"
+  tab_drag_fg: "#f8f8f2"
+  tab_busy: "#f1fa8c"
+  context_empty: "#282a36"
+  context_fill: "#8be9fd"
+  context_text: "#6272a4"
+  resize: "#6272a4"
+  resize_hover: "#8be9fd"
+  resize_active: "#f8f8f2"
+  hint: "#f8f8f2"
+  focus: "#8be9fd"
+  disabled: "#44475a"
+  status_adjacent: "#6272a4"
+
   
   # Badge colors
   badge_accent: "#bd93f9"

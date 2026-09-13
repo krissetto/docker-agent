@@ -18,7 +18,7 @@ func TestRenderTabAttachedIdentityAndRootUnchanged(t *testing.T) {
 	root := renderTab(messages.TabInfo{Title: "worker"}, 20, dragRoleNone, 0)
 	attached := renderTab(messages.TabInfo{Title: "worker", IsAttached: true}, 20, dragRoleNone, 0)
 
-	assert.Equal(t, "▎ worker × ", ansi.Strip(root.View()), "ordinary root rendering stays visually stable")
+	assert.Equal(t, "▎ worker"+strings.Repeat(" ", 14)+" × ", ansi.Strip(root.View()), "ordinary root identity and chrome remain stable")
 	assert.NotContains(t, ansi.Strip(root.View()), attachedIndicator)
 	assert.Contains(t, ansi.Strip(attached.View()), attachedIndicator)
 	assert.Equal(t, root.Width()+lipgloss.Width(attachedIndicator), attached.Width())

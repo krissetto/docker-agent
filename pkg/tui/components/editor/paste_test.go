@@ -667,7 +667,7 @@ func newPasteTestEditor() *editor {
 	ta.Focus()
 	return &editor{
 		textarea: ta,
-		banner:   newAttachmentBanner(),
+		banner:   newContextBar(),
 	}
 }
 

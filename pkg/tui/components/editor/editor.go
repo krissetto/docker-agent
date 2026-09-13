@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -88,7 +89,15 @@ type Editor interface {
 	Cleanup()
 	GetSize() (width, height int)
 	BannerHeight() int
+	BannerView(totalWidth int) string
+	ToggleContextBar()
+	SetContextBarFocused(focused bool)
+	IsContextBarFocused() bool
+	HasContextBar() bool
+	// ContentLineCount reports visual rows, including wraps and explicit newlines.
+	ContentLineCount() int
 	AttachmentAt(x int) (AttachmentPreview, bool)
+	AttachmentAtPosition(x, y int) (AttachmentPreview, bool)
 	// SetRecording sets the recording mode which shows animated dots as the cursor
 	SetRecording(recording bool) tea.Cmd
 	// IsRecording returns true if the editor is in recording mode
@@ -148,7 +157,7 @@ type editor struct {
 	// Only set when cursor is in a word starting with @, cleared when cursor leaves.
 	pendingFileRef string
 	// banner renders pending attachments so the user can see what's queued.
-	banner *attachmentBanner
+	banner *contextBar
 	// attachments tracks all file attachments (pastes and file refs).
 	attachments []attachment
 	// pasteCounter tracks the next paste number for display purposes.
@@ -241,7 +250,7 @@ func New(hist *history.History, opts ...Option) Editor {
 		hist:                          hist,
 		placeholder:                   defaultPlaceholder,
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
-		banner:                        newAttachmentBanner(),
+		banner:                        newContextBar(),
 	}
 
 	// Apply options
@@ -1340,20 +1349,18 @@ func (e *editor) View() string {
 		view = e.applySuggestionOverlay(view)
 	}
 
-	bannerView := e.banner.View()
-	if bannerView != "" {
-		view = lipgloss.JoinVertical(lipgloss.Left, bannerView, view)
-	}
-
 	if e.historySearch.active {
 		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
 	}
 
-	return styles.RenderComposite(styles.EditorStyle.MarginBottom(1), view)
+	return styles.RenderComposite(styles.EditorStyle.Width(e.width+styles.EditorStyle.GetHorizontalPadding()+styles.EditorStyle.GetHorizontalBorderSize()), view)
 }
 
 // SetSize sets the dimensions of the component
 func (e *editor) SetSize(width, height int) tea.Cmd {
+	oldWidth := e.textarea.Width()
+	oldHeight := e.textarea.Height()
+
 	e.width = width
 	e.height = max(height, 1)
 
@@ -1361,21 +1368,104 @@ func (e *editor) SetSize(width, height int) tea.Cmd {
 	e.searchInput.SetWidth(max(width, 10))
 	e.updateTextareaHeight()
 
+	if e.textarea.Width() != oldWidth && e.textarea.Height() == oldHeight {
+		e.fixViewportScroll()
+	}
+
 	return nil
 }
 
 func (e *editor) updateTextareaHeight() {
 	available := e.height
-	if e.banner != nil {
-		available -= e.banner.Height()
-	}
 	if e.historySearch.active {
 		available--
 	}
 
 	available = max(available, 1)
 
+	oldHeight := e.textarea.Height()
 	e.textarea.SetHeight(available)
+	if e.textarea.Height() != oldHeight {
+		e.fixViewportScroll()
+	}
+}
+
+// fixViewportScroll forces the textarea viewport to recalculate after a size
+// change, then restores the cursor to the same logical line and rune column.
+func (e *editor) fixViewportScroll() {
+	savedRow := e.textarea.Line()
+	lineInfo := e.textarea.LineInfo()
+	savedCol := lineInfo.StartColumn + lineInfo.ColumnOffset
+
+	e.textarea.MoveToBegin()
+	for e.textarea.Line() < savedRow {
+		e.textarea.CursorEnd()
+		e.textarea.CursorDown()
+	}
+	e.textarea.SetCursorColumn(savedCol)
+}
+
+// ContentLineCount returns the number of visual rows occupied by the current
+// content, including soft wraps and explicit newlines. It derives the count
+// directly from the content so querying layout cannot move the cursor or
+// viewport.
+func (e *editor) ContentLineCount() int {
+	width := e.textarea.Width()
+	lines := strings.Split(e.textarea.Value(), "\n")
+	if width <= 0 {
+		return max(len(lines), 1)
+	}
+
+	total := 0
+	for _, line := range lines {
+		total += wrappedLineCount([]rune(line), width)
+	}
+	return max(total, 1)
+}
+
+// wrappedLineCount mirrors textarea's word-wrapping rules without touching its
+// cursor, viewport, or memoization cache.
+func wrappedLineCount(runes []rune, width int) int {
+	lines := [][]rune{{}}
+	word := []rune{}
+	row := 0
+	spaces := 0
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 {
+			if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, append(word, []rune(strings.Repeat(" ", spaces))...))
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], []rune(strings.Repeat(" ", spaces))...)
+			}
+			spaces = 0
+			word = nil
+		} else {
+			lastCharWidth := runewidth.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastCharWidth > width {
+				if len(lines[row]) > 0 {
+					row++
+					lines = append(lines, []rune{})
+				}
+				lines[row] = append(lines[row], word...)
+				word = nil
+			}
+		}
+	}
+
+	if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, append(word, []rune(strings.Repeat(" ", spaces+1))...))
+	}
+
+	return len(lines)
 }
 
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
@@ -1386,6 +1476,34 @@ func (e *editor) BannerHeight() int {
 	return e.banner.Height()
 }
 
+// BannerView renders the attachment context bar outside the textarea.
+func (e *editor) BannerView(totalWidth int) string {
+	if e.banner == nil {
+		return ""
+	}
+	return e.banner.View(totalWidth)
+}
+
+func (e *editor) ToggleContextBar() {
+	if e.banner != nil {
+		e.banner.Toggle()
+	}
+}
+
+func (e *editor) SetContextBarFocused(focused bool) {
+	if e.banner != nil {
+		e.banner.SetFocused(focused)
+	}
+}
+
+func (e *editor) IsContextBarFocused() bool {
+	return e.banner != nil && e.banner.focused
+}
+
+func (e *editor) HasContextBar() bool {
+	return e.banner != nil && e.banner.hasContent()
+}
+
 // GetSize returns the rendered dimensions including EditorStyle padding.
 func (e *editor) GetSize() (width, height int) {
 	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
@@ -1394,11 +1512,16 @@ func (e *editor) GetSize() (width, height int) {
 
 // AttachmentAt returns preview information for the attachment rendered at the given X position.
 func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
+	return e.AttachmentAtPosition(x, contextBarMarginTop+1)
+}
+
+// AttachmentAtPosition uses coordinates local to BannerView, including its margin.
+func (e *editor) AttachmentAtPosition(x, y int) (AttachmentPreview, bool) {
 	if e.banner == nil || e.banner.Height() == 0 {
 		return AttachmentPreview{}, false
 	}
 
-	item, ok := e.banner.HitTest(x)
+	item, ok := e.banner.HitTestPosition(x, y)
 	if !ok {
 		return AttachmentPreview{}, false
 	}

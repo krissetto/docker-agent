@@ -135,9 +135,9 @@ func (d *snapshotsDialog) bodyContent(inner int) string {
 
 func (d *snapshotsDialog) helpKeys() []string {
 	if len(d.fileCounts) == 0 {
-		return []string{"esc", "close"}
+		return nil
 	}
-	return []string{"↑/↓", "navigate", "r", "restore", "esc", "close"}
+	return []string{"↑/↓", "navigate", "r", "restore"}
 }
 
 // renderRow draws a single list entry with the name on the left and a short

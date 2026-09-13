@@ -34,7 +34,7 @@ func NewHelpDialog(bindings []key.Binding) Dialog {
 		},
 		d.renderContent,
 	)
-	d.helpKeys = []string{"↑↓", "scroll", "Esc", "close"}
+	d.helpKeys = []string{"↑↓", "scroll"}
 	return d
 }
 

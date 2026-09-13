@@ -1,3 +1,4 @@
+//nolint:gocritic // Dialog command returns intentionally preserve Bubble Tea evaluation shape.
 package dialog
 
 import (
@@ -58,6 +59,8 @@ func (d *tourOfferDialog) Init() tea.Cmd {
 	return nil
 }
 
+func (d *tourOfferDialog) CancelDialogCmd() tea.Cmd { return tourOfferClose(TourOfferLater) }
+
 func (d *tourOfferDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -71,7 +74,7 @@ func (d *tourOfferDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		case key.Matches(msg, d.keyMap.Never):
 			return d, tourOfferClose(TourOfferNever)
 		case key.Matches(msg, d.keyMap.Later):
-			return d, tourOfferClose(TourOfferLater)
+			return d, d.CancelDialogCmd()
 		}
 	}
 
@@ -99,8 +102,7 @@ func (d *tourOfferDialog) View() string {
 		AddSeparator().
 		AddSpace().
 		AddContent(styles.BaseStyle.Width(contentWidth).Render(
-			"First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes, Esc leaves anytime.",
-		))
+			"First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes."))
 
 	if d.showTelemetryNotice {
 		content = content.

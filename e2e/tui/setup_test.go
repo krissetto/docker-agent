@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 
@@ -46,6 +47,11 @@ func newTUI(t *testing.T, agentFile string, width, height int, tuiOpts ...tui.Op
 // simulated SSE streaming so a scenario can interact with the TUI while the
 // agent is still mid-stream (steering, queueing).
 func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, proxyOpts *fake.ProxyOptions, tuiOpts ...tui.Option) *tuitest.Driver {
+	t.Helper()
+	return newTUIWithProxyOptionsWrapped(t, agentFile, width, height, proxyOpts, nil, tuiOpts...)
+}
+
+func newTUIWithProxyOptionsWrapped(t *testing.T, agentFile string, width, height int, proxyOpts *fake.ProxyOptions, wrap func(tea.Model) tea.Model, tuiOpts ...tui.Option) *tuitest.Driver {
 	t.Helper()
 
 	isolateState(t)
@@ -90,6 +96,9 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 
 	wd, _ := os.Getwd()
 	model := tui.New(ctx, nil /* no spawner: single tab */, application, wd, func() {}, tuiOpts...)
+	if wrap != nil {
+		model = wrap(model)
+	}
 
 	return tuitest.New(t, model, width, height)
 }

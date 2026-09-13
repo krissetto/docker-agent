@@ -56,6 +56,26 @@ colors:
   tab_border: "#7AA2F7"
 
   placeholder: "#808080"
+  # Shared shell/editor semantic colors
+  editor_bg: "#25252c"
+  card_bg: "#24283B"
+  shell_bg: "#1C1C22"
+  tab_hover_bg: "#24283B"
+  tab_hover_fg: "#E5F2FC"
+  tab_drag_bg: "#364A82"
+  tab_drag_fg: "#E5F2FC"
+  tab_busy: "#E0AF68"
+  context_empty: "#1C1C22"
+  context_fill: "#7DCFFF"
+  context_text: "#808080"
+  resize: "#6B75A8"
+  resize_hover: "#7DCFFF"
+  resize_active: "#E5F2FC"
+  hint: "#808080"
+  focus: "#7AA2F7"
+  disabled: "#404550"
+  status_adjacent: "#808080"
+
 
   # Badge colors
   badge_accent: "#B083EA"

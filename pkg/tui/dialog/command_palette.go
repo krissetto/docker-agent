@@ -53,6 +53,7 @@ func NewCommandPaletteDialog(categories []commands.Category) Dialog {
 		categories: categories,
 	}
 	d.textInput.CharLimit = 100
+	d.listHeight = d.targetListHeight
 	d.filterCommands()
 	return d
 }
@@ -255,10 +256,19 @@ func (d *commandPaletteDialog) buildLines(contentWidth int) (lines []string, lin
 	return gl.Lines(), gl.LineToItem()
 }
 
+func (d *commandPaletteDialog) targetListHeight(maxListHeight int) int {
+	if len(d.filtered) == 0 {
+		return min(2, maxListHeight) // blank line plus centred empty-state message
+	}
+	return min(max(1, len(d.buildList(0).Lines())), maxListHeight)
+}
+
 // View renders the command palette dialog.
 func (d *commandPaletteDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
+	dialogWidth, maxHeight, contentWidth := d.dialogSize()
 	d.textInput.SetWidth(contentWidth)
+	maxListHeight := max(1, maxHeight-d.layout.ListOverhead)
+	d.scrollview.SetSize(d.regionWidth(contentWidth), d.visibleListHeight(maxListHeight))
 
 	gl := d.buildList(contentWidth)
 	d.updateScrollviewPosition()
@@ -276,10 +286,10 @@ func (d *commandPaletteDialog) View() string {
 		AddSeparator().
 		AddContent(scrollableContent).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "execute", "esc", "close").
+		AddHelpKeys("↑/↓", "navigate", "enter", "execute").
 		Build()
 
-	return styles.DialogStyle.Width(dialogWidth).Render(content)
+	return styles.DialogStyle.Width(dialogWidth).MaxHeight(max(1, d.Height())).Render(content)
 }
 
 // renderCommand renders a single command line in the list.
