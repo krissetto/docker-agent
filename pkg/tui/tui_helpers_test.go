@@ -18,23 +18,9 @@ func TestKeyboardEnhancementsUpdateCompleteHelp(t *testing.T) {
 	m.focusedPanel = PanelEditor
 	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
 
-	var beforeNewline string
-	for _, binding := range m.AllBindings() {
-		if binding.Help().Desc == "newline" {
-			beforeNewline = binding.Help().Key
-		}
-	}
-	require.Equal(t, "Ctrl+j", beforeNewline)
-
+	require.Equal(t, []string{"ctrl+j"}, helpKeys(m.helpDocument().Current, "composer.newline"))
 	_, _ = m.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
-
-	var afterNewline string
-	for _, binding := range m.AllBindings() {
-		if binding.Help().Desc == "newline" {
-			afterNewline = binding.Help().Key
-		}
-	}
-	require.Equal(t, "Shift+Enter", afterNewline)
+	require.Equal(t, []string{"shift+enter", "ctrl+j"}, helpKeys(m.helpDocument().Current, "composer.newline"))
 }
 
 func TestParseCtrlNumberKey(t *testing.T) {

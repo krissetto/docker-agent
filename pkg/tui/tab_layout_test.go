@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -83,7 +84,7 @@ func TestTabFramePointerRoutes(t *testing.T) {
 			_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 			_ = m.View()
 			if background {
-				_, _ = m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil), OriginatingEvent: "layout-background"})
+				_, _ = m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{}), OriginatingEvent: "layout-background"})
 				require.True(t, m.dialogMgr.TopIsBackground())
 			}
 			x, y := styles.EditorStyle.GetMarginLeft(), m.contentHeight+1

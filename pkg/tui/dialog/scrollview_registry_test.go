@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -79,7 +80,7 @@ func TestPreparedFamilyViewsPreserveScrollResourcesAndSelection(t *testing.T) {
 		{"commands", func() Dialog { return NewCommandPaletteDialog(concretePaletteCommands(2, 10)) }},
 		{"models", func() Dialog { return NewModelPickerDialog(nil) }},
 		{"plans", func() Dialog { return NewPlanBrowserDialog(plans.ListResult{}) }},
-		{"readonly", func() Dialog { return NewHelpDialog(nil) }},
+		{"readonly", func() Dialog { return NewHelpDialog(help.Document{}) }},
 		{"snapshots", func() Dialog { return NewSnapshotsDialog(make([]int, 30)) }},
 	}
 	for _, f := range fixtures {

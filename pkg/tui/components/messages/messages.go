@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
+	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -245,11 +247,12 @@ func nextBlockID() string {
 
 // model implements Model
 type model struct {
-	ar       *animation.Runtime
-	messages []*types.Message
-	views    []layout.Model
-	width    int // Full width including scrollbar space
-	height   int
+	keyboardEnhancementsSupported bool
+	ar                            *animation.Runtime
+	messages                      []*types.Message
+	views                         []layout.Model
+	width                         int // Full width including scrollbar space
+	height                        int
 
 	// Height tracking system fields
 	scrollOffset       int // Current scroll position in lines
@@ -421,6 +424,13 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if !m.userHasScrolled {
 			cmd := m.scrollToBottom()
 			return m, cmd
+		}
+		return m, nil
+
+	case tea.KeyboardEnhancementsMsg:
+		m.keyboardEnhancementsSupported = msg.Flags != 0 || termfeatures.SupportsModifiedEnter(os.Getenv)
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.KeyMap.InsertNewline.SetKeys(core.EditorNewlineKeys(m.keyboardEnhancementsSupported)...)
 		}
 		return m, nil
 
@@ -1106,9 +1116,13 @@ func (m *model) Bindings() []key.Binding {
 	}
 
 	bindings := []key.Binding{
-		key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "select prev")),
-		key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "select next")),
+		key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "select prev")),
+		key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "select next")),
 		key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy message")),
+		key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
+		key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDown", "page down")),
+		key.NewBinding(key.WithKeys("home", "g"), key.WithHelp("Home/g", "scroll top")),
+		key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("End/G", "scroll bottom")),
 	}
 
 	// Only show edit binding when a user message with session position is selected
@@ -1124,16 +1138,13 @@ func (m *model) Bindings() []key.Binding {
 
 // InlineEditBindings returns key bindings for inline edit mode
 func (m *model) InlineEditBindings() []key.Binding {
-	// Get the newline key help based on the configured keymap
 	newlineKeys := m.inlineEditTextarea.KeyMap.InsertNewline.Keys()
-	newlineHelp := "Ctrl+j"
-	if slices.Contains(newlineKeys, "shift+enter") {
-		newlineHelp = "Shift+Enter"
-	}
+	send := core.GetKeys().EditorSend
+	send.SetHelp(strings.Join(send.Keys(), "/"), "save")
 	return []key.Binding{
-		key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "save")),
+		send,
 		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Esc", "cancel")),
-		key.NewBinding(key.WithKeys(newlineKeys...), key.WithHelp(newlineHelp, "newline")),
+		key.NewBinding(key.WithKeys(newlineKeys...), key.WithHelp(strings.Join(newlineKeys, "/"), "newline")),
 	}
 }
 
@@ -3036,14 +3047,9 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 
 	ta.SetStyles(inlineEditStyles())
 
-	// Mirror the composer's configurable newline keys (ctrl+j by default),
-	// always offering shift+enter for terminals with keyboard enhancements.
-	// Clone so the keymap never aliases the cached KeyMap slice.
-	newlineKeys := slices.Clone(core.GetKeys().EditorNewline.Keys())
-	if !slices.Contains(newlineKeys, "shift+enter") {
-		newlineKeys = append([]string{"shift+enter"}, newlineKeys...)
-	}
-	ta.KeyMap.InsertNewline.SetKeys(newlineKeys...)
+	// Share the composer resolution, including configured Shift+Enter ownership.
+	enhanced := m.keyboardEnhancementsSupported || termfeatures.SupportsModifiedEnter(os.Getenv)
+	ta.KeyMap.InsertNewline.SetKeys(core.EditorNewlineKeys(enhanced)...)
 	ta.KeyMap.InsertNewline.SetEnabled(true)
 
 	m.inlineEditTextarea = ta

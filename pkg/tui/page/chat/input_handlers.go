@@ -41,6 +41,13 @@ func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		}
 	}
 
+	// Inline editing bypasses content shortcuts such as sidebar and pending restore.
+	if p.messages.IsInlineEditing() {
+		model, cmd := p.messages.Update(msg)
+		p.messages = model.(messages.Model)
+		return p, cmd
+	}
+
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("alt+up"))):
 		cmd := p.restorePendingMessages()

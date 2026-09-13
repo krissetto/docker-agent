@@ -92,6 +92,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 			m.handleInterrupt()
 		} else {
 			m.screen.Autocomplete.Dismiss()
+			return // Keep the matching draft from immediately reopening completion.
 		}
 	case ui.KeyCtrlL:
 		m.clearScreen()
@@ -972,27 +973,71 @@ func (m *model) addNotice(prefix, text string, style lipgloss.Style) {
 }
 
 func (m *model) commitHelp() {
-	m.screen.Transcript.AddBlock(func(int) []string {
-		return []string{
-			ui.StBold().Render("Commands"),
-			ui.StMuted().Render("  /new       start a new session"),
-			ui.StMuted().Render("  /sessions  resume a session from this directory"),
-			ui.StMuted().Render("  /compact   summarize and compact the conversation"),
-			ui.StMuted().Render("  /model     change the model for the current agent"),
-			ui.StMuted().Render("  /effort    set the model's reasoning effort (e.g. /effort high)"),
-			ui.StMuted().Render("  /copy      copy the last assistant response"),
-			ui.StMuted().Render("  /clear     clear the screen"),
-			ui.StMuted().Render("  /help      show this help"),
-			ui.StMuted().Render("  /exit      quit"),
-			"",
-			ui.StBold().Render("Shortcuts"),
-			ui.StMuted().Render("  Enter      send             Shift+Enter insert newline"),
-			ui.StMuted().Render("  Alt+Enter  follow up        Up/Down     history"),
-			ui.StMuted().Render("  Tab        complete command Shift+Tab   cycle thinking"),
-			ui.StMuted().Render("  Option+Up  edit all pending messages"),
-			ui.StMuted().Render("  Esc        interrupt         Ctrl+C     cancel / quit"),
-			ui.StMuted().Render("  Ctrl+W     delete previous word"),
+	m.screen.Transcript.AddBlock(func(width int) []string {
+		var lines []string
+		heading := func(text string) {
+			if len(lines) > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, ui.WrapANSI(ui.StBold().Render(text), width)...)
 		}
+		entry := func(text string) {
+			lines = append(lines, ui.WrapANSI(ui.StMuted().Render("  "+text), width)...)
+		}
+
+		heading("Lean terminal help")
+		entry("Independent lean app only; not the full TUI's shortcuts.")
+		entry("/help: show this help. Type / for the available command list.")
+		entry("The list includes enabled built-ins and current agent commands/skills.")
+
+		heading("Composer and sending")
+		entry("Enter: send nonempty input; while busy, steer the response (may queue).")
+		entry("LF / Ctrl+J and CR / Ctrl+M decode as Enter here, not newline or model selection.")
+		entry("Shift+Enter: insert newline (requires terminal keyboard support).")
+		entry("Alt+Enter: send; while busy, enqueue an end-of-turn follow-up.")
+		entry("Typing / bracketed paste: insert text; pasted CR characters are stripped.")
+		entry("! prefix: run a shell command instead of sending (not in read-only sessions).")
+
+		heading("Cursor and history")
+		entry("Left / Right: move one character.")
+		entry("Alt+B / Alt+F: move one word backward / forward.")
+		entry("Ctrl+Left/Right, Alt+Left/Right, Shift+Left/Right: move by word, not select.")
+		entry("Home / Ctrl+A: line start. End / Ctrl+E: line end.")
+		entry("Up / Down: move visual row; at first / last row, previous / next history.")
+		entry("Down past newest history restores the draft. Completion overrides Up / Down.")
+		entry("No app-level selection, select-all, or copy-selection bindings.")
+
+		heading("Editing")
+		entry("Backspace / Ctrl+H: delete previous character. Delete: delete next character.")
+		entry("Ctrl+D: delete next character with a nonempty draft; quit if empty.")
+		entry("Ctrl+U / Ctrl+K: delete to line start / end.")
+		entry("Ctrl+W / Alt+Backspace: delete previous word.")
+
+		heading("Command and argument completion")
+		entry("Type / at the start of a single-line draft (no spaces) to find commands.")
+		entry("Up / Down: select previous / next match (stops at the ends).")
+		entry("Enter: execute selected completion. Tab: accept it and add a space, without sending.")
+		entry("Esc: dismiss completion when idle with no run handle; typing can reopen it.")
+		entry("Tab does nothing without active completion; scoped arguments use the same controls.")
+
+		heading("Response and application controls")
+		entry("Alt+Up: withdraw all eligible pending messages and restore their displays as one draft.")
+		entry("This replaces the draft; unavailable or already-consumed pending messages stay unchanged.")
+		entry("Ctrl+C: cancel while busy; otherwise clear a nonempty draft; otherwise quit.")
+		entry("Esc: invoke that same interrupt when busy or a run handle remains; no double-Esc guard.")
+		entry("Shift+Tab: cycle thinking effort when the current model/runtime supports it.")
+		entry("Ctrl+L: clear/redraw the screen, without resetting the conversation.")
+
+		heading("Tool confirmation (takes priority over all other keys)")
+		entry("Y / y: approve once. A / a: always approve this tool.")
+		entry("B / b: auto-approve safe tools (balanced). S / s: approve autonomously for the session.")
+		entry("N / n / Esc: reject. Other keys, including Enter, Ctrl+C and Ctrl+D, are ignored.")
+
+		heading("Terminal key aliases")
+		entry("Alt includes Option when the terminal sends Alt sequences.")
+		entry("Supported CSI / SS3 cursor and Home/End encodings share the actions above.")
+		entry("Supported Kitty encodings share these actions; unsupported controls/Alt keys are ignored.")
+		return lines
 	})
 }
 

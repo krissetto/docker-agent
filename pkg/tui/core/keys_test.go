@@ -29,7 +29,7 @@ func TestBuildKeys_Overrides(t *testing.T) {
 		Keybindings: []userconfig.Keybinding{
 			{Action: "quit", Keys: []string{"ctrl+q"}},
 			{Action: "commands", Keys: []string{"f2", "ctrl+k"}},
-			{Action: "editor_newline", Keys: []string{"alt+enter"}},
+			{Action: "editor_newline", Keys: []string{"alt+j"}},
 			{Action: "editor_send", Keys: []string{"ctrl+d"}},
 			{Action: "unknown_action", Keys: []string{"ctrl+u"}}, // ignored
 		},
@@ -39,7 +39,7 @@ func TestBuildKeys_Overrides(t *testing.T) {
 
 	assert.Equal(t, []string{"ctrl+q"}, keys.Quit.Keys())
 	assert.Equal(t, []string{"f2", "ctrl+k"}, keys.Commands.Keys())
-	assert.Equal(t, []string{"alt+enter"}, keys.EditorNewline.Keys())
+	assert.Equal(t, []string{"alt+j"}, keys.EditorNewline.Keys())
 	assert.Equal(t, []string{"ctrl+d"}, keys.EditorSend.Keys())
 
 	// The first override key drives the help label, capitalized for display.
@@ -108,11 +108,11 @@ func TestBuildKeys_ReuseFreedKey(t *testing.T) {
 	t.Parallel()
 	keys := buildKeys(&userconfig.Settings{
 		Keybindings: []userconfig.Keybinding{
-			{Action: "editor_newline", Keys: []string{"alt+enter"}}, // frees ctrl+j
-			{Action: "editor_send", Keys: []string{"ctrl+j"}},       // now allowed
+			{Action: "editor_newline", Keys: []string{"alt+j"}}, // frees ctrl+j
+			{Action: "editor_send", Keys: []string{"ctrl+j"}},   // now allowed
 		},
 	})
-	assert.Equal(t, []string{"alt+enter"}, keys.EditorNewline.Keys())
+	assert.Equal(t, []string{"alt+j"}, keys.EditorNewline.Keys())
 	assert.Equal(t, []string{"ctrl+j"}, keys.EditorSend.Keys())
 }
 
@@ -159,7 +159,7 @@ settings:
     - action: "quit"
       keys: ["ctrl+q"]
     - action: "editor_newline"
-      keys: ["alt+enter"]
+      keys: ["alt+j"]
     - action: "history_search"
       keys: ["ctrl+f"]
 `
@@ -169,7 +169,7 @@ settings:
 	keys := buildKeys(config.Settings)
 
 	assert.Equal(t, []string{"ctrl+q"}, keys.Quit.Keys())
-	assert.Equal(t, []string{"alt+enter"}, keys.EditorNewline.Keys())
+	assert.Equal(t, []string{"alt+j"}, keys.EditorNewline.Keys())
 	assert.Equal(t, []string{"ctrl+f"}, keys.HistorySearch.Keys())
 	assert.Equal(t, []string{"tab"}, keys.SwitchFocus.Keys())
 }
@@ -194,4 +194,33 @@ func TestValidActions(t *testing.T) {
 	assert.Contains(t, actions, "editor_newline")
 	assert.Contains(t, actions, "quit")
 	assert.Len(t, actions, 14)
+}
+
+func TestBuildKeysHelpFallbackAndReservedFollowup(t *testing.T) {
+	t.Parallel()
+	keys := buildKeys(&userconfig.Settings{Keybindings: []userconfig.Keybinding{
+		{Action: "help", Keys: []string{"f7"}},
+		{Action: "commands", Keys: []string{"f1"}},
+		{Action: "editor_newline", Keys: []string{"alt+enter"}},
+	}})
+	require.Equal(t, []string{"f7", "f1"}, keys.Help.Keys())
+	require.Equal(t, []string{"ctrl+k"}, keys.Commands.Keys())
+	require.Equal(t, []string{"ctrl+j"}, keys.EditorNewline.Keys())
+}
+
+func TestEditorNewlineKeysRespectConfiguredEnhancedOwner(t *testing.T) {
+	t.Parallel()
+	for _, action := range ValidActions() {
+		t.Run(action, func(t *testing.T) {
+			keys := buildKeys(&userconfig.Settings{Keybindings: []userconfig.Keybinding{{Action: action, Keys: []string{"shift+enter"}}}})
+			got := editorNewlineKeys(keys, true)
+			if action == "editor_newline" {
+				require.Equal(t, []string{"shift+enter"}, got)
+			} else {
+				require.Equal(t, []string{"ctrl+j"}, got)
+			}
+		})
+	}
+	require.Equal(t, []string{"ctrl+j"}, editorNewlineKeys(DefaultKeyMap(), false))
+	require.Equal(t, []string{"shift+enter", "ctrl+j"}, editorNewlineKeys(DefaultKeyMap(), true))
 }

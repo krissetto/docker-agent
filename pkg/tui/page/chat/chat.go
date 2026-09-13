@@ -138,6 +138,8 @@ type Page interface {
 	IsWorking() bool
 	// IsInlineEditing returns true if a past user message is being edited inline
 	IsInlineEditing() bool
+	// IsTitleEditing reports the sidebar title input owns keyboard and paste.
+	IsTitleEditing() bool
 	// IsSelecting returns true while a text-selection drag is active in the messages panel
 	IsSelecting() bool
 	// QueueLength returns the number of queued messages
@@ -395,10 +397,7 @@ func defaultKeyMap() KeyMap {
 			key.WithHelp("Esc", "interrupt"),
 		),
 		ToggleSplitDiff: splitDiff,
-		ToggleSidebar: key.NewBinding(
-			key.WithKeys("ctrl+b"),
-			key.WithHelp("Ctrl+b", "toggle sidebar"),
-		),
+		ToggleSidebar:   core.GetKeys().ToggleSidebar,
 	}
 }
 
@@ -678,6 +677,14 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := p.SetSize(msg.Width, msg.Height)
+		return p, cmd
+
+	case tea.PasteMsg:
+		if p.sidebar.IsEditingTitle() {
+			return p, p.sidebar.UpdateTitleInput(msg)
+		}
+		model, cmd := p.messages.Update(msg)
+		p.messages = model.(messages.Model)
 		return p, cmd
 
 	case tea.KeyPressMsg:
@@ -1666,3 +1673,6 @@ func (p *chatPage) BlurMessages() {
 func (p *chatPage) ScrollToBottom() tea.Cmd {
 	return p.messages.ScrollToBottom()
 }
+
+// IsTitleEditing reports whether the sidebar title input is active.
+func (p *chatPage) IsTitleEditing() bool { return p.sidebar.IsEditingTitle() }

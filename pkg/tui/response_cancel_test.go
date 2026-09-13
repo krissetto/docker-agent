@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -127,7 +128,7 @@ func TestResponsePromptDisarmsOnInputFinishRestartAndModal(t *testing.T) {
 	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	_, _ = root.Update(runtime.StreamStarted(root.application.Session().ID, "root"))
 	require.False(t, root.responsePrompt.armed, "new run cannot inherit old confirmation")
-	_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})})
 	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.False(t, root.responsePrompt.armed, "modal Escape only dismisses its dialog")
 	require.Zero(t, handle.cancels.Load())
@@ -202,7 +203,7 @@ func TestActualProgramResponsePromptRunAndModalGuards(t *testing.T) {
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Eventually(t, promptVisible, time.Second, time.Millisecond)
 	require.Zero(t, handle.cancels.Load(), "new-run Escape cannot cancel by inheriting prior prompt")
-	program.Send(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	program.Send(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})})
 	require.Eventually(t, func() bool { return !promptVisible() }, time.Second, time.Millisecond)
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Zero(t, handle.cancels.Load(), "modal Escape dismisses, never arms or cancels underneath")

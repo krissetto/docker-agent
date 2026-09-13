@@ -647,3 +647,16 @@ func TestSettingsActionsMatchSelectedControl(t *testing.T) {
 	d.changeValue(1)
 	require.Equal(t, before, d.current, "disabled selection cannot mutate settings")
 }
+
+func TestSettingsSelectedSectionUsesColorOnly(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	for tab := range tabCount {
+		d.tab = tab
+		view := d.renderTabBar(100)
+		assertToolActionsNotUnderlined(t, view)
+		for _, label := range settingsTabLabels {
+			assert.Contains(t, ansi.Strip(view), label)
+		}
+		assert.Equal(t, tab, d.tab, "render preserves the selected section")
+	}
+}

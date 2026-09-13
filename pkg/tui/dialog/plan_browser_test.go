@@ -141,13 +141,9 @@ func TestPlanBrowserFilter(t *testing.T) {
 	require.Len(t, d.filtered, 1)
 	assert.Equal(t, "release", d.filtered[0].Name)
 
-	// Esc leaves filter mode without closing the dialog.
+	// Escape has the same safe dismissal meaning in filter and content modes.
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	assert.False(t, d.filtering)
-	assert.Nil(t, cmd)
-
-	// Outside filter mode, esc closes.
-	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	assert.True(t, d.filtering, "dismissal does not rewrite the underlying filter state")
 	msgs := collectMsgs(cmd)
 	_, ok := firstMsgOfType[CloseDialogMsg](msgs)
 	assert.True(t, ok)
@@ -468,15 +464,16 @@ func TestPlanBrowserFilteringPillsCannotTypeActionLetters(t *testing.T) {
 	view := d.View()
 	row, col := d.Position()
 	dl := NewDialogLayout(view, row, col)
-	done := false
+	detail := false
 	for y := row; y < row+dl.Height; y++ {
 		for x := col; x < col+dl.Width; x++ {
 			k, hit := d.ActionKeyAt(x, y, dl)
 			if hit {
-				require.Contains(t, []rune{tea.KeyEnter, tea.KeyEscape}, k.Code)
-				done = done || k.Code == tea.KeyEscape
+				require.Equal(t, tea.KeyEnter, k.Code)
+				detail = true
 			}
 		}
 	}
-	require.True(t, done, "filter mode supplies an actual Done filtering action")
+	require.True(t, detail, "filter mode retains the meaningful Detail action")
+	require.NotContains(t, view, "Done filtering")
 }

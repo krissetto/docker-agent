@@ -22,29 +22,24 @@ func TestPrimaryHelpKeepsCompleteKeyboardHelp(t *testing.T) {
 		require.Len(t, bindings, 1)
 		require.Equal(t, "quit", bindings[0].Help().Desc)
 		require.Equal(t, []string{"ctrl+c"}, bindings[0].Keys())
-		nl := "ctrl+j"
+		doc := m.helpDocument()
+		require.Equal(t, "Composer", doc.Context)
+		require.Contains(t, helpKeys(doc.Current, "composer.newline"), "ctrl+j")
 		if enhanced {
-			nl = "shift+enter"
+			require.Contains(t, helpKeys(doc.Current, "composer.newline"), "shift+enter")
 		}
-		var fullKeys []string
-		for _, binding := range m.AllBindings() {
-			fullKeys = append(fullKeys, binding.Keys()...)
-		}
-		require.Equal(t, []string{
-			"ctrl+c", "tab", "ctrl+t", "ctrl+w", "ctrl+p", "ctrl+n",
-			"ctrl+k", "ctrl+h", "f1", "ctrl+?", "ctrl+y", "ctrl+o", "ctrl+s", "ctrl+m", "ctrl+z",
-			"shift+tab", "ctrl+b", nl, "ctrl+g", "ctrl+r",
-		}, fullKeys, "complete keyboard shortcut inventory is unchanged")
+		require.Contains(t, helpKeys(doc.Current, "app.help"), "f1")
+		require.Empty(t, helpKeys(doc.Current, "tab.close"), "composer retains delete-word")
 
 		_, cmd := m.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
 		open, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
 		require.True(t, ok, "primary help shortcut opens the help dialog")
-		expected := dialog.NewHelpDialog(m.AllBindings())
+		expected := dialog.NewHelpDialog(doc)
 		open.Model.SetSize(160, 100)
 		expected.SetSize(160, 100)
 		require.Equal(t, expected.View(), open.Model.View(), "keyboard help uses full bindings, not footer subset")
-		require.Contains(t, ansi.Strip(open.Model.View()), "new/close tab")
-		require.Contains(t, ansi.Strip(open.Model.View()), "history search")
+		require.NotContains(t, ansi.Strip(open.Model.View()), "new/close tab")
+		require.Contains(t, ansi.Strip(open.Model.View()), "Composer")
 	}
 	m.leanMode = true
 	require.Len(t, m.Bindings(), 1)
@@ -99,12 +94,7 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 		for _, hint := range m.Bindings() {
 			require.False(t, key.Matches(msg, hint), "newline is absent from the quit-only footer")
 		}
-		var newline key.Binding
-		for _, binding := range m.AllBindings() {
-			if binding.Help().Desc == "newline" {
-				newline = binding
-			}
-		}
+		newline := key.NewBinding(key.WithKeys(helpKeys(m.helpDocument().Current, "composer.newline")...))
 		require.True(t, key.Matches(msg, newline), "complete help retains the dispatched newline key")
 		_, _ = m.Update(msg)
 		require.Equal(t, "first\n", m.editor.Value())

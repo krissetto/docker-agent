@@ -7,6 +7,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/help"
 )
 
 func TestReadOnlyScrollDialogUsesIntrinsicContentHeight(t *testing.T) {
@@ -36,7 +38,7 @@ func TestReadOnlyScrollDialogUsesIntrinsicContentHeight(t *testing.T) {
 }
 
 func TestReadOnlyDialogHasNoCloseActionOrFooterRows(t *testing.T) {
-	d := NewHelpDialog(nil).(*helpDialog)
+	d := NewHelpDialog(help.Document{}).(*helpDialog)
 	d.SetSize(60, 20)
 	view := d.View()
 	require.Empty(t, d.actionRows)

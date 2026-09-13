@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -520,7 +521,7 @@ func TestNestedOpenClearsParentPointerStateWithoutRestoringItOnPop(t *testing.T)
 	mgr.View()
 	mgr.TakeVisualDirty()
 	mgr.drag.active = true
-	child := NewHelpDialog(nil)
+	child := NewHelpDialog(help.Document{})
 	mgr.Update(OpenDialogMsg{Model: child})
 	require.False(t, parent.closeHovered, "parent pointer state clears in the push Update, not on another motion")
 	require.False(t, mgr.stack[0].closeHovered)

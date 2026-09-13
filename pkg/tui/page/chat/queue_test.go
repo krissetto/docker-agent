@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,7 @@ func (s queueTestServices) OnBackgroundEvent(func(runtime.Event)) {}
 type sessionTestSession struct {
 	runtime.UnsupportedSessionHandle
 
+	skills         []skills.Skill
 	mu             sync.Mutex
 	id             string
 	state          runtime.SessionState
@@ -118,6 +120,12 @@ func (s *sessionTestSession) Compact(_ context.Context, prompt string, sink runt
 	s.compactPrompts = append(s.compactPrompts, prompt)
 	sink.Emit(runtime.SessionCompactionCompleted(s.id, runtime.CompactionOutcomeApplied, "root"))
 	return nil
+}
+
+// Skills exposes the same per-handle discovery surface used by App resolution;
+// legacy presentation services are not consulted for a session-bound App.
+func (s *sessionTestSession) Skills(context.Context) ([]skills.Skill, error) {
+	return slices.Clone(s.skills), nil
 }
 
 func (s *sessionTestSession) ResolveSkillCommand(_ context.Context, input string) (string, error) {
@@ -210,6 +218,9 @@ func newSessionTestApp(t *testing.T, sess *session.Session, services *queueTestS
 	}
 	if handle == nil {
 		handle = &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled}
+	}
+	if services.skillset != nil {
+		handle.skills = slices.Clone(services.skillset.Skills())
 	}
 	sessions := &sessionTestRuntime{handle: handle}
 	opts = append([]app.Opt{app.WithRuntimeServices(services)}, opts...)
@@ -378,7 +389,7 @@ func skillCommandParser(name string) *commands.Parser {
 // Hop 1: handleSendMsg parses it and Execute re-emits a BypassQueue SendMsg.
 // Hop 2: that message is fed back through handleSendMsg, which must route it
 // to processMessage instead of re-parsing it into another SendMsg (the loop).
-func dispatchTypedSkill(t *testing.T, p *chatPage, content string) {
+func dispatchTypedSkill(t *testing.T, p *chatPage, content string) tea.Msg {
 	t.Helper()
 
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: content})
@@ -390,9 +401,11 @@ func dispatchTypedSkill(t *testing.T, p *chatPage, content string) {
 
 	_, cmd = p.handleSendMsg(redispatch)
 	require.NotNil(t, cmd)
-	if _, loops := cmd().(messages.SendMsg); loops {
+	result := cmd()
+	if _, loops := result.(messages.SendMsg); loops {
 		t.Fatal("skill SendMsg was re-emitted: dispatch is looping")
 	}
+	return result
 }
 
 // TestHandleSendMsg_SessionNativeSubmit verifies an inline skill is resolved before
@@ -406,6 +419,9 @@ func TestHandleSendMsg_SessionNativeSubmitAndUnsupportedFork(t *testing.T) {
 	a, handle := newSessionTestApp(t, sess, &queueTestServices{skillset: inline}, nil)
 	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 	p.commandParser = skillCommandParser("services")
+	available, err := handle.Skills(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, inline.Skills(), available, "canonical handle discovers exactly the configured inline skill")
 	dispatchTypedSkill(t, p, "/services please")
 	require.Eventually(t, func() bool { return len(handle.submitted()) == 1 }, time.Second, 10*time.Millisecond)
 	require.Len(t, handle.submitted(), 1)
@@ -416,7 +432,21 @@ func TestHandleSendMsg_SessionNativeSubmitAndUnsupportedFork(t *testing.T) {
 	forkApp, forkHandle := newSessionTestApp(t, session.New(), &queueTestServices{skillset: fork}, nil)
 	forkPage := New(animation.NewRuntime(), t.Context(), forkApp, service.NewSessionState(forkApp.Session())).(*chatPage)
 	forkPage.commandParser = skillCommandParser("worker")
-	dispatchTypedSkill(t, forkPage, "/worker task")
+	available, err = forkHandle.Skills(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, fork.Skills(), available, "canonical handle discovers exactly the configured fork skill")
+	resolved, err := forkApp.ResolveInputOnce(t.Context(), "/worker task")
+	require.NoError(t, err)
+	require.True(t, resolved.ForkSkill)
+	require.Equal(t, "worker", resolved.SkillName)
+	require.Equal(t, "task", resolved.SkillTask)
+	result, ok := dispatchTypedSkill(t, forkPage, "/worker task").(skillAdmissionMsg)
+	require.True(t, ok, "fork path must return synchronous admission result, not launch parent Run")
+	require.NotEmpty(t, result.operationID)
+	var unsupported *runtime.SessionError
+	require.ErrorAs(t, result.err, &unsupported)
+	require.Equal(t, runtime.SessionErrorUnsupported, unsupported.Kind)
+	require.Equal(t, runtime.SessionOperationRunSkill, unsupported.Operation)
 	assert.Empty(t, forkHandle.submitted(), "unsupported fork must not fall back to parent Submit")
 }
 

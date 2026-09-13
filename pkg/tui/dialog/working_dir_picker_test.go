@@ -38,3 +38,16 @@ func TestWorkingDirPickerEmptyInitialDirUsesGetwd(t *testing.T) {
 
 	require.Equal(t, cwd, d.currentDir, "empty initial directory should fall back to current working directory")
 }
+
+func TestWorkingDirectorySelectedSectionUsesColorOnly(t *testing.T) {
+	d := &workingDirPickerDialog{}
+	for _, section := range dirPickerSectionOrder {
+		d.section = section
+		view := d.renderTabs(100)
+		assertToolActionsNotUnderlined(t, view)
+		require.Contains(t, view, "Browse")
+		require.Contains(t, view, "Recent")
+		require.Contains(t, view, "Pinned")
+		require.Equal(t, section, d.section, "render preserves the selected section")
+	}
+}

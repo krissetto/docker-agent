@@ -104,6 +104,8 @@ type Editor interface {
 	IsRecording() bool
 	// IsHistorySearchActive returns true if the editor is in history search mode
 	IsHistorySearchActive() bool
+	// HistoryNavigationActive reports whether Up/Down browse history instead of moving the cursor.
+	HistoryNavigationActive() bool
 	// EnterHistorySearch activates incremental history search
 	EnterHistorySearch() (layout.Model, tea.Cmd)
 	// SendContent triggers sending the current editor content
@@ -686,12 +688,7 @@ func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
 // historical defaults intact while letting users replace the ctrl+j fallback
 // that conflicts with common editor/terminal shortcuts (see issue #1626).
 func (e *editor) configureNewlineKeybinding() {
-	// Clone so the textarea's keymap never aliases the cached KeyMap slice.
-	newlineKeys := slices.Clone(core.GetKeys().EditorNewline.Keys())
-	if e.keyboardEnhancementsSupported && !slices.Contains(newlineKeys, "shift+enter") {
-		newlineKeys = append([]string{"shift+enter"}, newlineKeys...)
-	}
-	e.textarea.KeyMap.InsertNewline.SetKeys(newlineKeys...)
+	e.textarea.KeyMap.InsertNewline.SetKeys(core.EditorNewlineKeys(e.keyboardEnhancementsSupported)...)
 	e.textarea.KeyMap.InsertNewline.SetEnabled(true)
 }
 
@@ -2014,3 +2011,5 @@ func (e *editor) exitHistorySearch() tea.Cmd {
 	e.historySearch = historySearchState{matchIndex: -1}
 	return e.textarea.Focus()
 }
+
+func (e *editor) HistoryNavigationActive() bool { return !e.userTyped }

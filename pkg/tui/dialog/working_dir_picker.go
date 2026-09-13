@@ -812,7 +812,7 @@ func (d *workingDirPickerDialog) helpKeys() []string {
 }
 
 func (d *workingDirPickerDialog) renderTabs(width int) string {
-	activeStyle := styles.HighlightWhiteStyle.Underline(true)
+	activeStyle := styles.HighlightWhiteStyle
 	inactiveStyle := styles.MutedStyle
 	countStyle := styles.MutedStyle
 	activeCountStyle := styles.SecondaryStyle

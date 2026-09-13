@@ -2,163 +2,148 @@ package dialog
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// helpDialog displays all currently active key bindings in a scrollable dialog.
+// helpDialog owns a detached snapshot, never the underlying input or action state.
 type helpDialog struct {
 	readOnlyScrollDialog
 
-	bindings []key.Binding
+	document help.Document
+	page     int
 }
 
-// NewHelpDialog creates a new help dialog that displays all active key bindings.
-func NewHelpDialog(bindings []key.Binding) Dialog {
-	d := &helpDialog{
-		bindings: bindings,
-	}
+// NewHelpDialog displays the captured context first, then named reference pages.
+func NewHelpDialog(document help.Document) Dialog {
+	d := &helpDialog{document: help.Document{
+		Context:   document.Context,
+		Current:   copyHelpSections(document.Current),
+		Reference: copyHelpSections(document.Reference),
+	}}
 	d.readOnlyScrollDialog = newReadOnlyScrollDialog(
 		readOnlyScrollDialogSize{
-			widthPercent:  70,
-			minWidth:      60,
-			maxWidth:      120,
-			heightPercent: 80,
-			heightMax:     40,
-		},
-		d.renderContent,
+			widthPercent: 70, minWidth: 60, maxWidth: 120,
+			heightPercent: 80, heightMax: 40,
+		}, d.renderContent,
 	)
-	d.helpKeys = []string{"↑↓", "scroll"}
 	return d
 }
 
-// renderContent renders the help dialog content.
-func (d *helpDialog) renderContent(contentWidth, maxHeight int) []string {
-	titleStyle := styles.DialogTitleStyle
-	separatorStyle := styles.DialogSeparatorStyle
-	keyStyle := styles.DialogHelpStyle.Foreground(styles.TextSecondary).Bold(true)
-	descStyle := styles.DialogHelpStyle
+// IsHelpDialog lets the owner avoid stacking Help over itself.
+func IsHelpDialog(d Dialog) bool {
+	_, ok := d.(*helpDialog)
+	return ok
+}
 
+// copyHelpSections also deduplicates aliases and repeated action identities within
+// the same context section, without merging unrelated actions sharing a key.
+func copyHelpSections(sections []help.Section) []help.Section {
+	out := make([]help.Section, 0, len(sections))
+	for _, section := range sections {
+		copySection := help.Section{ID: section.ID, Title: section.Title}
+		seen := make(map[string]int)
+		for _, entry := range section.Entries {
+			identity := entry.ID + "\x00" + entry.Condition
+			if entry.ID == "" {
+				identity += "\x00" + entry.Description
+			}
+			i, exists := seen[identity]
+			if !exists {
+				i = len(copySection.Entries)
+				seen[identity] = i
+				copySection.Entries = append(copySection.Entries, help.Entry{
+					ID: entry.ID, Description: entry.Description, Condition: entry.Condition,
+				})
+			}
+			for _, alias := range entry.Keys {
+				if alias != "" && !slices.Contains(copySection.Entries[i].Keys, alias) {
+					copySection.Entries[i].Keys = append(copySection.Entries[i].Keys, alias)
+				}
+			}
+		}
+		out = append(out, copySection)
+	}
+	return out
+}
+
+func (d *helpDialog) renderContent(contentWidth, _ int) []string {
+	width := max(1, contentWidth)
+	pageTitle := "This context"
+	sections := d.document.Current
+	if d.page > 0 {
+		sections = d.document.Reference[d.page-1 : d.page]
+		pageTitle = "Reference · " + sections[0].Title
+	}
+	// Exactly three bounded header rows retain the shared read-only layout.
 	lines := []string{
-		titleStyle.Render("Active Key Bindings"),
-		separatorStyle.Render(strings.Repeat("─", contentWidth)),
-		"",
+		styles.DialogTitleStyle.Render(ansi.Truncate("Help · "+pageTitle, width, "…")),
+		styles.DialogSeparatorStyle.Render(strings.Repeat("─", width)),
+		styles.DialogHelpStyle.Render(ansi.Truncate(fmt.Sprintf("%d/%d · ←/→ categories · ↑/↓ scroll", d.page+1, len(d.document.Reference)+1), width, "…")),
 	}
-
-	// Group bindings by category for better organization
-	// We'll do a simple categorization based on key prefixes
-	globalBindings := []key.Binding{}
-	ctrlBindings := []key.Binding{}
-	otherBindings := []key.Binding{}
-
-	for _, binding := range d.bindings {
-		if len(binding.Keys()) == 0 {
-			continue
+	appendText := func(text string, indent int, heading bool) {
+		indent = min(indent, max(0, width-1))
+		wrapped := ansi.Hardwrap(ansi.Wrap(text, width-indent, ""), width-indent, false)
+		style := styles.DialogHelpStyle
+		if heading {
+			style = style.Bold(true).Foreground(styles.TextSecondary)
 		}
-		keyStr := binding.Keys()[0]
-		switch {
-		case strings.HasPrefix(keyStr, "ctrl+"):
-			ctrlBindings = append(ctrlBindings, binding)
-		case keyStr == "esc" || keyStr == "enter" || keyStr == "tab":
-			globalBindings = append(globalBindings, binding)
-		default:
-			otherBindings = append(otherBindings, binding)
+		for line := range strings.SplitSeq(wrapped, "\n") {
+			lines = append(lines, strings.Repeat(" ", indent)+style.Render(ansi.Truncate(line, width-indent, "")))
 		}
 	}
-
-	// Render global bindings
-	if len(globalBindings) > 0 {
-		lines = append(lines,
-			styles.DialogHelpStyle.Bold(true).Render("General"),
-			"",
-		)
-		for _, binding := range globalBindings {
-			lines = append(lines, d.formatBinding(binding, keyStyle, descStyle))
-		}
+	if d.page == 0 {
+		appendText("Captured context: "+d.document.Context, 0, true)
+		appendText("These controls describe the view beneath Help. Dismiss Help to use them.", 0, false)
+	} else {
+		appendText("Other-context reference — not all controls are active in the captured view.", 0, false)
+	}
+	if d.page == 0 {
+		appendText("Help: ←/→ categories; ↑/↓ or j/k scroll; pgup/pgdown pages; home/end limits; wheel or scrollbar scroll; enter/q/esc or × dismiss. F1 keeps this Help open.", 0, false)
+	} else {
+		appendText("pgup/pgdown scroll pages · enter/q/esc dismiss Help", 0, false)
+	}
+	for _, section := range sections {
 		lines = append(lines, "")
-	}
-
-	// Render ctrl bindings
-	if len(ctrlBindings) > 0 {
-		lines = append(lines,
-			styles.DialogHelpStyle.Bold(true).Render("Control Key Shortcuts"),
-			"",
-		)
-		for _, binding := range ctrlBindings {
-			lines = append(lines, d.formatBinding(binding, keyStyle, descStyle))
-		}
-		lines = append(lines, "")
-	}
-
-	// Render other bindings
-	if len(otherBindings) > 0 {
-		lines = append(lines,
-			styles.DialogHelpStyle.Bold(true).Render("Other"),
-			"",
-		)
-		for _, binding := range otherBindings {
-			lines = append(lines, d.formatBinding(binding, keyStyle, descStyle))
+		appendText(section.Title, 0, true)
+		for _, entry := range section.Entries {
+			appendText(strings.Join(entry.Keys, " / "), 0, true)
+			appendText(entry.Description, 2, false)
+			if entry.Condition != "" {
+				appendText("When: "+entry.Condition, 2, false)
+			}
 		}
 	}
-
 	return lines
 }
 
-// formatBinding formats a single key binding as "  key  description"
-func (d *helpDialog) formatBinding(binding key.Binding, keyStyle, descStyle lipgloss.Style) string {
-	helpInfo := binding.Help()
-	helpKey := helpInfo.Key
-	helpDesc := helpInfo.Desc
-
-	// Calculate spacing to align descriptions
-	const keyWidth = 20
-	const indent = 2
-
-	keyPart := keyStyle.Render(helpKey)
-	descPart := descStyle.Render(helpDesc)
-
-	// Pad the key part to align descriptions
-	keyPartWidth := lipgloss.Width(keyPart)
-	padding := strings.Repeat(" ", max(1, keyWidth-keyPartWidth))
-
-	return fmt.Sprintf("%s%s%s%s",
-		strings.Repeat(" ", indent),
-		keyPart,
-		padding,
-		descPart,
-	)
-}
-
-func (d *helpDialog) Init() tea.Cmd {
-	return d.readOnlyScrollDialog.Init()
-}
-
 func (d *helpDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	model, cmd := d.readOnlyScrollDialog.Update(msg)
-	if rod, ok := model.(*readOnlyScrollDialog); ok {
-		d.readOnlyScrollDialog = *rod
+	if k, ok := msg.(tea.KeyPressMsg); ok && k.Mod == 0 {
+		delta := 0
+		switch k.Code {
+		case tea.KeyLeft:
+			delta = -1
+		case tea.KeyRight:
+			delta = 1
+		}
+		if delta != 0 {
+			d.page = (d.page + delta + len(d.document.Reference) + 1) % (len(d.document.Reference) + 1)
+			d.scrollview.ScrollToTop()
+			d.renderBody(true)
+			d.MarkVisualDirty()
+			return d, nil
+		}
 	}
+	_, cmd := d.readOnlyScrollDialog.Update(msg)
 	return d, cmd
 }
 
-func (d *helpDialog) View() string {
-	return d.readOnlyScrollDialog.View()
-}
-
-func (d *helpDialog) Position() (int, int) {
-	return d.readOnlyScrollDialog.Position()
-}
-
-func (d *helpDialog) SetSize(width, height int) tea.Cmd {
-	return d.readOnlyScrollDialog.SetSize(width, height)
-}
-
-func (d *helpDialog) Bindings() []key.Binding {
-	return []key.Binding{}
-}
+func (d *helpDialog) Bindings() []key.Binding { return nil }

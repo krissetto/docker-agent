@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -162,7 +163,7 @@ func TestRootSingleTabPlusHoverLeaveAndOutsideRelease(t *testing.T) {
 func TestRootBackgroundDialogTabPlusHoverLeavesAfterRelease(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	prepareRootImmediateChrome(root)
-	_, openCmd := root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil), OriginatingEvent: "background-tab-hover"})
+	_, openCmd := root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{}), OriginatingEvent: "background-tab-hover"})
 	settleRootChrome(t, root, openCmd)
 	require.True(t, root.dialogMgr.TopIsBackground())
 	idle := root.tabBar.View()

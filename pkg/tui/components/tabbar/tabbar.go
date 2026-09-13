@@ -581,19 +581,13 @@ func (t *TabBar) HasFloatingOverlay() bool {
 // VisualGeneration changes only when rendered tab geometry or drag styling changes.
 func (t *TabBar) VisualGeneration() uint64 { return t.visualGeneration + styles.AgentColorGeneration() }
 
-// Bindings returns consolidated key bindings for the help bar.
+// Bindings returns distinct actions, never combining unrelated tab operations.
 func (t *TabBar) Bindings() []key.Binding {
-	return []key.Binding{
-		key.NewBinding(
-			key.WithKeys("ctrl+t", "ctrl+w"),
-			key.WithHelp("Ctrl+t/w", "new/close tab"),
-		),
-		key.NewBinding(
-			key.WithKeys("ctrl+p", "ctrl+n"),
-			key.WithHelp("Ctrl+p/n", "prev/next tab"),
-		),
-	}
+	return []key.Binding{t.keyMap.NewTab, t.keyMap.CloseTab, t.keyMap.PrevTab, t.keyMap.NextTab}
 }
+
+// Count reports the number of rendered session tabs.
+func (t *TabBar) Count() int { return len(t.tabs) }
 
 // Update handles messages and returns commands.
 func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {

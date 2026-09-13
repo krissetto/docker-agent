@@ -1223,9 +1223,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialogMgr.Open() {
 			return m.forwardDialog(msg)
 		}
-		// When inline editing a past message, forward paste to the chat page
-		// so the messages component can insert content into the inline textarea.
-		if m.chatPage.IsInlineEditing() {
+		// Local message/title edits own paste, not the background composer.
+		if m.chatPage.IsInlineEditing() || m.chatPage.IsTitleEditing() {
 			return m.forwardChat(msg)
 		}
 		// Forward paste to editor
@@ -2980,70 +2979,6 @@ func (m *appModel) Help() help.KeyMap {
 	return core.NewSimpleHelp(m.Bindings())
 }
 
-// AllBindings returns ALL available key bindings for the help dialog (comprehensive list).
-func (m *appModel) AllBindings() []key.Binding {
-	keys := core.GetKeys()
-	quitBinding := keys.Quit
-
-	if m.leanMode {
-		return []key.Binding{quitBinding}
-	}
-
-	tabBinding := keys.SwitchFocus
-
-	bindings := []key.Binding{quitBinding, tabBinding}
-	bindings = append(bindings, m.tabBar.Bindings()...)
-
-	// Additional global shortcuts. shift+tab is not user-configurable.
-	bindings = append(bindings,
-		keys.Commands,
-		keys.Help,
-		keys.ToggleYolo,
-		keys.ToggleHideToolResults,
-		keys.CycleAgent,
-		keys.ModelPicker,
-		keys.Suspend,
-		key.NewBinding(
-			key.WithKeys("shift+tab"),
-			key.WithHelp("Shift+Tab", "cycle thinking level"),
-		),
-	)
-
-	// leanMode already returned above, so only hideSidebar matters here.
-	if !m.hideSidebar {
-		bindings = append(bindings, keys.ToggleSidebar)
-	}
-
-	// Show newline help based on keyboard enhancement support. shift+enter is
-	// detected at runtime; otherwise fall back to the configured newline key.
-	if m.keyboardEnhancementsSupported {
-		bindings = append(bindings, key.NewBinding(
-			key.WithKeys("shift+enter"),
-			key.WithHelp("Shift+Enter", "newline"),
-		))
-	} else {
-		nl := keys.EditorNewline
-		bindings = append(bindings, key.NewBinding(
-			key.WithKeys(nl.Keys()...),
-			key.WithHelp(nl.Help().Key, "newline"),
-		))
-	}
-
-	if m.focusedPanel == PanelContent {
-		bindings = append(bindings, m.chatPage.Bindings()...)
-	} else {
-		editorName := editorname.FromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
-		editExternal := keys.EditExternal
-		// Keep the binding's capitalized key label; only swap the description.
-		editExternal.SetHelp(editExternal.Help().Key, "edit in "+editorName)
-		bindings = append(bindings,
-			editExternal,
-			keys.HistorySearch,
-		)
-	}
-	return bindings
-}
-
 // Bindings returns primary hints; the help dialog retains the complete bindings.
 func (m *appModel) Bindings() []key.Binding {
 	return []key.Binding{core.GetKeys().Quit}
@@ -3087,6 +3022,15 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m.requestExitConfirmation()
 	}
 
+	// F1 is always a safe help fallback. Modal inputs retain Ctrl+h/backspace;
+	// configured Help aliases apply only outside dialogs. Snapshot before push.
+	if msg.String() == "f1" || (!m.dialogMgr.Open() && key.Matches(msg, keys.Help)) {
+		if dialog.IsHelpDialog(m.dialogMgr.TopDialog()) {
+			return m, nil
+		}
+		return m, core.CmdHandler(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(m.helpDocument())})
+	}
+
 	// Dialog gets priority when open, EXCEPT for background dialogs (e.g.
 	// pending elicitations) which let tab-navigation keys keep working so
 	// the user can switch to another conversation while the prompt waits.
@@ -3098,6 +3042,12 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 			}
 		}
 		return m.forwardDialog(msg)
+	}
+
+	// Local text editing owns all remaining keys, including Ctrl+w/n/p and
+	// Escape. Never close a tab or cancel a response while editing its text.
+	if m.chatPage.IsInlineEditing() || m.chatPage.IsTitleEditing() {
+		return m.forwardChat(msg)
 	}
 
 	if m.messageBar != nil && m.messageBar.Focused() {
@@ -3131,7 +3081,8 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 
 	// Completion popup gets priority when open
 	if m.completions.Open() {
-		if core.IsNavigationKey(msg) {
+		switch msg.String() {
+		case "up", "down", "enter", "tab", "esc":
 			return m.forwardCompletions(msg)
 		}
 		// For all other keys (typing), send to both completion (for filtering) and editor
@@ -3160,17 +3111,11 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 
 	case key.Matches(msg, keys.ModelPicker):
 		return m.handleOpenModelPicker()
-
-	case key.Matches(msg, keys.Help):
-		// Show contextual help dialog with ALL available key bindings
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewHelpDialog(m.AllBindings()),
-		})
 	}
 
 	if m.editor.IsContextBarFocused() {
 		switch msg.String() {
-		case "enter", " ":
+		case "enter", "space":
 			m.editor.ToggleContextBar()
 			cmd := m.resizeAll()
 			return m, cmd

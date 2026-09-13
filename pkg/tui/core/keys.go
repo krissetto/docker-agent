@@ -2,6 +2,7 @@ package core
 
 import (
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,7 @@ var namedKeys = map[string]bool{
 var reservedKeys = []string{
 	"ctrl+t", "ctrl+w", "ctrl+p", "ctrl+n", // tab bar
 	"shift+tab", // cycle thinking level
+	"alt+enter", // end-of-turn follow-up
 	"esc",       // cancel / dismiss
 	"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5",
 	"ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9", // agent quick-switch
@@ -211,6 +213,7 @@ func applyUserKeybindings(bindings []userconfig.Keybinding, entries []actionEntr
 	}
 
 	boundKeys := make(map[string]string)
+	boundKeys["f1"] = "help"
 	for _, k := range reservedKeys {
 		boundKeys[k] = "a built-in shortcut"
 	}
@@ -263,7 +266,30 @@ func buildKeys(settings *userconfig.Settings) KeyMap {
 	if settings != nil && len(settings.Keybindings) > 0 {
 		applyUserKeybindings(settings.Keybindings, actionMapFor(&keys))
 	}
+	if !slices.Contains(keys.Help.Keys(), "f1") {
+		keys.Help.SetKeys(append(slices.Clone(keys.Help.Keys()), "f1")...)
+	}
 	return keys
+}
+
+// EditorNewlineKeys resolves the configured newline aliases and the optional
+// enhanced-terminal fallback without shadowing any configured action.
+func EditorNewlineKeys(enhanced bool) []string {
+	keys := GetKeys()
+	return editorNewlineKeys(keys, enhanced)
+}
+
+func editorNewlineKeys(keys KeyMap, enhanced bool) []string {
+	aliases := slices.Clone(keys.EditorNewline.Keys())
+	if !enhanced || slices.Contains(aliases, "shift+enter") {
+		return aliases
+	}
+	for _, entry := range actionMapFor(&keys) {
+		if entry.binding.Enabled() && slices.Contains(entry.binding.Keys(), "shift+enter") {
+			return aliases
+		}
+	}
+	return append([]string{"shift+enter"}, aliases...)
 }
 
 // GetKeys returns the resolved keybindings, merging the user config over the

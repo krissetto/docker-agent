@@ -345,10 +345,6 @@ func (d *planBrowserDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 		return d, cmd
 
 	case key.Matches(msg, d.keyMap.Escape):
-		if d.filtering {
-			d.stopFiltering()
-			return d, nil
-		}
 		return d, core.CmdHandler(CloseDialogMsg{})
 	}
 
@@ -523,9 +519,6 @@ func (d *planBrowserDialog) renderBody(prepare bool) string {
 		if d.filtering && code != tea.KeyEnter {
 			actions[i].Disabled = true
 		}
-	}
-	if d.filtering {
-		actions = append(actions, actionsForKeys("esc", "Done filtering")...)
 	}
 	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {

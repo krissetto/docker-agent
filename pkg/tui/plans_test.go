@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
@@ -616,7 +617,7 @@ func TestPlanChangedEvent_RefreshesBuriedPlanDialogs(t *testing.T) {
 	require.NoError(t, err)
 	detail := dialog.NewPlanDetailDialog(p)
 	openDialog(t, m, detail)
-	openDialog(t, m, dialog.NewHelpDialog(nil))
+	openDialog(t, m, dialog.NewHelpDialog(help.Document{}))
 
 	// An agent moves the plan to v2 while the plan dialogs are buried.
 	v1 := 1
@@ -712,7 +713,7 @@ func TestPlanRefresh_BuriedDetailSuppressesErrorsUntilSurfaced(t *testing.T) {
 
 			sizeDialogs(t, m)
 			openDialog(t, m, dialog.NewPlanDetailDialog(p))
-			openDialog(t, m, dialog.NewHelpDialog(nil))
+			openDialog(t, m, dialog.NewHelpDialog(help.Document{}))
 
 			// Repeated refreshes neither notify nor try to close the buried
 			// detail.

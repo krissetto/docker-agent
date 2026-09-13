@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	tuiinput "github.com/docker/docker-agent/pkg/tui/input"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
@@ -132,7 +133,7 @@ func TestActualProgramDialogFadeInputAndIdleQuiescence(t *testing.T) {
 		}
 	}
 	require.Eventually(t, func() bool { return writer.snapshot() != "" }, time.Second, time.Millisecond)
-	program.Send(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	program.Send(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})})
 	opened := snapshot()
 	require.True(t, opened.open)
 	require.Positive(t, opened.active, "opening must use shared animation runtime")
@@ -191,7 +192,7 @@ func TestClosingDialogSuppressesQuitWithoutOpeningAnotherDialog(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	defer root.ar.Stop()
 	defer root.dialogMgr.Cleanup()
-	_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})})
 	_, _ = root.Update(dialog.CloseDialogMsg{})
 	require.True(t, root.dialogMgr.Closing())
 	_, cmd := root.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})

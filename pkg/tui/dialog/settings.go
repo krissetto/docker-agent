@@ -463,7 +463,7 @@ func (d *settingsDialog) renderTabBar(width int) string {
 	for i, label := range settingsTabLabels {
 		style := styles.MutedStyle
 		if i == d.tab {
-			style = styles.HighlightWhiteStyle.Underline(true)
+			style = styles.HighlightWhiteStyle
 		}
 		tabs = append(tabs, style.Render(label))
 	}

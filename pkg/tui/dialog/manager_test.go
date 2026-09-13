@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/help"
 )
 
 // TestManagerBackgroundDialog verifies that opening a dialog with a non-nil
@@ -83,7 +84,7 @@ func TestManagerHasDialog(t *testing.T) {
 	assert.True(t, mgr.HasDialog(isExit))
 
 	// Bury it under another dialog: TopDialog no longer sees it, HasDialog does.
-	mgr.handleOpen(OpenDialogMsg{Model: NewHelpDialog(nil)})
+	mgr.handleOpen(OpenDialogMsg{Model: NewHelpDialog(help.Document{})})
 	_, topIsExit := mgr.TopDialog().(*exitConfirmationDialog)
 	require.False(t, topIsExit)
 	assert.True(t, mgr.HasDialog(isExit), "a buried dialog must still be found")
@@ -139,11 +140,11 @@ func TestManagerClosePlanDetail(t *testing.T) {
 		mgr := New(animation.NewRuntime()).(*manager)
 		mgr.SetSize(80, 24)
 		mgr.handleOpen(OpenDialogMsg{Model: newDetail()})
-		help := NewHelpDialog(nil)
-		mgr.handleOpen(OpenDialogMsg{Model: help})
+		helpModal := NewHelpDialog(help.Document{})
+		mgr.handleOpen(OpenDialogMsg{Model: helpModal})
 
 		mgr.Update(ClosePlanDetailMsg{Ref: ref})
-		assert.Same(t, help, mgr.TopDialog(), "the covering dialog must not be popped")
+		assert.Same(t, helpModal, mgr.TopDialog(), "the covering dialog must not be popped")
 		assert.True(t, mgr.HasDialog(func(d Dialog) bool {
 			viewer, ok := d.(PlanDetailViewer)
 			return ok && viewer.PlanRef() == ref

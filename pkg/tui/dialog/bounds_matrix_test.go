@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -47,7 +48,7 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 		{"plan-name", newPlanNameDialog},
 		{"effort", func() Dialog { return NewEffortPickerDialog([]effort.Level{effort.Low, effort.High}, effort.Low) }},
 		{"snapshots", func() Dialog { return NewSnapshotsDialog(make([]int, 30)) }},
-		{"help", func() Dialog { return NewHelpDialog(nil) }},
+		{"help", func() Dialog { return NewHelpDialog(help.Document{}) }},
 		{"tools", func() Dialog { return NewToolsDialog(nil, nil) }},
 		{"skills", func() Dialog { return NewSkillsDialog(nil) }},
 		{"permissions", func() Dialog { return NewPermissionsDialog(nil, false) }},

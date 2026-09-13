@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -136,7 +137,7 @@ func TestObserve_PaletteStep(t *testing.T) {
 	m := startedTour()
 	m.idx = 2
 
-	assert.Nil(t, m.Observe(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)}),
+	assert.Nil(t, m.Observe(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})}),
 		"other dialogs must not complete the palette step")
 
 	require.NotNil(t, m.Observe(dialog.OpenDialogMsg{Model: dialog.NewCommandPaletteDialog(nil)}))

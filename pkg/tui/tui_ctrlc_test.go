@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/help"
 )
 
 // applyOpenDialogMsgs feeds every dialog.OpenDialogMsg in cmd back into the
@@ -42,7 +43,7 @@ func TestCtrlC_OnOtherDialog_StacksExitConfirmation(t *testing.T) {
 	m, _ := newTestModel(t)
 
 	// Open an arbitrary, non-exit dialog first.
-	_, cmd := m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil)})
+	_, cmd := m.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(help.Document{})})
 	applyOpenDialogMsgs(t, m, cmd)
 	require.True(t, m.dialogMgr.Open(), "help dialog should be open")
 	require.False(t, m.dialogMgr.TopIsExitConfirmation(),
