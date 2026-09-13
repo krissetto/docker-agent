@@ -83,7 +83,7 @@ func TestMigrationCatalogIsContentPinned(t *testing.T) {
 
 	got := digestMigrationCatalog(getAllMigrations())
 
-	const wantDigest = "a1c8418ba17590778d44cd1c22ba6b5ade0c29be3514b1775b6589286abe21d9"
+	const wantDigest = "a8def06bd1d26eb433d04895d1fd6e2ed15adaaaf82ee8d7934869519a5be216"
 	if got != wantDigest {
 		t.Fatalf(`migration catalogue content has changed.
 
@@ -115,6 +115,7 @@ Diff:
 // and are therefore NOT covered by this digest:
 //
 //   - 015_migrate_messages_to_session_items (migrateMessagesToSessionItems)
+//   - 035_complete_child_coordination_schema (completeChildCoordinationSchema, UpTxFunc)
 //
 // Reviewers must scrutinise changes to those functions extra
 // carefully, and any future Go-based migration added to the catalogue

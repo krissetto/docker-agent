@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -11,232 +13,289 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 )
 
-// PersistenceObserver is the stock [EventObserver] that mirrors the
-// runtime's event stream to a [session.Store]:
-//
-//   - persists the initial session row on [OnRunStart] for non-sub-session runs;
-//   - tracks streaming assistant content (AgentChoice and
-//     AgentChoiceReasoning) into a single growing message row, finalised
-//     on [MessageAddedEvent];
-//   - persists user messages, sub-session attachments, summaries, token
-//     usage, and session-title updates as they fly past.
-//
-// Sub-session and SessionScoped-mismatch filtering live inside [OnEvent]
-// so callers don't have to think about them.
-//
-// The runtime auto-registers one of these in [NewLocalRuntime] against
-// the configured store. Custom sinks (telemetry, audit, A2A, ...) layer
-// alongside via [WithEventObserver].
+// PersistenceObserver writes only the emitting session's row. Failed effects
+// remain ordered until the driver's completion barrier retries them.
 type PersistenceObserver struct {
-	store session.Store
-
-	mu        sync.Mutex
-	streaming map[string]*streamingState
+	store    session.Store
+	mu       sync.Mutex
+	journals map[string]*sessionPersistenceJournal
+	drain    context.Context //nolint:containedctx // supervisor shutdown context replaces canceled execution lifetime only for final writes
+	lifetime context.Context //nolint:containedctx // supervisor-owned cancellation bounds persistence backpressure
 }
 
-// streamingState holds the in-flight streaming assistant message for one
-// session across consecutive AgentChoice / AgentChoiceReasoning events. It is
-// keyed by session id in PersistenceObserver so concurrent runs for different
-// sessions on the same runtime cannot corrupt each other's streaming row.
+const (
+	persistenceJournalEvents = 256
+	persistenceJournalBytes  = 8 << 20
+)
+
+type sessionPersistenceJournal struct {
+	mu        sync.Mutex
+	streaming *streamingState
+	pending   []persistenceEffect
+	bytes     int
+	failure   error
+	terminal  error
+}
+
+type persistenceEffect struct {
+	write func(context.Context) error
+	bytes int
+}
+
 type streamingState struct {
 	content          strings.Builder
 	reasoningContent strings.Builder
 	agentName        string
-	messageID        int64 // ID of the in-flight row, 0 for none.
+	messageID        int64
+	writeID          string
 }
 
-// newPersistenceObserver returns an observer that persists to store, or
-// nil when store is nil so the constructor can call [WithEventObserver]
-// unconditionally without a guard.
 func newPersistenceObserver(store session.Store) *PersistenceObserver {
 	if store == nil {
 		return nil
 	}
-	return &PersistenceObserver{store: store, streaming: map[string]*streamingState{}}
+	return &PersistenceObserver{store: store, journals: map[string]*sessionPersistenceJournal{}, lifetime: context.Background()} //rubocop:disable Lint/ContextConnectivity
 }
 
-// OnRunStart persists the session row before the run loop starts.
-// Sub-sessions skip this: the parent session's store absorbs them via
-// the SubSessionCompletedEvent handling in OnEvent.
+func (p *PersistenceObserver) journal(id string) *sessionPersistenceJournal {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.journals == nil {
+		p.journals = map[string]*sessionPersistenceJournal{}
+	}
+	j := p.journals[id]
+	if j == nil {
+		j = &sessionPersistenceJournal{}
+		p.journals[id] = j
+	}
+	return j
+}
+
+func (p *PersistenceObserver) enqueueLocked(ctx context.Context, j *sessionPersistenceJournal, size int, effect func(context.Context) error) {
+	// A single oversized output stays in the session transcript. Do not retain a
+	// second queued copy; backpressure this emitting goroutine until it is written.
+	for (len(j.pending) > 0 && (len(j.pending) >= persistenceJournalEvents || j.bytes+size > persistenceJournalBytes)) || size > persistenceJournalBytes {
+		retryCtx, cancel := context.WithTimeout(p.durabilityContext(), defaultSubagentPersistenceTimeout)
+		err := p.flushLocked(retryCtx, j)
+		if err == nil && size > persistenceJournalBytes {
+			err = effect(retryCtx)
+		}
+		cancel()
+		if err == nil {
+			if size > persistenceJournalBytes {
+				return
+			}
+			break
+		}
+		j.failure = err
+		select {
+		case <-p.durabilityContext().Done():
+			j.terminal = err
+			return
+		case <-time.After(subagentPersistenceRetryBase):
+		}
+	}
+	j.pending = append(j.pending, persistenceEffect{write: effect, bytes: size})
+	j.bytes += size
+	_ = p.flushLocked(ctx, j)
+}
+
+func (p *PersistenceObserver) flushLocked(ctx context.Context, j *sessionPersistenceJournal) error {
+	if j.terminal != nil {
+		return j.terminal
+	}
+	for len(j.pending) > 0 {
+		effect := j.pending[0]
+		if err := effect.write(ctx); err != nil {
+			// Execution cancellation after a failed write must not replace its storage cause.
+			if j.failure != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				return j.failure
+			}
+			j.failure = err
+			return err
+		}
+		j.bytes -= effect.bytes
+		j.pending[0] = persistenceEffect{}
+		j.pending = j.pending[1:]
+	}
+	j.failure = nil
+	return nil
+}
+
+func (p *PersistenceObserver) completionError(id string) error {
+	j := p.journal(id)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	ctx, cancel := context.WithTimeout(p.durabilityContext(), defaultSubagentPersistenceTimeout)
+	defer cancel()
+	return p.flushLocked(ctx, j)
+}
+
+func (p *PersistenceObserver) release(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.journals, id)
+}
+
+func (p *PersistenceObserver) appendItem(ctx context.Context, sessionID, writeID string, item session.Item) (int64, error) {
+	if store, ok := p.store.(session.ItemAppender); ok {
+		return store.AppendItem(ctx, sessionID, writeID, item)
+	}
+	switch {
+	case item.Message != nil:
+		return p.store.AddMessage(ctx, sessionID, item.Message)
+	case item.Error != nil:
+		return 0, p.store.AddError(ctx, sessionID, item.Error)
+	case item.SubSession != nil:
+		return 0, p.store.AddSubSession(ctx, sessionID, item.SubSession)
+	case item.Summary != "":
+		return 0, p.store.AddSummary(ctx, sessionID, item)
+	default:
+		return 0, errors.New("unsupported persistence item")
+	}
+}
+
 func (p *PersistenceObserver) OnRunStart(ctx context.Context, sess *session.Session) {
-	if sess.IsSubSession() {
-		return
-	}
-	if err := p.store.UpdateSession(ctx, sess); err != nil {
-		slog.WarnContext(ctx, "Failed to persist initial session", "session_id", sess.ID, "error", err)
-	}
+	j := p.journal(sess.ID)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	snapshot := sess.OwnSnapshot()
+	snapshot.Messages = nil
+	data, _ := json.Marshal(snapshot)
+	p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error { return p.store.UpdateSession(ctx, snapshot) })
 }
 
-// OnEvent applies the per-event-type persistence rules. Sub-session
-// events are skipped (the parent absorbs them on SubSessionCompleted),
-// and any [SessionScoped] event tagged with a different session id
-// (forwarded sub-agent streaming events) is filtered out so it can't
-// pollute the parent's transcript.
 func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session, event Event) {
-	if sess.IsSubSession() {
-		return
-	}
 	if scoped, ok := event.(SessionScoped); ok && scoped.GetSessionID() != sess.ID {
 		return
 	}
-
+	j := p.journal(sess.ID)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	id := sess.ID
+	appendItem := func(item session.Item) {
+		writeID, err := newSessionRequestID()
+		if err != nil {
+			j.failure = err
+			return
+		}
+		data, _ := json.Marshal(item)
+		p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error { _, err := p.appendItem(ctx, id, writeID, item); return err })
+	}
 	switch e := event.(type) {
 	case *AgentChoiceEvent:
-		p.withStreaming(e.SessionID, func(st *streamingState) {
-			st.content.WriteString(e.Content)
-			st.agentName = e.AgentName
-			p.persistStreamingContentLocked(ctx, e.SessionID, st)
-		})
-
+		st := j.streaming
+		if st == nil {
+			st = &streamingState{}
+			j.streaming = st
+		}
+		st.content.WriteString(e.Content)
+		st.agentName = e.AgentName
+		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *AgentChoiceReasoningEvent:
-		p.withStreaming(e.SessionID, func(st *streamingState) {
-			st.reasoningContent.WriteString(e.Content)
-			st.agentName = e.AgentName
-			p.persistStreamingContentLocked(ctx, e.SessionID, st)
-		})
-
+		st := j.streaming
+		if st == nil {
+			st = &streamingState{}
+			j.streaming = st
+		}
+		st.reasoningContent.WriteString(e.Content)
+		st.agentName = e.AgentName
+		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *UserMessageEvent:
-		p.resetStreaming(e.SessionID)
-		if _, err := p.store.AddMessage(ctx, e.SessionID, session.UserMessage(e.Message, e.MultiContent...)); err != nil {
-			slog.WarnContext(ctx, "Failed to persist user message", "session_id", e.SessionID, "error", err)
-		}
-
+		j.streaming = nil
+		msg := QueuedMessage{Content: e.Message, MultiContent: e.MultiContent, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, InputMode: e.InputMode}
+		message := msg.sessionMessage()
+		message.TurnID = e.TurnID
+		appendItem(session.NewMessageItem(message))
 	case *MessageAddedEvent:
-		// Finalise the streaming row (if any) with the canonical
-		// MessageAddedEvent payload, then reset for the next stream.
-		st := p.takeStreaming(e.SessionID)
-		var err error
-		if st != nil && st.messageID != 0 {
-			err = p.store.UpdateMessage(ctx, e.SessionID, st.messageID, e.Message)
+		st := j.streaming
+		j.streaming = nil
+		if e.boundaryOnly {
+			break
+		}
+		message := *e.Message
+		if st != nil && st.writeID != "" {
+			p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error { return p.store.UpdateMessage(ctx, id, st.messageID, &message) })
 		} else {
-			_, err = p.store.AddMessage(ctx, e.SessionID, e.Message)
+			appendItem(session.NewMessageItem(&message))
 		}
-		if err != nil {
-			var messageID int64
-			if st != nil {
-				messageID = st.messageID
-			}
-			slog.WarnContext(ctx, "Failed to persist message",
-				"session_id", e.SessionID, "message_id", messageID, "error", err)
-		}
-
 	case *SubSessionCompletedEvent:
-		if subSess, ok := e.SubSession.(*session.Session); ok {
-			if err := p.store.AddSubSession(ctx, e.ParentSessionID, subSess); err != nil {
-				slog.WarnContext(ctx, "Failed to persist sub-session", "parent_id", e.ParentSessionID, "error", err)
-			}
+		if child, ok := e.SubSession.(*session.Session); ok && !child.AsyncSubagent {
+			ref := child.OwnSnapshot()
+			ref.Messages = nil
+			data, _ := json.Marshal(ref)
+			p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error { return p.store.AddSubSession(ctx, e.ParentSessionID, ref) })
 		}
-
 	case *SessionSummaryEvent:
 		if e.persisted {
-			break
+			return
 		}
 		item := session.Item{Summary: e.Summary, FirstKeptEntry: e.FirstKeptEntry, Cost: e.Cost, Model: e.Model}
 		if e.Usage != nil {
-			// Copy so the persisted item doesn't alias the event's pointer.
 			usage := *e.Usage
 			item.Usage = &usage
 		}
-		if err := p.store.AddSummary(ctx, e.SessionID, item); err != nil {
-			slog.WarnContext(ctx, "Failed to persist summary", "session_id", e.SessionID, "error", err)
-		}
-
+		appendItem(item)
 	case *TokenUsageEvent:
 		if e.Usage != nil {
-			if err := p.store.UpdateSessionTokens(ctx, sess.ID, e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.Cost); err != nil {
-				slog.WarnContext(ctx, "Failed to persist token usage", "session_id", sess.ID, "error", err)
-			}
+			input, output, cost := e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.Cost
+			p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error { return p.store.UpdateSessionTokens(ctx, id, input, output, cost) })
 		}
-
 	case *SessionTitleEvent:
-		if err := p.store.UpdateSessionTitle(ctx, sess.ID, e.Title); err != nil {
-			slog.WarnContext(ctx, "Failed to persist session title", "session_id", sess.ID, "error", err)
-		}
-
+		p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error { return p.store.UpdateSessionTitle(ctx, id, e.Title) })
 	case *ErrorEvent:
-		// Persist agent failures so they survive a session reload and travel
-		// with a shared JSON export for diagnostics. Reset the streaming state
-		// so any in-flight assistant row is finalised in place and the error is
-		// recorded as a distinct trailing item.
-		p.resetStreaming(sess.ID)
+		j.streaming = nil
 		ts := e.Timestamp
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		errItem := &session.Error{
-			Message:   e.Error,
-			Code:      e.Code,
-			AgentName: e.AgentName,
-			CreatedAt: ts.Format(time.RFC3339),
-		}
-		if err := p.store.AddError(ctx, sess.ID, errItem); err != nil {
-			slog.WarnContext(ctx, "Failed to persist error", "session_id", sess.ID, "error", err)
-		}
+		appendItem(session.Item{Error: &session.Error{Message: e.Error, Code: e.Code, AgentName: e.AgentName, CreatedAt: ts.Format(time.RFC3339)}})
+	}
+	if err := j.failure; err != nil {
+		slog.WarnContext(ctx, "Session persistence awaiting retry", "session_id", id, "error", err)
 	}
 }
 
-// withStreaming locks the observer, retrieves the streaming state for
-// sessionID, and runs fn while holding the lock. The store calls below are
-// synchronous today; keeping the lock across create/update preserves event
-// ordering for one session while allowing independent sessions to keep separate
-// state.
-func (p *PersistenceObserver) withStreaming(sessionID string, fn func(*streamingState)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.streaming == nil {
-		p.streaming = map[string]*streamingState{}
-	}
-	st := p.streaming[sessionID]
-	if st == nil {
-		st = &streamingState{}
-		p.streaming[sessionID] = st
-	}
-	fn(st)
-}
-
-func (p *PersistenceObserver) resetStreaming(sessionID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.streaming, sessionID)
-}
-
-func (p *PersistenceObserver) takeStreaming(sessionID string) *streamingState {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	st := p.streaming[sessionID]
-	delete(p.streaming, sessionID)
-	return st
-}
-
-// persistStreamingContentLocked creates or updates the streaming assistant
-// message row. The runtime emits one AgentChoice / AgentChoiceReasoning
-// event per delta chunk, so this fires repeatedly during a streaming
-// response; we keep one row open and update it in place rather than
-// creating a row per chunk.
-func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context, sessionID string, st *streamingState) {
-	msg := &session.Message{
-		AgentName: st.agentName,
-		Message: chat.Message{
-			Role:             chat.MessageRoleAssistant,
-			Content:          st.content.String(),
-			ReasoningContent: st.reasoningContent.String(),
-		},
-	}
-
-	if st.messageID == 0 {
-		id, err := p.store.AddMessage(ctx, sessionID, msg)
+func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context, id string, j *sessionPersistenceJournal, st *streamingState) {
+	message := &session.Message{AgentName: st.agentName, Message: chat.Message{Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String()}}
+	if st.writeID == "" {
+		writeID, err := newSessionRequestID()
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to create streaming message", "session_id", sessionID, "error", err)
 			return
 		}
-		st.messageID = id
-		slog.DebugContext(ctx, "[PERSIST] Created streaming message",
-			"session_id", sessionID, "message_id", id, "agent", st.agentName)
-		return
+		st.writeID = writeID
+		p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+			rowID, err := p.appendItem(ctx, id, writeID, session.NewMessageItem(message))
+			if err == nil {
+				st.messageID = rowID
+			}
+			return err
+		})
+	} else {
+		p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+			return p.store.UpdateMessage(ctx, id, st.messageID, message)
+		})
 	}
+}
 
-	if err := p.store.UpdateMessage(ctx, sessionID, st.messageID, msg); err != nil {
-		slog.WarnContext(ctx, "Failed to update streaming message",
-			"session_id", sessionID, "message_id", st.messageID, "error", err)
+func (p *PersistenceObserver) pendingError(id string) error {
+	j := p.journal(id)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.failure
+}
+
+func (p *PersistenceObserver) setDrainContext(ctx context.Context) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.drain = ctx
+}
+
+func (p *PersistenceObserver) durabilityContext() context.Context {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.drain != nil {
+		return p.drain
 	}
+	return p.lifetime
 }

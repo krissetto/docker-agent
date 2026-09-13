@@ -14,6 +14,13 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 )
 
+func sessionHandleSnapshot(t *testing.T, handle SessionHandle) *session.Session {
+	t.Helper()
+	snapshot, err := handle.Snapshot(t.Context())
+	require.NoError(t, err)
+	return snapshot
+}
+
 func TestConcurrentIdleRetriesReportLoserQueued(t *testing.T) {
 	started := make(chan struct{})
 	releaseRun := make(chan struct{})
@@ -98,7 +105,12 @@ func TestRetryStopRaceReturnsErrorWhenMailboxIsCleared(t *testing.T) {
 	close(release)
 	var stopped *SessionError
 	require.ErrorAs(t, <-result, &stopped)
-	assert.Equal(t, SessionErrorCapacity, stopped.Kind, "mailbox-only retry preserves prepareStart failure")
+	assert.Equal(t, SessionErrorStopped, stopped.Kind, "cleared retry must report stopped rather than accepted or capacity-limited")
+	require.ErrorIs(t, stopped, ErrSessionStopped)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	assert.Empty(t, d.pending, "stopping clears accepted retry work")
+	assert.False(t, d.running, "cleared retry must not start execution")
 }
 
 func TestIdleConcurrentPostsStaySuccessfulWhenLaterCallerWinsStart(t *testing.T) {
@@ -217,25 +229,39 @@ func TestSteerReportsCanceledAndStoppedWithoutCapacityMasking(t *testing.T) {
 
 func TestAcceptedBacklogRetriesAutonomouslyAndCorrelatesHeadFailure(t *testing.T) {
 	rt, sess := newSessionFixture(t)
-	h, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
-	require.NoError(t, err)
-	d := h.(*sessionHandle).driver
-
-	// Seed restored-like accepted A, then fail only the first admission attempt.
+	// Seed restored-like accepted A before publishing its driver to the scheduler.
 	a := session.UserMessage("A")
 	a.Pending, a.Accepted, a.TurnID = true, true, "turn-a"
-	position := sess.AddMessageAt(a)
-	d.mu.Lock()
-	d.pending = append(d.pending, QueuedMessage{Content: "A", RequestID: "turn-a", AcceptedPosition: position})
-	d.mu.Unlock()
+	sess.AddMessage(a)
+	require.NoError(t, rt.sessionStore.AddSession(t.Context(), sess))
+	reservation, err := rt.sessionDrivers.PrepareRestore(t.Context(), sess)
+	require.NoError(t, err)
+	defer reservation.Discard()
+	d := reservation.driver
 	var attempts int
+	releaseRetry := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseRetry:
+		default:
+			close(releaseRetry)
+		}
+	})
 	d.SetPreStartErrorGate(func() error {
 		attempts++
 		if attempts == 1 {
 			return retryable(assert.AnError)
 		}
-		return nil
+		select {
+		case <-releaseRetry:
+			return nil
+		case <-rt.lifetime().Done():
+			return rt.lifetime().Err()
+		}
 	}, nil)
+	require.NoError(t, rt.sessionDrivers.ActivateRestoreBatch([]*restoreDriverReservation{reservation}, nil))
+	h, err := rt.SessionByID(sess.ID)
+	require.NoError(t, err)
 	obs, err := h.Observe(t.Context(), ObserveOptions{Buffer: 64})
 	require.NoError(t, err)
 	defer obs.Cancel()
@@ -244,6 +270,7 @@ func TestAcceptedBacklogRetriesAutonomouslyAndCorrelatesHeadFailure(t *testing.T
 	require.NoError(t, err, "B is accepted even though waking A fails")
 	require.NotEmpty(t, b.TurnID)
 	assert.Equal(t, SubmissionDispositionQueued, b.Disposition, "retained wake failure leaves B pending")
+	close(releaseRetry)
 	var failedTurn string
 	require.Eventually(t, func() bool {
 		select {
@@ -258,7 +285,7 @@ func TestAcceptedBacklogRetriesAutonomouslyAndCorrelatesHeadFailure(t *testing.T
 	}, 5*time.Second, time.Millisecond)
 	assert.Equal(t, "turn-a", failedTurn, "wake failure belongs to FIFO head A, never newly accepted B")
 	counts := map[string]int{}
-	for _, message := range sess.GetAllMessages() {
+	for _, message := range sessionHandleSnapshot(t, h).GetAllMessages() {
 		if message.Message.Role == chat.MessageRoleUser {
 			counts[message.Message.Content]++
 		}
@@ -269,13 +296,15 @@ func TestAcceptedBacklogRetriesAutonomouslyAndCorrelatesHeadFailure(t *testing.T
 
 func TestPermanentRetryFailureStopsWorkerAndRuntimeCancelWaits(t *testing.T) {
 	rt, sess := newSessionFixture(t)
-	d := rt.sessionDrivers.Get(sess)
-	d.mu.Lock()
+	reservation, err := rt.sessionDrivers.PrepareRestore(t.Context(), sess)
+	require.NoError(t, err)
+	defer reservation.Discard()
+	d := reservation.driver
 	d.pending = append(d.pending, QueuedMessage{Content: "A", RequestID: "A"})
-	d.mu.Unlock()
 	d.SetPreStartErrorGate(func() error {
 		return &SessionError{Kind: SessionErrorUnsupported, SessionID: sess.ID, Operation: "gate"}
 	}, nil)
+	require.NoError(t, rt.sessionDrivers.ActivateRestoreBatch([]*restoreDriverReservation{reservation}, nil))
 	d.schedulePendingRetry()
 	require.Eventually(t, func() bool {
 		d.mu.Lock()
@@ -283,11 +312,9 @@ func TestPermanentRetryFailureStopsWorkerAndRuntimeCancelWaits(t *testing.T) {
 		return !d.retryRunning && len(d.pending) == 1
 	}, time.Second, time.Millisecond)
 
-	ctx, cancel := context.WithCancel(t.Context())
-	rt.lifecycleCtx = ctx
 	d.SetPreStartErrorGate(func() error { return retryable(assert.AnError) }, nil)
 	d.schedulePendingRetry()
-	cancel()
+	rt.lifecycleCancel()
 	done := make(chan struct{})
 	go func() { d.Wait(); close(done) }()
 	select {
@@ -295,19 +322,36 @@ func TestPermanentRetryFailureStopsWorkerAndRuntimeCancelWaits(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runtime cancellation must terminate retry worker and Wait")
 	}
+	select {
+	case <-rt.sessionDrivers.workDone:
+	case <-time.After(time.Second):
+		t.Fatal("runtime cancellation must terminate the retry scheduler")
+	}
 }
 
 func TestSessionHandlePinsSessionIdentity(t *testing.T) {
-	rt, sess := newSessionFixture(t)
-	h, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: sess.AgentName})
+	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 100_000})
+	sess := newWorkerSession("pinned-identity")
+	h, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
 	require.NoError(t, err)
 	assert.Equal(t, sess.ID, h.ID())
+	before := sessionHandleSnapshot(t, h)
 
-	replacement := session.New(session.WithID(sess.ID))
-	_, err = rt.CreateSession(t.Context(), replacement, SessionBinding{})
+	replacement := before.Clone()
+	replacement.AddMessage(session.UserMessage("must not overwrite canonical transcript"))
+	repeated, err := rt.CreateSession(t.Context(), replacement, SessionBinding{AgentName: "worker"})
+	require.NoError(t, err)
+	assert.Equal(t, h.ID(), repeated.ID())
+	assert.Equal(t, h.AgentName(), repeated.AgentName())
+	assert.Equal(t, before.MessagesSnapshot(), sessionHandleSnapshot(t, repeated).MessagesSnapshot())
+	require.NoError(t, repeated.UpdateTitle(t.Context(), "shared canonical state"))
+	assert.Equal(t, "shared canonical state", sessionHandleSnapshot(t, h).TitleSnapshot())
+
+	_, err = rt.CreateSession(t.Context(), replacement, SessionBinding{AgentName: "root"})
 	var sessionErr *SessionError
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, SessionErrorInvalid, sessionErr.Kind)
+	assert.Equal(t, before.MessagesSnapshot(), sessionHandleSnapshot(t, h).MessagesSnapshot())
 }
 
 func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
@@ -343,7 +387,7 @@ func TestSessionRetryDoesNotAppendUserInputAndCorrelates(t *testing.T) {
 	sess.AddMessage(session.UserMessage("original"))
 	h, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
-	before := len(sess.Messages)
+	before := len(sessionHandleSnapshot(t, h).Messages)
 	obs, err := h.Observe(t.Context(), ObserveOptions{})
 	require.NoError(t, err)
 	defer obs.Cancel()
@@ -355,7 +399,7 @@ func TestSessionRetryDoesNotAppendUserInputAndCorrelates(t *testing.T) {
 			break
 		}
 	}
-	assert.Len(t, sess.Messages, before+1, "retry appends only the assistant result")
+	assert.Len(t, sessionHandleSnapshot(t, h).Messages, before+1, "retry appends only the assistant result")
 }
 
 func TestSessionObserverCancellationDoesNotStopSession(t *testing.T) {

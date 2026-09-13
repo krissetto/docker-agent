@@ -10,7 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 type sessionStub struct {
@@ -99,7 +101,7 @@ func (s *recordingSink) OnError(e error) {
 }
 
 func obs(cursor uint64, replay []runtime.SessionEvent, events chan runtime.SessionEvent) runtime.Observation {
-	return runtime.Observation{Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Cursor: cursor}}, Replay: replay, Events: events, Cancel: func() {}}
+	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Cursor: cursor}}, Replay: replay, Events: events, Cancel: func() {}}
 }
 
 func TestSnapshotResetCarriesCanonicalPendingFIFO(t *testing.T) {
@@ -107,7 +109,7 @@ func TestSnapshotResetCarriesCanonicalPendingFIFO(t *testing.T) {
 	events := make(chan runtime.SessionEvent)
 	close(events)
 	a.observations <- runtime.Observation{
-		Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{PendingInputs: []runtime.PendingInput{{TurnID: "one"}, {TurnID: "two"}}}},
+		Initial: []runtime.SessionSnapshot{{PendingInputs: []runtime.PendingInput{{TurnID: "one"}, {TurnID: "two"}}}},
 		Events:  events, Cancel: func() {},
 	}
 	sink := &recordingSink{}
@@ -182,7 +184,11 @@ func TestObservationTerminalErrorsReconnectWithCursorAndExhaust(t *testing.T) {
 		errs <- errors.New("dropped")
 		close(errs)
 		close(events)
-		a.observations <- runtime.Observation{Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Cursor: uint64(i + 1)}}, Events: events, Errors: errs, Cancel: func() {}}
+		var replay []runtime.SessionEvent
+		if i > 0 {
+			replay = []runtime.SessionEvent{{Sequence: uint64(i + 1)}}
+		}
+		a.observations <- runtime.Observation{Initial: []runtime.SessionSnapshot{{Cursor: uint64(i + 1)}}, Replay: replay, Events: events, Errors: errs, Cancel: func() {}}
 	}
 	sink := &recordingSink{}
 	attachment, err := Attach(t.Context(), a, sink)
@@ -197,6 +203,32 @@ func TestObservationTerminalErrorsReconnectWithCursorAndExhaust(t *testing.T) {
 		require.NotNil(t, a.since[i])
 		assert.Equal(t, uint64(i), *a.since[i])
 	}
+}
+
+func TestObservationReconnectRetainsZeroCursor(t *testing.T) {
+	a := &sessionStub{observations: make(chan runtime.Observation, 4)}
+	for range 4 {
+		events := make(chan runtime.SessionEvent)
+		close(events)
+		a.observations <- obs(0, nil, events)
+	}
+	sink := &recordingSink{}
+	attachment, err := Attach(t.Context(), a, sink)
+	require.NoError(t, err)
+	defer attachment.Detach()
+	select {
+	case <-attachment.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("observation retries did not finish")
+	}
+	require.Len(t, a.since, 4)
+	assert.Nil(t, a.since[0])
+	for _, since := range a.since[1:] {
+		require.NotNil(t, since)
+		assert.Zero(t, *since)
+	}
+	assert.Equal(t, []uint64{0}, sink.resets)
+	require.Len(t, sink.errors, 1)
 }
 
 func TestObservationRepeatedGapExhaustionCallsOnError(t *testing.T) {
@@ -239,6 +271,114 @@ func TestDetachSynchronouslyFencesCallback(t *testing.T) {
 	}
 }
 
+type transcriptSink struct {
+	recordingSink
+
+	session *session.Session
+	live    string
+	deltas  []string
+}
+
+func (s *transcriptSink) Reset(snapshot runtime.SessionSnapshot) {
+	s.recordingSink.Reset(snapshot)
+	s.session = snapshot.Session.Clone()
+	s.live = ""
+}
+
+func (s *transcriptSink) Apply(envelope runtime.SessionEvent) {
+	s.recordingSink.Apply(envelope)
+	switch event := envelope.Event.(type) {
+	case *runtime.AgentChoiceEvent:
+		s.live += event.Content
+		s.deltas = append(s.deltas, event.Content)
+	case *runtime.MessageAddedEvent:
+		s.session.AddMessage(event.Message)
+		s.live = ""
+	}
+}
+
+func TestObservationReconnectPreservesStreamingAndCommittedTranscript(t *testing.T) {
+	committed := session.New(session.WithID("s"))
+	committed.AddMessage(session.NewAgentMessage("a", &chat.Message{Role: chat.MessageRoleAssistant, Content: "earlier"}))
+	first := runtime.SessionEvent{Sequence: 11, Event: runtime.AgentChoice("a", "s", "first ")}
+	second := runtime.SessionEvent{Sequence: 12, Event: runtime.AgentChoice("a", "s", "second")}
+	message := session.NewAgentMessage("a", &chat.Message{Role: chat.MessageRoleAssistant, Content: "first second"})
+	commit := runtime.SessionEvent{Sequence: 13, TranscriptPosition: 1, Event: &runtime.MessageAddedEvent{Message: message, SessionPosition: 1}}
+	closed := make(chan runtime.SessionEvent)
+	close(closed)
+	sink := &transcriptSink{}
+	initial := obs(10, []runtime.SessionEvent{first}, closed)
+	initial.Initial[0].Session = committed.Clone()
+	result := projectObservation(t.Context(), sink, initial, nil)
+	require.Error(t, result.err)
+	require.Equal(t, uint64(11), result.cursor)
+	require.Equal(t, "first ", sink.live)
+	require.Equal(t, 1, sink.session.MessageCount())
+
+	reconnect := obs(12, []runtime.SessionEvent{first, second, second}, closed)
+	reconnect.Initial[0].Session = committed.Clone()
+	result = projectObservation(t.Context(), sink, reconnect, &result.cursor)
+	require.Error(t, result.err)
+	require.Equal(t, uint64(12), result.cursor)
+	require.Equal(t, "first second", sink.live)
+	require.Equal(t, []uint64{10}, sink.resets)
+	require.Equal(t, 1, sink.session.MessageCount())
+
+	// A later snapshot includes the commit; replay must not append it twice.
+	committed.AddMessage(message)
+	reconnect = obs(13, []runtime.SessionEvent{second, commit, commit}, closed)
+	reconnect.Initial[0].Session = committed.Clone()
+	reconnect.Initial[0].TranscriptPosition = 2
+	result = projectObservation(t.Context(), sink, reconnect, &result.cursor)
+	require.Error(t, result.err)
+	assert.Equal(t, uint64(13), result.cursor)
+	assert.Equal(t, []uint64{10}, sink.resets)
+	assert.Equal(t, []uint64{11, 12, 13}, sink.applied)
+	assert.Equal(t, []string{"first ", "second"}, sink.deltas)
+	assert.Empty(t, sink.live)
+	assert.Equal(t, 2, sink.session.MessageCount())
+	assert.Equal(t, "first second", sink.session.GetLastAssistantMessageContent())
+	assert.Equal(t, 1, initial.Initial[0].Session.MessageCount())
+	assert.Equal(t, 2, reconnect.Initial[0].Session.MessageCount())
+}
+
+func TestObservationGapResetsCommittedTranscriptAndSeedsLiveTail(t *testing.T) {
+	committed := session.New(session.WithID("s"))
+	committed.AddMessage(session.NewAgentMessage("a", &chat.Message{Role: chat.MessageRoleAssistant, Content: "committed"}))
+	closed := make(chan runtime.SessionEvent)
+	close(closed)
+	sink := &transcriptSink{}
+	initial := obs(10, []runtime.SessionEvent{{Sequence: 11, Event: runtime.AgentChoice("a", "s", "stale")}}, closed)
+	initial.Initial[0].Session = committed.Clone()
+	result := projectObservation(t.Context(), sink, initial, nil)
+	require.Error(t, result.err)
+
+	gap := obs(20, []runtime.SessionEvent{{Gap: true}, {Sequence: 20, Event: runtime.AgentChoice("a", "s", "must not apply")}}, closed)
+	gap.Initial[0].Session = committed.Clone()
+	result = projectObservation(t.Context(), sink, gap, &result.cursor)
+	require.True(t, result.gap)
+	require.Equal(t, []uint64{10}, sink.resets)
+	require.Equal(t, "stale", sink.live)
+
+	message := session.NewAgentMessage("a", &chat.Message{Role: chat.MessageRoleAssistant, Content: "settled during gap"})
+	committed.AddMessage(message)
+	fresh := obs(20, []runtime.SessionEvent{
+		{Sequence: 20, Event: &runtime.MessageAddedEvent{Message: message, SessionPosition: 1}},
+		{Event: runtime.AgentChoice("a", "s", "fresh live ")},
+	}, closed)
+	fresh.Initial[0].Session = committed.Clone()
+	fresh.Initial[0].TranscriptPosition = 2
+	result = projectObservation(t.Context(), sink, fresh, nil)
+	require.Error(t, result.err)
+	assert.Equal(t, uint64(20), result.cursor)
+	assert.Equal(t, []uint64{10, 20}, sink.resets)
+	assert.Equal(t, []uint64{11, 0}, sink.applied)
+	assert.Equal(t, "fresh live ", sink.live)
+	assert.Equal(t, 2, sink.session.MessageCount())
+	assert.Equal(t, "settled during gap", sink.session.GetLastAssistantMessageContent())
+	assert.Equal(t, 1, initial.Initial[0].Session.MessageCount())
+}
+
 func TestAttachRejectsTreeObservation(t *testing.T) {
 	a := &sessionStub{observations: make(chan runtime.Observation, 1)}
 	a.observations <- runtime.Observation{
@@ -258,6 +398,6 @@ func TestAttachRejectsTreeObservation(t *testing.T) {
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	var treeErr *TreeObservationError
-	assert.ErrorAs(t, sink.errors[0], &treeErr)
+	require.ErrorAs(t, sink.errors[0], &treeErr)
 	assert.Empty(t, sink.resets)
 }

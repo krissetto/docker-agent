@@ -25,6 +25,10 @@ type sessionDriverRegistry struct {
 	reservations       map[string]*restoreDriverReservation
 	prepareRestoreHook func(string) // test-only barrier before reservation
 	closed             bool
+	workOnce           sync.Once
+	work               chan struct{}
+	workDone           chan struct{}
+	runMu              sync.Mutex
 }
 
 func newSessionDriverRegistry(r *LocalRuntime) *sessionDriverRegistry {
@@ -91,11 +95,15 @@ func (g *sessionDriverRegistry) pruneIdleLocked(now time.Time) {
 	}
 	retention := g.r.idleRetention
 	for id, d := range g.drivers {
+		if g.ancestorResidentLocked(id) {
+			continue
+		}
 		d.mu.Lock()
 		expired := now.Sub(d.lastActive) >= retention && d.beginReclaimLocked()
 		d.mu.Unlock()
 		if expired {
 			delete(g.drivers, id)
+			g.releasePersistence(id)
 			if g.r.sessionEvents != nil {
 				g.r.sessionEvents.Delete(id)
 			}
@@ -128,6 +136,9 @@ func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 		return 0
 	})
 	for _, id := range ids {
+		if g.ancestorResidentLocked(id) {
+			continue
+		}
 		d := g.drivers[id]
 		d.mu.Lock()
 		eligible := d.beginReclaimLocked()
@@ -136,6 +147,7 @@ func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 			continue
 		}
 		delete(g.drivers, id)
+		g.releasePersistence(id)
 		if g.r.sessionEvents != nil {
 			g.r.sessionEvents.Delete(id)
 		}
@@ -232,6 +244,7 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		// publication; small test/service stubs may not have an execution router.
 		if g.r != nil && g.r.agents != nil {
 			d.WakePending()
+			g.signalWork()
 		}
 		return d, nil
 	}
@@ -266,16 +279,21 @@ func (g *sessionDriverRegistry) PrepareRestore(ctx context.Context, sess *sessio
 	if g.prepareRestoreHook != nil {
 		g.prepareRestoreHook(sess.ID)
 	}
-	if sess.AgentName == "" {
-		a, err := g.r.team.DefaultAgent()
+	var modelRef string
+	var providers []provider.Provider
+	if g.r.team != nil {
+		if sess.AgentName == "" {
+			a, err := g.r.team.DefaultAgent()
+			if err != nil {
+				return nil, err
+			}
+			sess.AgentName = a.Name()
+		}
+		var err error
+		modelRef, providers, err = g.r.resolveSessionModelBinding(ctx, sess, "")
 		if err != nil {
 			return nil, err
 		}
-		sess.AgentName = a.Name()
-	}
-	modelRef, providers, err := g.r.resolveSessionModelBinding(ctx, sess, "")
-	if err != nil {
-		return nil, err
 	}
 	d := newSessionDriver(g.r, sess)
 	d.SetModelBinding(modelRef, providers)
@@ -316,6 +334,11 @@ func (g *sessionDriverRegistry) ActivateRestoreBatch(batch []*restoreDriverReser
 		return &SessionError{Kind: SessionErrorClosed, Operation: "restore_activate"}
 	}
 	maxSessions := g.maxSessionsLocked()
+	for len(batch) == 1 && maxSessions > 0 && len(g.drivers)+len(batch) > maxSessions {
+		if !g.evictSettledForCapacityLocked() {
+			break
+		}
+	}
 	if maxSessions == 0 || (maxSessions > 0 && len(g.drivers)+len(batch) > maxSessions) {
 		return &SessionError{Kind: SessionErrorCapacity, Operation: "restore_activate", Reason: SessionErrorReasonLimit, Limit: maxSessions}
 	}
@@ -385,6 +408,15 @@ func (g *sessionDriverRegistry) PostKnown(ctx context.Context, sessionID string,
 // temporarily denied; unknown sessions use the same bounded orphan mailbox as
 // other buffered delivery.
 func (g *sessionDriverRegistry) PostReliable(ctx context.Context, sessionID string, msg QueuedMessage) bool {
+	msg.InputOrigin = session.InputOriginRuntime
+	msg.InputMode = "steer"
+	if msg.RequestID == "" {
+		id, err := newSessionRequestID()
+		if err != nil {
+			return false
+		}
+		msg.RequestID = id
+	}
 	g.mu.Lock()
 	d, ok := g.drivers[sessionID]
 	if !ok {
@@ -502,6 +534,9 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		done = d.Done()
 	}
 	g.mu.Unlock()
+	if d != nil {
+		d.refreshAttention()
+	}
 
 	if done != nil {
 		select {
@@ -523,6 +558,7 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 	g.mu.Lock()
 	if g.drivers[sessionID] == d {
 		delete(g.drivers, sessionID)
+		g.releasePersistence(sessionID)
 	}
 	delete(g.orphans, sessionID)
 	g.mu.Unlock()
@@ -530,6 +566,21 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		g.r.interactions.deleteSession(sessionID)
 	}
 	return nil
+}
+
+func (g *sessionDriverRegistry) closeAdmission() {
+	g.mu.Lock()
+	g.closed = true
+	drivers := make([]*sessionDriver, 0, len(g.drivers))
+	for _, d := range g.drivers {
+		drivers = append(drivers, d)
+	}
+	g.mu.Unlock()
+	for _, d := range drivers {
+		d.StopAll()
+		d.refreshAttention()
+	}
+	g.signalWork()
 }
 
 func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
@@ -552,11 +603,45 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 		}
 	}
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.drivers = map[string]*sessionDriver{}
-	g.mu.Unlock()
 	return nil
 }
 
 func (g *sessionDriverRegistry) Close() {
 	_ = g.CloseContext(context.Background())
+}
+
+// Ancestors stay routable while any resident descendant can produce a report.
+func (g *sessionDriverRegistry) ancestorResidentLocked(id string) bool {
+	for otherID, d := range g.drivers {
+		if otherID == id {
+			continue
+		}
+		sess := d.session()
+		seen := map[string]bool{}
+		for sess != nil && sess.ParentID != "" && !seen[sess.ParentID] {
+			if sess.ParentID == id {
+				return true
+			}
+			seen[sess.ParentID] = true
+			parent := g.drivers[sess.ParentID]
+			if parent == nil {
+				break
+			}
+			sess = parent.session()
+		}
+	}
+	return false
+}
+
+func (g *sessionDriverRegistry) releasePersistence(id string) {
+	if g.r == nil {
+		return
+	}
+	for _, observer := range g.r.observers {
+		if p, ok := observer.(*PersistenceObserver); ok {
+			p.release(id)
+		}
+	}
 }

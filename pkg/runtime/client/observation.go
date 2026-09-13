@@ -60,7 +60,7 @@ func (a *Attachment) run(ctx context.Context, session Observer, sink Sink) {
 			}
 			continue
 		}
-		result := projectObservation(ctx, sink, observation)
+		result := projectObservation(ctx, sink, observation, cursor)
 		observation.Cancel()
 		var treeErr *TreeObservationError
 		if errors.As(result.err, &treeErr) {
@@ -75,10 +75,8 @@ func (a *Attachment) run(ctx context.Context, session Observer, sink Sink) {
 			cursor = nil
 			continue
 		}
-		if result.cursor != 0 {
-			value := result.cursor
-			cursor = &value
-		}
+		value := result.cursor
+		cursor = &value
 		if result.err == nil || ctx.Err() != nil {
 			return
 		}
@@ -125,7 +123,7 @@ func waitRetry(ctx context.Context, attempt int) bool {
 	}
 }
 
-func projectObservation(ctx context.Context, sink Sink, observation runtime.Observation) projectionResult {
+func projectObservation(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64) projectionResult {
 	if ctx.Err() != nil {
 		return projectionResult{}
 	}
@@ -133,8 +131,14 @@ func projectObservation(ctx context.Context, sink Sink, observation runtime.Obse
 		return projectionResult{err: err}
 	}
 	primary := observation.Primary()
-	sink.Reset(primary)
 	cursor := primary.Cursor
+	if since == nil {
+		sink.Reset(primary)
+	} else {
+		// Reconnect replay extends the existing projection; the newer snapshot
+		// includes commits but omits the uncommitted streaming tail.
+		cursor = *since
+	}
 	apply := func(envelope runtime.SessionEvent) bool {
 		if envelope.Gap {
 			return false

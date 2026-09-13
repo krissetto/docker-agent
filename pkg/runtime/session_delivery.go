@@ -7,14 +7,13 @@ import "context"
 // woken by runtime-authored notes; unknown sessions keep wakeable notes until
 // their session object is seen.
 
-func (r *LocalRuntime) deliverOrBuffer(ctx context.Context, sessionID, content string) bool {
-	return r.sessionDrivers.PostReliable(ctx, sessionID, QueuedMessage{Content: content})
+func (r *LocalRuntime) deliverOrBuffer(ctx context.Context, sessionID, content string) {
+	r.sessionDrivers.PostReliable(ctx, sessionID, QueuedMessage{Content: content})
 }
 
 func (r *LocalRuntime) drainSessionSteer(sessionID string) []QueuedMessage {
 	if d, ok := r.sessionDrivers.Lookup(sessionID); ok {
-		notes := d.DrainRuntimeNotes()
-		return append(notes, d.DrainSteering()...)
+		return d.drainBoundarySteering()
 	}
 	return nil
 }

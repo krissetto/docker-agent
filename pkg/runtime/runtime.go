@@ -75,6 +75,11 @@ type LocalRuntime struct {
 	commandEvaluator *CommandEvaluatorFactory
 
 	ctx                       func() context.Context
+	lifecycleCancel           context.CancelFunc
+	shutdownMu                sync.Mutex
+	creationMu                sync.Mutex
+	drainMu                   sync.Mutex
+	drainCtx                  context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
 	lifecycleCtx              context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
 	toolMap                   map[string]ToolHandlerFunc
 	toolDeferrals             tools.DeferralTracker
@@ -684,9 +689,11 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		return nil, err
 	}
 
+	lifecycleCtx, lifecycleCancel := context.WithCancel(ctx)
 	r := &LocalRuntime{
+		lifecycleCancel:              lifecycleCancel,
 		ctx:                          func() context.Context { return context.WithoutCancel(ctx) },
-		lifecycleCtx:                 ctx,
+		lifecycleCtx:                 lifecycleCtx,
 		toolMap:                      make(map[string]ToolHandlerFunc),
 		liveSessions:                 make(map[string]*liveSessionEntry),
 		team:                         agents,
@@ -874,6 +881,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// observer chain so any user-supplied observers see the same view
 	// of the session that future RunStream calls and store reads will.
 	if obs := newPersistenceObserver(r.sessionStore); obs != nil {
+		obs.lifetime = r.lifetime()
 		r.observers = append([]EventObserver{obs}, r.observers...)
 	}
 
@@ -1607,15 +1615,36 @@ func (r *LocalRuntime) shutdownStartupTools(ctx context.Context) error {
 // CloseSessions releases session resources while leaving the embedder-owned
 // session store open.
 func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
+	r.shutdownMu.Lock()
+	defer r.shutdownMu.Unlock()
+	r.drainMu.Lock()
+	r.drainCtx = ctx
+	r.drainMu.Unlock()
+	for _, observer := range r.observers {
+		if p, ok := observer.(*PersistenceObserver); ok {
+			p.setDrainContext(ctx)
+		}
+	}
+	if r.lifecycleCancel != nil {
+		r.lifecycleCancel()
+	}
+	if r.subagents != nil {
+		r.subagents.closeAdmission()
+	}
+	if r.sessionDrivers != nil {
+		r.sessionDrivers.closeAdmission()
+	}
 	if err := r.shutdownStartupTools(ctx); err != nil {
 		return err
 	}
 	r.bgAgents.StopAll()
-	if r.subagents != nil {
-		r.subagents.Close()
-	}
 	if r.sessionDrivers != nil {
 		if err := r.sessionDrivers.CloseContext(ctx); err != nil {
+			return err
+		}
+	}
+	if r.subagents != nil {
+		if err := r.subagents.CloseContext(ctx); err != nil {
 			return err
 		}
 	}
@@ -1629,7 +1658,7 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 }
 
 func (r *LocalRuntime) Close() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.lifetime()), 5*time.Second)
 	defer cancel()
 	return NewSessionRuntimeSupervisor(r).Shutdown(ctx)
 }

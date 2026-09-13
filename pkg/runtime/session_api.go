@@ -18,8 +18,15 @@ import (
 // legacy session schema does not have a dedicated agent column.
 const SessionAgentAttribute = "docker-agent.actor.agent"
 
+const SessionParentAgentAttribute = "docker-agent.actor.parent_agent"
+
 // SessionErrorKind is a stable, machine-readable session operation failure.
 type SessionErrorKind string
+
+const (
+	SessionErrorConflict    SessionErrorKind = "conflict"
+	SessionErrorPersistence SessionErrorKind = "persistence"
+)
 
 // SessionOperation identifies a stable session operation.
 type SessionOperation string
@@ -190,6 +197,8 @@ type SessionHandle interface {
 	Respond(ctx context.Context, response InteractionResponse) error
 	UpdateTitle(ctx context.Context, title string) error
 	Cancel(ctx context.Context, turnID string) (CancelResult, error)
+	AwaitTurn(ctx context.Context, turnID string) error
+	Edit(ctx context.Context, edit SessionEdit) (*session.Session, error)
 	Release(ctx context.Context) error
 	Snapshot(ctx context.Context) (*session.Session, error)
 	Todos(ctx context.Context) ([]session.Todo, error)
@@ -228,53 +237,73 @@ type UnsupportedSessionHandle struct{}
 func (UnsupportedSessionHandle) Snapshot(context.Context) (*session.Session, error) {
 	return nil, sessionUnsupported("", SessionOperationSource)
 }
+
 func (UnsupportedSessionHandle) Todos(context.Context) ([]session.Todo, error) {
 	return nil, sessionUnsupported("", SessionOperationTodos)
 }
+
 func (UnsupportedSessionHandle) Compact(context.Context, string, EventSink) error {
 	return sessionUnsupported("", SessionOperationCompact)
 }
+
 func (UnsupportedSessionHandle) CompactTarget(context.Context, string, string, EventSink) error {
 	return sessionUnsupported("", SessionOperationCompactTarget)
 }
+
 func (UnsupportedSessionHandle) ContextBreakdown(context.Context) (*ContextBreakdown, error) {
 	return nil, sessionUnsupported("", SessionOperationContext)
 }
+
 func (UnsupportedSessionHandle) LiveSessions(context.Context) ([]LiveSession, error) {
 	return nil, sessionUnsupported("", SessionOperationLiveSessions)
 }
-func (UnsupportedSessionHandle) Skills(context.Context) ([]skills.Skill, error) { return nil, nil }
+
+func (UnsupportedSessionHandle) Skills(context.Context) ([]skills.Skill, error) {
+	return nil, nil
+}
+
 func (UnsupportedSessionHandle) ResolveSkillCommand(context.Context, string) (string, error) {
 	return "", nil
 }
+
 func (UnsupportedSessionHandle) RunSkillFork(context.Context, skillstool.RunSkillArgs, EventSink) (*tools.ToolCallResult, error) {
 	return nil, sessionUnsupported("", SessionOperationRunSkill)
 }
+
 func (UnsupportedSessionHandle) StartSkillFork(context.Context, string, skillstool.RunSkillArgs) error {
 	return sessionUnsupported("", SessionOperationRunSkill)
 }
+
 func (UnsupportedSessionHandle) TogglePause(context.Context) (bool, error) {
 	return false, sessionUnsupported("", SessionOperationPause)
 }
+
 func (UnsupportedSessionHandle) RefreshModelsCatalog(context.Context) error {
 	return sessionUnsupported("", SessionOperationRefreshModels)
 }
+
 func (UnsupportedSessionHandle) SetStarred(context.Context, bool) error {
 	return sessionUnsupported("", SessionOperationSetStarred)
 }
+
 func (UnsupportedSessionHandle) RemoveAttachment(context.Context, string) error {
 	return sessionUnsupported("", SessionOperationRemoveAttachment)
 }
+
 func (UnsupportedSessionHandle) AvailableModels(context.Context) []ModelChoice { return nil }
+
 func (UnsupportedSessionHandle) SetModel(context.Context, string) error {
 	return sessionUnsupported("", SessionOperationSetModel)
 }
+
 func (UnsupportedSessionHandle) CycleThinkingLevel(context.Context) (effort.Level, error) {
 	return "", sessionUnsupported("", SessionOperationThinkingLevel)
 }
+
 func (UnsupportedSessionHandle) SetThinkingLevel(context.Context, effort.Level) (effort.Level, error) {
 	return "", sessionUnsupported("", SessionOperationThinkingLevel)
 }
+
 func (UnsupportedSessionHandle) ThinkingLevels(context.Context) []effort.Level     { return nil }
 func (UnsupportedSessionHandle) CurrentThinkingLevel(context.Context) effort.Level { return "" }
 func (UnsupportedSessionHandle) EmitPinnedAgentInfo(context.Context, EventSink)    {}
@@ -321,7 +350,7 @@ type TurnInput struct {
 	Content      string
 	MultiContent []chat.MessagePart
 	Retry        bool
-	ClientID     string `json:"client_id,omitempty"`
+	RequestID    string `json:"request_id,omitempty"`
 }
 
 // SessionMetadata is immutable handle metadata.
@@ -335,6 +364,7 @@ type SessionMetadata struct {
 }
 
 type SessionError struct {
+	Detail    string `json:"detail,omitempty"`
 	Kind      SessionErrorKind
 	SessionID string
 	RequestID string
@@ -344,6 +374,9 @@ type SessionError struct {
 }
 
 func (e *SessionError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("session %s: %s: %s", e.Operation, e.Kind, e.Detail)
+	}
 	if e.Kind == SessionErrorCapacity {
 		switch e.normalizedReason() {
 		case SessionErrorReasonBusy:
@@ -475,6 +508,10 @@ type InteractionSnapshot struct {
 
 // PendingInput is one accepted, durable input awaiting FIFO promotion.
 type PendingInput struct {
+	InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID        string              `json:"sender_id,omitempty"`
+	SenderName      string              `json:"sender_name,omitempty"`
+	InputMode       string              `json:"input_mode,omitempty"`
 	TurnID          string
 	Content         string
 	MultiContent    []chat.MessagePart
@@ -532,4 +569,12 @@ func (o Observation) Primary() SessionSnapshot {
 		return SessionSnapshot{}
 	}
 	return o.Initial[0]
+}
+
+func (UnsupportedSessionHandle) AwaitTurn(context.Context, string) error {
+	return sessionUnsupported("", "await_turn")
+}
+
+func (UnsupportedSessionHandle) Edit(context.Context, SessionEdit) (*session.Session, error) {
+	return nil, sessionUnsupported("", "edit")
 }

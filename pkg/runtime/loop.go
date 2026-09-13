@@ -80,7 +80,7 @@ func initialUserPrompt(sess *session.Session) (QueuedMessage, int, bool) {
 		return QueuedMessage{}, -1, false
 	}
 	msg := item.Message.Message
-	return QueuedMessage{Content: msg.Content, MultiContent: msg.MultiContent, AcceptedPosition: func() int {
+	return QueuedMessage{Content: msg.Content, MultiContent: msg.MultiContent, RequestID: item.Message.TurnID, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, InputMode: item.Message.InputMode, AcceptedPosition: func() int {
 		if item.Message.Accepted {
 			return len(items) - 1
 		}
@@ -98,7 +98,10 @@ func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.
 	}
 	accepted := prompt.AcceptedPosition == position
 	if !accepted {
-		events.Emit(UserMessage(prompt.Content, sess.ID, prompt.MultiContent, position))
+		events.Emit(inputEventMetadata(UserMessage(prompt.Content, sess.ID, prompt.MultiContent, position), prompt))
+	}
+	if normalizedInputOrigin(prompt.InputOrigin) != session.InputOriginUser {
+		return nil, false
 	}
 	stopRun, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, events)
 	if stopRun {
@@ -112,8 +115,9 @@ func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.
 
 // appendSteerAndEmit adds a steer message to the session and emits the corresponding event.
 func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessage, events EventSink) {
-	pos := sess.AddMessageAt(session.UserMessage(sm.Content, sm.MultiContent...))
-	events.Emit(UserMessage(sm.Content, sess.ID, sm.MultiContent, pos))
+	message := sm.sessionMessage()
+	pos := sess.AddMessageAt(message)
+	events.Emit(inputEventMetadata(UserMessage(sm.Content, sess.ID, sm.MultiContent, pos), sm))
 }
 
 // drainAndEmitSteered drains all messages from the steer queue and injects
@@ -144,6 +148,9 @@ func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessag
 // Returns drained=true with messageCountBefore set when any messages
 // were drained and emitted; otherwise drained=false.
 func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) steerResult {
+	if !waitForObserverDelivery(ctx, events) {
+		return steerResult{}
+	}
 	var steered []QueuedMessage
 	if !isDetachedSubSession(sess) {
 		steered = r.steerQueue.Drain(ctx)
@@ -161,13 +168,18 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 		if sm.Retry {
 			continue
 		}
-		contents = append(contents, sm.Content)
+		if normalizedInputOrigin(sm.InputOrigin) == session.InputOriginUser {
+			contents = append(contents, sm.Content)
+		}
 		if i < len(steered)-1 {
 			sm = appendNewlineToQueuedMessage(sm)
 		}
 		if sm.RequestID == "" {
 			r.appendSteerAndEmit(sess, sm, events)
 		}
+	}
+	if len(contents) == 0 {
+		return steerResult{drained: true, messageCountBefore: messageCountBefore}
 	}
 	stop, stopMsg, ctxMsgs := r.executeUserSteeringMessagesSubmitHooks(ctx, sess, a, contents, events)
 	return steerResult{
@@ -329,6 +341,7 @@ func (r *LocalRuntime) runExecution(ctx context.Context, sess *session.Session) 
 
 // runStreamRaw drives one runtime loop without session-driver arbitration.
 func (r *LocalRuntime) runStreamRaw(ctx context.Context, sess *session.Session) <-chan Event {
+	ctx = context.WithValue(ctx, observerDeliveryContextKey{}, true)
 	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 
@@ -337,6 +350,8 @@ func (r *LocalRuntime) runStreamRaw(ctx context.Context, sess *session.Session) 
 	// the whole lifetime of its stream.
 	entry := r.registerLiveSession(sess)
 
+	// Persist startup metadata before execution can advance the active agent.
+	r.observeRunStart(ctx, sess)
 	go func() {
 		r.runStreamLoop(ctx, sess, entry, events)
 	}()
@@ -737,7 +752,7 @@ type loopState struct {
 //   - reasoning-only: thinking-mode models (e.g. Qwen3 via
 //     openai_chatcompletions) that stream only reasoning tokens and then stop
 //     or hit the output token limit, leaving visible content empty (see #3145).
-//   - otherwise: an empty stream from a rate-limited or token-capped provider.
+//   - otherwise: an empty response with no evidence of its cause.
 //
 // Refusals are handled separately by the caller and never reach here.
 func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID string, reason chat.FinishReason) string {
@@ -751,10 +766,11 @@ func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID stri
 				"the reasoning is not used as the response.",
 			modelID, reason,
 		)
+	case reason == chat.FinishReasonLength:
+		return fmt.Sprintf("Model %s returned an empty response (stop reason: %s); the output token limit was reached.", modelID, reason)
 	default:
 		return fmt.Sprintf(
-			"Model %s returned an empty response (stop reason: %s). "+
-				"This usually means the provider rate-limited the request or the output token limit was reached.",
+			"Model %s returned an empty response (stop reason: %s).",
 			modelID, reason,
 		)
 	}
@@ -877,6 +893,9 @@ func (r *LocalRuntime) runTurn(
 
 	// Try primary model with fallback chain if configured
 	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)
+	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+		streamCtx = d.steeringContext(streamCtx)
+	}
 	res, usedModel, err := r.fallback.execute(streamCtx, a, model, messages, agentTools, sess, m, events)
 	if err != nil {
 		outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &ls.overflowCompactions, streamSpan, events)
@@ -946,7 +965,7 @@ func (r *LocalRuntime) runTurn(
 		events.Emit(Warning(fmt.Sprintf("Model %s refused to respond (stop reason: refusal).", modelID.String()), a.Name()))
 	case emptyTurn && len(res.Media) > 0:
 		slog.DebugContext(ctx, "Media-only assistant turn", "agent", a.Name(), "model", modelID.String(), "media_items", len(res.Media), "session_id", sess.ID)
-	case emptyTurn:
+	case emptyTurn && !res.Steered:
 		// Surface otherwise-silent empty turns. recordAssistantMessage skips a
 		// turn with no content and no tool calls, which previously left the user
 		// staring at silence with no explanation. See emptyTurnWarning for the
@@ -997,6 +1016,43 @@ func (r *LocalRuntime) runTurn(
 	r.subagents.updateSessionMetrics(sess, int64(len(dispatchCalls)))
 	stopRun, stopMsg := r.processToolCalls(ctx, sess, dispatchCalls, agentTools, events)
 
+	// post_tool_use hook signalled run termination via a deny
+	// verdict (decision="block" / continue=false / exit 2).
+	// User-authored hooks can use this to stop the run; the
+	// runtime fans out the standard Error / notification /
+	// on_error stanzas before exiting.
+	if stopRun {
+		slog.WarnContext(ctx, "post_tool_use hook signalled run termination",
+			"agent", a.Name(), "session_id", sess.ID, "reason", stopMsg)
+		r.emitHookDrivenShutdown(ctx, a, sess, stopMsg, events)
+		endReason = turnEndReasonHookBlocked
+		return turnExit
+	}
+
+	// Record whether this turn made tool calls so the next iteration can
+	// classify a trailing empty turn as a benign post-tool stop rather than
+	// a rate-limit / token-cap event. Set after processToolCalls so it
+	// reflects the turn just completed.
+	ls.prevTurnMadeToolCalls = len(res.Calls) > 0
+
+	// Record per-toolset model override for the next LLM turn.
+	ls.toolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
+
+	// Drain steer messages that arrived during tool calls.
+	if sr := r.drainAndEmitSteered(ctx, sess, a, events); sr.drained {
+		if sr.stop {
+			slog.WarnContext(ctx, "user_steering_messages_submit hook signalled run termination",
+				"agent", a.Name(), "session_id", sess.ID, "reason", sr.stopMsg)
+			r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, events)
+			endReason = turnEndReasonHookBlocked
+			return turnExit
+		}
+		ls.userPromptMsgs = sr.contextMsgs
+		r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
+		endReason = turnEndReasonSteered
+		return turnContinue
+	}
+
 	// Re-probe toolsets after tool calls: an install/setup tool call may
 	// have made a previously-unavailable LSP or MCP connectable. reprobe()
 	// calls ensureToolSetsAreStarted, emits recovery notices, and updates
@@ -1040,43 +1096,6 @@ func (r *LocalRuntime) runTurn(
 		ls.loopDetector.Reset()
 		endReason = turnEndReasonLoopDetected
 		return turnExit
-	}
-
-	// post_tool_use hook signalled run termination via a deny
-	// verdict (decision="block" / continue=false / exit 2).
-	// User-authored hooks can use this to stop the run; the
-	// runtime fans out the standard Error / notification /
-	// on_error stanzas before exiting.
-	if stopRun {
-		slog.WarnContext(ctx, "post_tool_use hook signalled run termination",
-			"agent", a.Name(), "session_id", sess.ID, "reason", stopMsg)
-		r.emitHookDrivenShutdown(ctx, a, sess, stopMsg, events)
-		endReason = turnEndReasonHookBlocked
-		return turnExit
-	}
-
-	// Record whether this turn made tool calls so the next iteration can
-	// classify a trailing empty turn as a benign post-tool stop rather than
-	// a rate-limit / token-cap event. Set after processToolCalls so it
-	// reflects the turn just completed.
-	ls.prevTurnMadeToolCalls = len(res.Calls) > 0
-
-	// Record per-toolset model override for the next LLM turn.
-	ls.toolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
-
-	// Drain steer messages that arrived during tool calls.
-	if sr := r.drainAndEmitSteered(ctx, sess, a, events); sr.drained {
-		if sr.stop {
-			slog.WarnContext(ctx, "user_steering_messages_submit hook signalled run termination",
-				"agent", a.Name(), "session_id", sess.ID, "reason", sr.stopMsg)
-			r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, events)
-			endReason = turnEndReasonHookBlocked
-			return turnExit
-		}
-		ls.userPromptMsgs = sr.contextMsgs
-		r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
-		endReason = turnEndReasonSteered
-		return turnContinue
 	}
 
 	if res.Stopped {
@@ -1166,19 +1185,6 @@ func isDetachedSubSession(sess *session.Session) bool {
 	return sess.IsSubSession() && sess.NonInteractive
 }
 
-// Run executes the agent loop synchronously and returns the final session
-// messages. This is a convenience wrapper around RunStream for non-streaming
-// callers.
-func (r *LocalRuntime) Run(ctx context.Context, sess *session.Session) ([]session.Message, error) {
-	events := r.runExecution(ctx, sess)
-	for event := range events {
-		if errEvent, ok := event.(*ErrorEvent); ok {
-			return nil, fmt.Errorf("%s", errEvent.Error)
-		}
-	}
-	return sess.GetAllMessages(), nil
-}
-
 // applyConfigCost overlays a config-declared price table (USD per 1M tokens)
 // onto the catalogue entry, returning m untouched when there is no override.
 // It never mutates m: the store caches entries shared across sessions. When
@@ -1254,7 +1260,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 	cost *float64,
 	events EventSink,
 ) *MessageUsage {
-	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 {
+	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered {
 		slog.DebugContext(ctx, "Skipping empty assistant message (no content, no tool calls, and no generated media)", "agent", a.Name())
 		return nil
 	}
@@ -1344,6 +1350,19 @@ func (r *LocalRuntime) recordAssistantMessage(
 		assistantMessage.MultiContent = append(assistantMessage.MultiContent, mediaParts...)
 	}
 
+	if r.sessionDrivers != nil {
+		if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+			d.mu.Lock()
+			d.generationResult = res.Content
+			d.mu.Unlock()
+		}
+	}
+	if res.Steered && strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && res.ReasoningContent == "" {
+		boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &assistantMessage), a.Name(), -1).(*MessageAddedEvent)
+		boundary.boundaryOnly = true
+		events.Emit(boundary)
+		return nil
+	}
 	addAgentMessage(sess, a, &assistantMessage, events)
 	slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", len(sess.GetAllMessages()))
 

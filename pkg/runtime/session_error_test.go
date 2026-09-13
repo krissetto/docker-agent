@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSessionErrorCapacityWordingDistinguishesReason(t *testing.T) {
@@ -21,6 +22,6 @@ func TestSessionErrorLegacyCapacityReasonInference(t *testing.T) {
 
 func TestSessionErrorJSONPreservesOperationAndReasonStrings(t *testing.T) {
 	encoded, err := json.Marshal(&SessionError{Kind: SessionErrorCapacity, Operation: SessionOperationPost, Reason: SessionErrorReasonLimit})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.JSONEq(t, `{"Kind":"capacity","SessionID":"","RequestID":"","Operation":"post","reason":"limit","Limit":0}`, string(encoded))
 }

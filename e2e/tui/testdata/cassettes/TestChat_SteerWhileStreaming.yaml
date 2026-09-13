@@ -98,7 +98,7 @@ interactions:
         proto_minor: 1
         content_length: 0
         host: api.openai.com
-        body: '{"messages":[{"content":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.\n","role":"system"},{"content":"What''s 2+2?","role":"user"},{"content":"2 + 2 equals 4.","role":"assistant"},{"content":"Also, what''s 3+3?","role":"user"}],"model":"gpt-3.5-turbo","stream_options":{"include_usage":true},"stream":true}'
+        body: '{"messages":[{"content":"You are a knowledgeable assistant that helps users with various tasks.\nBe helpful, accurate, and concise in your responses.\n","role":"system"},{"content":"What''s 2+2?","role":"user"},{"content":"2 +","role":"assistant"},{"content":"Also, what''s 3+3?","role":"user"}],"model":"gpt-3.5-turbo","stream_options":{"include_usage":true},"stream":true}'
         url: https://api.openai.com/v1/chat/completions
         method: POST
       response:

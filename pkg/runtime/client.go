@@ -76,6 +76,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 		registry: map[string]func() Event{
 			"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
 			"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
+			"interaction_resolved":          func() Event { return &InteractionResolvedEvent{} },
 			"pending_user_message_canceled": func() Event { return &PendingUserMessageCanceledEvent{} },
 			"user_message":                  func() Event { return &UserMessageEvent{} },
 			"tool_call":                     func() Event { return &ToolCallEvent{} },

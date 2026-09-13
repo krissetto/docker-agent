@@ -34,7 +34,7 @@ func TestCompactorSettledSessionEmitsCanonicalEvents(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"started:", "completed:" + CompactionOutcomeApplied}, statuses)
-	assert.Equal(t, "session summary", sess.LastSummary())
+	assert.Equal(t, "session summary", sessionHandleSnapshot(t, handle).LastSummary())
 	status, err := handle.Status(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, SessionStateSettled, status.State)
@@ -74,7 +74,7 @@ func TestCompactorRunningSessionUsesBoundaryQueue(t *testing.T) {
 	sess := newWorkerSession("session-live-compact")
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
 	require.NoError(t, err)
-	stream := rt.runExecution(t.Context(), sess)
+	stream := rt.runExecution(t.Context(), handle.(*sessionHandle).driver.session())
 	waitClosed(t, started, "session turn")
 
 	events := make(chan Event, 16)
@@ -94,7 +94,7 @@ func TestCompactorRunningSessionUsesBoundaryQueue(t *testing.T) {
 		}
 	}
 	assert.True(t, completed)
-	assert.Equal(t, "boundary summary", sess.LastSummary())
+	assert.Equal(t, "boundary summary", sessionHandleSnapshot(t, handle).LastSummary())
 }
 
 func TestCompactorRunningRejectsExistingPendingAndSteering(t *testing.T) {
@@ -138,7 +138,7 @@ func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) 
 	sess.AddMessage(session.UserMessage(strings.Repeat("old context ", 20_000)))
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
 	require.NoError(t, err)
-	stream := rt.runExecution(t.Context(), sess)
+	stream := rt.runExecution(t.Context(), handle.(*sessionHandle).driver.session())
 	waitClosed(t, turnStarted, "active session turn")
 	require.NoError(t, handle.Compact(t.Context(), "", nil))
 
@@ -168,12 +168,12 @@ func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) 
 		assert.NotContains(t, message.Content, "later")
 		assert.NotContains(t, message.Content, "guide")
 	}
-	assert.NotContains(t, sess.LastSummary(), "later")
-	assert.NotContains(t, sess.LastSummary(), "guide")
+	assert.NotContains(t, sessionHandleSnapshot(t, handle).LastSummary(), "later")
+	assert.NotContains(t, sessionHandleSnapshot(t, handle).LastSummary(), "guide")
 
 	close(releaseCompact)
 	drainStream(t, stream)
-	assert.Equal(t, "reserved summary", sess.LastSummary())
+	assert.Equal(t, "reserved summary", sessionHandleSnapshot(t, handle).LastSummary())
 	assert.False(t, d.compactReserved)
 	prov.mu.Lock()
 	require.GreaterOrEqual(t, len(prov.messages), 3)
@@ -267,7 +267,7 @@ func TestCompactorStandaloneQueuesCrossModeFIFOAndWakesPending(t *testing.T) {
 	close(releaseCompact)
 	waitClosed(t, turnStarted, "queued work wake")
 	local.driver.Wait()
-	assert.Equal(t, "standalone summary", sess.LastSummary())
+	assert.Equal(t, "standalone summary", sessionHandleSnapshot(t, handle).LastSummary())
 	prov.mu.Lock()
 	require.GreaterOrEqual(t, len(prov.messages), 2)
 	compactInput := prov.messages[0]
@@ -301,7 +301,7 @@ func TestCompactorStandaloneStopsAndWaitsWithoutMutation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("driver did not wait for cancelled standalone compaction")
 	}
-	assert.Empty(t, sess.LastSummary())
+	assert.Empty(t, sessionHandleSnapshot(t, handle).LastSummary())
 	assert.True(t, local.driver.isStopped())
 }
 
@@ -327,7 +327,7 @@ func TestCompactorStoppedDuringCancellationCleanupRejectsInputAsStopped(t *testi
 	require.NoError(t, local.Compact(t.Context(), "", sink))
 	waitClosed(t, cleanupHeld, "compaction cleanup sink")
 	assert.True(t, local.driver.StopAll())
-	before := len(sess.MessagesSnapshot())
+	before := len(sessionHandleSnapshot(t, handle).MessagesSnapshot())
 
 	_, submitErr := handle.Submit(t.Context(), TurnInput{Content: "later"})
 	_, steerErr := handle.Steer(t.Context(), TurnInput{Content: "guide"})
@@ -336,7 +336,7 @@ func TestCompactorStoppedDuringCancellationCleanupRejectsInputAsStopped(t *testi
 		require.ErrorAs(t, err, &sessionErr)
 		assert.Equal(t, SessionErrorStopped, sessionErr.Kind)
 	}
-	assert.Len(t, sess.MessagesSnapshot(), before)
+	assert.Len(t, sessionHandleSnapshot(t, handle).MessagesSnapshot(), before)
 	local.driver.mu.Lock()
 	assert.True(t, local.driver.compactReserved, "reservation remains through terminal cleanup")
 	local.driver.mu.Unlock()
@@ -360,5 +360,5 @@ func TestCompactorRejectsPendingInputSeparately(t *testing.T) {
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, SessionErrorCapacity, sessionErr.Kind)
 	assert.Equal(t, SessionOperationCompactPending, sessionErr.Operation)
-	assert.Empty(t, sess.LastSummary())
+	assert.Empty(t, sessionHandleSnapshot(t, handle).LastSummary())
 }

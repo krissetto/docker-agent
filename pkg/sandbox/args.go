@@ -21,10 +21,6 @@ import (
 // under wd), the reference cannot be resolved, or the resolved source
 // has no on-disk parent directory.
 func ExtraWorkspace(wd, agentRef string) string {
-	if agentRef == "" || agentRef == "default" {
-		return ""
-	}
-
 	source, err := sources.Resolve(agentRef, nil)
 	if err != nil {
 		return ""

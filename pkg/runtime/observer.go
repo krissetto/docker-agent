@@ -57,22 +57,38 @@ func WithEventObserver(o EventObserver) Opt {
 	}
 }
 
-// observe wraps inner with the runtime's observer chain: each
-// observer sees [EventObserver.OnRunStart] before the first event,
-// then every event drained from inner is dispatched to each observer
-// in registration order before being forwarded to the returned
-// channel. Observers run synchronously, so a slow observer
-// back-pressures the consumer.
-func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner <-chan Event) <-chan Event {
+func (r *LocalRuntime) observeRunStart(ctx context.Context, sess *session.Session) {
 	for _, obs := range r.observers {
 		obs.OnRunStart(ctx, sess)
+		if persistence, ok := obs.(*PersistenceObserver); ok {
+			if err := persistence.pendingError(sess.ID); err != nil {
+				if d, found := r.sessionDrivers.Lookup(sess.ID); found {
+					d.cancelForPersistence(err)
+				}
+			}
+		}
 	}
+}
+
+// observe forwards events after observeRunStart completes and execution begins.
+func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner <-chan Event) <-chan Event {
 	out := make(chan Event, cap(inner))
 	go func() {
 		defer close(out)
 		for event := range inner {
+			if fence, ok := event.(*observerDeliveryFence); ok {
+				close(fence.done)
+				continue
+			}
 			for _, obs := range r.observers {
 				obs.OnEvent(ctx, sess, event)
+				if persistence, ok := obs.(*PersistenceObserver); ok {
+					if err := persistence.pendingError(sess.ID); err != nil {
+						if d, found := r.sessionDrivers.Lookup(sess.ID); found {
+							d.cancelForPersistence(err)
+						}
+					}
+				}
 			}
 			// Publish through the owning session. Persistence observers and
 			// attached views consume the same ordered transition.

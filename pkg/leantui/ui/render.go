@@ -5,8 +5,11 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 const (
@@ -29,6 +32,19 @@ func RenderUserLines(text string, width int) []string {
 		lines[0] = seqPromptStart + lines[0] + seqOutputStart
 	}
 	return lines
+}
+
+func RenderInputLines(msg *types.Message, width int) []string {
+	if msg.Type == types.MessageTypeUser {
+		return RenderUserLines(msg.Content, width)
+	}
+	width = max(width, 1)
+	if msg.Type == types.MessageTypeAgentInput {
+		lines := RenderUserLines(msg.Content, width)
+		return strings.Split(agentidentity.Border(strings.Join(lines, "\n"), msg.InputReference, width), "\n")
+	}
+	innerWidth := max(width-StToolBox(width).GetHorizontalFrameSize(), 1)
+	return splitRenderedLines(renderToolBox(subagenttool.RenderInput(msg, innerWidth), width), width)
 }
 
 func RenderPendingUserLines(msg PendingUserMessage, width int) []string {

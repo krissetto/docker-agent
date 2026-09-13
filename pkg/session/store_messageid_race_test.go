@@ -54,7 +54,11 @@ func TestInMemoryStoreAddMessageConcurrentUniqueIDs(t *testing.T) {
 		t.Fatalf("expected %d unique message IDs, got %d", n, len(seen))
 	}
 
-	if got := sess.MessageCount(); got != n {
+	stored, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.MessageCount(); got != n {
 		t.Errorf("expected %d messages recorded on the session, got %d", n, got)
 	}
 }

@@ -434,13 +434,13 @@ func TestRunDockerAgent_NewSessionUsesA2ASettings(t *testing.T) {
 	// fixed value rather than reading the process working directory.
 	assert.Equal(t, testWorkspaceRoot, sess.WorkingDir)
 
-	msgs := sess.GetAllMessages()
+	stored, err := store.GetSession(t.Context(), "a2a-ctx-new")
+	require.NoError(t, err)
+	msgs := stored.GetAllMessages()
 	require.NotEmpty(t, msgs)
 	assert.Equal(t, chat.MessageRoleUser, msgs[0].Message.Role)
 	assert.Equal(t, "What is Docker?", msgs[0].Message.Content)
 
-	stored, err := store.GetSession(t.Context(), "a2a-ctx-new")
-	require.NoError(t, err)
 	assert.Equal(t, "a2a-ctx-new", stored.ID)
 	assert.Equal(t, "a2a", stored.Origin)
 	assert.Equal(t, "A2A Session a2a-ctx-new", stored.Title)
@@ -517,11 +517,17 @@ func TestRunDockerAgent_ResumedSessionDoesNotExceedServerSafety(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ceiling", "follow-up question")
-	collectRunEvents(ctx, tm, root, store, session.SafetyPolicyBalanced)
-
-	assert.Equal(t, session.SafetyPolicyBalanced, existing.GetSafetyPolicy())
-	assert.False(t, existing.ToolsApproved)
-	assert.True(t, existing.NonInteractive)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyBalanced)
+	require.Len(t, events, 2)
+	for _, event := range events {
+		require.NoError(t, event.err)
+	}
+	resumed, err := store.GetSession(t.Context(), existing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyBalanced, resumed.GetSafetyPolicy())
+	assert.False(t, resumed.ToolsApproved)
+	assert.True(t, resumed.NonInteractive)
+	assert.Equal(t, session.SafetyPolicyAutonomous, existing.GetSafetyPolicy(), "the original store input is detached")
 }
 
 func TestRunDockerAgent_ResumedSaferSessionIsPreserved(t *testing.T) {
@@ -537,11 +543,16 @@ func TestRunDockerAgent_ResumedSaferSessionIsPreserved(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-preserve", "follow-up question")
-	collectRunEvents(ctx, tm, root, store, session.SafetyPolicyAutonomous)
-
-	assert.Equal(t, session.SafetyPolicyStrict, existing.GetSafetyPolicy())
-	assert.False(t, existing.ToolsApproved)
-	assert.True(t, existing.NonInteractive)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyAutonomous)
+	require.Len(t, events, 2)
+	for _, event := range events {
+		require.NoError(t, event.err)
+	}
+	resumed, err := store.GetSession(t.Context(), existing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyStrict, resumed.GetSafetyPolicy())
+	assert.False(t, resumed.ToolsApproved)
+	assert.True(t, resumed.NonInteractive)
 }
 
 func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
@@ -564,14 +575,17 @@ func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
 
 	updated := store.updatedSessions()
 	require.NotEmpty(t, updated)
-	assert.Same(t, existing, updated[0], "the stored session should be resumed, not recreated")
+	assert.Equal(t, existing.ID, updated[0].ID, "resume preserves the stable session identity")
+	assert.NotSame(t, existing, updated[0], "the store does not expose its mutable session")
+	resumed, err := store.GetSession(t.Context(), existing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Existing Title", resumed.Title)
+	assert.Equal(t, session.SafetyPolicyRestricted, resumed.GetSafetyPolicy())
+	assert.False(t, resumed.ToolsApproved)
+	assert.True(t, resumed.NonInteractive)
+	assert.Empty(t, existing.GetAllMessages(), "submission must not mutate the original store input")
 
-	assert.Equal(t, "Existing Title", existing.Title)
-	assert.Equal(t, session.SafetyPolicyRestricted, existing.GetSafetyPolicy())
-	assert.False(t, existing.ToolsApproved)
-	assert.True(t, existing.NonInteractive)
-
-	msgs := existing.GetAllMessages()
+	msgs := resumed.GetAllMessages()
 	require.NotEmpty(t, msgs)
 	assert.Equal(t, chat.MessageRoleUser, msgs[0].Message.Role)
 	assert.Equal(t, "follow-up question", msgs[0].Message.Content)
@@ -614,7 +628,9 @@ func TestRunDockerAgent_ResumeFailsClosedWhenPersistedChildBindingConflicts(t *t
 	require.Error(t, events[0].err)
 	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
 	assert.Contains(t, events[0].err.Error(), "session binding")
-	assert.Empty(t, existing.GetAllMessages(), "the session must not run after restore validation fails")
+	stored, err := store.GetSession(t.Context(), existing.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.GetAllMessages(), "the session must not run after restore validation fails")
 }
 
 func TestRunDockerAgent_ResumeFailsClosedWhenSubagentTreeIsInvalid(t *testing.T) {
@@ -642,7 +658,9 @@ func TestRunDockerAgent_ResumeFailsClosedWhenSubagentTreeIsInvalid(t *testing.T)
 	require.Error(t, events[0].err)
 	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
 	assert.Contains(t, events[0].err.Error(), "unsupported topology version")
-	assert.Empty(t, existing.GetAllMessages(), "the session must not run after restore validation fails")
+	stored, err := store.GetSession(t.Context(), existing.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.GetAllMessages(), "the session must not run after restore validation fails")
 }
 
 func TestRunDockerAgent_RuntimeCreationError(t *testing.T) {

@@ -9,8 +9,12 @@
 package tui_test
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,9 +42,13 @@ func steeringProxyOptions() *fake.ProxyOptions {
 // the WaitFor deadline to 30s: the simulated stream replays slower there
 // (issue #3983). Applied after construction because newTUIWithProxyOptions
 // does not forward tuitest options; it is safe before any interaction.
-func newStreamingTUI(t *testing.T) *tuitest.Driver {
+func newStreamingTUI(t *testing.T, options ...*fake.ProxyOptions) *tuitest.Driver {
 	t.Helper()
-	d := newTUIWithProxyOptions(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions())
+	proxyOptions := steeringProxyOptions()
+	if len(options) != 0 {
+		proxyOptions = options[0]
+	}
+	d := newTUIWithProxyOptions(t, "testdata/basic.yaml", 120, 40, proxyOptions)
 	if runtime.GOOS == "windows" {
 		tuitest.WithTimeout(30 * time.Second)(d)
 	}
@@ -53,7 +61,28 @@ func newStreamingTUI(t *testing.T) *tuitest.Driver {
 // once the runtime drains the message the transcript shows the injected user
 // bubble followed by the agent's answer to it.
 func TestChat_SteerWhileStreaming(t *testing.T) {
-	d := newStreamingTUI(t)
+	options := steeringProxyOptions()
+	gateEntered, release := make(chan struct{}), make(chan struct{})
+	var gateOnce sync.Once
+	var prefixSent atomic.Bool
+	options.BeforeStreamChunk = func(ctx context.Context, chunk []byte) {
+		if !bytes.Contains(chunk, []byte(`"id":"chatcmpl-steer-a1"`)) {
+			return
+		}
+		if prefixSent.Load() {
+			gateOnce.Do(func() { close(gateEntered) })
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			return
+		}
+		if bytes.Contains(chunk, []byte(`"content":"+"`)) {
+			prefixSent.Store(true)
+		}
+	}
+	d := newStreamingTUI(t, options)
+	t.Cleanup(func() { close(release) })
 
 	// Draft the follow-up as a single paste so it costs one Update instead of
 	// one per keystroke (keystrokes are expensive under -race and would eat
@@ -65,6 +94,11 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		WaitFor(tuitest.Contains("What's 2+2?")).
 		WaitFor(tuitest.Contains("2 +"))
 	firstBeforeSteer := d.Frame()
+	select {
+	case <-gateEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first response did not reach the replay gate")
+	}
 
 	// Plain Enter while the agent is working steers into the ongoing stream.
 	d.Enter().
@@ -74,7 +108,8 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 	// call, even if the renderer coalesces adjacent assistant blocks.
 	require.Contains(t, firstBeforeSteer, "2 +")
 	d.WaitFor(tuitest.Contains("Also, what's 3+3?")).
-		WaitFor(tuitest.Contains("3 + 3 equals 6."))
+		WaitFor(tuitest.Contains("3 + 3 equals 6.")).
+		Assert(tuitest.Absent("2 + 2 equals 4."))
 }
 
 // TestChat_QueueSendModeWhileStreaming switches the send mode to Queue via

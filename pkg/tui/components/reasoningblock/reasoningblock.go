@@ -3,6 +3,7 @@ package reasoningblock
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -327,6 +328,43 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		return initCmd
 	}
 	return nil
+}
+
+// SetCommittedReasoning replaces reasoning without discarding published tool entries.
+func (m *Model) SetCommittedReasoning(content string) {
+	items := []contentItem{{kind: contentItemReasoning, reasoning: content}}
+	for _, item := range m.contentItems {
+		if item.kind == contentItemTool {
+			items = append(items, item)
+		}
+	}
+	m.contentItems = items
+	m.reasoningVersion++
+	m.cache = nil
+}
+
+// RemoveUncommittedTools drops aborted partial calls without touching active tools.
+func (m *Model) RemoveUncommittedTools(committed []string) bool {
+	changed := false
+	for index, entry := range slices.Backward(m.toolEntries) {
+		if entry.msg.ToolStatus != types.ToolStatusPending || slices.Contains(committed, entry.msg.ToolCall.ID) {
+			continue
+		}
+		animation.StopView(entry.view)
+		m.toolEntries = slices.Delete(m.toolEntries, index, index+1)
+		m.contentItems = slices.DeleteFunc(m.contentItems, func(item contentItem) bool { return item.kind == contentItemTool && item.toolIndex == index })
+		for i := range m.contentItems {
+			if m.contentItems[i].kind == contentItemTool && m.contentItems[i].toolIndex > index {
+				m.contentItems[i].toolIndex--
+			}
+		}
+		changed = true
+	}
+	if changed {
+		m.reasoningVersion++
+		m.cache = nil
+	}
+	return changed
 }
 
 // HasToolCall returns true if the block contains the given tool call ID.

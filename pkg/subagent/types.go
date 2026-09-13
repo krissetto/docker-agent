@@ -17,6 +17,12 @@ type NodeID string
 // ids through a [Tree] retry on the rare clash anyway.
 const idLength = 5
 
+// ShortID formats an identity for display without changing its canonical target.
+func ShortID(id string) string {
+	runes := []rune(id)
+	return string(runes[:min(idLength, len(runes))])
+}
+
 // NewID returns a fresh, git-like short-sha node id (5 hex characters).
 func NewID() NodeID {
 	var seed [16]byte

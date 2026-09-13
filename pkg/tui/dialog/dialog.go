@@ -1,9 +1,12 @@
 package dialog
 
 import (
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
@@ -20,6 +23,12 @@ import (
 type OpenDialogMsg struct {
 	Model            Dialog
 	OriginatingEvent tea.Msg
+}
+
+// ReconcileInteractionsMsg removes only prompts absent from an authoritative head.
+type ReconcileInteractionsMsg struct {
+	SessionID  string
+	Projection *lifecycle.Projection
 }
 
 // CloseDialogMsg is sent to close the current (topmost) dialog
@@ -77,6 +86,7 @@ type dialogEntry struct {
 	// when applicable. A non-nil value marks the dialog as a background
 	// dialog (see OpenDialogMsg.OriginatingEvent).
 	originatingEvent tea.Msg
+	interactionKey   lifecycle.InteractionKey
 }
 
 // dragState tracks an in-progress drag operation.
@@ -93,6 +103,7 @@ type manager struct {
 	width, height int
 	stack         []dialogEntry
 	drag          dragState
+	projections   map[string]*lifecycle.Projection
 }
 
 // New creates a new dialog component manager
@@ -117,6 +128,17 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case messages.ThemeChangedMsg:
 		cmd := d.broadcastToAll(msg)
 		return d, cmd
+
+	case ReconcileInteractionsMsg:
+		if d.projections == nil {
+			d.projections = make(map[string]*lifecycle.Projection)
+		}
+		d.projections[msg.SessionID] = msg.Projection
+		d.stack = slices.DeleteFunc(d.stack, func(entry dialogEntry) bool {
+			key := entry.interactionKey
+			return key.SessionID == msg.SessionID && key.InteractionID != "" && !msg.Projection.HasInteraction(key)
+		})
+		return d, nil
 
 	case OpenDialogMsg:
 		return d.handleOpen(msg)
@@ -280,9 +302,24 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 
 // handleOpen processes dialog opening requests and adds to stack
 func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
+	key := lifecycle.InteractionIdentity(msg.OriginatingEvent)
+	if key.InteractionID != "" && slices.ContainsFunc(d.stack, func(entry dialogEntry) bool { return lifecycle.InteractionIdentity(entry.originatingEvent) == key }) {
+		return d, nil
+	}
+	if msg.OriginatingEvent == nil {
+		if child, ok := msg.Model.(*multiChoiceDialog); ok {
+			if correlation, ok := child.config.Context.(messages.InteractionResponseMsg); ok {
+				key = lifecycle.InteractionKey{SessionID: correlation.SessionID, InteractionID: correlation.Response.InteractionID}
+			}
+		}
+	}
+	if head, ok := d.projections[key.SessionID]; ok && key.InteractionID != "" && !head.HasInteraction(key) {
+		return d, nil
+	}
 	d.stack = append(d.stack, dialogEntry{
 		dialog:           msg.Model,
 		originatingEvent: msg.OriginatingEvent,
+		interactionKey:   key,
 	})
 
 	var cmds []tea.Cmd

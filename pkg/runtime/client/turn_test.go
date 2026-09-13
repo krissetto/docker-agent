@@ -66,7 +66,7 @@ func TestConsumeTurnCloseRacePrefersBufferedTransportError(t *testing.T) {
 		termination := ConsumeTurn(t.Context(), runtime.Observation{Events: events, Errors: errs, Cancel: func() {}}, "turn", func(context.Context, runtime.SessionEvent) (TurnDecision, error) {
 			return TurnContinue, nil
 		})
-		assert.EqualError(t, termination.Err, "transport dropped")
+		require.EqualError(t, termination.Err, "transport dropped")
 	}
 }
 
@@ -86,7 +86,7 @@ func TestConsumeTurnSurfacesObservationErrorAfterPrematureClose(t *testing.T) {
 		return TurnContinue, nil
 	})
 
-	assert.EqualError(t, termination.Err, "transport dropped")
+	require.EqualError(t, termination.Err, "transport dropped")
 	assert.False(t, termination.Stopped)
 	assert.Equal(t, 1, cancelCalls)
 }
@@ -103,7 +103,7 @@ func TestConsumeTurnDeliversStoppedBeforeTermination(t *testing.T) {
 	})
 
 	assert.True(t, called)
-	assert.EqualError(t, termination.Err, "stop callback failed")
+	require.EqualError(t, termination.Err, "stop callback failed")
 	assert.True(t, termination.Stopped)
 }
 
@@ -119,7 +119,7 @@ func TestConsumeTurnSurfacesObservationErrorWhileEventsRemainOpen(t *testing.T) 
 		return TurnContinue, nil
 	})
 
-	assert.EqualError(t, termination.Err, "transport dropped")
+	require.EqualError(t, termination.Err, "transport dropped")
 	assert.True(t, termination.ObservationError)
 }
 
@@ -135,7 +135,7 @@ func TestConsumeTurnPrematureCloseDoesNotWaitForErrors(t *testing.T) {
 		return TurnContinue, nil
 	})
 
-	assert.ErrorIs(t, termination.Err, ErrTurnObservationEnded)
+	require.ErrorIs(t, termination.Err, ErrTurnObservationEnded)
 	assert.True(t, termination.ObservationError)
 }
 
@@ -153,7 +153,7 @@ func TestConsumeTurnContextCancellationTerminates(t *testing.T) {
 		return TurnContinue, nil
 	})
 
-	assert.ErrorIs(t, termination.Err, context.Canceled)
+	require.ErrorIs(t, termination.Err, context.Canceled)
 	assert.True(t, termination.Terminated)
 	assert.Equal(t, 1, cancelCalls)
 }
@@ -164,7 +164,7 @@ func TestRunTurnObservesBeforeSubmitAndCancelsOnSubmitFailure(t *testing.T) {
 		return nil
 	})
 
-	assert.EqualError(t, err, "submit turn: rejected")
+	require.EqualError(t, err, "submit turn: rejected")
 	assert.Equal(t, []string{"observe", "submit", "cancel"}, handle.calls)
 }
 
@@ -254,7 +254,7 @@ func TestRunTurnReturnsRespondFailure(t *testing.T) {
 
 	_, err := RunTurn(t.Context(), handle, runtime.TurnInput{})
 
-	assert.EqualError(t, err, "respond to max_iterations interaction: write failed")
+	require.EqualError(t, err, "respond to max_iterations interaction: write failed")
 	assert.Equal(t, 1, countCalls(handle.calls, "cancel"))
 }
 
@@ -288,7 +288,7 @@ func TestRunTurnStopCallbackOrderingAndError(t *testing.T) {
 	})
 
 	assert.Equal(t, "normal", result.StopReason)
-	assert.EqualError(t, err, "stop callback failed")
+	require.EqualError(t, err, "stop callback failed")
 	assert.Equal(t, 1, countCalls(handle.calls, "cancel"))
 }
 
@@ -355,7 +355,7 @@ func TestRunTurnRequiresStreamStopped(t *testing.T) {
 
 	_, err := RunTurn(t.Context(), handle, runtime.TurnInput{})
 
-	assert.ErrorIs(t, err, ErrTurnObservationEnded)
+	require.ErrorIs(t, err, ErrTurnObservationEnded)
 }
 
 func TestRunTurnCorrelatesThroughStopped(t *testing.T) {
@@ -377,6 +377,7 @@ func TestRunTurnCorrelatesThroughStopped(t *testing.T) {
 type turnHandleStub struct {
 	runtime.UnsupportedSessionHandle
 	sessionStub
+
 	observation runtime.Observation
 	submitErr   error
 	respondErr  error
@@ -442,6 +443,6 @@ func TestConsumeTurnRejectsTreeObservation(t *testing.T) {
 		return TurnContinue, nil
 	})
 	var treeErr *TreeObservationError
-	assert.ErrorAs(t, termination.Err, &treeErr)
+	require.ErrorAs(t, termination.Err, &treeErr)
 	assert.True(t, termination.ObservationError)
 }

@@ -40,26 +40,36 @@ func TestLimitAllows(t *testing.T) {
 
 func TestChildAdmissionReturnsTypedDenialReason(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 0
-	m.r.maxActiveDescendantsRoot = -1
-	m.r.maxSubagentDepth = -1
-	decision := m.childAdmissionLocked(childAdmissionRequest{parentSession: "root", spawn: true})
-	assert.Equal(t, childAdmissionGlobalActive, decision.denial)
-	assert.Equal(t, 0, decision.limit)
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot = 0, -1
+	d := admissionTestDriver(m, "candidate", "root")
+	err := m.r.sessionDrivers.admitRun(d)
+	var denial *SessionError
+	require.ErrorAs(t, err, &denial)
+	assert.Equal(t, SessionErrorCapacity, denial.Kind)
+	assert.Equal(t, SessionOperationActiveDescendants, denial.Operation)
+	assert.Zero(t, denial.Limit)
+}
+
+func admissionTestDriver(m *subagentManager, id, parent string) *sessionDriver {
+	return m.r.sessionDrivers.Get(session.New(session.WithID(id), session.WithParentID(parent), session.WithAsyncSubagent(true)))
+}
+
+func setAdmissionTestState(d *sessionDriver, starting, running, settling bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.starting, d.running, d.settling = starting, running, settling
 }
 
 func TestSubagentAdmissionDepthAndCount(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 2
-	m.r.maxActiveDescendantsRoot = 2
-	m.r.maxSubagentDepth = 2
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot, m.r.maxSubagentDepth = 2, 2, 2
 	root := session.New(session.WithID("root"))
-	child := session.New(session.WithID("child"))
+	child := session.New(session.WithID("child"), session.WithParentID(root.ID), session.WithAsyncSubagent(true))
 	m.registerChild(root, "root", "aaaaa", "worker", child)
 	require.NoError(t, m.spawnAdmissionErrorLocked(child))
-	grandchild := session.New(session.WithID("grandchild"))
+	grandchild := session.New(session.WithID("grandchild"), session.WithParentID(child.ID), session.WithAsyncSubagent(true))
 	m.registerChild(child, "worker", "bbbbb", "worker", grandchild)
-	require.ErrorContains(t, m.spawnAdmissionErrorLocked(root), "limit reached")
+	require.ErrorContains(t, m.r.sessionDrivers.admitRun(admissionTestDriver(m, "candidate", root.ID)), "limit reached")
 	require.ErrorContains(t, m.spawnAdmissionErrorLocked(grandchild), "limit")
 }
 
@@ -169,24 +179,22 @@ func TestActualSequentialSpawnSettleCyclesDoNotExhaust(t *testing.T) {
 
 func TestNestedGlobalAndPerRootRunLimits(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 3
-	m.r.maxActiveDescendantsRoot = 2
-	rootA := session.New(session.WithID("root-a"))
-	rootB := session.New(session.WithID("root-b"))
-	childA := session.New(session.WithID("child-a"))
-	m.registerChild(rootA, "root", "a0001", "worker", childA)
-	m.registerChild(childA, "worker", "a0002", "worker", session.New(session.WithID("grand-a")))
-	m.registerChild(rootA, "root", "a0003", "worker", session.New(session.WithID("idle-a")))
-	m.children["a0003"].state = subagent.NodeIdle
-	require.Error(t, m.admitChildRun("a0003"), "nested runs share their root's limit")
-
-	m.registerChild(rootB, "root", "b0001", "worker", session.New(session.WithID("child-b")))
-	m.registerChild(rootB, "root", "b0002", "worker", session.New(session.WithID("idle-b")))
-	m.children["b0002"].state = subagent.NodeIdle
-	require.Error(t, m.admitChildRun("b0002"), "global limit spans independent roots")
-
-	m.children["a0002"].state = subagent.NodeIdle
-	assert.NoError(t, m.admitChildRun("b0002"), "a nested settlement releases global capacity")
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot = 3, 2
+	childA := admissionTestDriver(m, "child-a", "root-a")
+	grandA := admissionTestDriver(m, "grand-a", "child-a")
+	idleA := admissionTestDriver(m, "idle-a", "root-a")
+	setAdmissionTestState(childA, false, true, false)
+	setAdmissionTestState(grandA, false, true, false)
+	var denial *SessionError
+	require.ErrorAs(t, m.r.sessionDrivers.admitRun(idleA), &denial)
+	assert.Equal(t, SessionOperationActiveDescendantsRoot, denial.Operation)
+	childB := admissionTestDriver(m, "child-b", "root-b")
+	idleB := admissionTestDriver(m, "idle-b", "root-b")
+	setAdmissionTestState(childB, false, true, false)
+	require.ErrorAs(t, m.r.sessionDrivers.admitRun(idleB), &denial)
+	assert.Equal(t, SessionOperationActiveDescendants, denial.Operation)
+	setAdmissionTestState(grandA, false, false, false)
+	require.NoError(t, m.r.sessionDrivers.admitRun(idleB), "nested settlement releases global capacity")
 }
 
 func TestFailedSessionMessageableButRunGated(t *testing.T) {
@@ -194,8 +202,8 @@ func TestFailedSessionMessageableButRunGated(t *testing.T) {
 	m.r.maxActiveDescendants = 1
 	m.r.maxActiveDescendantsRoot = 1
 	parent := session.New(session.WithID("root"))
-	failed := session.New(session.WithID("failed"))
-	active := session.New(session.WithID("active"))
+	failed := session.New(session.WithID("failed"), session.WithParentID(parent.ID), session.WithAsyncSubagent(true))
+	active := session.New(session.WithID("active"), session.WithParentID(parent.ID), session.WithAsyncSubagent(true))
 	m.registerChild(parent, "root", "f0001", "worker", failed)
 	m.children["f0001"].state = subagent.NodeFailed
 	failedDriver := m.r.sessionDrivers.Get(failed)
@@ -237,43 +245,34 @@ func TestProviderErrorReleasesRunCapacity(t *testing.T) {
 
 func TestSubagentAdmissionCountsOnlyStartingAndRunning(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 2
-	m.r.maxActiveDescendantsRoot = 2
-	m.r.maxSubagentDepth = 3
-	root := session.New(session.WithID("root"))
-
-	states := []subagent.NodeState{subagent.NodeIdle, subagent.NodeFailed, subagent.NodeCompleted, subagent.NodeStopped}
-	for i, state := range states {
-		child := session.New(session.WithID(fmt.Sprintf("settled-%d", i)))
-		m.registerChild(root, "root", subagent.NodeID(fmt.Sprintf("s%04d", i)), "worker", child)
-		m.children[subagent.NodeID(fmt.Sprintf("s%04d", i))].state = state
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot = 2, 2
+	candidate := admissionTestDriver(m, "candidate", "root")
+	for _, state := range []subagent.NodeState{subagent.NodeIdle, subagent.NodeFailed, subagent.NodeCompleted, subagent.NodeStopped} {
+		d := admissionTestDriver(m, string(state), "root")
+		setAdmissionTestState(d, false, false, false)
 	}
-	require.NoError(t, m.spawnAdmissionErrorLocked(root), "retained quiescent sessions do not consume run capacity")
-
-	m.children["s0000"].state = subagent.NodeStarting
-	m.children["s0001"].state = subagent.NodeRunning
-	err := m.spawnAdmissionErrorLocked(root)
-	require.ErrorContains(t, err, "active/running")
-
-	m.children["s0001"].state = subagent.NodeIdle
-	require.NoError(t, m.spawnAdmissionErrorLocked(root), "settling releases exactly one slot")
+	require.NoError(t, m.r.sessionDrivers.admitRun(candidate), "retained quiescent sessions do not consume run capacity")
+	starting := admissionTestDriver(m, "starting", "root")
+	running := admissionTestDriver(m, "running", "root")
+	setAdmissionTestState(starting, true, false, false)
+	setAdmissionTestState(running, false, true, false)
+	var denial *SessionError
+	require.ErrorAs(t, m.r.sessionDrivers.admitRun(candidate), &denial)
+	assert.Equal(t, SessionOperationActiveDescendants, denial.Operation)
+	setAdmissionTestState(running, false, false, true)
+	require.Error(t, m.r.sessionDrivers.admitRun(candidate), "completion persistence still owns its slot")
+	setAdmissionTestState(running, false, false, false)
+	require.NoError(t, m.r.sessionDrivers.admitRun(candidate), "committed settlement releases exactly one slot")
 }
 
 func TestSequentialSettledSubagentsNeverExhaustActiveCapacity(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 100
-	m.r.maxActiveDescendantsRoot = 100
-	m.r.maxSubagentDepth = 3
-	root := session.New(session.WithID("root"))
-
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot = 100, 100
 	for i := range 200 {
-		id := subagent.NodeID(fmt.Sprintf("q%04d", i))
-		child := session.New(session.WithID(fmt.Sprintf("child-%d", i)))
-		m.registerChild(root, "root", id, "worker", child)
-		m.children[id].state = subagent.NodeIdle
-		require.NoError(t, m.spawnAdmissionErrorLocked(root), "settled retained session %d must not consume capacity", i)
+		candidate := admissionTestDriver(m, fmt.Sprintf("child-%d", i), "root")
+		require.NoError(t, m.r.sessionDrivers.admitRun(candidate), "settled retained session %d must not consume capacity", i)
 	}
-	assert.Len(t, m.children, 200)
+	assert.Len(t, m.r.sessionDrivers.drivers, 200)
 }
 
 func TestAccountedActiveMatchesTreeVisibleState(t *testing.T) {
@@ -312,57 +311,44 @@ func TestAccountedActiveMatchesTreeVisibleState(t *testing.T) {
 
 func TestSubagentRunAdmissionIsAtomicAndSharedAcrossRoots(t *testing.T) {
 	m := newTestSubagentManager(t)
-	m.r.maxActiveDescendants = 100
-	m.r.maxActiveDescendantsRoot = 100
-	m.r.maxSubagentDepth = 3
-	roots := []*session.Session{session.New(session.WithID("root-a")), session.New(session.WithID("root-b"))}
-
-	ids := make([]subagent.NodeID, 101)
-	for i := range ids {
-		id := subagent.NodeID(fmt.Sprintf("c%04d", i))
-		ids[i] = id
-		root := roots[i%len(roots)]
-		child := session.New(session.WithID(fmt.Sprintf("child-%d", i)))
-		m.registerChild(root, "root", id, "worker", child)
-		m.children[id].state = subagent.NodeIdle
+	m.r.maxActiveDescendants, m.r.maxActiveDescendantsRoot = 100, 100
+	drivers := make([]*sessionDriver, 101)
+	for i := range drivers {
+		drivers[i] = admissionTestDriver(m, fmt.Sprintf("child-%d", i), fmt.Sprintf("root-%d", i%2))
 	}
-
 	var accepted atomic.Int64
 	var wg sync.WaitGroup
-	for _, id := range ids {
+	errs := make([]error, len(drivers))
+	for i, d := range drivers {
 		wg.Go(func() {
-			if m.admitChildRun(id) == nil {
+			_, generation, _, err := d.prepareStart(t.Context(), false)
+			errs[i] = err
+			if err == nil && generation > 0 {
 				accepted.Add(1)
 			}
 		})
 	}
 	wg.Wait()
 	assert.Equal(t, int64(100), accepted.Load())
-
-	active := 0
-	var denied subagent.NodeID
-	m.mu.Lock()
-	for id, rec := range m.children {
-		if activeSubagentState(rec.state) {
-			active++
+	var denied, release *sessionDriver
+	for i, d := range drivers {
+		if errs[i] != nil {
+			denied = d
+			var capacity *SessionError
+			require.ErrorAs(t, errs[i], &capacity)
+			assert.Equal(t, SessionErrorCapacity, capacity.Kind)
 		} else {
-			denied = id
+			release = d
+			t.Cleanup(func() { d.StopAll(); d.wg.Done() })
 		}
 	}
-	m.mu.Unlock()
-	assert.Equal(t, 100, active)
-	require.NotEmpty(t, denied)
-
-	m.mu.Lock()
-	for id, rec := range m.children {
-		if activeSubagentState(rec.state) {
-			rec.state = subagent.NodeIdle
-			_ = m.tree.Update(id, func(n *subagent.Node) { n.State = subagent.NodeIdle })
-			break
-		}
-	}
-	m.mu.Unlock()
-	assert.NoError(t, m.admitChildRun(denied), "released capacity is immediately reusable")
+	require.NotNil(t, denied)
+	require.NotNil(t, release)
+	setAdmissionTestState(release, false, false, false)
+	_, generation, _, err := denied.prepareStart(t.Context(), false)
+	require.NoError(t, err, "released capacity is immediately reusable")
+	assert.Positive(t, generation)
+	t.Cleanup(func() { denied.StopAll(); denied.wg.Done() })
 }
 
 func TestConcurrentPostsWaitForAdmissionAndPreserveOrder(t *testing.T) {
@@ -547,7 +533,8 @@ func TestReliablePostRetainsDeniedNotesAndLaterProcessesFIFO(t *testing.T) {
 	d.mu.Unlock()
 
 	admit.Store(true)
-	require.True(t, d.WakePending())
+	// The registry may win the wake after admission opens.
+	d.WakePending()
 	require.Eventually(t, func() bool {
 		var users []string
 		for _, item := range sess.GetAllMessages() {
@@ -555,8 +542,15 @@ func TestReliablePostRetainsDeniedNotesAndLaterProcessesFIFO(t *testing.T) {
 				users = append(users, strings.TrimSpace(item.Message.Content))
 			}
 		}
-		return len(users) >= 2 && users[0] == "first" && users[1] == "second"
+		return d.Settled() && len(users) >= 2 && users[0] == "first" && users[1] == "second"
 	}, 2*time.Second, time.Millisecond)
+	var users []string
+	for _, item := range sess.GetAllMessages() {
+		if item.Message.Role == chat.MessageRoleUser {
+			users = append(users, strings.TrimSpace(item.Message.Content))
+		}
+	}
+	assert.Equal(t, []string{"first", "second"}, users, "accepted notes are delivered exactly once")
 }
 
 func TestReliablePostMailboxBound(t *testing.T) {
@@ -575,57 +569,52 @@ func TestReliablePostMailboxBound(t *testing.T) {
 }
 
 func TestCapacityReleaseWorkerWakesRetainedReliableNote(t *testing.T) {
-	r, waiting := newSessionFixture(t)
-	m := r.subagents
-	m.r.maxActiveDescendants = 1
-	m.r.maxActiveDescendantsRoot = 1
-	root := session.New(session.WithID("root"))
-	active := session.New(session.WithID("active"))
-	m.registerChild(root, "root", "active", "root", active)
-	m.registerChild(root, "root", "waiting", "root", waiting)
-
-	m.mu.Lock()
-	m.children["waiting"].state = subagent.NodeIdle
-	_ = m.tree.Update("waiting", func(n *subagent.Node) { n.State = subagent.NodeIdle })
-	m.mu.Unlock()
-	waitingDriver := m.r.sessionDrivers.Get(waiting)
-	waitingDriver.mu.Lock()
-	waitingDriver.running = false
-	waitingDriver.closeSettledLocked()
-	waitingDriver.mu.Unlock()
-	require.True(t, waitingDriver.PostReliable(t.Context(), QueuedMessage{Content: "later"}))
-	assert.True(t, waitingDriver.HasPending())
-
-	m.mu.Lock()
-	m.children["active"].state = subagent.NodeIdle
-	_ = m.tree.Update("active", func(n *subagent.Node) { n.State = subagent.NodeIdle })
-	m.mu.Unlock()
-	m.signalCapacityRelease()
-	require.Eventually(t, func() bool {
-		var sawLater, sawReply bool
-		for _, item := range waiting.GetAllMessages() {
-			switch item.Message.Role {
-			case chat.MessageRoleUser:
-				sawLater = sawLater || strings.TrimSpace(item.Message.Content) == "later"
-			case chat.MessageRoleAssistant:
-				sawReply = sawReply || strings.TrimSpace(item.Message.Content) == "ok"
+	store := session.NewInMemorySessionStore()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	worker := coordinationReply("ok")
+	worker.call = func(ctx context.Context, _ []chat.Message) (chat.MessageStream, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
 		}
-		rec, ok := m.Read("waiting")
-		return sawLater && sawReply && ok && rec.state == subagent.NodeIdle && rec.result == "ok" && waitingDriver.Settled()
-	}, 2*time.Second, time.Millisecond,
-		"capacity release must wake the retained note through a complete, durably observable turn")
+		return newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build(), nil
+	}
+	_, owner := coordinationRuntime(t, store, coordinationReply("received"), worker, WithMaxActiveDescendants(1), WithMaxActiveDescendantsPerRoot(1))
+	root := coordinationCreate(t, owner.Runtime(), "root", "")
+	active := coordinationCreate(t, owner.Runtime(), "active", root.ID())
+	waiting := coordinationCreate(t, owner.Runtime(), "waiting", root.ID())
+	first, err := active.Submit(t.Context(), TurnInput{Content: "hold"})
+	require.NoError(t, err)
+	coordinationWait(t, entered)
+	next, err := waiting.Submit(t.Context(), TurnInput{Content: "later", RequestID: "later"})
+	require.NoError(t, err, "admission pressure does not reject durable acceptance")
+	status, err := waiting.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, status.Pending)
+	assert.Equal(t, int32(1), calls.Load(), "queued child must not execute before capacity release")
+	close(release)
+	coordinationAwait(t, active, first.TurnID)
+	coordinationAwait(t, waiting, next.TurnID)
+	snapshot, err := waiting.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "ok", snapshot.GetLastAssistantMessageContent())
 	require.Eventually(t, func() bool {
-		m.r.sessionDrivers.mu.Lock()
-		defer m.r.sessionDrivers.mu.Unlock()
-		for _, msg := range m.r.sessionDrivers.orphans[root.ID] {
-			if strings.Contains(msg.Content, "finished its turn") && strings.Contains(msg.Content, "ok") {
+		stored, err := store.GetSession(t.Context(), root.ID())
+		if err != nil {
+			return false
+		}
+		for _, item := range stored.MessagesSnapshot() {
+			if item.Message != nil && strings.HasPrefix(item.Message.TurnID, "report:") && strings.Contains(item.Message.Message.Content, "ok") {
 				return true
 			}
 		}
 		return false
-	}, 2*time.Second, time.Millisecond,
-		"the completed wake turn must retain its report for the not-yet-adopted parent")
+	}, 5*time.Second, time.Millisecond, "completed wake delivers its durable report without another client nudge")
 }
 
 func TestSessionDriverMailboxBound(t *testing.T) {

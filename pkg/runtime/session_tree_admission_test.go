@@ -14,31 +14,34 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 )
 
-type admissionFailTreeStore struct {
-	*subagent.InMemoryStore
+type admissionFailChildStore struct {
+	session.Store
+	session.CoordinationStore
 
 	remaining int
 	always    bool
 }
 
-func (s *admissionFailTreeStore) SaveTree(ctx context.Context, id string, snapshot subagent.Snapshot) error {
+func (s *admissionFailChildStore) AdmitChild(ctx context.Context, admission session.ChildAdmission) error {
 	if s.always || s.remaining > 0 {
 		if s.remaining > 0 {
 			s.remaining--
 		}
-		return errors.New("injected tree save failure")
+		return errors.New("injected child admission failure")
 	}
-	return s.InMemoryStore.SaveTree(ctx, id, snapshot)
+	return s.CoordinationStore.AdmitChild(ctx, admission)
 }
 
-func testTreeAdmissionRollback(t *testing.T, store *admissionFailTreeStore) {
+func testTreeAdmissionRollback(t *testing.T, always bool) {
 	t.Helper()
+	base := session.NewInMemorySessionStore()
+	store := &admissionFailChildStore{Store: base, CoordinationStore: base.(session.CoordinationStore), remaining: 1, always: always}
 	m := newTestSubagentManager(t)
-	m.r.subagentStore = store
+	m.r.sessionStore = store
 	parent := session.New(session.WithID("parent"), session.WithAgentName("root"))
 	m.ensureRoot(parent, "root")
 	prior := m.tree.Snapshot()
-	child := session.New(session.WithID("child"), session.WithParentID(parent.ID), session.WithAgentName("worker"))
+	child := session.New(session.WithID("child"), session.WithParentID(parent.ID), session.WithAgentName("worker"), session.WithAsyncSubagent(true))
 	err := m.registerIdleChild(parent, "root", child, nil, subagent.AllowedSubagent{Agent: "worker"})
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, prior, m.tree.Snapshot(), "failed admission restores topology")
@@ -46,16 +49,24 @@ func testTreeAdmissionRollback(t *testing.T, store *admissionFailTreeStore) {
 	assert.False(t, tracked)
 	_, trackedNode := m.nodeForSession(child.ID)
 	assert.False(t, trackedNode)
+	_, rowErr := store.GetSession(t.Context(), child.ID)
+	require.ErrorIs(t, rowErr, session.ErrNotFound, "failed admission leaves no child transcript row")
 	mirrored := parent.GetSubagentTree()
 	assert.True(t, mirrored == nil || len(mirrored.Nodes) == 0, "uncommitted child is not mirrored")
+	if !always {
+		require.NoError(t, m.registerIdleChild(parent, "root", child, nil, subagent.AllowedSubagent{Agent: "worker"}), "retry can reuse the failed admission identity")
+		stored, err := store.GetSession(t.Context(), child.ID)
+		require.NoError(t, err)
+		assert.Equal(t, parent.ID, stored.ParentID)
+	}
 }
 
 func TestClientChildTreePersistenceRollbackFailOnce(t *testing.T) {
-	testTreeAdmissionRollback(t, &admissionFailTreeStore{InMemoryStore: subagent.NewInMemoryStore(), remaining: 1})
+	testTreeAdmissionRollback(t, false)
 }
 
 func TestClientChildTreePersistenceRollbackFailAlways(t *testing.T) {
-	testTreeAdmissionRollback(t, &admissionFailTreeStore{InMemoryStore: subagent.NewInMemoryStore(), always: true})
+	testTreeAdmissionRollback(t, true)
 }
 
 func TestTreeObservationUnexpectedDescendantClosureIsTerminal(t *testing.T) {
@@ -74,7 +85,7 @@ func TestTreeObservationUnexpectedDescendantClosureIsTerminal(t *testing.T) {
 		if id == child.ID {
 			events, errorsCh, cancel = childEvents, childErrors, func() { cancelOnce.Do(func() { close(cancelled) }) }
 		}
-		return Observation{Initial: []SessionSnapshot{SessionSnapshot{Session: session.New(session.WithID(id)), Status: SessionStatus{SessionID: id}}}, Events: events, Errors: errorsCh, Cancel: cancel}, nil
+		return Observation{Initial: []SessionSnapshot{{Session: session.New(session.WithID(id)), Status: SessionStatus{SessionID: id}}}, Events: events, Errors: errorsCh, Cancel: cancel}, nil
 	}
 	observation, err := h.observeTreeWith(t.Context(), ObserveOptions{Tree: true}, observe)
 	require.NoError(t, err)

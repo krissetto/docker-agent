@@ -15,6 +15,7 @@ import (
 
 type oauthAuthorizationDialog struct {
 	BaseDialog
+
 	serverURL string
 	ref       ElicitationRef
 	keyMap    ConfirmKeyMap
@@ -29,7 +30,8 @@ func (d *oauthAuthorizationDialog) Init() tea.Cmd { return nil }
 func (d *oauthAuthorizationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		return d, d.SetSize(msg.Width, msg.Height)
+		cmd := d.SetSize(msg.Width, msg.Height)
+		return d, cmd
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd

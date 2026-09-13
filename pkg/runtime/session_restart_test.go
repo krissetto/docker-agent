@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestViewCancellationAndCancelLeaveHandleResumable(t *testing.T) {
@@ -81,6 +82,34 @@ func (s *transientPromotionStore) PromotePendingUserMessage(ctx context.Context,
 	return s.Store.PromotePendingUserMessage(ctx, sessionID, turnID)
 }
 
+type restartRecordingProvider struct {
+	*multiRunProvider
+
+	mu       sync.Mutex
+	requests [][]chat.Message
+}
+
+func (p *restartRecordingProvider) CreateChatCompletionStream(ctx context.Context, messages []chat.Message, availableTools []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, append([]chat.Message(nil), messages...))
+	p.mu.Unlock()
+	return p.multiRunProvider.CreateChatCompletionStream(ctx, messages, availableTools)
+}
+
+func (p *restartRecordingProvider) userRequests() [][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	requests := make([][]string, len(p.requests))
+	for i, messages := range p.requests {
+		for _, message := range messages {
+			if message.Role == chat.MessageRoleUser {
+				requests[i] = append(requests[i], message.Content)
+			}
+		}
+	}
+	return requests
+}
+
 func TestPublicSQLiteSubmitBehindTransientRestoredHeadRecoversOnce(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "public-retry.db")
 	store, err := sqlitestore.New(t.Context(), dbPath)
@@ -97,22 +126,12 @@ func TestPublicSQLiteSubmitBehindTransientRestoredHeadRecoversOnce(t *testing.T)
 	releaseA := make(chan struct{})
 	var builds atomic.Int64
 	var mu sync.Mutex
-	var requests [][]string
-	provider := &multiRunProvider{mockProvider: &mockProvider{id: "test/public-retry"}, build: func() chat.MessageStream {
-		var users []string
-		for _, message := range loaded.GetAllMessages() {
-			if message.Message.Role == chat.MessageRoleUser && !message.Pending {
-				users = append(users, message.Message.Content)
-			}
-		}
-		mu.Lock()
-		requests = append(requests, users)
-		mu.Unlock()
+	provider := &restartRecordingProvider{multiRunProvider: &multiRunProvider{mockProvider: &mockProvider{id: "test/public-retry"}, build: func() chat.MessageStream {
 		if builds.Add(1) == 1 {
 			return &blockingMockStream{release: releaseA}
 		}
 		return newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()
-	}}
+	}}}
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(provider)))), WithSessionStore(wrapped))
 	require.NoError(t, err)
 	h, err := rt.CreateSession(t.Context(), loaded, SessionBinding{AgentName: "root"})
@@ -153,9 +172,7 @@ func TestPublicSQLiteSubmitBehindTransientRestoredHeadRecoversOnce(t *testing.T)
 	assert.Equal(t, 1, failures[b.TurnID])
 	assert.Zero(t, failures["turn-a"])
 	mu.Unlock()
-	mu.Lock()
-	got := append([][]string(nil), requests...)
-	mu.Unlock()
+	got := provider.userRequests()
 	require.Len(t, got, 2)
 	assert.Equal(t, []string{"A"}, got[0])
 	assert.Equal(t, []string{"A", "B"}, got[1])
@@ -229,7 +246,7 @@ func TestPersistedSessionFirstSubmitAfterFreshRuntime(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, "ok", loaded.GetLastAssistantMessageContent())
+	assert.Equal(t, "ok", sessionHandleSnapshot(t, handle).GetLastAssistantMessageContent())
 }
 
 func TestPersistedAcceptedPendingInputResumesOnceAcrossTwoRestarts(t *testing.T) {
@@ -248,28 +265,20 @@ func TestPersistedAcceptedPendingInputResumesOnceAcrossTwoRestarts(t *testing.T)
 	require.NoError(t, err)
 	loaded, err := storeB.GetSession(t.Context(), persisted.ID)
 	require.NoError(t, err)
-	var calls [][]chat.Message
-	provider := &multiRunProvider{mockProvider: &mockProvider{id: "test/restart"}, build: func() chat.MessageStream {
-		messages := loaded.GetAllMessages()
-		chatMessages := make([]chat.Message, len(messages))
-		for i := range messages {
-			chatMessages[i] = messages[i].Message
-		}
-		calls = append(calls, chatMessages)
+	provider := &restartRecordingProvider{multiRunProvider: &multiRunProvider{mockProvider: &mockProvider{id: "test/restart"}, build: func() chat.MessageStream {
 		return newStreamBuilder().AddContent("resumed answer").AddStopWithUsage(1, 1).Build()
-	}}
+	}}}
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(provider)))), WithSessionStore(storeB))
 	require.NoError(t, err)
 	handle, err := rt.CreateSession(t.Context(), loaded, SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		status, _ := handle.Status(t.Context())
-		return status.State == SessionStateSettled && len(calls) == 1
+		return status.State == SessionStateSettled && len(provider.userRequests()) == 1
 	}, 5*time.Second, time.Millisecond)
+	calls := provider.userRequests()
 	require.Len(t, calls, 1)
-	require.Len(t, calls[0], 1)
-	assert.Equal(t, chat.MessageRoleUser, calls[0][0].Role)
-	assert.Equal(t, "resume exactly once", calls[0][0].Content)
+	assert.Equal(t, []string{"resume exactly once"}, calls[0])
 	require.NoError(t, rt.shutdownSessions(t.Context()))
 	require.NoError(t, storeB.Close())
 
@@ -284,10 +293,10 @@ func TestPersistedAcceptedPendingInputResumesOnceAcrossTwoRestarts(t *testing.T)
 		}
 	}
 	rt2 := newPersistedSessionRuntime(t, storeC)
-	_, err = rt2.CreateSession(t.Context(), reloaded, SessionBinding{AgentName: "root"})
+	reopenedHandle, err := rt2.CreateSession(t.Context(), reloaded, SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond) //nolint:forbidigo // deliberate observation window proving stale generation is fenced
-	assert.Equal(t, "resumed answer", reloaded.GetLastAssistantMessageContent(), "second reload must not replay the promoted input")
+	assert.Equal(t, "resumed answer", sessionHandleSnapshot(t, reopenedHandle).GetLastAssistantMessageContent(), "second reload must not replay the promoted input")
 }
 
 func TestPersistedAcceptedPendingInputAutoResumesOnFreshRuntime(t *testing.T) {
@@ -311,9 +320,9 @@ func TestPersistedAcceptedPendingInputAutoResumesOnFreshRuntime(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		status, statusErr := handle.Status(t.Context())
-		return statusErr == nil && status.State == SessionStateSettled && loaded.GetLastAssistantMessageContent() == "ok"
+		return statusErr == nil && status.State == SessionStateSettled && sessionHandleSnapshot(t, handle).GetLastAssistantMessageContent() == "ok"
 	}, 5*time.Second, time.Millisecond, "durably accepted work resumes without client input")
-	messages := loaded.GetAllMessages()
+	messages := sessionHandleSnapshot(t, handle).GetAllMessages()
 	require.NotEmpty(t, messages)
 	var restored session.Message
 	var found bool
@@ -363,7 +372,11 @@ func TestConcurrentCreateSessionPublishesBindingOnce(t *testing.T) {
 	for err := range results {
 		require.NoError(t, err)
 	}
-	assert.Equal(t, "root", sess.AgentName)
+	handle, err := rt.SessionByID(sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "root", handle.AgentName())
+	assert.Equal(t, "root", sessionHandleSnapshot(t, handle).AgentName)
+	assert.Empty(t, sess.AgentName, "binding must not mutate the caller-owned template")
 }
 
 func TestConcurrentGenerationLifecyclePreservesDeleteFinality(t *testing.T) {
@@ -489,9 +502,9 @@ func TestExistingLegacySessionRemainsUnstampedAfterSessionPersistence(t *testing
 		agent.New("root", "prompt", agent.WithModel(&mockProvider{id: "test/legacy"})),
 	)), WithSessionStore(store))
 	require.NoError(t, err)
-	_, err = rt.CreateSession(t.Context(), loaded, SessionBinding{AgentName: "root"})
+	handle, err := rt.CreateSession(t.Context(), loaded, SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
-	require.NoError(t, rt.UpdateSessionTitle(t.Context(), loaded, "legacy updated"))
+	require.NoError(t, handle.UpdateTitle(t.Context(), "legacy updated"))
 	require.NoError(t, rt.shutdownSessions(t.Context()))
 	require.NoError(t, store.Close())
 

@@ -24,6 +24,7 @@ import (
 
 type leanSession struct {
 	runtime.UnsupportedSessionHandle
+
 	id             string
 	submitted      []runtime.TurnInput
 	sent           []runtime.TurnInput
@@ -116,7 +117,7 @@ func (a *leanSession) Steer(_ context.Context, input runtime.TurnInput) (runtime
 }
 
 func (a *leanSession) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
-	return runtime.Observation{Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Session: a.snapshot}}, Cancel: func() {}}, nil
+	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: a.snapshot}}, Cancel: func() {}}, nil
 }
 
 func (a *leanSession) Status(context.Context) (runtime.SessionStatus, error) {

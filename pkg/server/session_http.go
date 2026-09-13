@@ -120,7 +120,7 @@ type sessionInputRequest struct {
 	Mode         string             `json:"mode,omitempty"`
 	Content      string             `json:"content"`
 	MultiContent []chat.MessagePart `json:"multi_content,omitempty"`
-	ClientID     string             `json:"client_id,omitempty"`
+	RequestID    string             `json:"request_id,omitempty"`
 }
 
 type sessionSubmissionDTO struct {
@@ -158,10 +158,14 @@ type sessionStatusDTO struct {
 }
 
 type sessionPendingInputDTO struct {
-	TurnID          string             `json:"turn_id"`
-	Content         string             `json:"content"`
-	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
-	SessionPosition int                `json:"session_position"`
+	InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID        string              `json:"sender_id,omitempty"`
+	SenderName      string              `json:"sender_name,omitempty"`
+	InputMode       string              `json:"input_mode,omitempty"`
+	TurnID          string              `json:"turn_id"`
+	Content         string              `json:"content"`
+	MultiContent    []chat.MessagePart  `json:"multi_content,omitempty"`
+	SessionPosition int                 `json:"session_position"`
 }
 
 type sessionInteractionDTO struct {
@@ -199,6 +203,7 @@ type sessionStreamMessage struct {
 	Snapshot *sessionSnapshotDTO `json:"snapshot,omitempty"`
 	Envelope *sessionEnvelopeDTO `json:"envelope,omitempty"`
 	Cursor   uint64              `json:"cursor,omitempty"`
+	Chunk    []byte              `json:"chunk,omitempty"`
 }
 
 func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
@@ -212,6 +217,8 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.POST("/:id/retry", s.retrySession)
 	group.POST("/:id/responses", s.respondSession)
 	group.POST("/:id/cancel", s.cancelSession)
+	group.POST("/:id/turns/:turnID/wait", s.awaitSessionTurn)
+	group.PATCH("/:id", s.editCanonicalSession)
 	group.PATCH("/:id/title", s.updateCanonicalSessionTitle)
 	group.GET("/:id/tree", s.sessionTree)
 	group.GET("/:id/todos", s.sessionTodos)
@@ -258,7 +265,7 @@ func (s *Server) sessionInput(c echo.Context) error {
 	if err != nil {
 		return sessionHTTPError(err)
 	}
-	input := runtime.TurnInput{Content: req.Content, MultiContent: req.MultiContent, ClientID: req.ClientID}
+	input := runtime.TurnInput{Content: req.Content, MultiContent: req.MultiContent, RequestID: req.RequestID}
 	var submission runtime.Submission
 	switch req.Mode {
 	case "", "submit":
@@ -683,6 +690,33 @@ func (s *Server) cancelSession(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"session_id": result.SessionID, "turn_id": result.TurnID, "outcome": result.Outcome})
 }
 
+func (s *Server) editCanonicalSession(c echo.Context) error {
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	var edit runtime.SessionEdit
+	if err := decodeSessionJSON(c, &edit); err != nil {
+		return sessionRequestError("invalid request body")
+	}
+	updated, err := handle.Edit(c.Request().Context(), edit)
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, updated)
+}
+
+func (s *Server) awaitSessionTurn(c echo.Context) error {
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	if err := handle.AwaitTurn(c.Request().Context(), c.Param("turnID")); err != nil {
+		return sessionHTTPError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (s *Server) sessionEventStream(c echo.Context) error {
 	tree := c.QueryParam("tree") == "true"
 	if c.QueryParam("tree") != "" && !tree {
@@ -739,7 +773,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	snapshots := observation.Initial
 	for _, initial := range snapshots {
 		snapshot := sessionSnapshot(initial)
-		if err := write(sessionStreamMessage{Version: 1, Type: "snapshot", Snapshot: &snapshot}); err != nil {
+		if err := writeSessionSnapshot(snapshot, write); err != nil {
 			return nil
 		}
 	}
@@ -768,7 +802,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 				continue
 			}
 			dto := sessionSnapshot(snapshot)
-			if err := write(sessionStreamMessage{Version: 1, Type: "snapshot", Snapshot: &dto}); err != nil {
+			if err := writeSessionSnapshot(dto, write); err != nil {
 				return nil
 			}
 		case envelope, ok := <-observation.Events:
@@ -789,6 +823,30 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 			response.Flush()
 		}
 	}
+}
+
+const sessionSnapshotChunkBytes = 64 << 10
+
+// Large snapshots have bounded wire frames, not a truncated transcript.
+func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamMessage) error) error {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	if len(data) <= sessionSnapshotChunkBytes {
+		return write(sessionStreamMessage{Version: 1, Type: "snapshot", Snapshot: &snapshot})
+	}
+	if err := write(sessionStreamMessage{Version: 1, Type: "snapshot_begin", Cursor: snapshot.Cursor}); err != nil {
+		return err
+	}
+	for len(data) > 0 {
+		n := min(len(data), sessionSnapshotChunkBytes)
+		if err := write(sessionStreamMessage{Version: 1, Type: "snapshot_chunk", Cursor: snapshot.Cursor, Chunk: data[:n]}); err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+	return write(sessionStreamMessage{Version: 1, Type: "snapshot_end", Cursor: snapshot.Cursor})
 }
 
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
@@ -814,7 +872,7 @@ func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 		out.Interactions[i] = sessionInteractionDTO{SessionID: interaction.SessionID, InteractionID: interaction.InteractionID, Kind: interaction.Kind, ElicitationID: interaction.ElicitationID, Event: interaction.Event}
 	}
 	for i, input := range snapshot.PendingInputs {
-		out.PendingInputs[i] = sessionPendingInputDTO{TurnID: input.TurnID, Content: input.Content, MultiContent: input.MultiContent, SessionPosition: input.SessionPosition}
+		out.PendingInputs[i] = sessionPendingInputDTO{TurnID: input.TurnID, Content: input.Content, MultiContent: input.MultiContent, SessionPosition: input.SessionPosition, InputOrigin: input.InputOrigin, SenderID: input.SenderID, SenderName: input.SenderName, InputMode: input.InputMode}
 	}
 	return out
 }
@@ -877,14 +935,20 @@ func sessionHTTPError(err error) error {
 			status = http.StatusNotFound
 		case runtime.SessionErrorCapacity:
 			status = http.StatusTooManyRequests
+		case runtime.SessionErrorPersistence:
+			status = http.StatusServiceUnavailable
 		case runtime.SessionErrorStale:
 			status = http.StatusPreconditionFailed
 		case runtime.SessionErrorUnsupported:
 			status = http.StatusNotImplemented
-		case runtime.SessionErrorWrongSession:
+		case runtime.SessionErrorConflict, runtime.SessionErrorWrongSession:
 			status = http.StatusConflict
 		}
-		return echo.NewHTTPError(status, map[string]any{"error": sessionErr.Kind, "operation": publicSessionOperation(string(sessionErr.Operation)), "reason": sessionErr.Reason, "session_id": sessionErr.SessionID})
+		payload := map[string]any{"error": sessionErr.Kind, "operation": publicSessionOperation(string(sessionErr.Operation)), "reason": sessionErr.Reason, "session_id": sessionErr.SessionID}
+		if sessionErr.Detail != "" {
+			payload["detail"] = sessionErr.Detail
+		}
+		return echo.NewHTTPError(status, payload)
 	}
 	if errors.Is(err, session.ErrNotFound) {
 		return echo.NewHTTPError(http.StatusNotFound, "session not found")

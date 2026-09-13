@@ -31,8 +31,9 @@ func (s *testRuntimeSupervisor) shutdownCount() int {
 	return s.shutdowns
 }
 
-func newTestRuntimePool(maxIdle int) (*runtimePool, *[]*testRuntimeSupervisor) {
-	p := newRuntimePool(context.Background(), nil, maxIdle)
+func newTestRuntimePool(t *testing.T, maxIdle int) (*runtimePool, *[]*testRuntimeSupervisor) {
+	t.Helper()
+	p := newRuntimePool(t.Context(), nil, maxIdle)
 	created := make([]*testRuntimeSupervisor, 0)
 	p.new = func() (runtime.SessionRuntimeSupervisor, error) {
 		owner := &testRuntimeSupervisor{}
@@ -43,14 +44,14 @@ func newTestRuntimePool(maxIdle int) (*runtimePool, *[]*testRuntimeSupervisor) {
 }
 
 func TestRuntimePool_MaxIdleZeroBuildsAndShutsDownEachRequest(t *testing.T) {
-	p, created := newTestRuntimePool(0)
+	p, created := newTestRuntimePool(t, 0)
 
 	_, release, err := p.Get("root")
 	require.NoError(t, err)
-	require.NoError(t, release(t.Context()))
+	require.NoError(t, release(t.Context(), true))
 	_, release, err = p.Get("root")
 	require.NoError(t, err)
-	require.NoError(t, release(t.Context()))
+	require.NoError(t, release(t.Context(), true))
 
 	require.Len(t, *created, 2)
 	assert.Equal(t, 1, (*created)[0].shutdownCount())
@@ -58,30 +59,30 @@ func TestRuntimePool_MaxIdleZeroBuildsAndShutsDownEachRequest(t *testing.T) {
 }
 
 func TestRuntimePool_MaxIdleOneReusesReturnedRuntime(t *testing.T) {
-	p, created := newTestRuntimePool(1)
+	p, created := newTestRuntimePool(t, 1)
 
 	_, release, err := p.Get("root")
 	require.NoError(t, err)
-	require.NoError(t, release(t.Context()))
+	require.NoError(t, release(t.Context(), true))
 	_, release, err = p.Get("root")
 	require.NoError(t, err)
 
 	require.Len(t, *created, 1)
 	assert.Zero(t, (*created)[0].shutdownCount())
-	require.NoError(t, release(t.Context()))
+	require.NoError(t, release(t.Context(), true))
 	require.NoError(t, p.Shutdown(t.Context()))
 	assert.Equal(t, 1, (*created)[0].shutdownCount())
 }
 
 func TestRuntimePool_EvictsLeastRecentlyReturnedRuntime(t *testing.T) {
-	p, created := newTestRuntimePool(1)
+	p, created := newTestRuntimePool(t, 1)
 
 	_, releaseFirst, err := p.Get("root")
 	require.NoError(t, err)
 	_, releaseSecond, err := p.Get("root")
 	require.NoError(t, err)
-	require.NoError(t, releaseFirst(t.Context()))
-	require.NoError(t, releaseSecond(t.Context()))
+	require.NoError(t, releaseFirst(t.Context(), true))
+	require.NoError(t, releaseSecond(t.Context(), true))
 
 	require.Len(t, *created, 2)
 	assert.Equal(t, 1, (*created)[0].shutdownCount())
@@ -90,11 +91,11 @@ func TestRuntimePool_EvictsLeastRecentlyReturnedRuntime(t *testing.T) {
 	_, releaseReused, err := p.Get("root")
 	require.NoError(t, err)
 	require.Len(t, *created, 2)
-	require.NoError(t, releaseReused(t.Context()))
+	require.NoError(t, releaseReused(t.Context(), true))
 }
 
 func TestRuntimePool_ShutdownClosesBorrowedRuntimeOnce(t *testing.T) {
-	p, created := newTestRuntimePool(1)
+	p, created := newTestRuntimePool(t, 1)
 
 	_, release, err := p.Get("root")
 	require.NoError(t, err)
@@ -102,12 +103,12 @@ func TestRuntimePool_ShutdownClosesBorrowedRuntimeOnce(t *testing.T) {
 
 	require.NoError(t, p.Shutdown(t.Context()))
 	assert.Equal(t, 1, (*created)[0].shutdownCount())
-	require.NoError(t, release(t.Context()))
+	require.NoError(t, release(t.Context(), true))
 	assert.Equal(t, 1, (*created)[0].shutdownCount())
 }
 
 func TestRuntimePool_ReleaseRacingShutdownClosesRuntimeOnce(t *testing.T) {
-	p, created := newTestRuntimePool(1)
+	p, created := newTestRuntimePool(t, 1)
 	_, release, err := p.Get("root")
 	require.NoError(t, err)
 
@@ -117,7 +118,7 @@ func TestRuntimePool_ReleaseRacingShutdownClosesRuntimeOnce(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		_ = release(t.Context())
+		_ = release(t.Context(), true)
 	}()
 	go func() {
 		defer wg.Done()
@@ -137,4 +138,18 @@ func TestRuntimePool_NilReceiver(t *testing.T) {
 	require.ErrorIs(t, err, errInvalidRuntime)
 	assert.Nil(t, rt)
 	assert.Nil(t, release)
+}
+
+func TestRuntimePool_DiscardsRuntimeAfterFailedDrain(t *testing.T) {
+	p, created := newTestRuntimePool(t, 1)
+	_, release, err := p.Get("root")
+	require.NoError(t, err)
+	require.NoError(t, release(t.Context(), false))
+	require.NoError(t, release(t.Context(), true), "a failed drain cannot be made reusable later")
+	assert.Equal(t, 1, (*created)[0].shutdownCount())
+	_, releaseNext, err := p.Get("root")
+	require.NoError(t, err)
+	require.Len(t, *created, 2)
+	require.NoError(t, releaseNext(t.Context(), true))
+	require.NoError(t, p.Shutdown(t.Context()))
 }

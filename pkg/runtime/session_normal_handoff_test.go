@@ -68,7 +68,7 @@ func TestErrorCompletionAutomaticallyPromotesQueuedSuccessor(t *testing.T) {
 		return statusErr == nil && status.State == SessionStateSettled && status.Pending == 0
 	}, 5*time.Second, time.Millisecond)
 	assert.Equal(t, 2, provider.callCount())
-	assert.Equal(t, "recovered", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, "recovered", sessionHandleSnapshot(t, handle).GetLastAssistantMessageContent())
 }
 
 // A UI owns the context passed to Submit and cancels it when that turn's stop
@@ -157,9 +157,9 @@ func TestNormalCompletionHandoffDetachesCallerContextAndDrainsFIFO(t *testing.T)
 	assert.Equal(t, SessionStateSettled, status.State)
 	assert.Zero(t, status.Pending)
 	assert.Empty(t, status.LastError)
-	assert.Equal(t, "third", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, "third", sessionHandleSnapshot(t, handle).GetLastAssistantMessageContent())
 	var users []string
-	for _, item := range sess.GetAllMessages() {
+	for _, item := range sessionHandleSnapshot(t, handle).GetAllMessages() {
 		if item.Message.Role == chat.MessageRoleUser {
 			users = append(users, item.Message.Content)
 			assert.False(t, item.Pending)

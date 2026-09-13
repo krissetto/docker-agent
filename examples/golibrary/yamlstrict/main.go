@@ -18,13 +18,17 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/ocisource"
+	"github.com/docker/docker-agent/pkg/host/lifecycle"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools/builtin/api"
@@ -45,7 +49,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, ref string) error {
+func run(ctx context.Context, ref string) (retErr error) {
 	// Pick the source type explicitly; each lives in its own package so only
 	// the one you import is linked. pkg/config/sources resolves any kind of
 	// reference (files, directories, URLs, OCI, aliases) at the cost of
@@ -89,13 +93,39 @@ func run(ctx context.Context, ref string) error {
 
 	rt, err := runtime.New(ctx, team)
 	if err != nil {
-		return err
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return errors.Join(err, team.StopToolSets(cleanupCtx))
 	}
+	supervisor := lifecycle.OwnRuntime(runtime.NewSessionRuntimeSupervisor(rt), team)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		retErr = errors.Join(retErr, supervisor.Shutdown(cleanupCtx))
+	}()
 
-	messages, err := rt.Run(ctx, session.New(session.WithUserMessage("Introduce yourself in one sentence.")))
+	handle, err := supervisor.Runtime().CreateSession(ctx,
+		session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
 	if err != nil {
 		return err
 	}
-	fmt.Println(messages[len(messages)-1].Message.Content)
+	ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: "Introduce yourself in one sentence."})
+	if err != nil {
+		return err
+	}
+	termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		if event, ok := envelope.Event.(*runtime.ErrorEvent); ok {
+			return runtimeclient.TurnTerminate, errors.New(event.Error)
+		}
+		return runtimeclient.TurnContinue, nil
+	})
+	if termination.Err != nil {
+		return termination.Err
+	}
+	snapshot, err := handle.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println(snapshot.GetLastAssistantMessageContent())
 	return nil
 }

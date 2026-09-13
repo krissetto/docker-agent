@@ -87,9 +87,12 @@ type App struct {
 	// source and Run's own channel is drained for flow control only.
 	// runCancelled mutes bridged events after the user cancels the in-flight
 	// turn (all but the stream stop), mirroring the classic drop-on-cancel.
+	bridgeMu     sync.Mutex
 	stopBridge   func()
 	hubBridged   bool
 	bridgeEpoch  atomic.Uint64
+	presentation atomic.Pointer[PresentationState]
+	projectionMu sync.Mutex
 	runCancelled atomic.Bool
 	// lifecycleMu correlates accepted submissions with cancellation and bridged
 	// envelopes. A cancelled request only mutes its own tail; a stale stop can
@@ -108,10 +111,15 @@ type App struct {
 	// App only observes events and hands user input to the runtime.
 	attachedSubagent *runtime.SubagentAttachInfo
 
-	startOnce  sync.Once
-	subsMu     sync.Mutex
-	subs       []chan any
-	fanoutOnce sync.Once
+	startOnce      sync.Once
+	subsMu         sync.Mutex
+	subs           []chan any
+	subscriberDone map[chan any]<-chan struct{}
+	fanoutOnce     sync.Once
+	busMu          sync.Mutex
+	busContext     context.Context //nolint:containedctx // observer bus follows App lifetime, not execution
+	busCancel      context.CancelFunc
+	busDone        chan struct{}
 }
 
 // Opt is an option for creating a new App.
@@ -191,8 +199,10 @@ func New(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Ses
 			session: sess,
 			binding: binding,
 		},
-		events: make(chan any, 128),
+		events:           make(chan any, 128),
+		throttleDuration: 50 * time.Millisecond,
 	}
+	app.initBus(ctx)
 	for _, opt := range opts {
 		opt(app)
 	}
@@ -273,10 +283,6 @@ func (s sessionState) operationError(operation string) error {
 	return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: sessionID, Operation: runtime.SessionOperation(operation)}
 }
 
-func (a *App) sessionError(operation string) error {
-	return a.state().operationError(operation)
-}
-
 func (a *App) state() sessionState {
 	a.stateMu.RLock()
 	defer a.stateMu.RUnlock()
@@ -284,6 +290,12 @@ func (a *App) state() sessionState {
 }
 
 func (a *App) replaceSessionState(state sessionState) {
+	a.projectionMu.Lock()
+	defer a.projectionMu.Unlock()
+	if state.session != nil && state.handle != nil {
+		state.session = state.session.Clone()
+	}
+	a.presentation.Store(nil)
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 	a.currentState = state
@@ -294,6 +306,8 @@ func (a *App) replaceSessionState(state sessionState) {
 // lifecycle.
 func (a *App) Start(ctx context.Context) {
 	a.startOnce.Do(func() {
+		a.initBus(ctx)
+		context.AfterFunc(ctx, a.stopBus)
 		if a.attachedSubagent == nil {
 			a.reloadSubagentTree(ctx)
 		}
@@ -301,7 +315,7 @@ func (a *App) Start(ctx context.Context) {
 		// feeds the bus, whoever drives a run — this App, the subagent
 		// manager, or the runtime's session handle waking the session.
 		a.hubBridged = a.startSessionEventBridge(ctx)
-		a.startSubagentTreeBridge(ctx)
+		a.startSubagentTreeBridge(a.busLifetime())
 		// Emit startup info (agent, team, tools) through the events channel.
 		// This runs in the background so the TUI can start immediately while
 		// slow operations (like MCP tool loading) complete asynchronously.
@@ -358,9 +372,10 @@ func (a *App) InitialEventCommands() []EventCommand {
 				return nil
 			}
 			// Inherit the attachment in any sub-session created by this turn.
-			state := a.state()
-			if state.session != nil {
-				state.session.AddAttachedFile(attachedPath)
+			if attachedPath != "" {
+				if err := a.EditSession(a.ctx(), runtime.SessionEdit{Kind: runtime.SessionEditAttachment, AttachmentPath: attachedPath}); err != nil {
+					return runtime.Error("Failed to attach file: " + err.Error())
+				}
 			}
 
 			// If the message has multi-content (attachments), we need to handle it specially
@@ -531,11 +546,7 @@ func (a *App) refreshSessionProjection(ctx context.Context) {
 	if err != nil || snapshot == nil {
 		return
 	}
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
-	state := a.currentState
-	state.session = snapshot
-	a.currentState = state
+	a.installSessionView(ctx, reader, snapshot)
 }
 
 func (a *App) SupportsSessionEditing() bool {
@@ -873,7 +884,7 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 // and inlined text files — keeping everything in one text block ensures the
 // model sees file content together with the message, rather than as separate
 // content blocks — followed by any binary parts (images, PDFs, …).
-func (a *App) buildUserMultiContent(ctx context.Context, sess *session.Session, message string, attachments []messages.Attachment) []chat.MessagePart {
+func (a *App) buildUserMultiContent(ctx context.Context, _ *session.Session, message string, attachments []messages.Attachment) []chat.MessagePart {
 	var textBuilder strings.Builder
 	textBuilder.WriteString(message)
 
@@ -889,7 +900,9 @@ func (a *App) buildUserMultiContent(ctx context.Context, sess *session.Session, 
 			// dangling references to directories or missing paths. The editor
 			// resolves @-mentions to absolute paths before this point.
 			if a.processFileAttachment(ctx, att, &textBuilder, &binaryParts) {
-				sess.AddAttachedFile(att.FilePath)
+				if err := a.EditSession(ctx, runtime.SessionEdit{Kind: runtime.SessionEditAttachment, AttachmentPath: att.FilePath}); err != nil {
+					a.sendEvent(ctx, runtime.Warning("Failed to remember attachment: "+err.Error(), ""))
+				}
 			}
 		case att.Content != "":
 			// Inline content attachment (e.g. pasted text).
@@ -1117,8 +1130,16 @@ type SubscribeOptions struct {
 }
 
 func (a *App) Subscribe(ctx context.Context, send func(any), options SubscribeOptions) {
+	a.initBus(ctx)
+	busCtx := a.busLifetime()
 	ch := make(chan any, subscriberBufferSize)
-	a.addSubscriber(ch)
+	a.subsMu.Lock()
+	if a.subscriberDone == nil {
+		a.subscriberDone = make(map[chan any]<-chan struct{})
+	}
+	a.subscriberDone[ch] = ctx.Done()
+	a.subs = append(a.subs, ch)
+	a.subsMu.Unlock()
 	if options.Ready != nil {
 		close(options.Ready)
 	}
@@ -1129,6 +1150,8 @@ func (a *App) Subscribe(ctx context.Context, send func(any), options SubscribeOp
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-busCtx.Done():
 			return
 		case msg := <-ch:
 			if bridged, ok := msg.(SessionEventMsg); ok {
@@ -1152,83 +1175,44 @@ func (a *App) SubscribeWith(ctx context.Context, send func(tea.Msg)) {
 
 const subscriberBufferSize = 1024
 
-func (a *App) addSubscriber(ch chan any) {
-	a.subsMu.Lock()
-	defer a.subsMu.Unlock()
-	a.subs = append(a.subs, ch)
-}
-
 func (a *App) removeSubscriber(ch chan any) {
 	a.subsMu.Lock()
 	defer a.subsMu.Unlock()
 	a.subs = slices.DeleteFunc(a.subs, func(c chan any) bool { return c == ch })
+	delete(a.subscriberDone, ch)
 }
 
-// startFanOut runs once per App. It throttles the raw events channel and
-// scatters every message to all currently-registered subscribers. Sends are
-// non-blocking; if a subscriber's buffer is full the event is dropped for
-// that subscriber so one slow consumer cannot stall the others.
-//
-// Turn-boundary events are the exception: dropping a stream_started or
-// stream_stopped skews a consumer's turn accounting for good (the SSE replay
-// buffer never sees the event, so reconnecting cannot recover it). For those,
-// the oldest pending message — almost always a content delta, which the next
-// delta supersedes — is evicted to make room instead.
+// startFanOut keeps bounded, cancellation-aware delivery through the last fanout.
+// A slow consumer backpressures observation; any upstream journal gap then goes
+// through the same authoritative Reset path instead of silently losing deltas.
 func (a *App) startFanOut() {
-	throttled := a.throttleEvents(a.ctx(), a.events)
+	busCtx := a.busLifetime()
+	throttled := a.throttleEvents(busCtx, a.events)
+	a.busMu.Lock()
+	done := a.busDone
+	a.busMu.Unlock()
 	go func() {
+		defer close(done)
 		for msg := range throttled {
 			a.subsMu.Lock()
 			subs := slices.Clone(a.subs)
+			cancellations := make([]<-chan struct{}, len(subs))
+			for i, ch := range subs {
+				cancellations[i] = a.subscriberDone[ch]
+			}
 			a.subsMu.Unlock()
-			for _, ch := range subs {
+			for i, ch := range subs {
+				canceled := cancellations[i]
+
 				select {
 				case ch <- msg:
-				default:
-					if !isTurnBoundaryEvent(msg) {
-						slog.Warn("app: subscriber buffer full, dropping event")
-						continue
-					}
-					// Evict the oldest pending message (racing the subscriber's
-					// own receive is fine: either way a slot frees up), then
-					// retry once. Still full means the subscriber is wedged;
-					// drop as before rather than block the fan-out.
-					select {
-					case <-ch:
-					default:
-					}
-					select {
-					case ch <- msg:
-					default:
-						slog.Warn("app: subscriber buffer full, dropping turn-boundary event")
-					}
+				case <-canceled:
+				case <-busCtx.Done():
+					return
 				}
 			}
 		}
 	}()
-}
-
-// isTurnBoundaryEvent reports whether msg is one of the events consumers use
-// to track turn state (running/waiting/failed/paused) and identity (title).
-// These are low-frequency and irrecoverable when lost, unlike the content
-// deltas that dominate the stream, so the fan-out prefers them on overflow.
-func isTurnBoundaryEvent(msg any) bool {
-	if bridged, ok := msg.(SessionEventMsg); ok {
-		msg = bridged.Event
-	}
-	switch msg.(type) {
-	case *runtime.StreamStartedEvent,
-		*runtime.StreamStoppedEvent,
-		*runtime.UserMessageEvent,
-		*runtime.ErrorEvent,
-		*runtime.PauseChangedEvent,
-		*runtime.PausedEvent,
-		*runtime.SkillOperationEvent,
-		*runtime.SessionTitleEvent:
-		return true
-	default:
-		return false
-	}
 }
 
 // SteerMessage resolves attachments into message parts and queues the result
@@ -1266,6 +1250,8 @@ func (a *App) FollowUpMessage(ctx context.Context, content string, attachments [
 }
 
 func (a *App) fenceSessionBridge() {
+	a.bridgeMu.Lock()
+	defer a.bridgeMu.Unlock()
 	a.bridgeEpoch.Add(1)
 	if a.stopBridge != nil {
 		a.stopBridge()
@@ -1517,8 +1503,8 @@ func (a *App) CompactSession(ctx context.Context, additionalPrompt string) error
 
 // AttachedFiles returns the current session's attached file paths, the same
 // inventory DropAttachedFile resolves against. Backs /drop argument
-// completion; nil when there is no active session. Attachments are
-// in-memory client-side session state, so this works on remote runtimes too.
+// completion; nil when there is no active session. The canonical owner
+// retains attachment inventory for subsequent delegation and prompts.
 func (a *App) AttachedFiles() []string {
 	sess := a.Session()
 	if sess == nil {
@@ -1533,11 +1519,6 @@ func (a *App) AttachedFiles() []string {
 // absolute form of a relative path, then a unique base-name match. Dropping
 // stops the file from being propagated to future sub-agent delegations and
 // skill prompts; content already inlined in past messages is unaffected.
-//
-// Attached files are in-memory session state (recording them never touches
-// the store either), so the store sync afterwards is best-effort: it only
-// refreshes stores that snapshot the attachment list and a failure does not
-// undo the drop.
 func (a *App) DropAttachedFile(ctx context.Context, path string) (string, error) {
 	sess := a.Session()
 	if sess == nil {
@@ -1554,15 +1535,7 @@ func (a *App) DropAttachedFile(ctx context.Context, path string) (string, error)
 		a.refreshSessionProjection(ctx)
 		return resolved, nil
 	}
-	if !sess.RemoveAttachedFile(resolved) {
-		return "", fmt.Errorf("file is not attached to this session: %s", resolved)
-	}
-	if store := a.runtime.SessionStore(); store != nil {
-		if err := store.UpdateSession(ctx, sess); err != nil {
-			slog.WarnContext(ctx, "Failed to sync session store after dropping attachment", "session_id", sess.ID, "path", resolved, "error", err)
-		}
-	}
-	return resolved, nil
+	return "", a.unsupportedSessionOperation(runtime.SessionOperationRemoveAttachment)
 }
 
 // resolveAttachedFile maps user input to one recorded attachment path.
@@ -1657,14 +1630,6 @@ func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 // HasPermissions returns true if any permissions are configured (team or session level).
 func (a *App) HasPermissions() bool {
 	return a.PermissionsInfo() != nil
-}
-
-func (a *App) sessionAgentName() string {
-	state := a.state()
-	if state.handle != nil {
-		return state.handle.AgentName()
-	}
-	return ""
 }
 
 // ShouldExitAfterFirstResponse returns true if the app is configured to exit
@@ -1763,11 +1728,10 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 	// Clear first message so it won't be re-sent on re-init
 	a.firstMessage = nil
 	a.firstMessageAttach = ""
-	a.hubBridged = a.startSessionEventBridge(ctx)
-
 	// Hydrate the loaded session's subagent view from the subagent store
 	// before the TUI components read it.
 	a.reloadSubagentTree(ctx)
+	a.hubBridged = a.startSessionEventBridge(ctx)
 
 	// Reset and re-emit startup info so the sidebar shows agent/tools info
 	a.reEmitStartupInfo(ctx)
@@ -1807,6 +1771,7 @@ func (a *App) throttleEvents(ctx context.Context, in <-chan any) <-chan any {
 
 			case msg, ok := <-in:
 				if !ok {
+					flush()
 					return
 				}
 
@@ -1830,6 +1795,9 @@ func (a *App) throttleEvents(ctx context.Context, in <-chan any) <-chan any {
 
 // shouldThrottle determines if an event should be buffered/throttled
 func (a *App) shouldThrottle(msg any) bool {
+	if wrapped, ok := msg.(SessionEventMsg); ok {
+		msg = wrapped.Event
+	}
 	switch msg.(type) {
 	case *runtime.AgentChoiceEvent:
 		return true
@@ -1858,33 +1826,48 @@ func (a *App) mergeEvents(events []any) []any {
 	result := make([]any, 0, len(events))
 
 	for i := 0; i < len(events); i++ {
-		switch ev := events[i].(type) {
-		case *runtime.AgentChoiceEvent:
-			merged, consumed := mergeAgentChoiceRun(ev, events[i+1:])
-			result = append(result, merged)
-			i += consumed
-
-		case *runtime.AgentChoiceReasoningEvent:
-			merged, consumed := mergeAgentChoiceReasoningRun(ev, events[i+1:])
-			result = append(result, merged)
-			i += consumed
-
-		case *runtime.PartialToolCallEvent:
-			merged, consumed := mergePartialToolCallRun(ev, events[i+1:])
-			result = append(result, merged)
-			i += consumed
-
-		case *runtime.ToolCallOutputEvent:
-			merged, consumed := mergeToolCallOutputRun(ev, events[i+1:])
-			result = append(result, merged)
-			i += consumed
-
-		default:
-			result = append(result, events[i])
+		if first, ok := events[i].(SessionEventMsg); ok {
+			unwrapped := []any{first.Event}
+			for _, msg := range events[i+1:] {
+				next, ok := msg.(SessionEventMsg)
+				if !ok || next.OriginSessionID != first.OriginSessionID || next.TurnID != first.TurnID || next.Epoch != first.Epoch || next.Seed != first.Seed {
+					break
+				}
+				unwrapped = append(unwrapped, next.Event)
+			}
+			// Canonical cursor/gap handling and App projection precede this
+			// presentation-only merge. Preserve the newest projected head.
+			for j := 0; j < len(unwrapped); j++ {
+				merged, consumed := mergeEventRun(unwrapped[j], unwrapped[j+1:])
+				last := events[i+j+consumed].(SessionEventMsg)
+				last.Event, _ = merged.(runtime.Event)
+				result = append(result, last)
+				j += consumed
+			}
+			i += len(unwrapped) - 1
+			continue
 		}
+		merged, consumed := mergeEventRun(events[i], events[i+1:])
+		result = append(result, merged)
+		i += consumed
 	}
 
 	return result
+}
+
+func mergeEventRun(first any, rest []any) (any, int) {
+	switch ev := first.(type) {
+	case *runtime.AgentChoiceEvent:
+		return mergeAgentChoiceRun(ev, rest)
+	case *runtime.AgentChoiceReasoningEvent:
+		return mergeAgentChoiceReasoningRun(ev, rest)
+	case *runtime.PartialToolCallEvent:
+		return mergePartialToolCallRun(ev, rest)
+	case *runtime.ToolCallOutputEvent:
+		return mergeToolCallOutputRun(ev, rest)
+	default:
+		return first, 0
+	}
 }
 
 // mergeAgentChoiceRun merges first with any directly-following AgentChoiceEvents
@@ -1895,7 +1878,7 @@ func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []any) (*runtime.
 	total := len(first.Content)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.AgentChoiceEvent)
-		if !ok || next.AgentName != first.AgentName {
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID {
 			break
 		}
 		total += len(next.Content)
@@ -1914,6 +1897,7 @@ func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []any) (*runtime.
 	return &runtime.AgentChoiceEvent{
 		Type:         first.Type,
 		Content:      b.String(),
+		SessionID:    first.SessionID,
 		AgentContext: first.AgentContext,
 	}, n
 }
@@ -1925,7 +1909,7 @@ func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest
 	total := len(first.Content)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.AgentChoiceReasoningEvent)
-		if !ok || next.AgentName != first.AgentName {
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.SessionID != first.SessionID {
 			break
 		}
 		total += len(next.Content)
@@ -1944,6 +1928,7 @@ func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest
 	return &runtime.AgentChoiceReasoningEvent{
 		Type:         first.Type,
 		Content:      b.String(),
+		SessionID:    first.SessionID,
 		AgentContext: first.AgentContext,
 	}, n
 }
@@ -1955,7 +1940,7 @@ func mergeToolCallOutputRun(first *runtime.ToolCallOutputEvent, rest []any) (*ru
 	total := len(first.Output)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.ToolCallOutputEvent)
-		if !ok || next.ToolCallID != first.ToolCallID {
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.ToolCallID != first.ToolCallID {
 			break
 		}
 		total += len(next.Output)
@@ -1987,7 +1972,7 @@ func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []any) (*
 	total := len(first.ToolCall.Function.Arguments)
 	for _, msg := range rest {
 		next, ok := msg.(*runtime.PartialToolCallEvent)
-		if !ok || next.ToolCall.ID != first.ToolCall.ID {
+		if !ok || next.Type != first.Type || next.AgentName != first.AgentName || next.ToolCall.ID != first.ToolCall.ID || next.ToolCall.Type != first.ToolCall.Type {
 			break
 		}
 		total += len(next.ToolCall.Function.Arguments)

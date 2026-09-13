@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -327,12 +329,48 @@ func providerContextLimit(p provider.Provider) int64 {
 // priced from the same catalogue as every other call — otherwise the
 // compaction cost recorded on the summary item would silently be 0 whenever
 // the default lazy store cannot price the model the configured store can.
-func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) error {
+func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) (retErr error) {
 	t := team.New(team.WithAgents(a))
 	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore))
 	if err != nil {
 		return err
 	}
-	_, err = rt.Run(ctx, sess)
-	return err
+	supervisor := NewSessionRuntimeSupervisor(rt)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		retErr = errors.Join(retErr, supervisor.Shutdown(cleanupCtx))
+	}()
+
+	seed := sess.Clone()
+	seed.NonInteractive = true
+	handle, err := supervisor.Runtime().CreateSession(ctx, seed, SessionBinding{AgentName: a.Name()})
+	if err != nil {
+		return err
+	}
+	// The compactor already supplied the final user prompt; retry adds no input.
+	submission, err := handle.Submit(ctx, TurnInput{Retry: true})
+	if err != nil {
+		return err
+	}
+	if err := handle.AwaitTurn(ctx, submission.TurnID); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_, cancelErr := handle.Cancel(cleanupCtx, submission.TurnID)
+		return errors.Join(err, cancelErr, handle.AwaitTurn(cleanupCtx, submission.TurnID))
+	}
+	status, err := handle.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status.LastError != "" {
+		return errors.New(status.LastError)
+	}
+	snapshot, err := handle.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	// Only the compactor's private result receives the detached transcript/accounting.
+	sess.CommitCompactionFrom(snapshot)
+	return nil
 }

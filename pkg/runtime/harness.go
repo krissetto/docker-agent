@@ -409,10 +409,6 @@ func harnessSessionIDFor(sess *session.Session, a *agent.Agent) string {
 
 func (r *LocalRuntime) rememberHarnessSessionID(ctx context.Context, sess *session.Session, a *agent.Agent, harnessSessionID string) {
 	sess.SetAttribute(harnessSessionAttributeKey(sess, a), harnessSessionID)
-	if sess.IsSubSession() {
-		// SubSessionCompleted persists the full child after its stream drains.
-		return
-	}
 	if r.sessionStore == nil {
 		return
 	}

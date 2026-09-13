@@ -31,7 +31,7 @@ func TestRunEntrypointsDeliverOneElicitationAcrossObservationStyles(t *testing.T
 				handle.observe = func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
 					close(observed)
 					observation := runtime.Observation{
-						Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: sess.ID}}},
+						Initial: []runtime.SessionSnapshot{{Status: runtime.SessionStatus{SessionID: sess.ID}}},
 						Events:  handle.events, Cancel: func() {},
 					}
 					if style == "remote-replay" {

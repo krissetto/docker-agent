@@ -68,7 +68,8 @@ func TestSpawnedSecondTabGeneratesAndProjectsTitle(t *testing.T) {
 	spawner := flags.createSessionSpawner(nil, rt, sessions)
 	s := supervisor.New(spawner)
 	t.Cleanup(s.Shutdown)
-	s.AddSession(t.Context(), initialApp, initialSession, workingDir, nil)
+	_, err = s.AddSession(t.Context(), initialApp, initialSession, workingDir, nil)
+	require.NoError(t, err)
 
 	secondID, err := s.SpawnSession(t.Context(), workingDir)
 	require.NoError(t, err)

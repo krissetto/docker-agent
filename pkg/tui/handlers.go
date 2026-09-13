@@ -176,13 +176,8 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 	}
 	store := m.application.SessionStore()
 
-	currentSess = m.application.Session()
 	if currentSess != nil && currentSess.ID == sessionID {
-		currentSess.Starred = !currentSess.Starred
-		m.chatPage.SetSessionStarred(currentSess.Starred)
-		if err := store.UpdateSession(m.ctx(), currentSess); err != nil {
-			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
-		}
+		return m, notification.InfoCmd("Session editing is not supported for this session")
 	} else {
 		sessions := m.application.SessionRuntime()
 		if loader, ok := sessions.(runtime.SessionLoader); ok {
@@ -500,9 +495,10 @@ func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
 // flag, so toggle-off genuinely revokes an autonomous mode. Same contract
 // as the server's ToggleToolApproval.
 func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
-	sess := m.application.Session()
-	sess.ToggleYolo()
-	m.sessionState.SetYoloMode(sess.IsToolsApproved())
+	if err := m.application.EditSession(m.ctx(), runtime.SessionEdit{Kind: runtime.SessionEditPolicy, ToggleToolsApproved: true}); err != nil {
+		return m, notification.ErrorCmd("Failed to change tool approval: " + err.Error())
+	}
+	m.sessionState.SetYoloMode(m.application.Session().IsToolsApproved())
 	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }
 

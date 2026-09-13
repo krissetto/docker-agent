@@ -199,21 +199,35 @@ func validateSessionTree(root *session.Session, snapshot *subagent.Snapshot) ses
 
 func (s *Server) sessionCatalogResponse(c echo.Context) error {
 	var sessions []*session.Session
-	if c.QueryParam("active") == "true" {
-		// Active-only discovery must not scan historical sessions from disk.
-		s.sm.runtimeSessions.Range(func(_ string, active *activeRuntimes) bool {
-			if active.handle != nil && active.session != nil {
-				sessions = append(sessions, active.session.Clone())
-			}
-			return true
-		})
-	} else {
+	if c.QueryParam("active") != "true" {
 		var err error
 		sessions, err = s.sm.sessionStore.GetSessions(c.Request().Context())
 		if err != nil {
 			return sessionHTTPError(err)
 		}
 	}
+	// The store catalog may contain only roots. Merge loaded children and
+	// replace persisted rows with canonical snapshots without retaining pointers.
+	positions := make(map[string]int, len(sessions))
+	for i, sess := range sessions {
+		positions[sess.ID] = i
+	}
+	s.sm.runtimeSessions.Range(func(id string, active *activeRuntimes) bool {
+		if active.handle == nil {
+			return true
+		}
+		snapshot, err := active.handle.Snapshot(c.Request().Context())
+		if err != nil {
+			return true
+		}
+		if i, ok := positions[id]; ok {
+			sessions[i] = snapshot
+		} else {
+			positions[id] = len(sessions)
+			sessions = append(sessions, snapshot)
+		}
+		return true
+	})
 	catalog := sessionCatalogDTO{Version: 1, Sessions: make([]sessionResourceDTO, 0, len(sessions))}
 	index := newSessionCatalogIndex(sessions)
 	if len(s.sm.sessionRegistries) == 0 {
@@ -316,7 +330,7 @@ func catalogEntryFromSession(sess *session.Session) sessionResourceDTO {
 }
 
 func (s *Server) getCanonicalSession(c echo.Context) error {
-	sess, err := s.sm.sessionStore.GetSession(c.Request().Context(), c.Param("id"))
+	sess, err := s.sm.GetSession(c.Request().Context(), c.Param("id"))
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -409,7 +423,7 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	if source != "" {
 		template.SetAttribute(sessionSourceAttribute, source)
 	}
-	sess, err := s.sm.CreateSession(c.Request().Context(), template)
+	sess, err := s.sm.prepareSession(template)
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -417,7 +431,7 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	if sess.GetSafetyPolicy() == "" && !sess.ToolsApproved {
 		// No client choice: seed the author-declared YAML default, as a fresh
 		// local session would be. A default never overrides a stated policy.
-		// createHTTPSession persists the session right after.
+		// The canonical runtime persists the session on creation.
 		if defaults, ok := registry.(runtime.SafetyDefaults); ok {
 			if policy := defaults.AuthorSafetyDefault(sess); policy != "" {
 				sess.SetSafetyPolicy(policy)
@@ -426,7 +440,6 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	}
 	handle, err := s.sm.createHTTPSession(c.Request().Context(), registry, sess, runtime.SessionBinding{AgentName: req.AgentName, Model: req.Model, ParentSessionID: req.ParentSessionID})
 	if err != nil {
-		_ = s.sm.sessionStore.DeleteSession(c.Request().Context(), sess.ID)
 		return sessionHTTPError(err)
 	}
 	return c.JSON(http.StatusCreated, sessionMetadata(handle.Metadata()))
@@ -436,19 +449,14 @@ func (sm *SessionManager) createHTTPSession(ctx context.Context, registry runtim
 	if registry == nil {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
-	// Commit the immutable session discriminator before runtime creation. This is
-	// what distinguishes session-backed rows from classic sessions after a cold
-	// restart; never infer or synthesize it while restoring legacy rows.
+	// Stamp only the detached template; the runtime owns durable publication.
 	sess.AgentName = binding.AgentName
 	sess.SetAttribute(sessionAgentAttribute, binding.AgentName)
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		return nil, err
-	}
 	handle, err := registry.CreateSession(ctx, sess, binding)
 	if err != nil {
 		return nil, err
 	}
-	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: handle, registry: registry, session: sess})
+	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: handle, registry: registry})
 	sm.markReady()
 	return handle, nil
 }
@@ -537,7 +545,7 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 		}
 	}
 	if handle, lookupErr := registry.SessionByID(id); lookupErr == nil {
-		sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry, session: sess})
+		sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry})
 		sm.markReady()
 		return handle, nil
 	}
@@ -554,7 +562,7 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 			return nil, err
 		}
 	} else if _, ok := sm.runtimeSessions.Load(root.ID); !ok {
-		sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootSession, registry: registry, session: root})
+		sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootSession, registry: registry})
 	}
 	if id == root.ID {
 		return rootSession, nil
@@ -570,11 +578,7 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 	if err != nil {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "restore_child_tree"}
 	}
-	smSession, err := sm.sessionStore.GetSession(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry, session: smSession})
+	sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry})
 	return handle, nil
 }
 

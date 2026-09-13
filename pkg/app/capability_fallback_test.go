@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,7 +43,7 @@ func TestFalseModelCapabilityPreservesHandleTypedError(t *testing.T) {
 	a := &App{currentState: sessionState{session: session.New(session.WithID("no-models")), handle: &projectionSession{id: "no-models"}}}
 
 	err := a.SetCurrentAgentModel(t.Context(), "other/model")
-	require.True(t, errors.Is(err, runtime.ErrUnsupported))
+	require.ErrorIs(t, err, runtime.ErrUnsupported)
 	var sessionErr *runtime.SessionError
 	require.ErrorAs(t, err, &sessionErr)
 	assert.Equal(t, runtime.SessionOperationSetModel, sessionErr.Operation)

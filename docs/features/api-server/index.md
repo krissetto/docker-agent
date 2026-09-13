@@ -64,12 +64,14 @@ Session execution has one API surface:
 | --- | --- | --- |
 | `GET` / `POST` | `/api/sessions` | Catalog sessions (`?active=true` lists attached sessions without reading stored history) / create a session-bound session (`source`, `agent_name`, optional `model`, `title`, `working_dir`, `safety_policy`, `tools_approved`, `permissions`). |
 | `GET` / `DELETE` | `/api/sessions/:id` | Inspect or delete the session. Legacy stored rows remain inspectable but are not attachable. |
+| `PATCH` | `/api/sessions/:id` | Canonical edit: `kind` is `policy`, `permissions`, `title`, `message`, `summary`, `tokens`, or `attachment`; returns the updated session. Transcript edits require a quiescent session. |
 | `GET` | `/api/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
 | `GET` | `/api/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
 | `GET` | `/api/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
 | `POST` | `/api/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
 | `POST` | `/api/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |
-| `POST` | `/api/sessions/:id/cancel` | Cancel the active or named `turn_id` without closing the session. |
+| `POST` | `/api/sessions/:id/cancel` | Cancel the active or exactly named active/queued `turn_id` without closing the session. |
+| `POST` | `/api/sessions/:id/turns/:turnID/wait` | Wait for this exact turn to settle, including durable completion; `204` on success, typed `404` for unknown/expired turns. Disconnecting cancels only the wait. |
 | `POST` | `/api/sessions/:id/retry` | Retry the last failed settled turn. |
 | `PATCH` | `/api/sessions/:id/title` | Session-ordered durable title change. |
 | `GET` | `/api/sessions/:id/tree` | Authoritative subtree rooted at any session node; metrics are cumulative per node and can be summed for a subtree rollup. |
@@ -128,14 +130,64 @@ SID=$(curl -s -X POST http://localhost:8080/api/sessions \
 curl -N http://localhost:8080/api/sessions/$SID/events &
 curl -X POST http://localhost:8080/api/sessions/$SID/messages \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"submit","content":"Hello"}'
+  -d '{"mode":"submit","content":"Hello","request_id":"greeting-1"}'
 ```
 
-The SSE stream always starts with a versioned `snapshot`, emits zero or more
-replayed `event` messages, then a `ready` message whose cursor matches the
-snapshot. Live event envelopes carry monotonically increasing sequence IDs,
-`turn_id`, and (for interactions) `interaction_id`. `stream_stopped` settles
-one turn; it is not transport EOF.
+Input provenance is server-authored metadata: `input_origin` is `user`, `agent`,
+or `runtime`; `sender_id` and `sender_name` attribute explicit agent communication.
+Pending snapshot inputs and accepted/promoted/user-message events also carry
+`input_mode`, independently of provenance. Stored session messages keep their
+existing `actor_input_mode` field. These are response/event fields, not accepted
+fields on public `/messages` requests.
+
+Normal queued-user displays exclude typed agent/runtime inputs, but canonical
+`status.pending` still counts all accepted inputs. Render agent communication
+with its clean body and typed sender when consumed; do not render runtime-origin
+input as chat or queue text. Missing or unknown origins are legacy/unprivileged
+and remain visible: never classify input from its text or mode. In particular,
+a user's literal `<system_info>` text is ordinary user content.
+
+For echo reconciliation, `user_message.turn_id` identifies the accepted input;
+the envelope's `turn_id` may instead identify the active execution. Use accepted
+input identity and snapshot transcript positions, not matching message bodies,
+to avoid replay duplicates without dropping distinct identical messages.
+
+Submission `request_id` replaces the formerly ignored `client_id` field. The
+canonical runtime deduplicates matching payload/mode requests per session and
+returns the original submission; reusing an ID for different input returns
+`409 conflict`. Accepted identities survive restart while their transcript is
+retained; canceled/retry identities have a bounded recent retention window.
+Omit `request_id` to submit independently each time. Persistence-blocked
+submissions return `503` with typed `error: "persistence"` and a diagnostic
+`detail`; they are not accepted or automatically retried by the transport.
+
+For `PATCH /api/sessions/:id`, send a `kind` and its matching payload:
+`policy` uses `safety_policy`, `tools_approved`, or `toggle_tools_approved`;
+`permissions` uses `permissions`; `title` uses `title`; `message` uses
+`message_index` and `message`; `summary` uses `summary`; `tokens` uses
+`input_tokens`, `output_tokens`, and `cost`; `attachment` uses `attachment_path`.
+The runtime serializes edits and persistence; message/summary/token edits reject
+busy sessions instead of racing a turn. Existing policy and catalog routes
+remain available and delegate canonical rows to the same owner.
+
+The SSE stream starts with a versioned snapshot, emits zero or more replayed
+`event` messages, then a `ready` message whose cursor matches the snapshot.
+Snapshots up to 64 KiB use `snapshot`. Larger snapshots use contiguous
+`snapshot_begin`, `snapshot_chunk`, `snapshot_end` frames, all with the same
+`cursor`. Each chunk's `chunk` field is base64 encoding of at most 64 KiB of
+snapshot JSON bytes; concatenate decoded bytes, not JSON strings. No events
+interleave within a snapshot. The decoded snapshot cursor must match the frame
+cursor. Clients must reject oversized chunks, mismatched boundaries and missing
+end frames. This bounds framing overhead, not total reconstructed history RAM;
+use request cancellation/deadlines to bound waits. History is never truncated.
+This chunk extension and `request_id` rename are breaking wire changes.
+
+Live event envelopes carry monotonically increasing sequence IDs,
+`turn_id`, and (for interactions) `interaction_id`. `interaction_resolved`
+removes the matching pending interaction and carries reason `responded`,
+`canceled`, or `stopped`, with the same session/interaction envelope identity.
+`stream_stopped` is not transport EOF or a durable-completion barrier; use the
+turn wait endpoint when durable settlement is required.
 
 Reconnect with either `?since=<last sequence>` or `Last-Event-ID`. A retained
 cursor is replayed before `ready`. A `gap` envelope is a hard resnapshot

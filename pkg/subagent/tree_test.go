@@ -1,7 +1,6 @@
 package subagent
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ func TestTreeAddRejectsMissingParentWithoutMutation(t *testing.T) {
 
 	err := tree.Add(Node{ID: "orphan", Agent: "worker", Parent: "missing"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrNodeNotFound))
+	require.ErrorIs(t, err, ErrNodeNotFound)
 	assert.Equal(t, before, tree.Snapshot())
 	_, exists := tree.Node("orphan")
 	assert.False(t, exists)

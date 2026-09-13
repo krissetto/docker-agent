@@ -33,6 +33,8 @@ type ProxyOptions struct {
 	// StreamChunkDelay is the delay between SSE chunks when SimulateStream is true.
 	// Defaults to 15ms if not set.
 	StreamChunkDelay time.Duration
+	// BeforeStreamChunk optionally gates a simulated SSE chunk for deterministic replay tests.
+	BeforeStreamChunk func(context.Context, []byte)
 	// UpstreamGateway, when set, forwards requests to this models gateway
 	// instead of the provider's public endpoint. Used when recording a
 	// session that normally routes through a models gateway. Only honored
@@ -472,7 +474,7 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 
 		if IsStreamResponse(resp) {
 			if options.SimulateStream {
-				return SimulatedStreamCopy(c, resp, options.StreamChunkDelay)
+				return simulatedStreamCopy(c, resp, options.StreamChunkDelay, options.BeforeStreamChunk)
 			}
 			return StreamCopy(c, resp)
 		}
@@ -485,6 +487,10 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 // SimulatedStreamCopy copies a streaming SSE response to the client with artificial delays
 // between events to simulate real-time streaming behavior.
 func SimulatedStreamCopy(c echo.Context, resp *http.Response, chunkDelay time.Duration) error {
+	return simulatedStreamCopy(c, resp, chunkDelay, nil)
+}
+
+func simulatedStreamCopy(c echo.Context, resp *http.Response, chunkDelay time.Duration, beforeChunk func(context.Context, []byte)) error {
 	ctx := c.Request().Context()
 	writer := c.Response().Writer
 
@@ -515,6 +521,15 @@ func SimulatedStreamCopy(c echo.Context, resp *http.Response, chunkDelay time.Du
 				return nil
 			}
 			return err
+		}
+
+		if beforeChunk != nil && bytes.HasPrefix(line, dataPrefix) {
+			// Deliver the preceding blank SSE terminator before a gate can block.
+			c.Response().Flush()
+			beforeChunk(ctx, line)
+			if ctx.Err() != nil {
+				return nil
+			}
 		}
 
 		// Write the line (already includes newline from ReadBytes)

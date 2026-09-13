@@ -88,6 +88,7 @@ func TestSubagentPersistencePermanentFailureSurfacesAndRemainsPending(t *testing
 
 type failingTranscriptStore struct {
 	session.Store
+
 	err error
 }
 
@@ -95,29 +96,34 @@ func (s *failingTranscriptStore) AddSubSession(context.Context, string, *session
 	return s.err
 }
 
-func TestSubagentPersistenceFailedTranscriptRemainsPending(t *testing.T) {
+func TestSubagentPersistenceDoesNotWriteTranscripts(t *testing.T) {
 	store := &failingTranscriptStore{Store: session.NewInMemorySessionStore(), err: errors.New("transcript rejected")}
 	p := newSubagentPersistence(nil, store)
-	p.enqueueTranscript("parent", session.New(session.WithID("child")))
-	err := p.flushNow()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "transcript rejected")
-	require.Error(t, p.close())
-	p.mu.Lock()
-	_, pending := p.transcripts["child"]
-	p.mu.Unlock()
-	assert.True(t, pending)
+	require.NoError(t, p.flushNow())
+	require.NoError(t, p.close())
+}
+
+type rejectingChildAdmissionStore struct {
+	session.Store
+	session.CoordinationStore
+
+	err error
+}
+
+func (s *rejectingChildAdmissionStore) AdmitChild(context.Context, session.ChildAdmission) error {
+	return s.err
 }
 
 func TestSpawnToolSurfacesPermanentDurabilityBarrierFailure(t *testing.T) {
-	store := &retryingDurableSubagentStore{permanent: errors.New("tree disk offline")}
+	base := session.NewInMemorySessionStore()
+	store := &rejectingChildAdmissionStore{Store: base, CoordinationStore: base.(session.CoordinationStore), err: errors.New("child admission disk offline")}
 	tm := team.New(team.WithAgents(
 		agent.New("root", "prompt",
 			agent.WithModel(&mockProvider{id: "test/root", stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()}),
 			agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
 		agent.New("worker", "prompt", agent.WithModel(&mockProvider{id: "test/worker", stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()})),
 	))
-	rt, err := NewLocalRuntime(t.Context(), tm, WithSubagentStore(store))
+	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store))
 	require.NoError(t, err)
 	t.Cleanup(rt.subagents.Close)
 	result, err := rt.handleSpawnSubagent(t.Context(), session.New(session.WithID("parent")), tools.ToolCall{Function: tools.FunctionCall{
@@ -125,7 +131,10 @@ func TestSpawnToolSurfacesPermanentDurabilityBarrierFailure(t *testing.T) {
 	}}, nil, tools.NopRuntime{})
 	require.NoError(t, err)
 	require.True(t, result.IsError)
-	assert.Contains(t, result.Output, "tree disk offline")
+	assert.Contains(t, result.Output, "child admission disk offline")
+	children, err := store.LoadChildren(t.Context(), "parent")
+	require.NoError(t, err)
+	assert.Empty(t, children, "failed admission must not publish a durable child")
 }
 
 type blockingSubagentStore struct {

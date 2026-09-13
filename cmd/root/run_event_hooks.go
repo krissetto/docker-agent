@@ -9,8 +9,6 @@ import (
 	"os/exec"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -44,7 +42,7 @@ func withEventHooks(hooks []onEventHook) app.Opt {
 	}
 	return func(a *app.App) {
 		//rubocop:disable Lint/ContextConnectivity
-		go a.SubscribeWith(context.Background(), func(msg tea.Msg) {
+		go a.Subscribe(context.Background(), func(msg any) {
 			ev, ok := msg.(runtime.Event)
 			if !ok {
 				return
@@ -65,7 +63,7 @@ func withEventHooks(hooks []onEventHook) app.Opt {
 				}
 				go runEventHook(h.command, data)
 			}
-		})
+		}, app.SubscribeOptions{})
 	}
 }
 

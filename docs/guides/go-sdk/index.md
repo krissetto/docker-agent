@@ -38,6 +38,57 @@ Docker Agent can be used as a Go library, allowing you to build AI agents direct
 | `pkg/tui/animation`    | `Stopper` / `StopView` — animation lifecycle contract. Call `StopAnimation` on views removed from the UI to prevent leaked tick subscriptions. |
 | `pkg/tui/components/transcript` | Embedded transcript view with read-only `Messages()` accessor for observing conversation structure in host tests and persistence layers. |
 
+## Session Ownership and Coordination
+
+For long-lived or concurrent sessions, retain a `runtime.SessionHandle` rather
+than sharing a mutable `session.Session` between your host and the runtime.
+
+- **Lifetime:** `runtime.SessionRuntimeSupervisor` owns the runtime and its
+  shutdown. Pass its borrowed `Runtime()` view to consumers; that
+  `SessionRuntime` can create, find, and delete sessions, but cannot shut down
+  the owner. When you also own a loaded team's toolsets,
+  `pkg/host/lifecycle.OwnRuntime` stops them after the runtime drains. Do not
+  transfer ownership of a team shared with other callers.
+- **Commands and snapshots:** use the handle's `Submit`, `Steer`, `Respond`,
+  `Cancel`, and `Edit` methods. Treat `Snapshot` and observation snapshots as
+  read-only views, not write-back objects. The session driver owns admission,
+  execution, and ordered publication; callers must not save a stale snapshot
+  over live state or synthesize completion events.
+- **One accepted turn:** `pkg/host/turn.Start` observes before submitting and
+  returns the accepted `Submission`. Call its `Consume` exactly once. It
+  correlates events by `TurnID`, cancels on early exit, and calls `AwaitTurn`
+  before returning. Detaching an observation alone never cancels execution.
+  An `AwaitTurn` error is not successful settlement; a `turn.DrainError` means
+  the host must not reuse that session until its owner shuts it down.
+- **Binding and active agent:** `SessionBinding.AgentName` establishes the
+  session's binding. A handoff changes the active agent within that session;
+  it does not authorize rebinding the same ID. Read current agent metadata
+  from the handle. `AgentSwitcher.SwitchAgent` instead branches the
+  conversation into a new session identity and preserves the source.
+- **Child persistence:** each child owns its transcript row and accepted-input
+  identities. `session.CoordinationStore` separately admits child metadata,
+  commits completion revisions and reports, and atomically accepts reports
+  into the parent's inbox. A full mailbox retains reports for retry rather
+  than treating them as delivered. Tree snapshots and result previews are
+  projections, not transcript writers. Implementing the coordination
+  interface does not itself promise restart durability; the backing store
+  must advertise that capability.
+
+> [!WARNING]
+> **Breaking change: custom coordination stores**
+>
+> `CoordinationStore.AcceptReport` now returns `(ReportAcceptance, error)`, with
+> `ReportAcceptance{MessageID, Message, Created}`. Retries must return the same
+> accepted input identity and its current persisted `Message`, never retry content;
+> `Created` is true only for a new acceptance. A nil message argument is a read-only
+> acknowledgment probe: an unacknowledged report returns a zero result. After an
+> accepted input is removed, its `MessageID` remains and `Message` may be nil.
+
+For reconnecting clients, `pkg/runtime/client.Attach` projects a snapshot and
+ordered events into a sink. Its `Reset` must replace the local projection,
+including after an observation gap. A UI tab owns that attachment, not the
+runtime or the accepted work it observes.
+
 ## Embedding TUI Components
 
 When building custom UIs on top of Docker Agent's TUI primitives, four packages define the contracts that keep the runtime and the UI in sync:
@@ -92,8 +143,14 @@ for ev := range events {
     case ev.Text != "":
         response.WriteString(ev.Text)
     case ev.Tool != nil && ev.Tool.NeedsConfirmation:
-        // Approve the pending tool call (use ResumeApproveSession to allow all).
-        if err := chat.Confirm(ctx, dagentruntime.ResumeApprove()); err != nil {
+        // Approve this request (ResumeApproveAutonomous changes session policy).
+        request, ok := ev.RuntimeEvent.(*dagentruntime.ToolCallConfirmationEvent)
+        if !ok {
+            return fmt.Errorf("missing tool confirmation request")
+        }
+        approval := dagentruntime.ResumeApprove()
+        approval.RequestID = request.RequestID
+        if err := chat.Confirm(ctx, approval); err != nil {
             return err
         }
     case ev.Tool != nil && ev.Tool.Finished:
@@ -129,24 +186,68 @@ if err := chat.Restart(); err != nil {
 | `Done`         | Clean end of turn; no more events.                                       |
 | `RuntimeEvent` | The original `runtime.Event` for callers that need the full stream.      |
 
-For advanced use (custom elicitation, raw event inspection), call `chat.Runtime()` to access the underlying `runtime.Runtime` directly.
+For advanced use, `chat.SessionRuntime()` returns a borrowed
+`runtime.SessionRuntime` registry, not a second execution path. Use
+`chat.Conversation(ctx)` to get the current session ID, then
+`chat.SessionRuntime().SessionByID(snapshot.ID)` to look up its handle; check
+both errors. Inspect projected raw events through `Event.RuntimeEvent`. For
+custom elicitation handling, own the handle and turn directly as shown in
+[Streaming Responses](#streaming-responses): embedded chat declines
+elicitations and maximum-iteration extensions automatically.
 
 > [!WARNING]
-> **Breaking change: `Runtime.ResumeElicitation` (#3584)**
+> **Breaking change: session-owned SDK APIs**
 >
-> `Runtime.ResumeElicitation` gained an `elicitationID` parameter so responses can
-> be correlated with a specific concurrent elicitation request (needed once
-> multiple background jobs can be eliciting input at the same time). It is
-> declared **variadic** (`elicitationID ...string`) specifically so existing
-> *callers* of the 3-argument form keep compiling unchanged — `rt.ResumeElicitation(ctx, action, content)`
-> still works and falls back to resolving the sole pending request.
+> `chat.Runtime()` and the `runtime.Runtime` interface are no longer available.
+> `runtime.New` still returns a `*runtime.LocalRuntime` for code-built teams;
+> wrap it with `runtime.NewSessionRuntimeSupervisor` when transferring execution
+> ownership to sessions. Only the supervisor shuts down the runtime; consumers
+> retain its borrowed registry and session handles.
 >
-> If you implement your own `runtime.Runtime` (rather than embedding
-> `runtime.LocalRuntime`/`runtime.RemoteRuntime`), you do need to update your
-> method's signature to match, and also add an `OnElicitationRequest(handler
-> func(runtime.Event))` method (a no-op is fine if your runtime never raises
-> elicitations) — both are required interface methods, matching the existing
-> no-op-able pattern already used by `OnToolsChanged`/`OnBackgroundEvent`.
+> `LocalRuntime.Run` has been removed. Create a session, submit each prompt through
+> its handle, await that submission's exact `TurnID`, and read a detached
+> `Snapshot`. The initial session is cloned: changing it or a snapshot never
+> changes the live conversation. `host/turn.Start` and `Consume` handle observation,
+> cancellation, and exact-turn draining for synchronous hosts (see below).
+>
+> Replace runtime-wide resume/elicitation callbacks with `handle.Respond(ctx,
+> runtime.InteractionResponse{...})`. Set `InteractionID` from the
+> `runtime.SessionEvent` envelope and the matching `Kind`; for elicitations,
+> also carry the request's `ElicitationID`. Always check the response error.
+>
+> `chat.Conversation(ctx)` now returns `(*session.Session, error)`. The result is
+> a detached, read-only snapshot: changing it does not update the live session.
+> Check the error before reading it, and use handle commands or `Edit` for
+> supported mutations. Custom `runtime.SessionHandle` implementations must now
+> implement `AwaitTurn(context.Context, string) error` and
+> `Edit(context.Context, runtime.SessionEdit) (*session.Session, error)`. Check
+> `handle.Metadata().Capabilities.SessionEditing` before offering edits, and
+> keep custom-handle capability metadata accurate. Unsupported operations must
+> return a typed `*runtime.SessionError` rather than silently doing nothing.
+
+```go
+snapshot, err := chat.Conversation(ctx)
+if err != nil {
+    return fmt.Errorf("read conversation: %w", err)
+}
+fmt.Println(snapshot.GetLastAssistantMessageContent())
+```
+
+## Input provenance in session projections
+
+`session.Message`, `runtime.PendingInput`, and input events expose typed
+`InputOrigin` (`session.InputOriginUser`, `InputOriginAgent`, or
+`InputOriginRuntime`), plus `SenderID` and `SenderName`. `InputMode` remains
+independent: steering does not imply runtime authorship. Public submission APIs
+stamp user provenance; these fields are not caller-controlled submission options.
+
+Keep canonical pending counts and transcript positions intact. User queues show
+user and unknown/legacy origins, agent-origin messages show clean attributed
+communication on consumption (the TUIs preserve its body as literal text), and
+runtime-origin messages stay out of ordinary chat presentation. Never infer provenance from wrappers or body text, and never
+filter genuine user, assistant, or tool literals by content. For replay, use the
+accepted input `TurnID` on input events (including `UserMessageEvent`), not the
+active execution envelope's turn or content equality.
 
 ## RAG Toolset (opt-out)
 
@@ -234,7 +335,7 @@ options retains the legacy global fallback, including registrations made after
 runtime construction. Factories are still invoked lazily, at execution time.
 Runtime decorators used with `ResolveCommand` should forward
 `CommandEvaluatorFactory() runtime.CommandEvaluatorFactory` to preserve this
-selection. The `runtime.Runtime` interface itself is unchanged.
+selection.
 
 These options also work through `embeddedchat.Config.RuntimeOptions`. Loader
 policy remains separate: `teamloader.WithStrict(config.FeatureHarness)` permits
@@ -363,16 +464,20 @@ package main
 
 import (
     "context"
+    "errors"
     "fmt"
     "log"
     "os/signal"
     "syscall"
+    "time"
 
     "github.com/docker/docker-agent/pkg/agent"
     "github.com/docker/docker-agent/pkg/config/latest"
     "github.com/docker/docker-agent/pkg/environment"
+    "github.com/docker/docker-agent/pkg/host/turn"
     "github.com/docker/docker-agent/pkg/model/provider/openai"
     "github.com/docker/docker-agent/pkg/runtime"
+    runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
     "github.com/docker/docker-agent/pkg/session"
     "github.com/docker/docker-agent/pkg/team"
 )
@@ -387,7 +492,7 @@ func main() {
     }
 }
 
-func run(ctx context.Context) error {
+func run(ctx context.Context) (retErr error) {
     // Create model provider
     llm, err := openai.NewClient(
         ctx,
@@ -416,18 +521,37 @@ func run(ctx context.Context) error {
         return err
     }
 
-    // Run with a user message
-    sess := session.New(
-        session.WithUserMessage("What is 2 + 2?"),
-    )
+    supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+    defer func() {
+        cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+        defer cancel()
+        retErr = errors.Join(retErr, supervisor.Shutdown(cleanupCtx))
+    }()
 
-    messages, err := rt.Run(ctx, sess)
+    handle, err := supervisor.Runtime().CreateSession(ctx,
+        session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
     if err != nil {
         return err
     }
+    ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: "What is 2 + 2?"})
+    if err != nil {
+        return err
+    }
+    termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+        if event, ok := envelope.Event.(*runtime.ErrorEvent); ok {
+            return runtimeclient.TurnTerminate, errors.New(event.Error)
+        }
+        return runtimeclient.TurnContinue, nil
+    })
+    if termination.Err != nil {
+        return termination.Err
+    }
 
-    // Print the response
-    fmt.Println(messages[len(messages)-1].Message.Content)
+    snapshot, err := handle.Snapshot(ctx)
+    if err != nil {
+        return err
+    }
+    fmt.Println(snapshot.GetLastAssistantMessageContent())
     return nil
 }
 ```
@@ -488,28 +612,81 @@ func createCalculator(llm provider.Provider) *agent.Agent {
 
 ## Streaming Responses
 
-Process events as they happen:
+Process events through a session handle. For a source-loaded team, the host
+constructor owns both the runtime and loaded toolsets. This example accepts a
+`config.Source` (for example, `config.NewFileSource("agent.yaml")`) and the name
+of an agent declared in it:
 
 ```go
-func runStreaming(ctx context.Context, rt runtime.Runtime, sess *session.Session) error {
-    events := rt.RunStream(ctx, sess)
+import (
+    "context"
+    "errors"
+    "fmt"
 
-    for event := range events {
-        switch e := event.(type) {
+    "github.com/docker/docker-agent/pkg/config"
+    "github.com/docker/docker-agent/pkg/host"
+    "github.com/docker/docker-agent/pkg/host/turn"
+    "github.com/docker/docker-agent/pkg/runtime"
+    runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
+    "github.com/docker/docker-agent/pkg/session"
+    "github.com/docker/docker-agent/pkg/tools"
+)
+
+func runSource(ctx context.Context, source config.Source, agentName string) (retErr error) {
+    supervisor, err := host.NewSessionRuntime(ctx, source, nil, nil, host.RuntimeOptions{})
+    if err != nil {
+        return err
+    }
+    defer func() {
+        retErr = errors.Join(retErr, supervisor.Shutdown(context.WithoutCancel(ctx)))
+    }()
+
+    handle, err := supervisor.Runtime().CreateSession(ctx, session.New(), runtime.SessionBinding{
+        AgentName: agentName,
+    })
+    if err != nil {
+        return err
+    }
+    return runStreaming(ctx, handle, "What can you help me with?")
+}
+
+func runStreaming(ctx context.Context, handle runtime.SessionHandle, prompt string) error {
+    ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: prompt})
+    if err != nil {
+        return err
+    }
+    termination := ownedTurn.Consume(ctx, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+        switch e := envelope.Event.(type) {
         case *runtime.StreamStartedEvent:
             fmt.Println("Stream started")
 
         case *runtime.AgentChoiceEvent:
-            // Print response chunks as they arrive
             fmt.Print(e.Content)
 
         case *runtime.ToolCallEvent:
             fmt.Printf("\n[Tool call: %s]\n", e.ToolCall.Function.Name)
 
         case *runtime.ToolCallConfirmationEvent:
-            // Auto-approve tool calls
-            rt.Resume(ctx, runtime.ResumeRequest{
-                Type: runtime.ResumeTypeApproveSession,
+            // Only auto-approve in a trusted environment; otherwise ask the user.
+            return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{
+                InteractionID: envelope.InteractionID,
+                Kind:          runtime.InteractionConfirmation,
+                Resume:        runtime.ResumeApproveAutonomous(),
+            })
+
+        case *runtime.ElicitationRequestEvent:
+            return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{
+                InteractionID: envelope.InteractionID,
+                Kind:          runtime.InteractionElicitation,
+                ElicitationID: e.ElicitationID,
+                Elicitation:   runtime.ElicitationResult{Action: tools.ElicitationActionDecline},
+            })
+
+        case *runtime.MaxIterationsReachedEvent:
+            return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{
+                InteractionID: envelope.InteractionID,
+                Kind:          runtime.InteractionMaxIterations,
+                Resume:        runtime.ResumeReject("No interactive iteration handler."),
             })
 
         case *runtime.ToolCallResponseEvent:
@@ -519,13 +696,22 @@ func runStreaming(ctx context.Context, rt runtime.Runtime, sess *session.Session
             fmt.Println("\nStream stopped")
 
         case *runtime.ErrorEvent:
-            return fmt.Errorf("error: %s", e.Error)
+            return runtimeclient.TurnTerminate, fmt.Errorf("stream error: %s", e.Error)
         }
-    }
-
-    return nil
+        return runtimeclient.TurnContinue, nil
+    })
+    return termination.Err
 }
 ```
+
+After `Start` succeeds, call `Consume` exactly once, including when the caller
+cancels or an event handler fails. It cancels and awaits the accepted turn on
+early exit; simply abandoning an observation does not stop execution. Check
+its returned `Err` before reusing the handle (see [Error Handling](#error-handling)).
+For code-built teams, keep `runtime.New`, then construct a supervisor with
+`runtime.NewSessionRuntimeSupervisor(rt)`. If your supervisor also owns the
+team's toolsets, wrap it with `lifecycle.OwnRuntime(supervisor, team)` from
+`pkg/host/lifecycle`; shared teams keep their separate lifetime owner.
 
 ## Multi-Agent Teams
 
@@ -701,30 +887,32 @@ sess := session.New(
 
 ## Error Handling
 
+The `runStreaming` helper above returns admission, runtime event, observation,
+interaction-response, cancellation, and settlement errors. Check for a failed
+drain before treating cancellation as harmless:
+
 ```go
-messages, err := rt.Run(ctx, sess)
-if err != nil {
+if err := runStreaming(ctx, handle, "Review this code for bugs"); err != nil {
+    var drainErr *turn.DrainError
+    if errors.As(err, &drainErr) {
+        // Do not reuse the session; its lifetime owner must shut it down.
+        return fmt.Errorf("session did not settle: %w", err)
+    }
     if errors.Is(err, context.Canceled) {
-        // User cancelled
         log.Println("Operation cancelled")
         return nil
     }
     if errors.Is(err, context.DeadlineExceeded) {
-        // Timeout
         log.Println("Operation timed out")
         return nil
     }
-    // Other error
     return fmt.Errorf("runtime error: %w", err)
 }
-
-// Check for errors in the event stream
-for event := range rt.RunStream(ctx, sess) {
-    if errEvent, ok := event.(*runtime.ErrorEvent); ok {
-        return fmt.Errorf("stream error: %s", errEvent.Error)
-    }
-}
 ```
+
+Inside the `Consume` handler, return runtime `ErrorEvent` failures as shown in
+[Streaming Responses](#streaming-responses); do not return from an unmanaged
+stream loop and leave accepted work running.
 
 ## Complete Example
 

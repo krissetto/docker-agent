@@ -12,6 +12,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -140,7 +142,6 @@ func (m *model) handleInterrupt() {
 		}
 		m.queue = nil
 		m.pendingUsers = nil
-		m.ignoredUsers = nil
 		m.screen.Confirm = nil
 		m.cancelMarkerPending = true
 	case !m.screen.Editor.IsEmpty():
@@ -578,26 +579,35 @@ func (m *model) handleStarSession(ctx context.Context, arg string) {
 }
 
 func (m *model) loadSessionTranscript(sess *session.Session) {
+	m.inputParentSessionID = sess.ParentID
+	m.inputReferences = subagentindex.New()
+	if snapshot := sess.GetSubagentTree(); snapshot != nil {
+		m.inputReferences.Reset(*snapshot)
+	}
+	m.inputReplay.Reset(sess)
 	storedMessages := sess.OwnMessages()
 	toolResults := make(map[string]chat.Message)
 	for _, msg := range storedMessages {
-		if msg.Message.Role == chat.MessageRoleTool && msg.Message.ToolCallID != "" {
+		if lifecycle.VisibleTranscriptMessage(&msg) && msg.Message.Role == chat.MessageRoleTool && msg.Message.ToolCallID != "" {
 			toolResults[msg.Message.ToolCallID] = msg.Message
 		}
 	}
 
 	for _, msg := range storedMessages {
-		if msg.Implicit {
-			continue
+		if msg.Pending && !msg.Implicit && lifecycle.IsUserInput(msg.InputOrigin) {
+			kind := ui.PendingUserFollowUp
+			if msg.InputMode == "steer" {
+				kind = ui.PendingUserSteer
+			}
+			m.addPendingUser(msg.Message.Content, msg.Message.Content, msg.TurnID, kind)
 		}
-		if msg.Pending {
-			m.addPendingUser(msg.Message.Content, msg.Message.Content, msg.TurnID, ui.PendingUserFollowUp)
+		if !lifecycle.VisibleTranscriptMessage(&msg) {
 			continue
 		}
 		content := msg.Message.Content
 		switch msg.Message.Role {
 		case chat.MessageRoleUser:
-			m.addUserEcho(content)
+			m.addInputEcho(msg.InputOrigin, msg.InputMode, msg.SenderName, msg.SenderID, content)
 		case chat.MessageRoleAssistant:
 			if msg.Message.ReasoningContent != "" {
 				reasoning := msg.Message.ReasoningContent
@@ -717,8 +727,6 @@ func (m *model) dispatchUserMessage(ctx context.Context, display, content string
 			return
 		}
 	}
-	m.addUserEcho(display)
-	m.ignoreUserEcho(content)
 	m.startRun(ctx, content, nil)
 }
 
@@ -754,11 +762,8 @@ func (m *model) sendFirstMessage(ctx context.Context, msg, attachPath string) {
 
 	switch {
 	case trimmed != "":
-		m.addUserEcho(trimmed)
-		m.ignoreUserEcho(content)
 	case len(atts) > 0:
 		m.addNotice("", "(attached "+atts[0].Name+")", ui.StMuted())
-		m.ignoreUserEcho(content)
 	default:
 		return
 	}
@@ -900,7 +905,7 @@ func (m *model) resetConversation() {
 	m.screen.Transcript.ClearActive()
 	m.queue = nil
 	m.pendingUsers = nil
-	m.ignoredUsers = nil
+	m.inputReplay.Reset(nil)
 	m.busy = false
 	m.cancelMarkerPending = false
 	m.screen.Confirm = nil
@@ -930,12 +935,19 @@ func (m *model) addUserEcho(text string) {
 }
 
 func (m *model) addPendingUser(display, content, turnID string, kind ui.PendingUserKind) {
+	if turnID != "" {
+		for i := range m.pendingUsers {
+			if m.pendingUsers[i].TurnID == turnID {
+				return
+			}
+		}
+	}
 	m.pendingUsers = append(m.pendingUsers, ui.PendingUserMessage{Display: display, Content: content, TurnID: turnID, Kind: kind})
 }
 
-func (m *model) consumePendingUser(kind ui.PendingUserKind, turnID, content string) (ui.PendingUserMessage, bool) {
+func (m *model) consumePendingUser(kind ui.PendingUserKind, turnID string) (ui.PendingUserMessage, bool) {
 	for i, msg := range m.pendingUsers {
-		if msg.Kind != kind || (turnID != "" && msg.TurnID != turnID) || (turnID == "" && !samePendingUserContent(msg.Content, content)) {
+		if msg.Kind != kind || turnID == "" || msg.TurnID != turnID {
 			continue
 		}
 		m.pendingUsers = append(m.pendingUsers[:i], m.pendingUsers[i+1:]...)
@@ -944,23 +956,15 @@ func (m *model) consumePendingUser(kind ui.PendingUserKind, turnID, content stri
 	return ui.PendingUserMessage{}, false
 }
 
-func samePendingUserContent(pending, emitted string) bool {
-	return pending == emitted || pending == strings.TrimSuffix(emitted, "\n")
-}
-
-func (m *model) ignoreUserEcho(content string) {
-	m.ignoredUsers = append(m.ignoredUsers, content)
-}
-
-func (m *model) consumeIgnoredUserEcho(content string) bool {
-	for i, msg := range m.ignoredUsers {
-		if msg != content {
-			continue
-		}
-		m.ignoredUsers = append(m.ignoredUsers[:i], m.ignoredUsers[i+1:]...)
-		return true
-	}
-	return false
+func (m *model) addInputEcho(origin session.InputOrigin, mode, senderName, senderID, content string) {
+	input := session.UserMessage(content)
+	input.InputOrigin, input.InputMode = origin, mode
+	input.SenderName, input.SenderID = senderName, senderID
+	msg := tuitypes.Input(input)
+	m.screen.Transcript.AddInputBlock(func(w int) []string {
+		msg.InputReference = m.inputReferences.Resolve(m.inputParentSessionID, msg.SenderID, msg.SenderName)
+		return ui.RenderInputLines(msg, w)
+	})
 }
 
 func (m *model) addNotice(prefix, text string, style lipgloss.Style) {

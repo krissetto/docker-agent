@@ -360,14 +360,18 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 		return nil, err
 	}
 
-	if req.SwitchCurrentAgent && parent.AgentName == "" {
+	if req.SwitchCurrentAgent {
 		// Session execution never mutates runtime-global agent state. The child is
 		// pinned to its explicit target; switching events/hooks describe the
 		// scoped delegation only.
-		evts.Emit(AgentSwitching(true, callerAgent.Name(), child.Name()))
+		if !parent.IsSubSession() {
+			evts.Emit(AgentSwitching(true, callerAgent.Name(), child.Name()))
+		}
 		r.executeOnAgentSwitchHooks(ctx, callerAgent, parent.ID, callerAgent.Name(), child.Name(), agentSwitchKindTransferTask)
 		defer func() {
-			evts.Emit(AgentSwitching(false, child.Name(), callerAgent.Name()))
+			if !parent.IsSubSession() {
+				evts.Emit(AgentSwitching(false, child.Name(), callerAgent.Name()))
+			}
 			r.executeOnAgentSwitchHooks(ctx, callerAgent, parent.ID, child.Name(), callerAgent.Name(), agentSwitchKindTransferTaskReturn)
 		}()
 		req.PinAgent = true
@@ -763,11 +767,11 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	ca := r.currentAgentName()
-	currentAgent, err := r.team.Agent(ca)
-	if err != nil {
-		return nil, fmt.Errorf("current agent not found: %w", err)
+	currentAgent := r.resolveSessionAgent(sess)
+	if currentAgent == nil {
+		return nil, errors.New("session agent not found")
 	}
+	ca := currentAgent.Name()
 
 	if errResult := validateAgentInList(ca, params.Agent, "hand off to", "handoffs list", currentAgent.Handoffs()); errResult != nil {
 		return errResult, nil
@@ -799,7 +803,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	defer span.End()
 
 	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
-	sess.AgentName = next.Name()
+	r.setSessionActiveAgent(ctx, sess, next.Name())
 	handoffMessage := "The agent " + ca + " handed off the conversation to you. " +
 		"Your available handoff agents and tools are specified in the system messages that follow. " +
 		"Only use those capabilities - do not attempt to use tools or hand off to agents that you see " +
@@ -823,7 +827,7 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 	slog.InfoContext(ctx, "Forced handoff", "from_agent", from.Name(), "to_agent", to.Name(), "session_id", sess.ID)
 
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), to.Name(), agentSwitchKindForceHandoff)
-	sess.AgentName = to.Name()
+	r.setSessionActiveAgent(ctx, sess, to.Name())
 
 	sess.AddMessage(session.ImplicitUserMessage(
 		"The agent " + from.Name() + " finished its response and the conversation was automatically " +
@@ -834,4 +838,24 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 			"for context, continue the work from where the previous agent stopped, and complete your " +
 			"part of the task.",
 	))
+}
+
+func (r *LocalRuntime) setSessionActiveAgent(ctx context.Context, sess *session.Session, name string) {
+	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+		d.mu.Lock()
+		sess.AgentName = name
+		if a, err := r.team.Agent(name); err == nil {
+			d.modelProviders = a.ConfiguredModels()
+			d.modelRef = ""
+			d.bindingVersion++
+		}
+		d.mu.Unlock()
+	} else {
+		sess.AgentName = name
+	}
+	if r.sessionStore != nil {
+		if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
+			slog.WarnContext(ctx, "Persist active agent", "error", err)
+		}
+	}
 }

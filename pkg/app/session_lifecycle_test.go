@@ -22,6 +22,7 @@ import (
 // sessionCaptureHandle records submission at the session ownership boundary.
 type sessionCaptureHandle struct {
 	projectionSession
+
 	sess   *session.Session
 	inputs []runtime.TurnInput
 }
@@ -52,6 +53,7 @@ func (r *backgroundSessionCaptureRuntime) EmitStartupInfo(_ context.Context, ses
 
 type backgroundSkillHandle struct {
 	projectionSession
+
 	runtime *backgroundSessionCaptureRuntime
 	sess    *session.Session
 }

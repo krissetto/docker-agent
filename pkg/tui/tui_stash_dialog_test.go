@@ -111,7 +111,7 @@ func TestReplayPendingEvent_DiscardsStaleStash(t *testing.T) {
 	m.sessionStates[sessionID] = service.NewSessionState(&session.Session{ID: sessionID})
 
 	// Original event the user was answering when they left the tab.
-	originalEvent := &runtime.ElicitationRequestEvent{Message: "first prompt"}
+	originalEvent := &runtime.ElicitationRequestEvent{SessionID: sessionID, RequestID: "old", Message: "first prompt"}
 	stashed := &stubDialog{id: "stashed"}
 	m.stashedDialogs[sessionID] = stashedDialog{
 		dialog: stashed,
@@ -121,7 +121,7 @@ func TestReplayPendingEvent_DiscardsStaleStash(t *testing.T) {
 	// While the user was away the agent superseded the prompt with a new
 	// elicitation. The supervisor's pending event no longer matches the
 	// stashed one.
-	newEvent := &runtime.ElicitationRequestEvent{Message: "replacement prompt"}
+	newEvent := &runtime.ElicitationRequestEvent{SessionID: sessionID, RequestID: "new", Message: "replacement prompt"}
 	m.supervisor.SetPendingEvent(sessionID, newEvent)
 
 	cmd := m.replayPendingEvent(sessionID)

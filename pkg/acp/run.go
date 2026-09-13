@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
@@ -35,7 +36,11 @@ func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.W
 	conn := acpsdk.NewAgentSideConnection(acpAgent, stdout, stdin)
 	conn.SetLogger(slog.Default())
 	acpAgent.SetAgentConnection(conn)
-	defer acpAgent.Stop(ctx)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		acpAgent.Stop(cleanupCtx)
+	}()
 
 	slog.DebugContext(ctx, "acp started, waiting for conn")
 	select {

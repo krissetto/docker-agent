@@ -342,7 +342,11 @@ func TestInMemoryStoreGetSessionSummariesConcurrent(t *testing.T) {
 	if got := summaries[0].Title; got != "concurrent title" && got != "direct title" {
 		t.Errorf("unexpected title %q", got)
 	}
-	_, _, wantCost := sess.TokensAndCost()
+	stored, err := store.GetSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, wantCost := stored.TokensAndCost()
 	if got := summaries[0].Cost; got != wantCost {
 		t.Errorf("expected cost %v, got %v", wantCost, got)
 	}

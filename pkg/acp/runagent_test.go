@@ -38,6 +38,7 @@ const testSessionID = "acp-test-session"
 // fakeRuntime is a minimal session runtime for driving runAgent.
 type fakeRuntime struct {
 	runtime.UnsupportedSessionHandle
+
 	events    []runtime.Event
 	premature bool
 	// onSubmit runs synchronously before any event is delivered (for example,
@@ -125,10 +126,12 @@ func (f *fakeRuntime) resumeRequests() []runtime.ResumeRequest {
 
 type blockingPromptRuntime struct {
 	fakeRuntime
+
 	conversation *session.Session
 	eventsCh     chan runtime.SessionEvent
 	turnID       string
 	cancelRun    func()
+	settled      chan struct{}
 
 	started       chan int
 	firstCanceled chan struct{}
@@ -146,7 +149,7 @@ func (r *blockingPromptRuntime) CreateSession(_ context.Context, sess *session.S
 func (r *blockingPromptRuntime) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.eventsCh = make(chan runtime.SessionEvent)
+	r.eventsCh = make(chan runtime.SessionEvent, 1)
 	return runtime.Observation{Events: r.eventsCh, Cancel: func() {}}, nil
 }
 
@@ -167,11 +170,14 @@ func (r *blockingPromptRuntime) Submit(ctx context.Context, input runtime.TurnIn
 	r.conversation.AddMessage(session.UserMessage(input.Content))
 	r.turnID = fmt.Sprintf("request-%d", call)
 	done := make(chan struct{})
+	r.settled = make(chan struct{})
+	settled := r.settled
 	r.cancelRun = sync.OnceFunc(func() { close(done) })
 	ch := r.eventsCh
 	turnID := r.turnID
 	r.started <- call
 	go func() {
+		defer close(settled)
 		defer close(ch)
 		<-done
 		if call == 1 && r.releaseFirst != nil {
@@ -193,12 +199,12 @@ func (r *blockingPromptRuntime) Cancel(_ context.Context, turnID string) (runtim
 	return runtime.CancelResult{Outcome: runtime.CancelAccepted}, nil
 }
 
-func newPromptTestAgent(t *testing.T, rt runtime.SessionRuntime) (*Agent, *Session, *peerResponder) {
+func newPromptTestAgent(t *testing.T, rt runtime.SessionRuntime, options ...session.Opt) (*Agent, *Session, *peerResponder) {
 	t.Helper()
 	fixture := newRunAgentFixture(t, &fakeRuntime{}, &captureWriter{})
 	fixture.agent.sessions = make(map[string]*Session)
 	fixture.agent.closedSessionIDs = make(map[string]struct{})
-	conversation := session.New(session.WithID(testSessionID))
+	conversation := session.New(append([]session.Opt{session.WithID(testSessionID)}, options...)...)
 	handle, err := rt.CreateSession(t.Context(), conversation, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	sess := &Session{id: testSessionID, sess: conversation, rt: rt, session: handle}
@@ -255,10 +261,12 @@ func TestPrompt_EscapingGeneratedMediaCompletesWithoutElicitation(t *testing.T) 
 		runtime.WithSessionCompaction(false), runtime.WithSessionStore(store))
 	require.NoError(t, err)
 	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
-	t.Cleanup(func() { require.NoError(t, supervisor.Shutdown(context.Background())) })
-	agent, sess, peer := newPromptTestAgent(t, supervisor.Runtime())
-	sess.sess.ID = testSessionID
-	sess.sess.WorkingDir = workspace
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+		require.NoError(t, supervisor.Shutdown(ctx))
+	})
+	agent, _, peer := newPromptTestAgent(t, supervisor.Runtime(), session.WithWorkingDir(workspace))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -1246,3 +1254,17 @@ func TestRunAgent_ContextCancellationStopsEventLoop(t *testing.T) {
 func (f *fakeRuntime) Release(context.Context) error { return nil }
 
 func (f *fakeRuntime) UpdateTitle(context.Context, string) error { return nil }
+
+func (f *fakeRuntime) AwaitTurn(context.Context, string) error { return nil }
+
+func (r *blockingPromptRuntime) AwaitTurn(ctx context.Context, _ string) error {
+	r.mu.Lock()
+	settled := r.settled
+	r.mu.Unlock()
+	select {
+	case <-settled:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

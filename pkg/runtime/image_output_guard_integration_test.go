@@ -76,10 +76,7 @@ func TestRunStream_ImageOutputGuard_RejectsBeforeDispatch(t *testing.T) {
 	sess := session.New(session.WithUserMessage("draw a cat"))
 	sess.Title = "image output guard integration test"
 
-	var events []Event
-	for _, ev := range runAndCollect(t, rt, sess) {
-		events = append(events, ev)
-	}
+	events := runAndCollect(t, rt, sess)
 
 	assert.Zero(t, providerCalls.Load(), "the guard must reject before any request reaches the provider")
 

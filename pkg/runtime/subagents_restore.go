@@ -52,19 +52,32 @@ func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.D
 func (m *subagentManager) Restore(ctx context.Context, sess *session.Session, snapshot subagent.Snapshot) (subagent.Snapshot, error) {
 	m.restoreMu.Lock()
 	defer m.restoreMu.Unlock()
-	normalized, err := normalizeRestoredSnapshot(snapshot, m.storeDurability())
+	canonical, records, err := m.canonicalSnapshot(ctx, sess, snapshot)
 	if err != nil {
 		return subagent.Snapshot{}, err
 	}
-	return m.restoreLocked(ctx, sess, normalized)
+	normalized, err := normalizeRestoredSnapshot(canonical, m.storeDurability())
+	if err != nil {
+		return subagent.Snapshot{}, err
+	}
+	restored, err := m.restoreLockedRecords(ctx, sess, normalized, records)
+	if err == nil {
+		m.mu.Lock()
+		for _, record := range records {
+			if child := m.children[record.Node.ID]; child != nil {
+				child.durable = record
+				child.result = record.Result
+			}
+		}
+		m.mu.Unlock()
+		m.r.sessionDrivers.signalWork()
+	}
+	return restored, err
 }
 
 // storeDurability reports the durability of the runtime's subagent store.
 func (m *subagentManager) storeDurability() subagent.Durability {
-	if store, ok := m.r.subagentStore.(subagent.DurableStore); ok {
-		return store.Durability()
-	}
-	return subagent.DurabilityVolatile
+	return m.r.sessionDurability()
 }
 
 type restoredNode struct {
@@ -89,9 +102,9 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 	if root.Parent != "" || root.SessionID != "" || root.Agent == "" {
 		return nil, errors.New("invalid restored topology: malformed root")
 	}
-	expectedAgent := rootSess.AgentName
+	expectedAgent := rootSess.AttributesSnapshot()[SessionAgentAttribute]
 	if expectedAgent == "" {
-		expectedAgent = rootSess.AttributesSnapshot()[SessionAgentAttribute]
+		expectedAgent = rootSess.AgentName
 	}
 	if expectedAgent == "" {
 		defaultAgent, err := m.r.team.DefaultAgent()
@@ -153,9 +166,6 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 	var walk func([]subagent.NodeSnapshot, string, *session.Session, *agent.Agent, bool) error
 	walk = func(nodes []subagent.NodeSnapshot, parentSessionID string, parentSess *session.Session, parentAgent *agent.Agent, ancestorStopped bool) error {
 		var allowed []subagent.AllowedSubagent
-		if !ancestorStopped {
-			allowed = m.r.allowedFromAgent(parentAgent)
-		}
 		for _, snap := range nodes {
 			node := snap.Node
 			var childSess *session.Session
@@ -170,7 +180,9 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 						return fmt.Errorf("invalid restored topology: session %q session binding %q does not match node agent %q", node.SessionID, binding, node.Agent)
 					}
 					loaded = loaded.Clone()
-					loaded.AgentName = node.Agent
+					if loaded.AgentName == "" {
+						loaded.AgentName = node.Agent
+					}
 					loaded.NonInteractive = true
 					loaded.AsyncSubagent = true
 					childSess = loaded
@@ -179,12 +191,26 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 				}
 			}
 
+			grant := parentAgent
+			if childSess != nil {
+				if provenance := childSess.AttributesSnapshot()[SessionParentAgentAttribute]; provenance != "" {
+					grant, _ = m.r.team.Agent(provenance)
+				}
+			}
+			allowed = nil
+			if grant != nil && !ancestorStopped {
+				allowed = m.r.allowedFromAgent(grant)
+			}
 			state := node.State
 			var childAgent *agent.Agent
 			if ancestorStopped || state == subagent.NodeStopped {
 				state = subagent.NodeStopped
 			} else {
-				candidate, resolveErr := m.r.team.Agent(node.Agent)
+				activeName := node.Agent
+				if childSess != nil && childSess.AgentName != "" {
+					activeName = childSess.AgentName
+				}
+				candidate, resolveErr := m.r.team.Agent(activeName)
 				if resolveErr == nil {
 					childAgent = candidate
 				}
@@ -218,7 +244,7 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 
 // restoreLocked performs all fallible validation and driver initialization
 // before atomically publishing the topology under m.mu.
-func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Session, snapshot subagent.Snapshot) (subagent.Snapshot, error) {
+func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *session.Session, snapshot subagent.Snapshot, records []session.ChildRecord) (subagent.Snapshot, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -227,8 +253,19 @@ func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Sessi
 	_, tracked := m.sessions[sess.ID]
 	m.mu.Unlock()
 	if tracked {
-		snapshot, _ := snapshotForRoot(m.tree.Snapshot(), subagent.SessionRootID(sess.ID))
-		return snapshot, nil
+		m.mu.Lock()
+		hasChildren := false
+		for _, rec := range m.children {
+			if m.rootSessionLocked(rec.parentSession) == sess.ID {
+				hasChildren = true
+				break
+			}
+		}
+		m.mu.Unlock()
+		if hasChildren {
+			snapshot, _ := snapshotForRoot(m.tree.Snapshot(), subagent.SessionRootID(sess.ID))
+			return snapshot, nil
+		}
 	}
 
 	prepared, err := m.preflightRestore(ctx, sess, snapshot)
@@ -241,13 +278,14 @@ func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Sessi
 		m.mu.Unlock()
 		return subagent.Snapshot{}, nil
 	}
-	if _, exists := m.sessions[sess.ID]; exists {
-		m.mu.Unlock()
-		return subagent.Snapshot{}, fmt.Errorf("invalid restored topology: root session %q is already registered", sess.ID)
-	}
-	if _, exists := m.tree.Node(root.ID); exists {
-		m.mu.Unlock()
-		return subagent.Snapshot{}, fmt.Errorf("invalid restored topology: root node %q already exists", root.ID)
+	if tracked := m.sessions[sess.ID]; tracked != nil {
+		// A root may receive a report while the durable descendants are preflighted.
+		// Replace only its synthetic projection, never a published child graph.
+		if tracked.unwatch != nil {
+			tracked.unwatch()
+		}
+		delete(m.sessions, sess.ID)
+		_ = m.tree.Remove(root.ID)
 	}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
@@ -294,9 +332,7 @@ func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Sessi
 		driver := reservation.driver
 		childID := entry.snapshot.Node.ID
 		driver.SetPreStartErrorGate(func() error { return m.admitChildRun(childID) }, func() { m.abortChildStart(childID) })
-		unwatchSettled := driver.OnSettled(func() { m.reportChildSettled(childID) })
-		unwatchStarted := driver.OnStarted(func() { m.markChildRunning(childID) })
-		entry.unwatch = func() { unwatchSettled(); unwatchStarted() }
+		entry.unwatch = driver.OnStarted(func() { m.markChildRunning(childID) })
 		initialized = append(initialized, entry)
 	}
 
@@ -312,12 +348,23 @@ func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Sessi
 
 	insertedSessions := []string{sess.ID}
 	insertedChildren := make([]subagent.NodeID, 0, len(prepared))
-	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true, sess: sess}
+	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
-		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, session: entry.childSess, parentSess: entry.parentSess, agent: entry.childAgent, state: entry.state, errMsg: node.Error, unwatch: entry.unwatch}
+		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, agent: entry.childAgent, state: entry.state, errMsg: node.Error, unwatch: entry.unwatch}
 		if entry.childSess != nil {
-			rec.result = entry.childSess.GetLastAssistantMessageContent()
+			rec.parentAgentName = entry.childSess.AttributesSnapshot()[SessionParentAgentAttribute]
+			if rec.parentAgentName == "" && entry.parentSess != nil {
+				rec.parentAgentName = entry.parentSess.AgentName
+			}
+			rec.result = ownAssistantResult(entry.childSess)
+		}
+		for _, record := range records {
+			if record.Node.ID == node.ID {
+				rec.durable = record
+				rec.result = record.Result
+				break
+			}
 		}
 		m.children[node.ID] = rec
 		insertedChildren = append(insertedChildren, node.ID)
@@ -331,6 +378,22 @@ func (m *subagentManager) restoreLocked(ctx context.Context, sess *session.Sessi
 		reservations = append(reservations, entry.reservation)
 	}
 	if err := m.r.sessionDrivers.ActivateRestoreBatch(reservations, func() error {
+		for _, entry := range prepared {
+			rec := m.children[entry.snapshot.Node.ID]
+			if rec.durable.Revision != 0 || entry.childSess == nil {
+				continue
+			}
+			node := entry.snapshot.Node
+			node.State = entry.state
+			preview, _ := subagent.PreviewText(rec.result, subagent.PreviewLen)
+			record := session.ChildRecord{RootSessionID: sess.ID, ParentSessionID: entry.parentSessionID, Node: node, Revision: 1, Result: preview, Error: node.Error}
+			admission := entry.childSess.OwnSnapshot()
+			admission.Messages = nil
+			if err := m.coordination().AdmitChild(ctx, session.ChildAdmission{Child: admission, Record: record}); err != nil {
+				return fmt.Errorf("adopt legacy child %s: %w", node.ID, err)
+			}
+			rec.durable = record
+		}
 		if err := m.tree.AddSubtree(treeNodes); err != nil {
 			return fmt.Errorf("publish restored topology: %w", err)
 		}
@@ -374,12 +437,79 @@ func (r *LocalRuntime) RestoreSubagentTree(ctx context.Context, sess *session.Se
 		return nil, nil
 	}
 	stored, err := r.subagentStore.LoadTree(ctx, sess.ID)
-	if err != nil || stored == nil {
+	if err != nil {
 		return nil, err
+	}
+	if stored == nil {
+		records, loadErr := m.coordination().LoadChildren(ctx, sess.ID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if len(records) == 0 {
+			return nil, nil
+		}
+		stored = &subagent.Snapshot{}
 	}
 	snapshot, err := m.Restore(ctx, sess, *stored)
 	if err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
+}
+
+func (m *subagentManager) canonicalSnapshot(ctx context.Context, root *session.Session, legacy subagent.Snapshot) (subagent.Snapshot, []session.ChildRecord, error) {
+	records, err := m.coordination().LoadChildren(ctx, root.ID)
+	if err != nil {
+		return subagent.Snapshot{}, nil, err
+	}
+	if len(records) == 0 {
+		return legacy, nil, nil
+	}
+	agentName := root.AttributesSnapshot()[SessionAgentAttribute]
+	if agentName == "" {
+		agentName = root.AgentName
+	}
+	if agentName == "" && m.r.team != nil {
+		if defaultAgent, err := m.r.team.DefaultAgent(); err == nil {
+			agentName = defaultAgent.Name()
+		}
+	}
+	rootNode := subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: agentName, State: subagent.NodeIdle}
+	children := map[subagent.NodeID][]subagent.Node{}
+	known := map[subagent.NodeID]bool{}
+	for _, record := range records {
+		children[record.Node.Parent] = append(children[record.Node.Parent], record.Node)
+		known[record.Node.ID] = true
+	}
+	// A failed multi-row legacy migration is retryable: canonical rows win, but
+	// not-yet-adopted nodes remain in preflight and cannot silently disappear.
+	var mergeLegacy func([]subagent.NodeSnapshot)
+	mergeLegacy = func(nodes []subagent.NodeSnapshot) {
+		for _, item := range nodes {
+			if item.Node.ID != rootNode.ID && !known[item.Node.ID] {
+				children[item.Node.Parent] = append(children[item.Node.Parent], item.Node)
+				known[item.Node.ID] = true
+			}
+			mergeLegacy(item.Children)
+		}
+	}
+	mergeLegacy(legacy.Nodes)
+	var build func(subagent.Node, map[subagent.NodeID]bool) (subagent.NodeSnapshot, error)
+	build = func(node subagent.Node, seen map[subagent.NodeID]bool) (subagent.NodeSnapshot, error) {
+		if seen[node.ID] {
+			return subagent.NodeSnapshot{}, errors.New("cyclic child records")
+		}
+		seen[node.ID] = true
+		snap := subagent.NodeSnapshot{Node: node}
+		for _, child := range children[node.ID] {
+			branch, err := build(child, seen)
+			if err != nil {
+				return snap, err
+			}
+			snap.Children = append(snap.Children, branch)
+		}
+		return snap, nil
+	}
+	snap, err := build(rootNode, map[subagent.NodeID]bool{})
+	return subagent.Snapshot{Version: subagent.SnapshotVersion, Durability: m.storeDurability(), Root: rootNode.ID, Nodes: []subagent.NodeSnapshot{snap}}, records, err
 }

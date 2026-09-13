@@ -1,7 +1,7 @@
 package server
 
 import (
-	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -25,7 +25,7 @@ func TestAPIServerMarkdownDocumentsEveryRoute(t *testing.T) {
 	require.True(t, found, "API server Endpoints section must end before Workflow summary")
 
 	documented := make(map[string]struct{})
-	for _, line := range strings.Split(endpointSection, "\n") {
+	for line := range strings.SplitSeq(endpointSection, "\n") {
 		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
 			continue
 		}
@@ -55,7 +55,7 @@ func TestAPIServerMarkdownDocumentsEveryRoute(t *testing.T) {
 	server := NewWithManager(nil, "")
 	registered := make(map[string]struct{})
 	for _, route := range server.e.Routes() {
-		if route.Method == "HEAD" || route.Method == "OPTIONS" {
+		if route.Method == http.MethodHead || route.Method == http.MethodOptions {
 			continue
 		}
 		registered[route.Method+" "+route.Path] = struct{}{}
@@ -65,6 +65,6 @@ func TestAPIServerMarkdownDocumentsEveryRoute(t *testing.T) {
 		assert.Contains(t, documented, route, "registered route is missing from API server markdown")
 	}
 	for route := range documented {
-		assert.Contains(t, registered, route, fmt.Sprintf("documented route %q is not registered", route))
+		assert.Contains(t, registered, route, "documented route %q is not registered", route)
 	}
 }

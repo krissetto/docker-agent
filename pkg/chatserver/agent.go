@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
@@ -226,16 +227,11 @@ type agentEmit struct {
 func runAgentLoop(ctx context.Context, handle runtime.SessionHandle, input runtime.TurnInput, emit agentEmit) error {
 	var runErrs []error
 	toolIndex := 0
-	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	ownedTurn, err := turn.Start(ctx, handle, input)
 	if err != nil {
-		return fmt.Errorf("observe chat session: %w", err)
+		return fmt.Errorf("start chat prompt: %w", err)
 	}
-	submission, err := handle.Submit(ctx, input)
-	if err != nil {
-		observation.Cancel()
-		return fmt.Errorf("submit chat prompt: %w", err)
-	}
-	termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+	termination := ownedTurn.Consume(ctx, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 		ev := envelope.Event
 		switch e := ev.(type) {
 		case *runtime.AgentChoiceEvent:

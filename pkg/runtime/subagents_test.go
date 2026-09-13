@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ import (
 func newTestSubagentManager(t *testing.T) *subagentManager {
 	t.Helper()
 	r := &LocalRuntime{
-		ctx:           func() context.Context { return context.WithoutCancel(t.Context()) },
+		ctx:           func() context.Context { return t.Context() },
 		subagentStore: subagent.NewInMemoryStore(),
 		policy:        DefaultSessionResourcePolicy(),
 	}
@@ -70,12 +71,7 @@ func (m *subagentManager) registerChild(parent *session.Session, parentAgent str
 	if d != nil {
 		childID := id
 		d.SetPreStartErrorGate(func() error { return m.admitChildRun(childID) }, func() { m.abortChildStart(childID) })
-		unwatchSettled := d.OnSettled(func() { m.reportChildSettled(childID) })
-		unwatchStarted := d.OnStarted(func() { m.markChildRunning(childID) })
-		m.children[id].unwatch = func() {
-			unwatchSettled()
-			unwatchStarted()
-		}
+		m.children[id].unwatch = d.OnStarted(func() { m.markChildRunning(childID) })
 	}
 }
 
@@ -98,7 +94,7 @@ func TestSubagentManagerDeliversTurnReportToParentReceiver(t *testing.T) {
 
 	m.children["aaaaa"].result = "the answer is 42"
 	m.children["aaaaa"].state = subagent.NodeIdle
-	m.reportTurn("aaaaa", subagent.NodeIdle, "")
+	m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 
 	env := requireOneDriverMessage(t, m.r, parent)
 	assert.Contains(t, env, "worker")
@@ -106,7 +102,17 @@ func TestSubagentManagerDeliversTurnReportToParentReceiver(t *testing.T) {
 	// Short responses travel whole, explicitly marked as full.
 	assert.Contains(t, env, `Full response: "the answer is 42"`)
 	assert.NotContains(t, env, "[...]")
-	assert.True(t, strings.HasPrefix(env, "<system_info>"), "report wrapped in system_info")
+	assert.False(t, strings.HasPrefix(env, "<system_info>"), "canonical report body remains clean")
+	items := parent.MessagesSnapshot()
+	require.NotEmpty(t, items)
+	message := items[len(items)-1].Message
+	require.NotNil(t, message)
+	assert.Equal(t, session.InputOriginRuntime, message.InputOrigin)
+	assert.Equal(t, env, message.Message.Content)
+	projected := *message
+	projectModelInput(&projected)
+	assert.True(t, strings.HasPrefix(projected.Message.Content, "<system_info>"), "model-only attribution wrapper")
+	assert.Equal(t, env, parent.MessagesSnapshot()[len(items)-1].Message.Message.Content, "projection must not mutate transcript")
 
 	require.NotNil(t, parent.SubagentTree, "tree snapshot mirrored onto the top-level session for live access")
 	stored, err := m.r.subagentStore.LoadTree(t.Context(), "parent")
@@ -162,19 +168,27 @@ func TestPersistSnapshotIsScopedPerRootSession(t *testing.T) {
 }
 
 func TestStoppedParentRejectsNewDescendant(t *testing.T) {
-	m := newTestSubagentManager(t)
-	root := session.New(session.WithID("root"))
-	child := session.New(session.WithID("child"))
-	m.registerChild(root, "root", "aaaaa", "worker", child)
-	m.children["aaaaa"].state = subagent.NodeStopped
-
-	id, err := m.Spawn(child, "worker", subagent.AllowedSubagent{Agent: "worker"}, "too late")
-	require.Error(t, err)
-	assert.Empty(t, id)
-	snapshot := m.tree.Snapshot()
-	require.Len(t, snapshot.Nodes, 1)
-	require.Len(t, snapshot.Nodes[0].Children, 1)
-	assert.Empty(t, snapshot.Nodes[0].Children[0].Children)
+	worker := agent.New("worker", "prompt", agent.WithModel(coordinationReply("worker")), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}))
+	root := agent.New("root", "prompt", agent.WithModel(coordinationReply("root")), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker)), WithSessionStore(session.NewInMemorySessionStore()))
+	require.NoError(t, err)
+	owner := NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	parent := coordinationCreate(t, owner.Runtime(), "root", "")
+	child := coordinationCreate(t, owner.Runtime(), "child", parent.ID())
+	tree, err := owner.Runtime().(TreeInspector).InspectSessionTree(t.Context(), parent.ID())
+	require.NoError(t, err)
+	require.Len(t, tree.Nodes, 1)
+	require.Len(t, tree.Nodes[0].Children, 1)
+	_, err = rt.subagents.stopChild(parent.ID(), tree.Nodes[0].Children[0].Node.ID)
+	require.NoError(t, err)
+	_, err = owner.Runtime().CreateSession(t.Context(), session.New(session.WithID("grandchild")), SessionBinding{AgentName: "worker", ParentSessionID: child.ID()})
+	require.Error(t, err, "an explicitly stopped child cannot admit descendants")
+	tree, err = owner.Runtime().(TreeInspector).InspectSessionTree(t.Context(), parent.ID())
+	require.NoError(t, err)
+	require.Len(t, tree.Nodes, 1)
+	require.Len(t, tree.Nodes[0].Children, 1)
+	assert.Empty(t, tree.Nodes[0].Children[0].Children)
 }
 
 func TestSubagentManagerSendToChildRoutesToChildReceiver(t *testing.T) {
@@ -202,7 +216,7 @@ func TestSubagentManagerSendToChildLifecycle(t *testing.T) {
 	// A subagent that finished a turn stays conversational.
 	m.children["ccccc"].result = "done"
 	m.children["ccccc"].state = subagent.NodeIdle
-	m.reportTurn("ccccc", subagent.NodeIdle, "")
+	m.reportTurn(t, "ccccc", subagent.NodeIdle, "")
 	_, err = m.sendToChild("parent", "ccccc", "follow-up")
 	require.NoError(t, err, "idle subagents accept follow-ups")
 
@@ -340,7 +354,7 @@ func TestTurnReportPreviews(t *testing.T) {
 		m.registerChild(parent, "root", "aaaaa", "worker", child)
 		m.children["aaaaa"].result = result
 		m.children["aaaaa"].state = state
-		m.reportTurn("aaaaa", state, errMsg)
+		m.reportTurn(t, "aaaaa", state, errMsg)
 		return requireOneDriverMessage(t, m.r, parent)
 	}
 
@@ -364,19 +378,13 @@ func TestTurnReportPreviews(t *testing.T) {
 		assert.NotContains(t, env, "stale result")
 	})
 
-	t.Run("failed turn without error detail still reports", func(t *testing.T) {
-		env := newEnv("", "", subagent.NodeFailed)
-		assert.Contains(t, env, "failed")
-		assert.NotContains(t, env, "Error:")
-	})
-
 	t.Run("empty successful response reports quiet turn", func(t *testing.T) {
 		m := newTestSubagentManager(t)
 		parent := session.New(session.WithID("parent"))
 		child := session.New(session.WithID("child"))
 		m.registerChild(parent, "root", "aaaaa", "worker", child)
 		m.children["aaaaa"].state = subagent.NodeIdle
-		m.reportTurn("aaaaa", subagent.NodeIdle, "")
+		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 		env := requireOneDriverMessage(t, m.r, parent)
 		assert.Contains(t, env, "finished its turn")
 		assert.NotContains(t, env, "Full response")
@@ -402,7 +410,7 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 		// helper (bbbbb) is running beneath worker; worker's turn end is
 		// bookkeeping, not news.
 		m.children["aaaaa"].state = subagent.NodeIdle
-		m.reportTurn("aaaaa", subagent.NodeIdle, "")
+		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 		assert.Empty(t, drainDriverMessages(m.r, parent))
 		// The tree still records the state change for the UI.
 		n, ok := m.tree.Node("aaaaa")
@@ -414,18 +422,18 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 		m, parent, grand := setup()
 		leaf := session.New(session.WithID("leaf-sess"))
 		m.registerChild(grand, "helper", "ccccc", "leaf", leaf)
-		m.children["bbbbb"].state = subagent.NodeIdle
+		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
 		m.children["aaaaa"].state = subagent.NodeIdle
-		m.reportTurn("aaaaa", subagent.NodeIdle, "")
+		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 		assert.Empty(t, drainDriverMessages(m.r, parent))
 	})
 
 	t.Run("delivered once the subtree is quiet", func(t *testing.T) {
 		m, parent, _ := setup()
-		m.children["bbbbb"].state = subagent.NodeIdle // helper settled
+		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false) // helper settled
 		m.children["aaaaa"].state = subagent.NodeIdle
 		m.children["aaaaa"].result = "all done"
-		m.reportTurn("aaaaa", subagent.NodeIdle, "")
+		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 		env := requireOneDriverMessage(t, m.r, parent)
 		assert.Contains(t, env, "finished its turn")
 		assert.Contains(t, env, "all done")
@@ -434,15 +442,15 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 	t.Run("failed turn waits for running subtree", func(t *testing.T) {
 		m, parent, _ := setup()
 		m.children["aaaaa"].state = subagent.NodeFailed
-		m.reportTurn("aaaaa", subagent.NodeFailed, "model exploded")
+		m.reportTurn(t, "aaaaa", subagent.NodeFailed, "model exploded")
 		assert.Empty(t, drainDriverMessages(m.r, parent))
 	})
 
 	t.Run("failed turn reports once subtree is quiet", func(t *testing.T) {
 		m, parent, _ := setup()
-		m.children["bbbbb"].state = subagent.NodeIdle
+		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
 		m.children["aaaaa"].state = subagent.NodeFailed
-		m.reportTurn("aaaaa", subagent.NodeFailed, "model exploded")
+		m.reportTurn(t, "aaaaa", subagent.NodeFailed, "model exploded")
 		env := requireOneDriverMessage(t, m.r, parent)
 		assert.Contains(t, env, "failed")
 		assert.Contains(t, env, "model exploded")
@@ -645,4 +653,58 @@ func TestSpawnedSubagentInheritsSafetySettings(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicyBalanced, info.Session.SafetyPolicy)
 	require.NotNil(t, info.Session.Permissions)
 	assert.Equal(t, []string{"shell"}, info.Session.Permissions.Allow)
+}
+
+// reportTurn exercises admitted child completion without invoking a model.
+func (m *subagentManager) reportTurn(t *testing.T, id subagent.NodeID, state subagent.NodeState, errMsg string) {
+	t.Helper()
+	if m.r.sessionStore == nil {
+		m.r.sessionStore = session.NewInMemorySessionStore()
+	}
+	// Pump the outbox synchronously below instead of racing the scheduler.
+	m.r.sessionDrivers.workOnce.Do(func() {
+		m.r.sessionDrivers.work = make(chan struct{}, 1)
+		m.r.sessionDrivers.workDone = make(chan struct{})
+		close(m.r.sessionDrivers.workDone)
+	})
+	rec := m.children[id]
+	parentSession := m.sessions[rec.parentSession].sess
+	if driver, found := m.r.sessionDrivers.Lookup(rec.parentSession); found {
+		parentSession = driver.session()
+	}
+	d, ok := m.r.sessionDrivers.Lookup(rec.sessionID)
+	require.True(t, ok)
+	d.sess.AsyncSubagent = true
+	d.sess.ParentID = rec.parentSession
+	if rec.durable.Revision == 0 {
+		parent := parentSession
+		rootID := m.rootSessionLockedSafe(rec.parentSession)
+		root := m.sessions[rootID].sess
+		if driver, found := m.r.sessionDrivers.Lookup(rootID); found {
+			root = driver.session()
+		}
+		for _, sess := range []*session.Session{root, parent} {
+			err := m.r.sessionStore.AddSession(t.Context(), sess.OwnSnapshot())
+			if err != nil {
+				require.ErrorIs(t, err, session.ErrAlreadyExists)
+			}
+		}
+		node, exists := m.tree.Node(id)
+		require.True(t, exists)
+		rec.durable = session.ChildRecord{RootSessionID: rootID, ParentSessionID: parent.ID, Node: node, Revision: 1}
+		require.NoError(t, m.coordination().AdmitChild(t.Context(), session.ChildAdmission{Child: d.sess, Record: rec.durable}))
+	}
+	d.sess.AddMessage(session.NewAgentMessage(rec.name, &chat.Message{Role: chat.MessageRoleAssistant, Content: rec.result}))
+	d.mu.Lock()
+	d.generationResult = rec.result
+	d.mu.Unlock()
+	if state == subagent.NodeFailed {
+		require.NotEmpty(t, errMsg, "failed completion requires an execution error")
+	}
+	parent := m.r.sessionDrivers.Get(parentSession)
+	parent.mu.Lock()
+	parent.running = true // Keep delivery queued; these tests inspect the report, not model execution.
+	parent.mu.Unlock()
+	require.NoError(t, m.completeSessionTurn(d, fmt.Sprintf("test-turn-%d", rec.durable.Revision), errMsg))
+	m.r.sessionDrivers.deliverReports(parent)
 }

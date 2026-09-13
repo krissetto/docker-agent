@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -36,12 +37,14 @@ func TestAddMessageKeepsSpinnerAtTail(t *testing.T) {
 	m.AddUserMessage("ask the team")
 	m.AddAssistantMessage("", "") // pending-response spinner
 
-	m.ReplaceLoadingWithUser("<system_info>reviewer replied</system_info>", 3)
+	input := session.UserMessage("review complete")
+	input.InputOrigin, input.InputMode, input.SenderName, input.SenderID = session.InputOriginAgent, "steer", "reviewer", "child"
+	m.AddInputMessage(input, 3)
 
 	require.Len(t, m.messages, 3)
 	assert.Equal(t, []types.MessageType{
 		types.MessageTypeUser,
-		types.MessageTypeUser,
+		types.MessageTypeAgentInput,
 		types.MessageTypeSpinner,
 	}, messageTypes(m))
 	require.Len(t, m.views, 3)
@@ -49,7 +52,7 @@ func TestAddMessageKeepsSpinnerAtTail(t *testing.T) {
 	m.RemoveSpinner()
 	assert.Equal(t, []types.MessageType{
 		types.MessageTypeUser,
-		types.MessageTypeUser,
+		types.MessageTypeAgentInput,
 	}, messageTypes(m))
 }
 

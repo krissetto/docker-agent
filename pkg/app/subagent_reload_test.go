@@ -90,7 +90,7 @@ func TestReplaceSessionHydratesSubagentTree(t *testing.T) {
 	a := New(t.Context(), owner.Runtime(), session.New(), runtime.SessionBinding{}, WithRuntimeServices(rt))
 	a.ReplaceSession(t.Context(), loaded)
 
-	got := loaded.GetSubagentTree()
+	got := a.Session().GetSubagentTree()
 	require.NotNil(t, got, "ReplaceSession must hydrate the subagent tree from the store")
 	var idleChild, stoppedChild *subagent.NodeSnapshot
 	for i := range got.Nodes {
@@ -123,5 +123,8 @@ func TestReplaceSessionHydratesSubagentTree(t *testing.T) {
 
 	a.ReplaceSession(t.Context(), reloaded)
 
-	require.Equal(t, got, reloaded.GetSubagentTree(), "an already-tracked session tree must hydrate a distinct same-ID session")
+	currentTree := a.Session().GetSubagentTree()
+	require.NotNil(t, currentTree)
+	require.Equal(t, got.Root, currentTree.Root)
+	require.Equal(t, got.Nodes, currentTree.Nodes, "an already-tracked session tree must hydrate a distinct same-ID session")
 }

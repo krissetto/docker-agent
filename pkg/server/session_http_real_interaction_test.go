@@ -112,12 +112,14 @@ func runHTTPInteraction(t *testing.T, maximum int, kind runtime.InteractionKind)
 			if _, ok := e.Event.(*runtime.ToolCallConfirmationEvent); ok {
 				require.NoError(t, handle.Respond(t.Context(), runtime.InteractionResponse{InteractionID: e.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApprove()}))
 				if kind == runtime.InteractionConfirmation {
+					awaitHTTPInteractionResolved(t, obs, e.InteractionID, deadline.C)
 					return
 				}
 				continue
 			}
 			if _, ok := e.Event.(*runtime.MaxIterationsReachedEvent); ok && kind == runtime.InteractionMaxIterations {
 				require.NoError(t, handle.Respond(t.Context(), runtime.InteractionResponse{InteractionID: e.InteractionID, Kind: kind, Resume: runtime.ResumeReject("stop")}))
+				awaitHTTPInteractionResolved(t, obs, e.InteractionID, deadline.C)
 				return
 			}
 		}
@@ -130,4 +132,21 @@ func TestCanonicalHTTPRealToolConfirmationResponseRoundTrip(t *testing.T) {
 
 func TestCanonicalHTTPRealMaxIterationsResponseRoundTrip(t *testing.T) {
 	runHTTPInteraction(t, 1, runtime.InteractionMaxIterations)
+}
+
+func awaitHTTPInteractionResolved(t *testing.T, obs runtime.Observation, id string, deadline <-chan time.Time) {
+	t.Helper()
+	for {
+		select {
+		case event, ok := <-obs.Events:
+			require.True(t, ok, "stream closed before interaction resolution")
+			if resolved, ok := event.Event.(*runtime.InteractionResolvedEvent); ok && resolved.InteractionID == id {
+				require.Equal(t, id, event.InteractionID)
+				require.Equal(t, "responded", string(resolved.Reason))
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for interaction resolution")
+		}
+	}
 }

@@ -102,8 +102,15 @@ func TestAttachedAppSteerTargetsChildSession(t *testing.T) {
 	_, err = a.FollowUpMessage(t.Context(), "target child", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		for _, item := range child.ItemsSnapshot() {
-			if item.Message != nil && item.Message.Message.Content == "target child" && len(item.Message.Message.MultiContent) > 0 {
+		snapshot, snapshotErr := a.SessionHandle().Snapshot(t.Context())
+		if snapshotErr != nil || snapshot == nil {
+			return false
+		}
+		if snapshot.ID != child.ID {
+			return false
+		}
+		for _, item := range snapshot.ItemsSnapshot() {
+			if item.Message != nil && item.Message.Message.Content == "target child" && len(item.Message.Message.MultiContent) > 0 && strings.Contains(item.Message.Message.MultiContent[0].Text, "attached context") {
 				return true
 			}
 		}
@@ -134,9 +141,16 @@ func TestIdleAttachedAppRunPreservesAttachments(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	a.Run(ctx, cancel, "idle message", []messages.Attachment{{Name: "note.txt", Content: "attached context"}})
 	require.Eventually(t, func() bool {
-		for _, item := range child.ItemsSnapshot() {
+		snapshot, snapshotErr := a.SessionHandle().Snapshot(t.Context())
+		if snapshotErr != nil || snapshot == nil {
+			return false
+		}
+		if snapshot.ID != child.ID {
+			return false
+		}
+		for _, item := range snapshot.ItemsSnapshot() {
 			if item.Message != nil && item.Message.Message.Content == "idle message" {
-				return len(item.Message.Message.MultiContent) > 0
+				return len(item.Message.Message.MultiContent) > 0 && strings.Contains(item.Message.Message.MultiContent[0].Text, "attached context")
 			}
 		}
 		return false

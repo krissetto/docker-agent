@@ -43,11 +43,13 @@ type blockingLookupRuntime struct {
 func (*blockingLookupRuntime) CreateSession(context.Context, *session.Session, runtime.SessionBinding) (runtime.SessionHandle, error) {
 	return nil, nil
 }
+
 func (r *blockingLookupRuntime) SessionByID(string) (runtime.SessionHandle, error) {
 	close(r.started)
 	<-r.finish
 	return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, Operation: "lookup"}
 }
+
 func (*blockingLookupRuntime) DeleteSession(context.Context, string) error { return nil }
 
 func TestControlPlaneUnregisterDrainsBorrowedLookup(t *testing.T) {
@@ -122,7 +124,7 @@ func TestControlPlaneSessionsDeduplicatesAndCachesOwners(t *testing.T) {
 
 	require.NoError(t, unregister(t.Context()))
 	require.NoError(t, unregister(t.Context()))
-	require.Len(t, registry.extras, 0, "unregister is idempotent and removes the runtime")
+	require.Empty(t, registry.extras, "unregister is idempotent and removes the runtime")
 	registry.mu.RLock()
 	_, cachedAfterUnregister := registry.owners["other"]
 	registry.mu.RUnlock()

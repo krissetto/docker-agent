@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/model/provider"
@@ -83,6 +85,14 @@ type sessionDriver struct {
 	mu                 sync.Mutex
 	sess               *session.Session
 	running            bool
+	settling           bool
+	completionErr      error
+	persistenceFailure error
+	reportRetry        *session.ChildReport
+	completionRunErr   string
+	completionInFlight bool
+	settledGeneration  uint64
+	generationResult   string
 	starting           bool
 	startDone          chan struct{}
 	wakeRunning        bool
@@ -91,10 +101,13 @@ type sessionDriver struct {
 	cancelling         bool
 	cancel             context.CancelFunc
 	retryRunning       bool
-	retryCancel        context.CancelFunc
+	turnChanged        chan struct{}
+	completedTurns     []string
+	recentRetries      map[string]bool
 	pending            []QueuedMessage
 	steering           []QueuedMessage
 	interruptRequested bool
+	steeringChanged    chan struct{}
 	activeRequestID    string
 	generation         uint64
 	compactReserved    bool
@@ -152,6 +165,9 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 		return stopped(reason)
 	}
 
+	if d.persistenceFailure != nil && !session.IsTemporary(d.persistenceFailure) {
+		return &SessionError{Kind: SessionErrorPersistence, SessionID: sessionID, Operation: op, Detail: "session writes are blocked: " + d.persistenceFailure.Error()}
+	}
 	switch op {
 	case SessionOperationPost, SessionOperationSteer, SessionOperationPause:
 		if d.skillOperationID != "" {
@@ -184,13 +200,13 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
-	d := &sessionDriver{r: r, wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
+	d := &sessionDriver{r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
-		for _, item := range sess.MessagesSnapshot() {
+		for position, item := range sess.MessagesSnapshot() {
 			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted {
 				continue
 			}
-			d.pending = append(d.pending, QueuedMessage{Content: item.Message.Message.Content, MultiContent: item.Message.Message.MultiContent, RequestID: item.Message.TurnID, AcceptedPersisted: true})
+			d.pending = append(d.pending, queuedSessionInput(item.Message, position, r.sessionStore != nil))
 		}
 	}
 	return d
@@ -199,8 +215,14 @@ func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 func (d *sessionDriver) adopt(adopted []QueuedMessage) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(adopted) > 0 {
-		d.pending = append(d.pending, adopted...)
+	for _, msg := range adopted {
+		if msg.RequestID != "" {
+			if err := d.acceptInputLocked(&msg); err != nil {
+				d.lastError = err.Error()
+				continue
+			}
+		}
+		d.pending = append(d.pending, msg)
 	}
 }
 
@@ -238,33 +260,41 @@ func (d *sessionDriver) Wait() {
 }
 
 func (d *sessionDriver) acceptInputLocked(msg *QueuedMessage) error {
+	if msg != nil && msg.Retry {
+		if d.recentRetries == nil {
+			d.recentRetries = map[string]bool{}
+		}
+		if len(d.recentRetries) >= defaultMaxSubagentMailbox {
+			for id := range d.recentRetries {
+				if id != d.activeRequestID {
+					delete(d.recentRetries, id)
+					break
+				}
+			}
+		}
+		d.recentRetries[msg.RequestID] = true
+	}
 	if msg == nil || msg.Retry || d.sess == nil {
 		return nil
 	}
-	message := session.UserMessage(msg.Content, msg.MultiContent...)
+	message := msg.sessionMessage()
+	msg.InputMode = message.InputMode
 	message.Pending = true
 	message.Accepted = true
 	message.TurnID = msg.RequestID
 	if d.r.sessionStore != nil {
-		if d.sess.ParentID != "" {
-			// Sub-session persistence snapshots the full child transcript on settle;
-			// adding session inputs separately would duplicate them at the next snapshot.
-			msg.AcceptedPersisted = false
-		} else {
-			msg.AcceptedPersisted = true
-			if _, err := d.r.sessionStore.AddMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, message); err != nil {
-				if errors.Is(err, session.ErrNotFound) {
-					// An unregistered in-process session is explicitly volatile.
-					msg.AcceptedPersisted = false
-				} else {
-					return err
-				}
+		msg.AcceptedPersisted = true
+		if _, err := d.r.sessionStore.AddMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, message); err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				msg.AcceptedPersisted = false
+			} else {
+				return err
 			}
 		}
 	}
 	position := d.sess.AddMessageAt(message)
 	msg.AcceptedPosition = position
-	d.events.PublishForRequest(d.sess.ID, msg.RequestID, PendingUserMessageAccepted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, position))
+	d.events.PublishForRequest(d.sess.ID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, position), *msg))
 	return nil
 }
 
@@ -303,7 +333,7 @@ func (d *sessionDriver) promoteInputLocked(msg QueuedMessage) error {
 		return &SessionError{Kind: SessionErrorStale, SessionID: d.sess.ID, RequestID: msg.RequestID, Operation: "promote_input"}
 	}
 	d.lastFailureKey = ""
-	d.events.PublishForRequest(d.sess.ID, msg.RequestID, PendingUserMessagePromoted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition))
+	d.events.PublishForRequest(d.sess.ID, msg.RequestID, inputEventMetadata(PendingUserMessagePromoted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
 	return nil
 }
 
@@ -315,8 +345,12 @@ func (d *sessionDriver) PostSteer(ctx context.Context, msg QueuedMessage) bool {
 // postSteer returns queued when an accepted steer was demoted to the pending
 // turn FIFO by an active compaction reservation or older pending input.
 func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (queued bool, err error) {
+	msg.InputMode = "steer"
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if found, queued, err := d.existingInputLocked(msg); found || err != nil {
+		return queued, err
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -324,7 +358,7 @@ func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (queue
 		admissionErr.RequestID = msg.RequestID
 		return false, admissionErr
 	}
-	if d.compactReserved || len(d.pending) != 0 {
+	if d.compactReserved || (len(d.pending) != 0 && (!d.running || d.activeRequestID == "")) {
 		if !limitAllows(len(d.pending), d.pendingLimit()) {
 			return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "steer", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
 		}
@@ -341,7 +375,7 @@ func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (queue
 		return false, err
 	}
 	d.steering = append(d.steering, msg)
-	d.interruptRequested = true
+	d.refreshSteeringLocked()
 	return false, nil
 }
 
@@ -361,67 +395,22 @@ func (d *sessionDriver) DrainSteering() []QueuedMessage {
 	}
 	steering := append([]QueuedMessage(nil), d.steering[:promoted]...)
 	d.steering = d.steering[promoted:]
-	d.interruptRequested = len(d.steering) != 0
+	d.refreshSteeringLocked()
+	if len(steering) != 0 {
+		d.notifyTurnChangedLocked()
+	}
 	return steering
 }
 
 func (d *sessionDriver) schedulePendingRetry() {
 	d.mu.Lock()
-	if d.retryRunning || d.stopped || len(d.pending) == 0 {
-		d.mu.Unlock()
-		return
+	if !d.stopped && len(d.pending) != 0 {
+		d.retryRunning = true
 	}
-	base := d.r.lifecycleCtx
-	if base == nil {
-		base = d.r.ctx()
-	}
-	ctx, cancel := context.WithCancel(base)
-	d.retryRunning = true
-	d.retryCancel = cancel
-	d.wg.Add(1)
 	d.mu.Unlock()
-
-	go func() {
-		defer d.wg.Done()
-		defer func() {
-			func() {
-				d.mu.Lock()
-				defer d.mu.Unlock()
-				d.retryRunning = false
-				d.retryCancel = nil
-			}()
-		}()
-		delay := 10 * time.Millisecond
-		for {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-			if err := d.wakePending(); err == nil {
-				return
-			} else if !isRetryableSessionError(err) {
-				d.mu.Lock()
-				d.lastError = err.Error()
-				d.mu.Unlock()
-				return
-			}
-			d.mu.Lock()
-			done := d.stopped || d.running || len(d.pending) == 0
-			d.mu.Unlock()
-			if done {
-				return
-			}
-			if delay < time.Second {
-				delay *= 2
-				if delay > time.Second {
-					delay = time.Second
-				}
-			}
-		}
-	}()
+	if d.r.sessionDrivers != nil {
+		d.r.sessionDrivers.signalWork()
+	}
 }
 
 func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
@@ -450,6 +439,9 @@ func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
 }
 
 func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) bool {
+	if msg.trustedSteering() {
+		return d.postTrustedInput(ctx, msg)
+	}
 	_, err := d.post(ctx, msg, wake)
 	return err == nil
 }
@@ -459,6 +451,10 @@ func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) 
 func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) (queued bool, err error) {
 	for {
 		d.mu.Lock()
+		if found, queued, err := d.existingInputLocked(msg); found || err != nil {
+			d.mu.Unlock()
+			return queued, err
+		}
 		// Non-waking posts historically classify an idle driver as stopped before
 		// considering reservations; preserve that public ordering.
 		if !d.stopped && !d.running && !d.starting && !wake {
@@ -500,7 +496,7 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 			d.mu.Unlock()
 			return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "post", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
 		}
-		if d.running {
+		if d.running || d.settling {
 			if msg.RequestID != "" {
 				if err := d.acceptInputLocked(&msg); err != nil {
 					d.mu.Unlock()
@@ -531,8 +527,13 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 		if beforePrepareStart != nil {
 			beforePrepareStart()
 		}
-		wakeCtx, generation, callbacks, err := d.prepareStart(context.WithoutCancel(d.r.ctx()), true, nil)
+		wakeCtx, generation, callbacks, err := d.prepareStart(d.r.lifetime(), true)
 		if err != nil {
+			// Durable append already committed. Losing a wake to the session's
+			// existing turn is success, not a promotion or mailbox-capacity failure.
+			if startErr, ok := errors.AsType[*SessionError](err); ok && startErr.Operation == SessionOperationStart && startErr.Reason == SessionErrorReasonBusy {
+				return d.inputQueued(msg), nil
+			}
 			d.mu.Lock()
 			stopped := d.stopped
 			affectedTurnID := ""
@@ -583,34 +584,9 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 // denial is not delivery failure: the bounded pending mailbox retains the note
 // for a later release signal. Stopped drivers and mailbox overflow still fail.
 func (d *sessionDriver) PostReliable(ctx context.Context, msg QueuedMessage) bool {
-	for {
-		d.mu.Lock()
-		if d.stopped {
-			d.mu.Unlock()
-			return false
-		}
-		if d.starting {
-			done := d.startDone
-			d.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return false
-			}
-		}
-		if !limitAllows(len(d.pending), d.pendingLimit()) {
-			d.mu.Unlock()
-			return false
-		}
-		d.pending = append(d.pending, msg)
-		running := d.running
-		d.mu.Unlock()
-		if !running {
-			d.WakePending()
-		}
-		return true
-	}
+	msg.InputOrigin = session.InputOriginRuntime
+	msg.InputMode = "steer"
+	return d.postTrustedInput(ctx, msg)
 }
 
 // WakePending attempts to start an idle driver only when retained input exists.
@@ -629,12 +605,12 @@ func (d *sessionDriver) WakePending() bool {
 func (d *sessionDriver) wakePending() error {
 	d.mu.Lock()
 	pending := len(d.pending) > 0
-	idle := !d.running && !d.starting && !d.stopped
+	idle := !d.running && !d.starting && !d.settling && !d.stopped
 	d.mu.Unlock()
 	if !pending || !idle {
 		return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), Operation: "wake_pending"}
 	}
-	wakeCtx, generation, callbacks, err := d.prepareStart(d.r.lifecycleCtx, true, nil)
+	wakeCtx, generation, callbacks, err := d.prepareStart(d.r.lifetime(), true)
 	if err != nil {
 		return err
 	}
@@ -665,14 +641,26 @@ func (d *sessionDriver) DrainRuntimeNotes() []QueuedMessage {
 	defer d.mu.Unlock()
 	notes := make([]QueuedMessage, 0, len(d.pending))
 	pending := d.pending[:0]
+	blocked := false
 	for _, message := range d.pending {
-		if message.RequestID == "" {
+		if !blocked && (message.RequestID == "" || message.trustedSteering()) {
+			if message.RequestID != "" {
+				if err := d.promoteInputLocked(message); err != nil {
+					blocked = true
+					pending = append(pending, message)
+					continue
+				}
+			}
 			notes = append(notes, message)
 		} else {
 			pending = append(pending, message)
 		}
 	}
 	d.pending = pending
+	d.refreshSteeringLocked()
+	if len(notes) != 0 {
+		d.notifyTurnChangedLocked()
+	}
 	return notes
 }
 
@@ -711,7 +699,12 @@ func (d *sessionDriver) OnStarted(fn func()) func() {
 	d.nextHookID++
 	id := d.nextHookID
 	d.onStarted[id] = fn
+	ref := weak.Make(d)
 	return func() {
+		d := ref.Value()
+		if d == nil {
+			return
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		delete(d.onStarted, id)
@@ -727,7 +720,12 @@ func (d *sessionDriver) OnSettled(fn func()) func() {
 	d.nextHookID++
 	id := d.nextHookID
 	d.onSettled[id] = fn
+	ref := weak.Make(d)
 	return func() {
+		d := ref.Value()
+		if d == nil {
+			return
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		delete(d.onSettled, id)
@@ -948,7 +946,7 @@ type driverObservation struct {
 }
 
 func (d *sessionDriver) beginReclaimLocked() bool {
-	if d.reclaiming || d.stopped || d.running || d.starting || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
+	if d.reclaiming || d.stopped || d.reportRetry != nil || d.running || d.starting || d.settling || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
 		return false
 	}
 	d.reclaiming = true
@@ -981,6 +979,7 @@ func (d *sessionDriver) Cancel(turnID string) CancelOutcome {
 		return CancelAlreadyCancelling
 	}
 	d.cancelling = true
+	d.resolveInteractionsLocked()
 	cancel := d.cancel
 	d.mu.Unlock()
 	cancel()
@@ -1001,23 +1000,19 @@ func (d *sessionDriver) stopAll(deleting bool) bool {
 		d.events.FenceDelete(d.sessionIDLocked())
 	}
 	cancel := d.cancel
-	retryCancel := d.retryCancel
 	compactCancel := d.compactCancel
 	skillCancel := d.skillCancel
 	pauseCh := d.pauseCh
 	d.pauseCh = nil
 	d.pending = nil
-	d.interactions = map[string]sessionInteraction{}
 	d.stopped = true
+	d.resolveInteractionsLocked()
+	d.notifyTurnChangedLocked()
 	d.skillGeneration++
 	d.skillOperationID = ""
 	d.skillCancel = nil
 	d.signalStartDoneLocked()
 	d.mu.Unlock()
-	d.refreshAttention()
-	if retryCancel != nil {
-		retryCancel()
-	}
 	if pauseCh != nil {
 		close(pauseCh)
 	}
@@ -1045,13 +1040,13 @@ func (d *sessionDriver) isStopped() bool {
 func (d *sessionDriver) stoppedAndSettled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.stopped && !d.running && !d.starting
+	return d.stopped && !d.running && !d.starting && !d.settling
 }
 
 func (d *sessionDriver) Settled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return !d.running && !d.starting && d.skillOperationID == "" && len(d.pending) == 0
+	return !d.running && !d.starting && !d.settling && d.skillOperationID == "" && len(d.pending) == 0
 }
 
 func (d *sessionDriver) ActiveRequestID() string {
@@ -1104,7 +1099,7 @@ func (d *sessionDriver) Respond(response InteractionResponse) error {
 		return &SessionError{Kind: SessionErrorStale, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond"}
 	}
 	if interaction.turnID != d.activeRequestID || interaction.generation != d.generation {
-		delete(d.interactions, response.InteractionID)
+		d.resolveInteractionLocked(response.InteractionID)
 		d.mu.Unlock()
 		d.refreshAttention()
 		return &SessionError{Kind: SessionErrorStale, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond_generation"}
@@ -1126,7 +1121,7 @@ func (d *sessionDriver) Respond(response InteractionResponse) error {
 		response.Resume.RequestID = response.InteractionID
 		if d.r.interactions.sendResume(d.sessionID(), response.Resume) {
 			d.mu.Lock()
-			delete(d.interactions, response.InteractionID)
+			d.resolveInteractionLocked(response.InteractionID)
 			d.mu.Unlock()
 			d.refreshAttention()
 			return nil
@@ -1137,7 +1132,7 @@ func (d *sessionDriver) Respond(response InteractionResponse) error {
 		}
 		if d.r.elicitationWaiters.resolve(response.ElicitationID, response.Elicitation) {
 			d.mu.Lock()
-			delete(d.interactions, response.InteractionID)
+			d.resolveInteractionLocked(response.InteractionID)
 			d.mu.Unlock()
 			d.refreshAttention()
 			return nil
@@ -1167,7 +1162,7 @@ func (d *sessionDriver) snapshotLocked() (*session.Session, SessionStatus, []Int
 			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted {
 				continue
 			}
-			pendingInputs = append(pendingInputs, PendingInput{TurnID: item.Message.TurnID, Content: item.Message.Message.Content, MultiContent: item.Message.Message.MultiContent, SessionPosition: index})
+			pendingInputs = append(pendingInputs, PendingInput{TurnID: item.Message.TurnID, Content: item.Message.Message.Content, MultiContent: item.Message.Message.MultiContent, SessionPosition: index, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, InputMode: item.Message.InputMode})
 		}
 	}
 	interactions := make([]InteractionSnapshot, 0, len(d.interactions))
@@ -1375,7 +1370,7 @@ func (d *sessionDriver) attachThenRun(ctx context.Context) <-chan Event {
 }
 
 func (d *sessionDriver) tryStart(ctx context.Context) (context.Context, uint64, bool) {
-	runCtx, generation, callbacks, err := d.prepareStart(ctx, false, nil)
+	runCtx, generation, callbacks, err := d.prepareStart(ctx, false)
 	if err != nil {
 		return nil, 0, false
 	}
@@ -1389,11 +1384,24 @@ func (d *sessionDriver) tryStart(ctx context.Context) (context.Context, uint64, 
 // then atomically promotes the oldest accepted mailbox item before publishing
 // a running generation. Promotion failure leaves the FIFO intact and no
 // provider call can begin.
-func (d *sessionDriver) prepareStart(ctx context.Context, wake bool, msg *QueuedMessage) (context.Context, uint64, []func(), error) {
+func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
+	if d.r.sessionDrivers != nil {
+		d.r.sessionDrivers.runMu.Lock()
+		defer d.r.sessionDrivers.runMu.Unlock()
+		if err := d.r.sessionDrivers.admitRun(d); err != nil {
+			return nil, 0, nil, err
+		}
+	}
 	d.mu.Lock()
-	if d.running || d.starting || d.stopped {
+	if d.stopped || d.r.lifetime().Err() != nil {
+		id := d.sessionIDLocked()
 		d.mu.Unlock()
-		return nil, 0, nil, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), Operation: "start", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
+		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: id, Operation: SessionOperationStart}
+	}
+	if d.running || d.starting || d.settling {
+		id := d.sessionIDLocked()
+		d.mu.Unlock()
+		return nil, 0, nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: SessionOperationStart, Reason: SessionErrorReasonBusy}
 	}
 	d.starting = true
 	d.startDone = make(chan struct{})
@@ -1423,19 +1431,15 @@ func (d *sessionDriver) prepareStart(ctx context.Context, wake bool, msg *Queued
 		}
 		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "start"}
 	}
-	if msg != nil {
-		if msg.RequestID != "" {
-			if err := d.acceptInputLocked(msg); err != nil {
-				d.starting = false
-				d.signalStartDoneLocked()
-				d.mu.Unlock()
-				if abort != nil {
-					abort()
-				}
-				return nil, 0, nil, err
-			}
+	if wake && len(d.pending) == 0 {
+		id := d.sessionIDLocked()
+		d.starting = false
+		d.signalStartDoneLocked()
+		d.mu.Unlock()
+		if abort != nil {
+			abort()
 		}
-		d.pending = append(d.pending, *msg)
+		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: SessionOperationWakePending}
 	}
 	if len(d.pending) > 0 {
 		next := d.pending[0]
@@ -1455,9 +1459,10 @@ func (d *sessionDriver) prepareStart(ctx context.Context, wake bool, msg *Queued
 			d.activeRequestID = next.RequestID
 		}
 	}
-	d.events.SetRequest(d.sess.ID, d.activeRequestID, d.generation)
+	d.events.SetRequest(d.sess.ID, d.activeRequestID, d.generation+1)
 	d.starting = false
 	d.running = true
+	d.generationResult = ""
 	d.lastActive = time.Now()
 	d.wakeRunning = wake
 	d.rootActive = d.sess != nil && !d.sess.IsSubSession()
@@ -1469,7 +1474,8 @@ func (d *sessionDriver) prepareStart(ctx context.Context, wake bool, msg *Queued
 	d.generation++
 	generation := d.generation
 	runCtx, cancel := context.WithCancel(ctx)
-	d.cancel = cancel
+	stopLifetime := context.AfterFunc(d.r.lifetime(), cancel)
+	d.cancel = func() { stopLifetime(); cancel() }
 	callbacks := d.startedCallbacksLocked()
 	d.signalStartDoneLocked()
 	d.mu.Unlock()
@@ -1483,9 +1489,12 @@ func (d *sessionDriver) driveToOut(ctx context.Context, generation uint64, out c
 }
 
 func (d *sessionDriver) driveToOutNoClose(ctx context.Context, generation uint64, out chan Event) {
-	nextCtx, nextGeneration, again := d.driveToOutGeneration(ctx, generation, out)
-	if again {
-		d.driveToOutNoClose(nextCtx, nextGeneration, out)
+	for {
+		nextCtx, nextGeneration, again := d.driveToOutGeneration(ctx, generation, out)
+		if !again {
+			return
+		}
+		ctx, generation = nextCtx, nextGeneration //nolint:fatcontext // successor context is independently rooted in supervisor lifetime
 	}
 }
 
@@ -1515,9 +1524,12 @@ func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uin
 }
 
 func (d *sessionDriver) driveWake(ctx context.Context, generation uint64) {
-	nextCtx, nextGeneration, again := d.driveWakeGeneration(ctx, generation)
-	if again {
-		d.driveWake(nextCtx, nextGeneration)
+	for {
+		nextCtx, nextGeneration, again := d.driveWakeGeneration(ctx, generation)
+		if !again {
+			return
+		}
+		ctx, generation = nextCtx, nextGeneration //nolint:fatcontext // successor context is independently rooted in supervisor lifetime
 	}
 }
 
@@ -1536,11 +1548,68 @@ func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint
 
 func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Context, uint64, bool) {
 	d.mu.Lock()
-	if generation != d.generation {
+	if generation != d.generation || generation <= d.settledGeneration || d.completionInFlight {
 		d.mu.Unlock()
 		return nil, 0, false
 	}
-	if !d.stopped && len(d.pending) > 0 {
+	if runErr == "" && !d.cancelling && !d.stopped && !d.settling && d.hasSteeringLocked() {
+		nextCtx, cancel := context.WithCancel(d.r.lifetime())
+		previousCancel := d.cancel
+		d.cancel = cancel
+		d.mu.Unlock()
+		if previousCancel != nil {
+			previousCancel()
+		}
+		return nextCtx, generation, true
+	}
+	d.lastError = runErr
+	d.completionInFlight = true
+	d.settling = true
+	turnID := d.activeRequestID
+	d.mu.Unlock()
+	var completionErr error
+	for _, observer := range d.r.observers {
+		if p, ok := observer.(*PersistenceObserver); ok {
+			if err := p.completionError(d.sessionID()); err != nil {
+				completionErr = err
+				break
+			}
+		}
+	}
+	if completionErr == nil && d.r.subagents != nil {
+		completionErr = d.r.subagents.completeSessionTurn(d, turnID, runErr)
+	}
+	if completionErr != nil {
+		d.mu.Lock()
+		d.running = false
+		d.completionInFlight = false
+		firstFailure := d.completionErr == nil
+		d.completionErr, d.completionRunErr = completionErr, runErr
+		d.lastError = completionErr.Error()
+		d.persistenceFailure = completionErr
+		d.publishPersistenceFailureLocked(completionErr)
+		d.notifyTurnChangedLocked()
+		d.mu.Unlock()
+		if firstFailure {
+			d.r.sessionDrivers.signalWork()
+		}
+		return nil, 0, false
+	}
+
+	d.mu.Lock()
+	d.settling = false
+	d.completionInFlight = false
+	d.settledGeneration = generation
+	d.completionErr = nil
+	d.persistenceFailure = nil
+	d.resolveInteractionsLocked()
+	d.completeTurnLocked(turnID)
+	if len(d.steering) != 0 {
+		d.pending = append(d.steering, d.pending...)
+		d.steering = nil
+		d.refreshSteeringLocked()
+	}
+	if !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0 {
 		// Promote the oldest accepted request before the successor starts. This
 		// is one atomic handoff: events from the next turn are correlated to the
 		// request that caused it, and the old generation can no longer settle or
@@ -1549,7 +1618,7 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 		d.generation++
 		nextGeneration := d.generation
 		next := d.pending[0]
-		if d.sess != nil {
+		if d.sess != nil && next.RequestID != "" {
 			if err := d.promoteInputLocked(next); err != nil {
 				d.lastError = err.Error()
 				d.publishPromotionFailureLocked(next.RequestID, err)
@@ -1579,10 +1648,12 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 		}
 		d.pending = d.pending[1:]
 		d.activeRequestID = next.RequestID
+		d.running = true
+		d.generationResult = ""
 		if d.sess != nil {
 			d.events.SetRequest(d.sess.ID, d.activeRequestID, nextGeneration)
 		}
-		nextCtx, cancel := context.WithCancel(context.WithoutCancel(d.r.ctx()))
+		nextCtx, cancel := context.WithCancel(d.r.lifetime())
 		d.cancel = cancel
 		d.wakeRunning = true
 		d.cancelling = false
@@ -1613,6 +1684,9 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 	}
 	for _, fn := range callbacks {
 		fn()
+	}
+	if d.r.sessionDrivers != nil {
+		d.r.sessionDrivers.signalWork()
 	}
 	return nil, 0, false
 }
@@ -1702,4 +1776,66 @@ func (d *sessionDriver) closeSettledLocked() {
 	default:
 		close(d.settled)
 	}
+}
+
+func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, error) {
+	if msg.RequestID == "" || d.sess == nil {
+		return false, false, nil
+	}
+	for _, queued := range d.pending {
+		if queued.RequestID != msg.RequestID {
+			continue
+		}
+		if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
+			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+		}
+		return true, true, nil
+	}
+	if d.recentRetries[msg.RequestID] {
+		if !msg.Retry {
+			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+		}
+		return true, false, nil
+	}
+
+	for _, item := range d.sess.MessagesSnapshot() {
+		if item.Message == nil || item.Message.TurnID != msg.RequestID {
+			continue
+		}
+		mode := msg.InputMode
+		if mode == "" {
+			mode = "turn"
+		}
+
+		storedMode := item.Message.InputMode
+		if storedMode != "" && storedMode != mode {
+			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+		}
+		if normalizedInputOrigin(item.Message.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || item.Message.SenderID != msg.SenderID || item.Message.SenderName != msg.SenderName || item.Message.Message.Content != msg.Content || !reflect.DeepEqual(item.Message.Message.MultiContent, msg.MultiContent) || msg.Retry {
+			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+		}
+		return true, item.Message.Pending, nil
+	}
+	return false, false, nil
+}
+
+func (d *sessionDriver) cancelForPersistence(err error) {
+	d.mu.Lock()
+	cancel := d.cancel
+	d.lastError = err.Error()
+	d.persistenceFailure = err
+	d.publishPersistenceFailureLocked(err)
+	d.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (d *sessionDriver) publishPersistenceFailureLocked(err error) {
+	key := "persistence:" + err.Error()
+	if d.lastFailureKey == key {
+		return
+	}
+	d.lastFailureKey = key
+	d.events.PublishForRequest(d.sessionIDLocked(), d.activeRequestID, ErrorForSession(d.sessionIDLocked(), "Session persistence failed; accepted work is retained and new turns are blocked until storage recovers: "+err.Error()))
 }

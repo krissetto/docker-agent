@@ -162,7 +162,7 @@ func TestActualProgramSettlingRunAutomaticallyDispatchesQueuedFIFO(t *testing.T)
 			t.Error("program did not stop")
 		}
 	})
-	go a.SubscribeWith(t.Context(), program.Send)
+	go a.Subscribe(t.Context(), func(msg any) { program.Send(msg) }, app.SubscribeOptions{})
 	a.Start(t.Context())
 	require.Eventually(t, func() bool { return frame.String() != "" }, 3*time.Second, time.Millisecond)
 

@@ -65,7 +65,7 @@ func newRuntimePool(ctx context.Context, t *team.Team, maxIdle int) *runtimePool
 
 // Get returns a ready-to-use runtime for agent and a release function that
 // must be called after the request's session has been released.
-func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Context) error, error) {
+func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Context, bool) error, error) {
 	if p == nil {
 		return nil, nil, errInvalidRuntime
 	}
@@ -104,23 +104,23 @@ func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Co
 	return entry.rt, p.release(agent, entry), nil
 }
 
-func (p *runtimePool) release(agent string, entry *idleRuntime) func(context.Context) error {
+func (p *runtimePool) release(agent string, entry *idleRuntime) func(context.Context, bool) error {
 	var once sync.Once
 	var err error
-	return func(ctx context.Context) error {
-		once.Do(func() { err = p.put(ctx, agent, entry) })
+	return func(ctx context.Context, reusable bool) error {
+		once.Do(func() { err = p.put(ctx, agent, entry, reusable) })
 		return err
 	}
 }
 
-func (p *runtimePool) put(ctx context.Context, agent string, entry *idleRuntime) error {
+func (p *runtimePool) put(ctx context.Context, agent string, entry *idleRuntime, reusable bool) error {
 	p.mu.Lock()
 	if _, ok := p.borrowed[entry]; !ok {
 		p.mu.Unlock()
 		return nil
 	}
 	delete(p.borrowed, entry)
-	if p.closed || p.maxIdle == 0 {
+	if !reusable || p.closed || p.maxIdle == 0 {
 		p.mu.Unlock()
 		return entry.owner.Shutdown(ctx)
 	}

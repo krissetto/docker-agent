@@ -278,6 +278,8 @@ func (h *sessionEventHub) SetRequest(sessionID, requestID string, generation uin
 
 func interactionEventID(event Event) string {
 	switch e := event.(type) {
+	case *InteractionResolvedEvent:
+		return e.InteractionID
 	case *ToolCallConfirmationEvent:
 		return e.RequestID
 	case *MaxIterationsReachedEvent:

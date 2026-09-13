@@ -41,7 +41,6 @@ func TestSessionHandleConformance(t *testing.T) {
 		{name: "remote", new: newRemoteSessionContractFixture},
 	}
 	for _, factory := range factories {
-		factory := factory
 		t.Run(factory.name, func(t *testing.T) {
 			t.Run("identity_metadata_and_commands", func(t *testing.T) {
 				fixture := factory.new(t)
@@ -96,7 +95,6 @@ func TestSessionHandleConformance(t *testing.T) {
 				for _, submission := range submissions {
 					assert.True(t, seen[submission.TurnID], "command %s must remain correlated in replay", submission.TurnID)
 				}
-
 			})
 
 			t.Run("cancel_outcomes", func(t *testing.T) {
@@ -156,18 +154,6 @@ func TestSessionHandleConformance(t *testing.T) {
 				assertUnavailableCapabilities(t, fixture.handle, fixture.unavailable)
 			})
 		})
-	}
-}
-
-func nextContractEvent(t *testing.T, events <-chan SessionEvent) SessionEvent {
-	t.Helper()
-	select {
-	case event, ok := <-events:
-		require.True(t, ok)
-		return event
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for correlated session event")
-		return SessionEvent{}
 	}
 }
 
@@ -297,7 +283,6 @@ type remoteContractServer struct {
 	journal    []remoteSessionEnvelope
 	activeTurn string
 	cancelling bool
-	released   bool
 }
 
 func newRemoteSessionContractFixture(t *testing.T) sessionContractFixture {
@@ -315,9 +300,9 @@ func newRemoteSessionContractFixture(t *testing.T) sessionContractFixture {
 		handle: handle,
 		injectGap: func() {
 			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
 			fixture.sequence++
 			fixture.journal = []remoteSessionEnvelope{{Version: sessionWireVersion, SessionID: handle.ID(), Sequence: fixture.sequence, Gap: true, FirstAvailable: fixture.sequence}}
-			fixture.mu.Unlock()
 		},
 		settle:       func() {},
 		afterRelease: func() SessionHandle { return handle },
@@ -345,7 +330,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 			var request struct {
 				Mode string `json:"mode"`
 			}
-			require.NoError(s.t, json.NewDecoder(r.Body).Decode(&request))
+			assert.NoError(s.t, json.NewDecoder(r.Body).Decode(&request))
 			mode = request.Mode
 		}
 		s.sequence++
@@ -358,7 +343,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 		var request struct {
 			TurnID string `json:"turn_id"`
 		}
-		require.NoError(s.t, json.NewDecoder(r.Body).Decode(&request))
+		assert.NoError(s.t, json.NewDecoder(r.Body).Decode(&request))
 		outcome := CancelNotActive
 		if request.TurnID == s.activeTurn {
 			if s.cancelling {
@@ -372,13 +357,13 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusPreconditionFailed)
 		fmt.Fprint(w, `{"error":"stale","operation":"respond","session_id":"contract-session"}`)
 	case "events":
-		s.writeEvents(w, r)
+		s.writeEvents(w)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (s *remoteContractServer) writeEvents(w http.ResponseWriter, r *http.Request) {
+func (s *remoteContractServer) writeEvents(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	writer := bufio.NewWriter(w)
 	snapshot := remoteSessionSnapshot{Session: session.New(session.WithID("contract-session")), Status: SessionStatus{SessionID: "contract-session", AgentName: "contract", State: SessionStateSettled}, Cursor: s.sequence}
@@ -387,7 +372,7 @@ func (s *remoteContractServer) writeEvents(w http.ResponseWriter, r *http.Reques
 		writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "event", Envelope: &s.journal[i]})
 	}
 	writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "ready", Cursor: s.sequence})
-	require.NoError(s.t, writer.Flush())
+	assert.NoError(s.t, writer.Flush())
 }
 
 func writeContractSSE(writer *bufio.Writer, message remoteSessionStreamMessage) {
@@ -414,7 +399,7 @@ func TestRemoteSessionObserveReportsSeveredSSE(t *testing.T) {
 	select {
 	case streamErr := <-observation.Errors:
 		require.Error(t, streamErr)
-		assert.ErrorContains(t, streamErr, "terminated at cursor 0")
+		require.ErrorContains(t, streamErr, "terminated at cursor 0")
 	case <-time.After(5 * time.Second):
 		t.Fatal("severed SSE did not report a terminal observation error")
 	}

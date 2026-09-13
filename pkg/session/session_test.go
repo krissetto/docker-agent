@@ -23,11 +23,6 @@ func (todoInstructionToolSet) Instructions() string {
 	return "## Todo Tools\n\nTrack task progress with todos."
 }
 
-func todoToolSet(t *testing.T) tools.ToolSet {
-	t.Helper()
-	return todoInstructionToolSet{}
-}
-
 func TestTrimMessagesWithToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -279,7 +274,7 @@ func TestAddMessage_StripsCacheControl(t *testing.T) {
 func TestGetMessages_CacheControl(t *testing.T) {
 	t.Parallel()
 
-	testAgent := agent.New("root", "instructions", agent.WithToolSets(todoToolSet(t)))
+	testAgent := agent.New("root", "instructions", agent.WithToolSets(todoInstructionToolSet{}))
 
 	s := New()
 	messages := s.GetMessages(testAgent)
@@ -299,14 +294,14 @@ func TestGetMessages_AsyncSubagentHarnessPromptFirst(t *testing.T) {
 	testAgent := agent.New("root", "user instructions",
 		agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"}),
 		agent.WithAsyncHarnessPrompt(harness),
-		agent.WithToolSets(todoToolSet(t)),
+		agent.WithToolSets(todoInstructionToolSet{}),
 	)
 
 	messages := New().GetMessages(testAgent)
 	require.Len(t, messages, 3)
 
 	assert.True(t, strings.HasPrefix(messages[0].Content, "# Async subagents"))
-	assert.Contains(t, messages[0].Content, "message a colleague you")
+	assert.Contains(t, strings.Join(strings.Fields(messages[0].Content), " "), "Write to a colleague you respect")
 	assert.Contains(t, messages[0].Content, "- worker: Does work")
 	assert.Equal(t, "user instructions", messages[1].Content)
 	assert.Contains(t, messages[2].Content, "Todo Tools")
@@ -362,7 +357,7 @@ func TestGetMessages_CacheControlWithSummary(t *testing.T) {
 	//     buildContextSpecificSystemMessages caching behavior.
 	//   - Summary and conversation messages are not cache-controlled.
 	testAgent := agent.New("root", "instructions",
-		agent.WithToolSets(todoToolSet(t)),
+		agent.WithToolSets(todoInstructionToolSet{}),
 	)
 
 	s := New()

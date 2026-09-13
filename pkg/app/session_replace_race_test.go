@@ -102,6 +102,7 @@ func TestRunTitleGenerationStaysWithCapturedSessionState(t *testing.T) {
 
 type titleCaptureSession struct {
 	projectionSession
+
 	titles chan string
 }
 
@@ -112,6 +113,7 @@ func (s *titleCaptureSession) UpdateTitle(_ context.Context, title string) error
 
 type blockingTitleProvider struct {
 	stubProvider
+
 	entered chan struct{}
 	release chan struct{}
 }

@@ -42,6 +42,11 @@ func newAgentContext(agentName string) AgentContext {
 type PendingUserMessageAcceptedEvent struct {
 	AgentContext
 
+	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string              `json:"sender_id,omitempty"`
+	SenderName  string              `json:"sender_name,omitempty"`
+	InputMode   string              `json:"input_mode,omitempty"`
+
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
 	TurnID          string             `json:"turn_id"`
@@ -61,6 +66,11 @@ func (e *PendingUserMessageAcceptedEvent) GetSessionID() string { return e.Sessi
 type PendingUserMessagePromotedEvent struct {
 	AgentContext
 
+	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string              `json:"sender_id,omitempty"`
+	SenderName  string              `json:"sender_name,omitempty"`
+	InputMode   string              `json:"input_mode,omitempty"`
+
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
 	TurnID          string             `json:"turn_id"`
@@ -79,10 +89,16 @@ func (e *PendingUserMessagePromotedEvent) GetSessionID() string { return e.Sessi
 type UserMessageEvent struct {
 	AgentContext
 
+	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string              `json:"sender_id,omitempty"`
+	SenderName  string              `json:"sender_name,omitempty"`
+	InputMode   string              `json:"input_mode,omitempty"`
+
 	Type            string             `json:"type"`
 	Message         string             `json:"message"`
 	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
 	SessionID       string             `json:"session_id"`
+	TurnID          string             `json:"turn_id,omitempty"`
 	SessionPosition int                `json:"session_position"` // Index in session.Messages, -1 if unknown
 }
 
@@ -1217,15 +1233,18 @@ func HookBlocked(toolCall tools.ToolCall, toolDefinition tools.Tool, message, ag
 type MessageAddedEvent struct {
 	AgentContext
 
-	Type      string           `json:"type"`
-	SessionID string           `json:"session_id"`
-	Message   *session.Message `json:"-"`
+	Type         string           `json:"type"`
+	SessionID    string           `json:"session_id"`
+	Message      *session.Message `json:"-"`
+	boundaryOnly bool
 	// SessionPosition is the index in session.Messages the message was
 	// committed at, -1 when unknown. Emission happens synchronously after
 	// the commit and the event stream preserves order, so viewers merging a
 	// transcript snapshot with the live stream use it as an exact
 	// reconciliation anchor (see the attach protocol notes).
-	SessionPosition int `json:"session_position"`
+	SessionPosition int              `json:"session_position"`
+	MessageRole     chat.MessageRole `json:"message_role,omitempty"`
+	ToolCallIDs     []string         `json:"tool_call_ids,omitempty"`
 }
 
 func (e *MessageAddedEvent) GetSessionID() string { return e.SessionID }
@@ -1236,13 +1255,35 @@ func MessageAdded(sessionID string, msg *session.Message, agentName string) Even
 
 // MessageAddedAt is MessageAdded with the commit position stamp.
 func MessageAddedAt(sessionID string, msg *session.Message, agentName string, position int) Event {
-	return &MessageAddedEvent{
-		Type:            "message_added",
-		SessionID:       sessionID,
-		Message:         msg,
-		SessionPosition: position,
-		AgentContext:    newAgentContext(agentName),
+	event := &MessageAddedEvent{
+		Type: "message_added", SessionID: sessionID, Message: msg,
+		SessionPosition: position, AgentContext: newAgentContext(agentName),
 	}
+	if msg != nil {
+		event.MessageRole = msg.Message.Role
+		for _, call := range msg.Message.ToolCalls {
+			event.ToolCallIDs = append(event.ToolCallIDs, call.ID)
+		}
+	}
+	return event
+}
+
+func (e *MessageAddedEvent) CommittedRole() chat.MessageRole {
+	if e.Message != nil {
+		return e.Message.Message.Role
+	}
+	return e.MessageRole
+}
+
+func (e *MessageAddedEvent) CommittedToolCallIDs() []string {
+	if e.Message == nil {
+		return e.ToolCallIDs
+	}
+	ids := make([]string, 0, len(e.Message.Message.ToolCalls))
+	for _, call := range e.Message.Message.ToolCalls {
+		ids = append(ids, call.ID)
+	}
+	return ids
 }
 
 // SubSessionCompletedEvent is emitted when a sub-session completes and is added to parent.

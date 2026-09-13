@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
@@ -301,16 +302,11 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 		if err != nil {
 			return nil, ToolOutput{}, fmt.Errorf("bind MCP session: %w", err)
 		}
-		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: input.Message})
 		if err != nil {
-			return nil, ToolOutput{}, fmt.Errorf("attach MCP session: %w", err)
+			return nil, ToolOutput{}, fmt.Errorf("start MCP session turn: %w", err)
 		}
-		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: input.Message})
-		if err != nil {
-			observation.Cancel()
-			return nil, ToolOutput{}, fmt.Errorf("submit MCP session turn: %w", err)
-		}
-		termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		termination := ownedTurn.Consume(ctx, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 			switch event := envelope.Event.(type) {
 			case *runtime.ToolCallConfirmationEvent:
 				return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeReject("MCP agent tools are non-interactive")})
@@ -327,7 +323,11 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			return nil, ToolOutput{}, fmt.Errorf("agent execution failed: %w", termination.Err)
 		}
 
-		response := cmp.Or(sess.GetLastAssistantMessageContent(), "No response from agent")
+		completed, err := handle.Snapshot(ctx)
+		if err != nil {
+			return nil, ToolOutput{}, fmt.Errorf("snapshot MCP session: %w", err)
+		}
+		response := cmp.Or(completed.GetLastAssistantMessageContent(), "No response from agent")
 
 		slog.DebugContext(ctx, "Agent execution completed", "agent", agentName, "response_length", len(response))
 

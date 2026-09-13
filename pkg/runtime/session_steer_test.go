@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
 	_, err = handle.Submit(t.Context(), TurnInput{Content: "start"})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return rt.sessionDrivers.Settled(sess.ID) }, 5*time.Second, time.Millisecond)
-	items := sess.MessagesSnapshot()
+	items := sessionHandleSnapshot(t, handle).MessagesSnapshot()
 	counts := map[string]int{}
 	for _, item := range items {
 		if item.Message != nil && item.Message.Message.Role == chat.MessageRoleUser {
@@ -174,7 +175,13 @@ func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
 }
 
 func TestSteeringDrainWaitsForDurableSessionPromotion(t *testing.T) {
-	rt, sess := newSessionFixture(t)
+	store := &failingPromotionStore{Store: session.NewInMemorySessionStore()}
+	store.fail.Store(true)
+	tm := team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(&mockProvider{id: "test/mock-model"}))))
+	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	sess := session.New(session.WithID("session-sess"))
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
 	d := handle.(*sessionHandle).driver
@@ -182,29 +189,32 @@ func TestSteeringDrainWaitsForDurableSessionPromotion(t *testing.T) {
 	d.running = true
 	d.mu.Unlock()
 
-	original := rt.sessionStore
-	rt.sessionStore = failingPromotionStore{Store: original}
 	require.True(t, d.PostSteer(t.Context(), QueuedMessage{Content: "durable first", RequestID: "turn-1", AcceptedPosition: -1, AcceptedPersisted: true}))
 	assert.Empty(t, d.DrainSteering(), "provider must not consume before durable promotion")
-	items := sess.MessagesSnapshot()
+	items := sessionHandleSnapshot(t, handle).MessagesSnapshot()
 	require.Len(t, items, 1)
 	assert.True(t, items[0].Message.Pending)
 
-	rt.sessionStore = original
+	store.fail.Store(false)
 	promoted := d.DrainSteering()
 	require.Len(t, promoted, 1)
 	assert.Equal(t, "turn-1", promoted[0].RequestID)
-	items = sess.MessagesSnapshot()
+	items = sessionHandleSnapshot(t, handle).MessagesSnapshot()
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Message.Pending)
 }
 
 type failingPromotionStore struct {
 	session.Store
+
+	fail atomic.Bool
 }
 
-func (failingPromotionStore) PromotePendingUserMessage(context.Context, string, string) error {
-	return assert.AnError
+func (s *failingPromotionStore) PromotePendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	if s.fail.Load() {
+		return assert.AnError
+	}
+	return s.Store.PromotePendingUserMessage(ctx, sessionID, turnID)
 }
 
 func TestSteeringDrainAtomicSwapLeavesConcurrentArrivalForNextBoundary(t *testing.T) {

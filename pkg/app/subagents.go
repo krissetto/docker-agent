@@ -63,6 +63,7 @@ type SessionEventMsg struct {
 	TurnID          string
 	OriginSessionID string
 	Epoch           uint64
+	Projection      *PresentationState
 }
 
 // startSessionEventBridge mirrors the App's session's run events onto the
@@ -75,6 +76,9 @@ type SessionEventMsg struct {
 // (session switches). Reports whether a bridge is active, so Run knows the
 // bus is fed and its own channel is flow-control only.
 func (a *App) startSessionEventBridge(ctx context.Context) bool {
+	a.initBus(ctx)
+	a.bridgeMu.Lock()
+	defer a.bridgeMu.Unlock()
 	if a.stopBridge != nil {
 		a.stopBridge()
 		a.stopBridge = nil
@@ -86,8 +90,10 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 	}
 	epoch := a.bridgeEpoch.Add(1)
 	bridgeCtx, cancel := context.WithCancel(ctx)
+	stopBusCancel := context.AfterFunc(a.busLifetime(), cancel)
 	attachment, err := runtimeclient.Attach(bridgeCtx, session, &appProjectionSink{app: a, ctx: bridgeCtx, sessionID: sess.ID, epoch: epoch})
 	if err != nil {
+		stopBusCancel()
 		cancel()
 		a.sendEvent(ctx, runtime.Error(err.Error()))
 		return false
@@ -95,6 +101,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 	var stopOnce sync.Once
 	a.stopBridge = func() {
 		stopOnce.Do(func() {
+			stopBusCancel()
 			cancel()
 			attachment.Detach()
 		})
@@ -109,9 +116,16 @@ func (a *App) sendBridgedEventFrom(ctx context.Context, requestID string, event 
 	if event = a.filterBridgedEvent(requestID, event); event == nil {
 		return true
 	}
+	a.projectionMu.Lock()
+	if epoch != 0 && epoch != a.bridgeEpoch.Load() {
+		a.projectionMu.Unlock()
+		return false
+	}
+	projection := a.projectEvent(event)
+	a.projectionMu.Unlock()
 	originSessionID = strings.TrimSpace(originSessionID)
 	select {
-	case a.events <- SessionEventMsg{Event: event, Seed: seed, TurnID: requestID, OriginSessionID: originSessionID, Epoch: epoch}:
+	case a.events <- SessionEventMsg{Event: event, Seed: seed, TurnID: requestID, OriginSessionID: originSessionID, Epoch: epoch, Projection: projection}:
 		return true
 	case <-ctx.Done():
 		return false
@@ -127,6 +141,10 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 
+	switch e.(type) {
+	case *SessionResetEvent, *SessionViewEvent, *runtime.InteractionResolvedEvent:
+		return e
+	}
 	_, cancelled := a.cancelledRequests[requestID]
 	if cancelled {
 		if _, stopped := e.(*runtime.StreamStoppedEvent); !stopped {
@@ -144,7 +162,7 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	}
 
 	switch e.(type) {
-	case *runtime.PauseChangedEvent, *runtime.PausedEvent, *runtime.SkillOperationEvent:
+	case *SessionResetEvent, *runtime.InteractionResolvedEvent, *runtime.PauseChangedEvent, *runtime.PausedEvent, *runtime.SkillOperationEvent:
 		// Session state/lifecycle transitions are canonical and must survive
 		// request cancellation filtering.
 		return e

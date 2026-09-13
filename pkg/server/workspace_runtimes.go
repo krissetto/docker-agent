@@ -55,7 +55,7 @@ type workspaceBuild struct {
 // callback into this router; misses therefore retain a safe scan fallback and
 // only entries known to have no owners are eligible for eviction.
 type workspaceSessionRuntimes struct {
-	ctx    context.Context //nolint:containedctx
+	ctx    context.Context //nolint:containedctx // owns workspace runtime and pruner lifetimes
 	source config.Source
 	build  SessionRuntimeFactory
 
@@ -94,10 +94,10 @@ func newWorkspaceSessionRuntimes(ctx context.Context, source config.Source, buil
 	return w
 }
 
-func (w *workspaceSessionRuntimes) configureIdlePolicy(ttl time.Duration, cap int, now func() time.Time) {
+func (w *workspaceSessionRuntimes) configureIdlePolicy(ttl time.Duration, capacity int, now func() time.Time) {
 	w.mu.Lock()
 	w.idleTTL = ttl
-	w.idleCap = max(cap, 0)
+	w.idleCap = max(capacity, 0)
 	if now != nil {
 		w.now = now
 	}
@@ -133,10 +133,7 @@ func (w *workspaceSessionRuntimes) pruneLoop() {
 				if entry.refs != 0 {
 					continue
 				}
-				candidate := entry.lastUsed.Add(w.idleTTL).Sub(now)
-				if candidate < 0 {
-					candidate = 0
-				}
+				candidate := max(entry.lastUsed.Add(w.idleTTL).Sub(now), 0)
 				if !haveDeadline || candidate < wait {
 					wait, haveDeadline = candidate, true
 				}
@@ -282,13 +279,13 @@ func (w *workspaceSessionRuntimes) remember(sessionID string, key workspaceKey) 
 		return
 	}
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if _, exists := w.owners[sessionID]; !exists {
 		if entry := w.runtimes[key]; entry != nil {
 			entry.refs++
 			w.owners[sessionID] = key
 		}
 	}
-	w.mu.Unlock()
 }
 
 func (w *workspaceSessionRuntimes) forget(sessionID string) {
@@ -327,9 +324,9 @@ func (w *workspaceSessionRuntimes) prune() {
 		}
 	}
 	remaining := len(idle) - len(remove)
-	cap := max(w.idleCap, 0)
+	capacity := max(w.idleCap, 0)
 	for _, key := range idle {
-		if remaining <= cap {
+		if remaining <= capacity {
 			break
 		}
 		if !remove[key] {

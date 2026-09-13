@@ -128,5 +128,5 @@ func TestCancelImmediateSubmitPromotesRequestExactlyOnce(t *testing.T) {
 	assert.Equal(t, []string{"first"}, contentsByTurn[first.TurnID])
 	assert.Equal(t, []string{"second"}, contentsByTurn[second.TurnID])
 	assert.Equal(t, 1, secondStops)
-	assert.Equal(t, "second", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, "second", sessionHandleSnapshot(t, handle).GetLastAssistantMessageContent())
 }

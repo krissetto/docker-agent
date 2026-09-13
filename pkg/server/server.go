@@ -317,7 +317,7 @@ func (s *Server) forkSession(c echo.Context) error {
 
 func (s *Server) toggleSessionYolo(c echo.Context) error {
 	if err := s.sm.ToggleToolApproval(c.Request().Context(), c.Param("id")); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to toggle session tool approval mode: %v", err))
+		return sessionHTTPError(err)
 	}
 	return c.JSON(http.StatusOK, nil)
 }
@@ -350,7 +350,7 @@ func (s *Server) updateSessionPermissions(c echo.Context) error {
 	}
 
 	if err := s.sm.UpdateSessionPermissions(c.Request().Context(), sessionID, req.Permissions); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to update session permissions: %v", err))
+		return sessionHTTPError(err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "session permissions updated"})
@@ -445,7 +445,7 @@ func (s *Server) updateMessage(c echo.Context) error {
 		if errors.Is(err, ErrSessionBusy) {
 			return echo.NewHTTPError(http.StatusConflict, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to update message: %v", err))
+		return sessionHTTPError(err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
@@ -474,7 +474,7 @@ func (s *Server) addSummary(c echo.Context) error {
 		Usage:          req.Usage,
 	}
 	if err := s.sm.AddSummary(c.Request().Context(), sessionID, item); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to add summary: %v", err))
+		return sessionHTTPError(err)
 	}
 
 	return c.JSON(http.StatusCreated, map[string]string{"status": "added"})
@@ -516,7 +516,7 @@ func (s *Server) updateSessionTokens(c echo.Context) error {
 	}
 
 	if err := s.sm.UpdateSessionTokens(c.Request().Context(), sessionID, req.InputTokens, req.OutputTokens, req.Cost); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to update tokens: %v", err))
+		return sessionHTTPError(err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})

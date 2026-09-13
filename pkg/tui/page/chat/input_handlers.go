@@ -9,6 +9,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
@@ -186,8 +187,11 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			// A click on a subagent tool message ("Spawned x (id)" and
 			// friends) opens a tab attached to that subagent's session.
 			if msg.Button == tea.MouseLeft {
-				if id, ok := p.messages.SubagentNodeAt(msg.X, msg.Y); ok {
-					return p, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: string(id)})
+				if ref, ok := p.messages.InputReferenceAt(msg.X, msg.Y); ok {
+					if ref.Kind == lifecycle.InputReferenceParent {
+						return p, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: ref.ID})
+					}
+					return p, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: ref.ID})
 				}
 			}
 			cmd := p.routeMouseEvent(msg, msg.Y)

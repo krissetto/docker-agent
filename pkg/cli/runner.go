@@ -15,6 +15,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
@@ -101,12 +102,14 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 		return fmt.Errorf("bind CLI session: %w", err)
 	}
 
-	sess.SetTitle("Running agent")
+	if err := handle.UpdateTitle(ctx, "Running agent"); err != nil {
+		return fmt.Errorf("set CLI session title: %w", err)
+	}
 	// If the last received event was an error, return it. That way the exit code
 	// will be non-zero if the agent failed.
 	var lastErr error
 
-	oneLoop := func(text string, rd io.Reader) error {
+	oneLoop := func(text string, rd io.Reader) (runErr error) {
 		autoExtensions := 0
 
 		userInput := strings.TrimSpace(text)
@@ -121,20 +124,23 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 		if userMsg == nil {
 			return nil
 		}
-		sess.AddAttachedFile(attachedPath)
-
-		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
-		if err != nil {
-			return fmt.Errorf("observe CLI session: %w", err)
+		if attachedPath != "" {
+			if _, err := handle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditAttachment, AttachmentPath: attachedPath}); err != nil {
+				return fmt.Errorf("attach CLI file: %w", err)
+			}
 		}
-		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: userMsg.Message.Content, MultiContent: userMsg.Message.MultiContent})
+
+		ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: userMsg.Message.Content, MultiContent: userMsg.Message.MultiContent})
 		if err != nil {
-			observation.Cancel()
-			return fmt.Errorf("submit CLI message: %w", err)
+			return fmt.Errorf("start CLI message: %w", err)
 		}
 		eventsCtx, cancelEvents := context.WithCancel(ctx)
-		defer cancelEvents()
-		events := correlatedSessionEvents(eventsCtx, observation, submission.TurnID)
+		events, drained := correlatedSessionEvents(eventsCtx, ownedTurn)
+		defer func() {
+			cancelEvents()
+			runErr = errors.Join(runErr, <-drained)
+		}()
+
 		if cfg.OutputJSON {
 			for envelope := range events {
 				if envelope.Err != nil {
@@ -205,10 +211,8 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 				case ConfirmationApprove:
 					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApprove()})
 				case ConfirmationApproveBalanced:
-					sess.SetSafetyPolicy(sessionpkg.SafetyPolicyBalanced)
 					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApproveBalanced()})
 				case ConfirmationApproveSession:
-					sess.SetSafetyPolicy(sessionpkg.SafetyPolicyAutonomous)
 					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApproveAutonomous()})
 				case ConfirmationReject:
 					_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeReject("")})
@@ -375,11 +379,13 @@ type sessionEvent struct {
 	Err error
 }
 
-func correlatedSessionEvents(ctx context.Context, observation runtime.Observation, turnID string) <-chan sessionEvent {
+func correlatedSessionEvents(ctx context.Context, ownedTurn *turn.Turn) (<-chan sessionEvent, <-chan error) {
+	drained := make(chan error, 1)
 	out := make(chan sessionEvent)
 	go func() {
+		defer close(drained)
 		defer close(out)
-		termination := runtimeclient.ConsumeTurn(ctx, observation, turnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 			select {
 			case out <- sessionEvent{SessionEvent: envelope}:
 				return runtimeclient.TurnContinue, nil
@@ -387,6 +393,10 @@ func correlatedSessionEvents(ctx context.Context, observation runtime.Observatio
 				return runtimeclient.TurnTerminate, ctx.Err()
 			}
 		})
+		var drainErr *turn.DrainError
+		if errors.As(termination.Err, &drainErr) {
+			drained <- drainErr
+		}
 		if termination.Err != nil {
 			select {
 			case out <- sessionEvent{Err: termination.Err}:
@@ -394,7 +404,7 @@ func correlatedSessionEvents(ctx context.Context, observation runtime.Observatio
 			}
 		}
 	}()
-	return out
+	return out, drained
 }
 
 // PrepareUserMessage resolves commands, parses /attach directives, and creates

@@ -151,3 +151,12 @@ func AgentAccentStyleFor(agentName string) lipgloss.Style {
 
 	return agentRegistry.accentStyles[idx%len(agentRegistry.accentStyles)]
 }
+
+// AgentIdentityStyle shares the sidebar identity highlight with transcript references.
+func AgentIdentityStyle(agentName string, hovered bool) lipgloss.Style {
+	style := AgentAccentStyleFor(agentName)
+	if hovered {
+		style = style.Foreground(Brighten(style.GetForeground(), 0.25))
+	}
+	return style
+}

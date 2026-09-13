@@ -12,6 +12,11 @@ import (
 type PendingUserMessageCanceledEvent struct {
 	AgentContext
 
+	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string              `json:"sender_id,omitempty"`
+	SenderName  string              `json:"sender_name,omitempty"`
+	InputMode   string              `json:"input_mode,omitempty"`
+
 	Type            string `json:"type"`
 	SessionID       string `json:"session_id"`
 	TurnID          string `json:"turn_id"`
@@ -30,14 +35,21 @@ var _ PendingMessageCanceler = (*sessionHandle)(nil)
 // promotion. A failed durable deletion leaves the mailbox and transcript intact.
 // Cancel remains the separate active-turn-only operation.
 func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
-	d := h.driver
+	return h.driver.cancelPendingMessage(ctx, turnID)
+}
+
+func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.cancelPendingLocked(ctx, turnID)
+}
+
+func (d *sessionDriver) cancelPendingLocked(ctx context.Context, turnID string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	if d.stopped {
-		return false, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, RequestID: turnID, Operation: "cancel_pending_message"}
+		return false, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), RequestID: turnID, Operation: "cancel_pending_message"}
 	}
 	if turnID == "" || d.sess == nil || turnID == d.activeRequestID {
 		return false, nil
@@ -48,8 +60,13 @@ func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string)
 		queue = &d.steering
 		index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
 	}
-	if index < 0 || (*queue)[index].Retry {
+	if index < 0 {
 		return false, nil
+	}
+	if (*queue)[index].Retry {
+		*queue = slices.Delete(*queue, index, index+1)
+		d.completeTurnLocked(turnID)
+		return true, nil
 	}
 	position := -1
 	for i, item := range d.sess.MessagesSnapshot() {
@@ -62,12 +79,7 @@ func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string)
 		return false, nil
 	}
 	unsupported := func() (bool, error) {
-		return false, &SessionError{Kind: SessionErrorUnsupported, SessionID: h.sessionID, RequestID: turnID, Operation: "cancel_pending_message"}
-	}
-	// Child transcripts are replaced asynchronously as whole snapshots. Until
-	// that writer participates in recall, do not claim durable withdrawal.
-	if d.r.sessionStore != nil && d.sess.ParentID != "" {
-		return unsupported()
+		return false, &SessionError{Kind: SessionErrorUnsupported, SessionID: d.sessionIDLocked(), RequestID: turnID, Operation: "cancel_pending_message"}
 	}
 	if (*queue)[index].AcceptedPersisted {
 		store, ok := d.r.sessionStore.(session.PendingMessageDeleter)
@@ -80,9 +92,41 @@ func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string)
 	}
 	// The in-memory store may share the session pointer and have already
 	// removed this item. All remaining operations are infallible under d.mu.
+	msg := (*queue)[index]
 	d.sess.RemovePendingUserMessageByTurnID(turnID)
 	*queue = slices.Delete(*queue, index, index+1)
-	d.interruptRequested = len(d.steering) != 0
-	d.events.PublishForRequest(d.sess.ID, turnID, PendingUserMessageCanceled(d.sess.ID, turnID, position))
+	d.completeTurnLocked(turnID)
+	d.refreshSteeringLocked()
+	d.events.PublishForRequest(d.sess.ID, turnID, inputEventMetadata(PendingUserMessageCanceled(d.sess.ID, turnID, position), msg))
 	return true, nil
+}
+
+func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOutcome, error) {
+	d.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		d.mu.Unlock()
+		return CancelNotActive, err
+	}
+	if turnID != "" && d.activeRequestID == turnID && d.running && d.cancel != nil {
+		if d.cancelling {
+			d.mu.Unlock()
+			return CancelAlreadyCancelling, nil
+		}
+		d.cancelling = true
+		d.resolveInteractionsLocked()
+		cancel := d.cancel
+		d.mu.Unlock()
+		cancel()
+		d.refreshAttention()
+		return CancelAccepted, nil
+	}
+	withdrawn, err := d.cancelPendingLocked(ctx, turnID)
+	d.mu.Unlock()
+	if err != nil {
+		return CancelNotActive, err
+	}
+	if withdrawn {
+		return CancelAccepted, nil
+	}
+	return CancelNotActive, nil
 }

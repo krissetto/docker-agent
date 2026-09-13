@@ -11,75 +11,94 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 )
 
-// TestFanOut_TurnBoundaryEventEvictsPendingDelta verifies that when a
-// subscriber's buffer is full, a turn-boundary event (which SSE consumers
-// cannot recover if lost) evicts the oldest pending message instead of being
-// dropped.
-func TestFanOut_TurnBoundaryEventEvictsPendingDelta(t *testing.T) {
-	t.Parallel()
-
-	events := make(chan any, 16)
-	app := &App{
-		ctx:              func() context.Context { return t.Context() },
-		events:           events,
-		throttleDuration: time.Millisecond,
+func registerFanoutTestSubscriber(a *App, ctx context.Context, ch chan any) {
+	a.subsMu.Lock()
+	defer a.subsMu.Unlock()
+	if a.subscriberDone == nil {
+		a.subscriberDone = make(map[chan any]<-chan struct{})
 	}
-
-	// A one-slot subscriber makes the overflow deterministic. The subscriber
-	// never reads, standing in for a consumer that fell behind.
-	ch := make(chan any, 1)
-	app.addSubscriber(ch)
-	app.fanoutOnce.Do(app.startFanOut)
-
-	// Fill the subscriber's buffer with a droppable event.
-	filler := runtime.NewTokenUsageEvent("sess", "root", &runtime.Usage{})
-	events <- filler
-	require.Eventually(t, func() bool { return len(ch) == 1 }, 2*time.Second, time.Millisecond)
-
-	// The turn-boundary event must displace the pending filler.
-	stopped := runtime.StreamStopped("sess", "root", "normal")
-	events <- stopped
-
-	require.Eventually(t, func() bool {
-		select {
-		case msg := <-ch:
-			return assert.ObjectsAreEqual(stopped, msg)
-		default:
-			return false
-		}
-	}, 2*time.Second, time.Millisecond, "the stream_stopped event must survive the overflow")
+	a.subs = append(a.subs, ch)
+	a.subscriberDone[ch] = ctx.Done()
 }
 
-// TestFanOut_DroppableEventIsDroppedOnOverflow verifies the pre-existing
-// behavior for non-boundary events: on overflow they are dropped, never
-// evicting anything.
-func TestFanOut_DroppableEventIsDroppedOnOverflow(t *testing.T) {
-	t.Parallel()
-
-	events := make(chan any, 16)
-	app := &App{
-		ctx:              func() context.Context { return t.Context() },
-		events:           events,
-		throttleDuration: time.Millisecond,
-	}
-
+func TestFanOutPreservesEveryEventOnOverflow(t *testing.T) {
+	a := &App{ctx: func() context.Context { return t.Context() }, events: make(chan any, 16)}
 	ch := make(chan any, 1)
-	app.addSubscriber(ch)
-	// The witness is registered after ch, so once a message reaches it the
-	// fan-out has already made its keep-or-drop decision for ch.
-	witness := make(chan any, 16)
-	app.addSubscriber(witness)
-	app.fanoutOnce.Do(app.startFanOut)
+	registerFanoutTestSubscriber(a, t.Context(), ch)
+	a.startFanOut()
+	events := []any{runtime.AgentChoice("root", "s", "first"), runtime.PendingUserMessageCanceled("s", "turn", 0), &SessionResetEvent{}, runtime.StreamStopped("s", "root", "normal")}
+	for _, event := range events {
+		a.events <- event
+	}
+	for _, want := range events {
+		select {
+		case got := <-ch:
+			assert.Equal(t, want, got)
+		case <-time.After(time.Second):
+			t.Fatal("fanout lost an event")
+		}
+	}
+}
 
-	first := runtime.NewTokenUsageEvent("sess", "root", &runtime.Usage{})
-	events <- first
-	require.Eventually(t, func() bool { return len(ch) == 1 }, 2*time.Second, time.Millisecond)
+func TestFanOutCanceledSubscriberDoesNotBlockOthers(t *testing.T) {
+	a := &App{ctx: func() context.Context { return t.Context() }, events: make(chan any, 16)}
+	ctx, cancel := context.WithCancel(t.Context())
+	slow, witness := make(chan any, 1), make(chan any, 16)
+	registerFanoutTestSubscriber(a, ctx, slow)
+	registerFanoutTestSubscriber(a, t.Context(), witness)
+	a.startFanOut()
+	first := runtime.StreamStarted("s", "root")
+	a.events <- first
+	require.Eventually(t, func() bool { return len(slow) == 1 }, time.Second, time.Millisecond)
+	last := runtime.StreamStopped("s", "root", "normal")
+	a.events <- last
+	cancel()
+	assert.Equal(t, first, <-witness)
+	select {
+	case got := <-witness:
+		assert.Equal(t, last, got)
+	case <-time.After(time.Second):
+		t.Fatal("canceled subscriber blocked delivery")
+	}
+}
 
-	// A second droppable event overflows and is dropped; the first stays.
-	second := runtime.NewTokenUsageEvent("sess", "other", &runtime.Usage{})
-	events <- second
-	require.Eventually(t, func() bool { return len(witness) == 2 }, 2*time.Second, time.Millisecond)
+func TestCloseStopsBusWorkersWithoutCancelingSession(t *testing.T) {
+	for range 10 {
+		a := newMetadataTestApp(t)
+		handle := &projectionSession{id: "borrowed"}
+		a.replaceSessionState(sessionState{handle: handle})
+		ready := make(chan struct{})
+		stopped := make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() { defer close(stopped); a.Subscribe(ctx, func(any) {}, SubscribeOptions{Ready: ready}) }()
+		<-ready
+		a.Close()
+		select {
+		case <-a.busDone:
+		case <-time.After(time.Second):
+			t.Fatal("fanout/throttle workers leaked")
+		}
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("subscriber leaked on Close")
+		}
+		cancel()
+		assert.Empty(t, handle.cancelTurnID, "closing projection must not cancel execution")
+	}
+}
 
-	msg := <-ch
-	assert.Equal(t, first, msg)
+func TestInitializedBusDoesNotRequireCommandContext(t *testing.T) {
+	a := &App{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	a.initBus(ctx)
+	lifetime := a.busLifetime()
+	require.NotNil(t, lifetime)
+	cancel()
+	select {
+	case <-lifetime.Done():
+	default:
+		t.Fatal("bus did not retain the supplied lifetime")
+	}
 }

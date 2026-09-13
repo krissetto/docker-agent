@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,8 @@ type mockRuntime struct {
 	resumes               []runtime.ResumeRequest
 	elicitationDeclines   int
 	elicitationLastAction tools.ElicitationAction
+	title                 string
+	edits                 []runtime.SessionEdit
 }
 
 func (m *mockRuntime) AgentCommands(context.Context, string) (types.Commands, error) {
@@ -526,7 +529,10 @@ func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
 }
 func (m *mockRuntime) Release(context.Context) error { return nil }
 
-func (m *mockRuntime) UpdateTitle(context.Context, string) error { return nil }
+func (m *mockRuntime) UpdateTitle(_ context.Context, title string) error {
+	m.title = title
+	return nil
+}
 
 type cliSessions struct{ rt *mockRuntime }
 
@@ -541,6 +547,7 @@ func (r cliSessions) DeleteSession(context.Context, string) error { return nil }
 
 type cliSession struct {
 	runtime.UnsupportedSessionHandle
+
 	rt *mockRuntime
 }
 
@@ -573,3 +580,26 @@ func (a cliSession) Cancel(c context.Context, id string) (runtime.CancelResult, 
 }
 func (a cliSession) Release(c context.Context) error               { return a.rt.Release(c) }
 func (a cliSession) UpdateTitle(c context.Context, t string) error { return a.rt.UpdateTitle(c, t) }
+
+func (a cliSession) AwaitTurn(context.Context, string) error { return nil }
+
+func (a cliSession) Edit(_ context.Context, edit runtime.SessionEdit) (*session.Session, error) {
+	a.rt.edits = append(a.rt.edits, edit)
+	return session.New(), nil
+}
+
+func TestRunEditsCanonicalTitleAndAttachmentNotOriginalSession(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "context.txt")
+	assert.NilError(t, os.WriteFile(path, []byte("attached context"), 0o600))
+	rt := &mockRuntime{}
+	original := session.New(session.WithTitle("original"))
+	var output bytes.Buffer
+	assert.NilError(t, Run(t.Context(), NewPrinter(&output), Config{AttachmentPath: path}, rt, cliSessions{rt}, original, []string{"hello"}))
+	assert.Equal(t, rt.title, "Running agent")
+	assert.Equal(t, len(rt.edits), 1)
+	assert.Equal(t, rt.edits[0].Kind, runtime.SessionEditAttachment)
+	assert.Equal(t, rt.edits[0].AttachmentPath, path)
+	assert.Equal(t, original.TitleSnapshot(), "original")
+	assert.Equal(t, len(original.AttachedFilesSnapshot()), 0)
+}

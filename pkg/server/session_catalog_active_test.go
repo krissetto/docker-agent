@@ -26,7 +26,7 @@ func TestSessionHTTPCatalogActiveSkipsHistoricalStore(t *testing.T) {
 	sess := session.New(session.WithID("active"), session.WithAgentName("root"))
 	handle, err := registry.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
-	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: handle, registry: registry, session: sess})
+	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: handle, registry: registry})
 	response := sessionRequest(t, NewWithManager(sm, ""), http.MethodGet, "/api/sessions?active=true", "", "")
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 	var catalog sessionCatalogDTO

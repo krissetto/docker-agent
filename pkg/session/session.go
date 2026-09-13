@@ -427,8 +427,7 @@ type Session struct {
 	AgentName string `json:"-"`
 
 	// ParentID indicates this is a sub-session created by task transfer.
-	// Sub-sessions are not persisted as standalone entries; they are embedded
-	// within the parent session's Messages array.
+	// Child sessions own separate persisted rows; parent history contains links.
 	ParentID string `json:"-"`
 
 	// DelegationLineage records the names of the agents that delegated,
@@ -523,6 +522,16 @@ func (c *PermissionsConfig) Clone() *PermissionsConfig {
 	}
 }
 
+// InputOrigin records trusted input provenance independently of delivery mode.
+// Empty and unknown values retain legacy user semantics, never internal privileges.
+type InputOrigin string
+
+const (
+	InputOriginUser    InputOrigin = "user"
+	InputOriginAgent   InputOrigin = "agent"
+	InputOriginRuntime InputOrigin = "runtime"
+)
+
 // Message is a message from an agent
 type Message struct {
 	// ID is the database ID of the message (used for persistence tracking)
@@ -535,9 +544,13 @@ type Message struct {
 	Implicit bool `json:"implicit,omitempty"`
 	// Pending keeps an accepted user message visible and durable while excluding
 	// it from model input until its session turn is promoted.
-	Pending  bool   `json:"pending,omitempty"`
-	Accepted bool   `json:"actor_accepted,omitempty"`
-	TurnID   string `json:"actor_turn_id,omitempty"`
+	Pending     bool        `json:"pending,omitempty"`
+	Accepted    bool        `json:"actor_accepted,omitempty"`
+	TurnID      string      `json:"actor_turn_id,omitempty"`
+	InputMode   string      `json:"actor_input_mode,omitempty"`
+	InputOrigin InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string      `json:"sender_id,omitempty"`
+	SenderName  string      `json:"sender_name,omitempty"`
 }
 
 // UnmarshalJSON accepts both the current "agent_name" key and the legacy
@@ -1686,7 +1699,7 @@ func WithAgentName(name string) Opt {
 }
 
 // WithParentID marks this session as a sub-session of the given parent.
-// Sub-sessions are not persisted as standalone entries in the session store.
+// Child sessions own separate rows and are omitted from top-level listings.
 func WithParentID(parentID string) Opt {
 	return func(s *Session) {
 		s.ParentID = parentID
@@ -2378,14 +2391,14 @@ func (s *Session) instructionMessages() ([]chat.Message, []InstructionUpdate) {
 }
 
 func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
-	messages, _ := s.getMessages(a, true, extraSystemMessages...)
+	messages, _ := s.getMessages(a, true, nil, extraSystemMessages...)
 	return messages
 }
 
 // GetMessagesWithoutInstructionContext assembles the legacy prompt where
 // dynamic context is supplied directly as extra system messages.
 func (s *Session) GetMessagesWithoutInstructionContext(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
-	messages, _ := s.getMessages(a, false, extraSystemMessages...)
+	messages, _ := s.getMessages(a, false, nil, extraSystemMessages...)
 	return messages
 }
 
@@ -2398,10 +2411,18 @@ func (s *Session) GetMessagesWithoutInstructionContext(a *agent.Agent, extraSyst
 // guarantee covers only the session-history snapshot, not the other state
 // read during assembly (instruction context, agent configuration).
 func (s *Session) GetMessagesAndLastSummary(a *agent.Agent, extraSystemMessages ...chat.Message) ([]chat.Message, string) {
-	return s.getMessages(a, true, extraSystemMessages...)
+	return s.getMessages(a, true, nil, extraSystemMessages...)
 }
 
-func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, extraSystemMessages ...chat.Message) ([]chat.Message, string) {
+// GetMessagesWithProjection projects included own-history messages from the detached
+// assembly snapshot, before trimming and normalization. Synthetic instructions and
+// summaries are not projected; stored messages are never mutated.
+func (s *Session) GetMessagesWithProjection(a *agent.Agent, includeInstructionContext bool, project func(*Message), extraSystemMessages ...chat.Message) []chat.Message {
+	messages, _ := s.getMessages(a, includeInstructionContext, project, extraSystemMessages...)
+	return messages
+}
+
+func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, project func(*Message), extraSystemMessages ...chat.Message) ([]chat.Message, string) {
 	slog.Debug("Getting messages for agent", "agent", a.Name(), "session_id", s.ID)
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
@@ -2460,6 +2481,9 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 			updateIndex++
 		}
 		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending {
+			if project != nil {
+				project(items[i].Message)
+			}
 			messages = append(messages, items[i].Message.Message)
 		}
 	}

@@ -448,3 +448,48 @@ func TestDefaultMatcherNormalizesPromptFilePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestSimulatedStreamCopy_ChunkGateCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", http.NoBody)
+	rec := &flushSnapshotRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c := echo.New().NewContext(req, rec)
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: first\n\ndata: gated\n\n"))}
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- simulatedStreamCopy(c, resp, time.Millisecond, func(ctx context.Context, chunk []byte) {
+			if bytes.Contains(chunk, []byte("gated")) {
+				assert.Contains(t, rec.flushed, "data: first\n\n", "complete prior SSE event must be flushed before the gate")
+				close(entered)
+				<-ctx.Done()
+			}
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("chunk gate was not reached")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("chunk gate did not release on request cancellation")
+	}
+	assert.Contains(t, rec.Body.String(), "data: first")
+	assert.NotContains(t, rec.Body.String(), "gated")
+}
+
+type flushSnapshotRecorder struct {
+	*httptest.ResponseRecorder
+
+	flushed string
+}
+
+func (r *flushSnapshotRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.flushed = r.Body.String()
+}

@@ -23,7 +23,7 @@ const (
 
 // TurnHandler handles correlated events for ConsumeTurnWithHandler.
 type TurnHandler interface {
-	HandleTurn(context.Context, runtime.SessionEvent) (TurnDecision, error)
+	HandleTurn(ctx context.Context, event runtime.SessionEvent) (TurnDecision, error)
 }
 
 // TurnHandlerFunc adapts a function to TurnHandler.

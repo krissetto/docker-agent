@@ -492,7 +492,9 @@ func TestApp_DropAttachedFile(t *testing.T) {
 
 	newAppWithAttachments := func(store session.Store, paths ...string) (*App, *session.Session) {
 		sess := session.New(session.WithAttachedFiles(paths))
-		return New(t.Context(), nil, sess, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{store: store})), sess
+		a := New(t.Context(), nil, sess, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{store: store}))
+		a.replaceSessionState(sessionState{session: sess, handle: &editingProjectionSession{sess: sess, store: store}})
+		return a, sess
 	}
 
 	t.Run("drops by exact path and syncs the store", func(t *testing.T) {

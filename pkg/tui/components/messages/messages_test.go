@@ -340,7 +340,7 @@ func TestLoadFromSessionWithToolResults(t *testing.T) {
 	assert.Equal(t, "I found the files.", m.messages[1].Content)
 }
 
-func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
+func TestLoadFromSessionPreservesCommittedReasoningBoundaries(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -357,7 +357,7 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 					Role:             chat.MessageRoleAssistant,
 					ReasoningContent: "First reasoning chunk.",
 					ToolCalls: []tools.ToolCall{
-						{ID: "call-1", Function: tools.FunctionCall{Name: "tool1", Arguments: "{}"}},
+						{ID: "call-1", Function: tools.FunctionCall{Name: "tool1", Arguments: `{"query":"check"}`}},
 					},
 					ToolDefinitions: []tools.Tool{
 						{Name: "tool1", Description: "First tool"},
@@ -373,14 +373,14 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 					Content:    "Result 1",
 				},
 			}),
-			// Second assistant message with more reasoning and another tool call (consecutive, no content between)
+			// A separate assistant message, despite having no intervening visible text.
 			session.NewMessageItem(&session.Message{
 				AgentName: "root",
 				Message: chat.Message{
 					Role:             chat.MessageRoleAssistant,
 					ReasoningContent: "Second reasoning chunk.",
 					ToolCalls: []tools.ToolCall{
-						{ID: "call-2", Function: tools.FunctionCall{Name: "tool2", Arguments: "{}"}},
+						{ID: "call-2", Function: tools.FunctionCall{Name: "tool2", Arguments: `{"query":"check"}`}},
 					},
 					ToolDefinitions: []tools.Tool{
 						{Name: "tool2", Description: "Second tool"},
@@ -396,14 +396,14 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 					Content:    "Result 2",
 				},
 			}),
-			// Third consecutive reasoning block
+			// Third committed assistant reasoning message.
 			session.NewMessageItem(&session.Message{
 				AgentName: "root",
 				Message: chat.Message{
 					Role:             chat.MessageRoleAssistant,
 					ReasoningContent: "Third reasoning chunk.",
 					ToolCalls: []tools.ToolCall{
-						{ID: "call-3", Function: tools.FunctionCall{Name: "tool3", Arguments: "{}"}},
+						{ID: "call-3", Function: tools.FunctionCall{Name: "tool3", Arguments: `{"query":"check"}`}},
 					},
 					ToolDefinitions: []tools.Tool{
 						{Name: "tool3", Description: "Third tool"},
@@ -419,7 +419,7 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 					Content:    "Result 3",
 				},
 			}),
-			// Final assistant response (this breaks the chain)
+			// Final assistant response.
 			session.NewMessageItem(&session.Message{
 				AgentName: "root",
 				Message: chat.Message{
@@ -432,33 +432,26 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 
 	m.LoadFromSession(sess, nil)
 
-	// Should have: 1 combined reasoning block + 1 assistant content = 2 messages
-	require.Len(t, m.messages, 2, "consecutive reasoning blocks should be combined into one")
+	// Each assistant commit owns its reasoning and tools, matching live boundaries.
+	require.Len(t, m.messages, 4)
+	for i, reasoning := range []string{"First reasoning chunk.", "Second reasoning chunk.", "Third reasoning chunk."} {
+		assert.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[i].Type)
+		assert.Equal(t, reasoning, m.messages[i].Content, "copy content preserves the exact message")
+		block, ok := m.views[i].(*reasoningblock.Model)
+		require.True(t, ok, "view should be a reasoning block")
+		assert.Equal(t, reasoning, block.Reasoning())
+		assert.Equal(t, 1, block.ToolCount(), "each committed message retains its own tool")
+		for j := range 3 {
+			assert.Equal(t, i == j, block.HasToolCall("call-"+strconv.Itoa(j+1)))
+		}
+		block.SetExpanded(true)
+		view := block.View()
+		assert.Contains(t, view, "tool"+strconv.Itoa(i+1))
+		assert.Contains(t, view, "Result "+strconv.Itoa(i+1), "committed tool results survive restoration")
+	}
 
-	// First message should be the combined reasoning block
-	assert.Equal(t, types.MessageTypeAssistantReasoningBlock, m.messages[0].Type)
-	block, ok := m.views[0].(*reasoningblock.Model)
-	require.True(t, ok, "view should be a reasoning block")
-
-	// Block should contain all 3 tool calls
-	assert.Equal(t, 3, block.ToolCount(), "combined block should contain all 3 tool calls")
-
-	// Reasoning should contain all three chunks
-	reasoning := block.Reasoning()
-	assert.Contains(t, reasoning, "First reasoning chunk", "should contain first reasoning")
-	assert.Contains(t, reasoning, "Second reasoning chunk", "should contain second reasoning")
-	assert.Contains(t, reasoning, "Third reasoning chunk", "should contain third reasoning")
-
-	// Expand to verify tools are present
-	block.SetExpanded(true)
-	view := block.View()
-	assert.Contains(t, view, "tool1", "should contain tool1")
-	assert.Contains(t, view, "tool2", "should contain tool2")
-	assert.Contains(t, view, "tool3", "should contain tool3")
-
-	// Second message should be assistant content
-	assert.Equal(t, types.MessageTypeAssistant, m.messages[1].Type)
-	assert.Equal(t, "All done!", m.messages[1].Content)
+	assert.Equal(t, types.MessageTypeAssistant, m.messages[3].Type)
+	assert.Equal(t, "All done!", m.messages[3].Content)
 }
 
 func TestLoadFromSessionStandaloneToolCallsWithResults(t *testing.T) {
@@ -1793,7 +1786,7 @@ func TestMessageCacheBoundsHistoricalRerender(t *testing.T) {
 	_ = m.AppendToLastMessage("root", " small")
 	_ = m.View()
 	require.False(t, m.renderDirty)
-	require.Equal(t, before, m.renderedItems.Len(), "single append does not trigger history-wide cache growth")
+	require.Equal(t, before+1, m.renderedItems.Len(), "a new live message adds only one metadata range")
 }
 
 func assistantTestMedia(fallback string) []types.AssistantMedia {

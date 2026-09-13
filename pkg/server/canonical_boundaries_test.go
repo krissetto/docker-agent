@@ -30,6 +30,7 @@ import (
 
 type modelUpdateFailStore struct {
 	session.Store
+
 	err  error
 	fail bool
 }
@@ -141,7 +142,7 @@ func TestCanonicalSessionsReadyImmediateAfterCreateAndTimeout(t *testing.T) {
 func TestCanonicalSessionEventsEmitHeartbeatAfterSnapshotAndReady(t *testing.T) {
 	events := make(chan runtime.SessionEvent)
 	handle := &httpSession{id: "heartbeat", agent: "root", attach: runtime.Observation{
-		Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Session: session.New(session.WithID("heartbeat"))}},
+		Initial: []runtime.SessionSnapshot{{Session: session.New(session.WithID("heartbeat"))}},
 		Events:  events, Cancel: func() {},
 	}}
 	srv, _ := newSessionHTTPServer(t, &httpSessionRegistry{sessions: map[string]*httpSession{"heartbeat": handle}})
@@ -173,8 +174,8 @@ func TestCanonicalSessionEventsEmitHeartbeatAfterSnapshotAndReady(t *testing.T) 
 	for {
 		select {
 		case line := <-lines:
-			if strings.HasPrefix(line, "event: ") {
-				eventsSeen = append(eventsSeen, strings.TrimPrefix(line, "event: "))
+			if event, ok := strings.CutPrefix(line, "event: "); ok {
+				eventsSeen = append(eventsSeen, event)
 			}
 			if line == ": ping" {
 				assert.Equal(t, []string{"snapshot", "ready"}, eventsSeen)

@@ -29,6 +29,7 @@ type lifecycleSessions struct {
 
 type lifecycleHandle struct {
 	runtime.UnsupportedSessionHandle
+
 	id       string
 	submits  atomic.Int32
 	releases atomic.Int32

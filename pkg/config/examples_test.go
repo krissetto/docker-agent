@@ -128,9 +128,8 @@ func TestParseExamples(t *testing.T) {
 			}
 
 			for _, model := range cfg.Models {
-				// Skip first_available selectors - their provider/model is
-				// resolved at load time from the environment's credentials.
-				if model.IsFirstAvailable() {
+				// Selectors and alloy groups resolve their member models at runtime.
+				if model.IsFirstAvailable() || isAlloyModelConfig(model) {
 					continue
 				}
 				require.NotEmpty(t, model.Provider)

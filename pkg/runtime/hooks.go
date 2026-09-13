@@ -299,14 +299,14 @@ func (r *LocalRuntime) messagesWithDynamicContext(
 				slog.WarnContext(ctx, "Failed to clear instruction context", "session_id", sess.ID, "error", err)
 			}
 		}
-		return sess.GetMessagesWithoutInstructionContext(a, legacyExtras...)
+		return sess.GetMessagesWithProjection(a, false, projectModelInput, legacyExtras...)
 	}
 	if sess.PrepareInstructionContext(sources) {
 		if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
 			slog.WarnContext(ctx, "Failed to persist instruction context", "session_id", sess.ID, "error", err)
 		}
 	}
-	return sess.GetMessages(a)
+	return sess.GetMessagesWithProjection(a, true, projectModelInput)
 }
 
 func instructionSource(key, label string, messages []chat.Message) session.InstructionSource {

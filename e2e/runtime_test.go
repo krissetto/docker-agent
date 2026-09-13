@@ -1,14 +1,19 @@
 package e2e_test
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -29,8 +34,11 @@ func TestRuntime_OpenAI_Basic(t *testing.T) {
 	rt, err := runtime.New(t.Context(), team)
 	require.NoError(t, err)
 
-	sess := session.New(session.WithUserMessage("What's 2+2?"))
-	_, err = rt.Run(ctx, sess)
+	supervisor := ownTestRuntime(t, rt)
+	handle, err := supervisor.Runtime().CreateSession(ctx,
+		session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
+	require.NoError(t, err)
+	sess, err := runTestTurn(ctx, handle, "What's 2+2?")
 	require.NoError(t, err)
 
 	response := sess.GetLastAssistantMessageContent()
@@ -72,35 +80,42 @@ func TestRuntime_MultiAgent_SessionReload(t *testing.T) {
 	rt, err := runtime.New(t.Context(), team, runtime.WithSessionStore(store))
 	require.NoError(t, err)
 
+	supervisor := ownTestRuntime(t, rt)
+
 	// --- Turn 1: trigger a task transfer ---
-	sess := session.New(session.WithUserMessage("What's the weather in Paris? Delegate to the weather agent."))
-	_, err = rt.Run(ctx, sess)
+	handle, err := supervisor.Runtime().CreateSession(ctx,
+		session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
+	require.NoError(t, err)
+	sess, err := runTestTurn(ctx, handle, "What's the weather in Paris? Delegate to the weather agent.")
 	require.NoError(t, err)
 
 	response := sess.GetLastAssistantMessageContent()
 	require.NotEmpty(t, response, "first turn should produce a response")
+
+	// The store is independently owned and stays open across runtime shutdown.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	require.NoError(t, supervisor.Shutdown(cleanupCtx))
 
 	// --- Reload the session from the store ---
 	reloaded, err := store.GetSession(ctx, sess.ID)
 	require.NoError(t, err)
 	require.NotNil(t, reloaded)
 
-	// --- Turn 2: follow-up on the reloaded session ---
-	// Session-v2 keeps stable identity while permitting a settled handle to adopt
-	// the just-loaded durable snapshot. This exercises the reload rather than
-	// accidentally continuing against the pre-reload in-memory object.
-	handle, err := rt.SessionByID(sess.ID)
+	// --- Turn 2: follow-up with a fresh owner of the durable snapshot ---
+	restarted, err := runtime.New(ctx, team, runtime.WithSessionStore(store))
 	require.NoError(t, err)
-	require.True(t, runtime.ReplaceSettledSession(handle, reloaded))
-	reloaded.AddMessage(session.UserMessage("Can you summarize what you found?"))
-	reloaded.SendUserMessage = true
-
-	_, err = rt.Run(ctx, reloaded)
+	restartedSupervisor := ownTestRuntime(t, restarted)
+	reloadedHandle, err := restartedSupervisor.Runtime().CreateSession(ctx, reloaded, runtime.SessionBinding{})
+	require.NoError(t, err)
+	assert.Equal(t, handle.ID(), reloadedHandle.ID())
+	assert.NotSame(t, handle, reloadedHandle)
+	completed, err := runTestTurn(ctx, reloadedHandle, "Can you summarize what you found?")
 	require.NoError(t, err, "follow-up on reloaded session should not fail; "+
 		"orphan sub-agent messages in the persisted parent session would cause "+
 		"model API errors due to corrupted message sequence")
 
-	response2 := reloaded.GetLastAssistantMessageContent()
+	response2 := completed.GetLastAssistantMessageContent()
 	assert.NotEmpty(t, response2, "second turn should produce a response")
 }
 
@@ -118,11 +133,42 @@ func TestRuntime_Mistral_Basic(t *testing.T) {
 	rt, err := runtime.New(t.Context(), team)
 	require.NoError(t, err)
 
-	sess := session.New(session.WithUserMessage("What's 2+2?"))
-	_, err = rt.Run(ctx, sess)
+	supervisor := ownTestRuntime(t, rt)
+	handle, err := supervisor.Runtime().CreateSession(ctx,
+		session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
+	require.NoError(t, err)
+	sess, err := runTestTurn(ctx, handle, "What's 2+2?")
 	require.NoError(t, err)
 
 	response := sess.GetLastAssistantMessageContent()
 	assert.Equal(t, "The sum of 2 + 2 is 4.", response)
 	// Title generation is now handled by pkg/app or pkg/server, not the runtime
+}
+
+func ownTestRuntime(t *testing.T, rt *runtime.LocalRuntime) runtime.SessionRuntimeSupervisor {
+	t.Helper()
+	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		require.NoError(t, supervisor.Shutdown(ctx))
+	})
+	return supervisor
+}
+
+func runTestTurn(ctx context.Context, handle runtime.SessionHandle, prompt string) (*session.Session, error) {
+	ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: prompt})
+	if err != nil {
+		return nil, err
+	}
+	termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		if event, ok := envelope.Event.(*runtime.ErrorEvent); ok {
+			return runtimeclient.TurnTerminate, errors.New(event.Error)
+		}
+		return runtimeclient.TurnContinue, nil
+	})
+	if termination.Err != nil {
+		return nil, termination.Err
+	}
+	return handle.Snapshot(ctx)
 }

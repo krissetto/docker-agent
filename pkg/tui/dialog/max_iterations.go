@@ -63,8 +63,11 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 					core.CmdHandler(CloseDialogMsg{}),
 					core.CmdHandler(messages.InteractionResponseMsg{
 						SessionID: d.sessionID,
-						Response: runtime.InteractionResponse{InteractionID: d.requestID,
-							Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeApprove()},
+						Response: runtime.InteractionResponse{
+							InteractionID: d.requestID,
+							Kind:          runtime.InteractionMaxIterations,
+							Resume:        runtime.ResumeApprove(),
+						},
 					}),
 				)
 			},
@@ -73,8 +76,11 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 					core.CmdHandler(CloseDialogMsg{}),
 					core.CmdHandler(messages.InteractionResponseMsg{
 						SessionID: d.sessionID,
-						Response: runtime.InteractionResponse{InteractionID: d.requestID,
-							Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")},
+						Response: runtime.InteractionResponse{
+							InteractionID: d.requestID,
+							Kind:          runtime.InteractionMaxIterations,
+							Resume:        runtime.ResumeReject(""),
+						},
 					}),
 				)
 			},

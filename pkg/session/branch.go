@@ -71,6 +71,16 @@ func branchSessionWithTitle(parent *Session, branchAtPosition int, titleFn func(
 // full message history, making it suitable for transactional "work on a
 // copy, commit on success" flows.
 func (s *Session) Clone() *Session {
+	return s.clone(false)
+}
+
+// OwnSnapshot copies this session, retaining descendants as ID-only references.
+// A writer must not snapshot or persist another session owner's mutable history.
+func (s *Session) OwnSnapshot() *Session {
+	return s.clone(true)
+}
+
+func (s *Session) clone(referencesOnly bool) *Session {
 	if s == nil {
 		return nil
 	}
@@ -131,7 +141,11 @@ func (s *Session) Clone() *Session {
 			clone.Messages[i].Message = cloneMessage(item.Message)
 		}
 		if item.SubSession != nil {
-			clone.Messages[i].SubSession = item.SubSession.Clone()
+			if referencesOnly {
+				clone.Messages[i].SubSession = &Session{ID: item.SubSession.ID, ParentID: s.ID}
+			} else {
+				clone.Messages[i].SubSession = item.SubSession.Clone()
+			}
 		}
 		if item.Error != nil {
 			errCopy := *item.Error

@@ -1563,10 +1563,10 @@ func parseBackgroundTaskID(t *testing.T, dispatchOutput string) string {
 // TestRunStream_NestedBackgroundAgents_EndToEnd is the true asynchronous
 // end-to-end regression test for #3904/#3886. Unlike the tests above, it
 // never calls RunAgent or handleTaskTransfer directly: root is driven
-// through rt.Run, so its model's run_background_agent tool call dispatches
+// through a session handle, so its run_background_agent tool call dispatches
 // through r.toolMap into the real agenttool.Handler.HandleRun, which returns
 // a task ID immediately and runs the worker on the real detached goroutine.
-// Inside that detached RunStream the worker's model again calls
+// Inside that detached turn the worker's model again calls
 // run_background_agent (nested background → background), and root later
 // inspects completion through the real list/view handlers via further model
 // tool calls.
@@ -1642,9 +1642,12 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 		WithModelStore(mockModelStore{}),
 	)
 	require.NoError(t, err)
-	// StopAll cancels and waits for detached task goroutines, so they
-	// cannot leak past the test even on a failure path.
-	t.Cleanup(func() { _ = rt.Close() })
+	supervisor := NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+		defer cancel()
+		require.NoError(t, supervisor.Shutdown(cleanupCtx))
+	})
 
 	rbRoot := &recordingBuiltin{}
 	rbWorker := &recordingBuiltin{}
@@ -1663,12 +1666,55 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 		}))
 	rt.buildHooksExecutors()
 
-	sess := session.New(session.WithUserMessage("dispatch the worker"), session.WithToolsApproved(true))
+	seed := session.New(session.WithToolsApproved(true), session.WithNonInteractive(true))
+	handle, err := supervisor.Runtime().CreateSession(t.Context(), seed, SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	var previousTurnID string
+	runTurn := func(prompt string) *session.Session {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		observation, err := handle.Observe(ctx, ObserveOptions{})
+		require.NoError(t, err)
+		defer observation.Cancel()
+		submission, err := handle.Submit(ctx, TurnInput{Content: prompt})
+		require.NoError(t, err)
+		require.Equal(t, handle.ID(), submission.SessionID)
+		require.NotEmpty(t, submission.TurnID)
+		require.NotEqual(t, previousTurnID, submission.TurnID)
+		previousTurnID = submission.TurnID
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_, err := handle.Cancel(cleanupCtx, submission.TurnID)
+			require.NoError(t, err)
+			require.NoError(t, handle.AwaitTurn(cleanupCtx, submission.TurnID))
+		}()
+		for {
+			select {
+			case envelope, ok := <-observation.Events:
+				require.True(t, ok, "observation must last until the exact turn stops")
+				require.False(t, envelope.Gap)
+				if envelope.TurnID != submission.TurnID {
+					continue
+				}
+				if event, ok := envelope.Event.(*ErrorEvent); ok {
+					t.Fatalf("turn %s failed: %s", submission.TurnID, event.Error)
+				}
+				if _, ok := envelope.Event.(*StreamStoppedEvent); ok {
+					require.NoError(t, handle.AwaitTurn(ctx, submission.TurnID))
+					return sessionHandleSnapshot(t, handle)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for the exact turn to stop")
+			}
+		}
+	}
 
 	// Turn 1: root's model dispatches the worker. HandleRun must return a
 	// task ID immediately while the worker runs detached.
-	_, err = rt.Run(t.Context(), sess)
-	require.NoError(t, err)
+	sess := runTurn("dispatch the worker")
+	assert.Empty(t, seed.Messages, "the canonical API must not mutate its caller's seed")
 
 	dispatchOut := toolResultContent(t, sess, "call_run_worker")
 	require.Contains(t, dispatchOut, "Background agent task started with ID: ",
@@ -1717,9 +1763,7 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 			Build(),
 		newStreamBuilder().AddContent("background check complete").AddStopWithUsage(10, 5).Build(),
 	)
-	sess.AddMessage(session.UserMessage("check on the background task"))
-	_, err = rt.Run(t.Context(), sess)
-	require.NoError(t, err)
+	sess = runTurn("check on the background task")
 
 	viewOut := toolResultContent(t, sess, "call_view_worker")
 	assert.Contains(t, viewOut, taskID)

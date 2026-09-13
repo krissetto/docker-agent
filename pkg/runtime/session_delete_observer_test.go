@@ -80,12 +80,10 @@ func TestDeleteSessionClosesMultipleObserversExactlyOnce(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(8)
 	for range 8 {
-		go func() {
-			defer wg.Done()
-			require.NoError(t, rt.DeleteSession(t.Context(), sess.ID))
-		}()
+		wg.Go(func() {
+			assert.NoError(t, rt.DeleteSession(t.Context(), sess.ID))
+		})
 	}
 	wg.Wait()
 	for _, obs := range observers {
@@ -105,9 +103,7 @@ func TestConcurrentObserveAndDeleteNeverLeavesObserverOpen(t *testing.T) {
 	errs := make(chan error, 32)
 	var wg sync.WaitGroup
 	for range 32 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			obs, observeErr := h.Observe(t.Context(), ObserveOptions{})
 			if observeErr != nil {
@@ -115,7 +111,7 @@ func TestConcurrentObserveAndDeleteNeverLeavesObserverOpen(t *testing.T) {
 				return
 			}
 			results <- obs
-		}()
+		})
 	}
 	close(start)
 	require.NoError(t, rt.DeleteSession(t.Context(), sess.ID))

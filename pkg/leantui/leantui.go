@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 )
 
 // Config wires the lean TUI to a prepared App and the initial run parameters.
@@ -186,16 +187,18 @@ type model struct {
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
-	busy                bool
-	lifecycle           lifecycle.State
-	spinnerFrame        int
-	runCancel           context.CancelFunc
-	cancelMarkerPending bool
-	queue               []ui.PendingUserMessage
-	pendingUsers        []ui.PendingUserMessage
-	ignoredUsers        []string
-	ownedSkillOperation string
-	ownedSkillStream    bool
+	busy                 bool
+	lifecycle            lifecycle.State
+	spinnerFrame         int
+	runCancel            context.CancelFunc
+	cancelMarkerPending  bool
+	queue                []ui.PendingUserMessage
+	pendingUsers         []ui.PendingUserMessage
+	inputReplay          lifecycle.InputReplay
+	inputReferences      *subagentindex.Index
+	inputParentSessionID string
+	ownedSkillOperation  string
+	ownedSkillStream     bool
 
 	quitting         bool
 	appName          string

@@ -21,22 +21,15 @@ const (
 )
 
 type subagentPersistence struct {
-	treeStore    subagent.Store
-	sessionStore session.Store
-	ctx          context.Context //nolint:containedctx // lifecycle context owned and canceled by close
-	cancel       context.CancelFunc
-	wake         chan struct{}
-	done         chan struct{}
-	mu           sync.Mutex
-	closed       bool
-	flushMu      sync.Mutex
-	trees        map[string]subagent.Snapshot
-	transcripts  map[string]transcriptWrite
-}
-
-type transcriptWrite struct {
-	parentID string
-	session  *session.Session
+	treeStore subagent.Store
+	ctx       context.Context //nolint:containedctx // lifecycle context owned and canceled by close
+	cancel    context.CancelFunc
+	wake      chan struct{}
+	done      chan struct{}
+	mu        sync.Mutex
+	closed    bool
+	flushMu   sync.Mutex
+	trees     map[string]subagent.Snapshot
 }
 
 func newSubagentPersistence(treeStore subagent.Store, sessionStore session.Store) *subagentPersistence {
@@ -45,8 +38,8 @@ func newSubagentPersistence(treeStore subagent.Store, sessionStore session.Store
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &subagentPersistence{
-		treeStore: treeStore, sessionStore: sessionStore, ctx: ctx, cancel: cancel,
-		wake: make(chan struct{}, 1), done: make(chan struct{}), trees: map[string]subagent.Snapshot{}, transcripts: map[string]transcriptWrite{},
+		treeStore: treeStore, ctx: ctx, cancel: cancel,
+		wake: make(chan struct{}, 1), done: make(chan struct{}), trees: map[string]subagent.Snapshot{},
 	}
 	go p.run()
 	return p
@@ -59,18 +52,6 @@ func (p *subagentPersistence) enqueueTree(id string, snapshot subagent.Snapshot)
 	p.mu.Lock()
 	if !p.closed {
 		p.trees[id] = snapshot
-	}
-	p.mu.Unlock()
-	p.signal()
-}
-
-func (p *subagentPersistence) enqueueTranscript(parentID string, child *session.Session) {
-	if p == nil || parentID == "" || child == nil {
-		return
-	}
-	p.mu.Lock()
-	if !p.closed {
-		p.transcripts[child.ID] = transcriptWrite{parentID, child.Clone()}
 	}
 	p.mu.Unlock()
 	p.signal()
@@ -97,13 +78,12 @@ func (p *subagentPersistence) run() {
 	}
 }
 
-func (p *subagentPersistence) takeBatch() (map[string]subagent.Snapshot, map[string]transcriptWrite) {
+func (p *subagentPersistence) takeBatch() map[string]subagent.Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	trees, transcripts := p.trees, p.transcripts
+	trees := p.trees
 	p.trees = map[string]subagent.Snapshot{}
-	p.transcripts = map[string]transcriptWrite{}
-	return trees, transcripts
+	return trees
 }
 
 func (p *subagentPersistence) retryTemporary(write func(context.Context) error) error {
@@ -128,7 +108,7 @@ func (p *subagentPersistence) retryTemporary(write func(context.Context) error) 
 	return err
 }
 
-func (p *subagentPersistence) requeue(trees map[string]subagent.Snapshot, transcripts map[string]transcriptWrite) {
+func (p *subagentPersistence) requeue(trees map[string]subagent.Snapshot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for id, snapshot := range trees {
@@ -136,19 +116,13 @@ func (p *subagentPersistence) requeue(trees map[string]subagent.Snapshot, transc
 			p.trees[id] = snapshot
 		}
 	}
-	for id, write := range transcripts {
-		if _, newer := p.transcripts[id]; !newer {
-			p.transcripts[id] = write
-		}
-	}
 }
 
 func (p *subagentPersistence) flushBatch() error {
 	p.flushMu.Lock()
 	defer p.flushMu.Unlock()
-	trees, transcripts := p.takeBatch()
+	trees := p.takeBatch()
 	failedTrees := map[string]subagent.Snapshot{}
-	failedTranscripts := map[string]transcriptWrite{}
 	var failures []error
 	for id, snapshot := range trees {
 		if p.treeStore == nil {
@@ -160,24 +134,7 @@ func (p *subagentPersistence) flushBatch() error {
 			failures = append(failures, fmt.Errorf("persist subagent tree for session %s: %w", id, err))
 		}
 	}
-	for id, write := range transcripts {
-		if p.sessionStore == nil {
-			continue
-		}
-		err := p.retryTemporary(func(ctx context.Context) error {
-			return p.sessionStore.AddSubSession(ctx, write.parentID, write.session)
-		})
-		// Unregistered in-process parents are explicitly volatile; there is no
-		// durable transcript promise to fail in that mode.
-		if errors.Is(err, session.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			failedTranscripts[id] = write
-			failures = append(failures, fmt.Errorf("persist subagent transcript for session %s: %w", id, err))
-		}
-	}
-	p.requeue(failedTrees, failedTranscripts)
+	p.requeue(failedTrees)
 	return errors.Join(failures...)
 }
 
@@ -211,7 +168,7 @@ func (p *subagentPersistence) close() error {
 		return errors.New("timed out flushing subagent persistence")
 	}
 	p.mu.Lock()
-	pending := len(p.trees) != 0 || len(p.transcripts) != 0
+	pending := len(p.trees) != 0
 	p.mu.Unlock()
 	if pending {
 		return p.flushBatch()

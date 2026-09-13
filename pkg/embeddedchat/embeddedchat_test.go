@@ -3,6 +3,7 @@ package embeddedchat
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func TestNewLoadsAgentAndWelcomeMessage(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.Equal(t, "Hello from embedded chat.", s.WelcomeMessage())
 	require.NotNil(t, s.SessionRuntime())
-	require.NotNil(t, s.Conversation())
+	require.NotNil(t, conversationSnapshot(t, s))
 }
 
 func TestNewRequiresAgentSource(t *testing.T) {
@@ -83,7 +84,7 @@ func TestNewFromCodeBuiltTeam(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
 	require.Equal(t, "Hello from a code-built team.", s.WelcomeMessage())
 	require.NotNil(t, s.SessionRuntime())
-	require.NotNil(t, s.Conversation())
+	require.NotNil(t, conversationSnapshot(t, s))
 }
 
 func TestConversationsCarryWorkspaceProvenance(t *testing.T) {
@@ -96,10 +97,10 @@ func TestConversationsCarryWorkspaceProvenance(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	require.Equal(t, root, s.Conversation().WorkingDir)
+	require.Equal(t, root, conversationSnapshot(t, s).WorkingDir)
 
 	require.NoError(t, s.Restart())
-	require.Equal(t, root, s.Conversation().WorkingDir, "restarted conversations must keep the workspace root")
+	require.Equal(t, root, conversationSnapshot(t, s).WorkingDir, "restarted conversations must keep the workspace root")
 }
 
 func TestSessionOptionsOverrideCapturedWorkingDir(t *testing.T) {
@@ -114,7 +115,7 @@ func TestSessionOptionsOverrideCapturedWorkingDir(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	require.Equal(t, override, s.Conversation().WorkingDir)
+	require.Equal(t, override, conversationSnapshot(t, s).WorkingDir)
 }
 
 func TestInitialSessionResumesConversation(t *testing.T) {
@@ -125,21 +126,28 @@ func TestInitialSessionResumesConversation(t *testing.T) {
 	s, err := New(t.Context(), Config{Team: newCodeBuiltTeam(), InitialSession: restored})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	require.Same(t, restored, s.Conversation(), "the first conversation must be the restored one")
+	snapshot := conversationSnapshot(t, s)
+	require.Equal(t, restored.ID, snapshot.ID, "resume keeps stable identity")
+	require.Len(t, snapshot.GetAllMessages(), 1)
+	require.Equal(t, "earlier prompt", snapshot.GetAllMessages()[0].Message.Content)
+	require.NotSame(t, restored, snapshot, "caller receives a detached snapshot")
+	snapshot.AddMessage(session.UserMessage("not canonical"))
+	require.Len(t, conversationSnapshot(t, s).GetAllMessages(), 1)
 
 	require.NoError(t, s.Restart())
-	require.NotSame(t, restored, s.Conversation(), "Restart must start a fresh conversation")
+	require.NotEqual(t, restored.ID, conversationSnapshot(t, s).ID, "Restart must start a fresh conversation")
 }
 
 type fakeRuntime struct {
 	dagentruntime.UnsupportedSessionHandle
+
 	events chan dagentruntime.Event
 
 	runCtxs       []context.Context
 	resumes       []dagentruntime.ResumeRequest
 	elicitations  []tools.ElicitationAction
 	closed        bool
-	stopWakeCalls int
+	stopWakeCalls atomic.Int32
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -170,6 +178,7 @@ func (f *fakeRuntime) Send(ctx context.Context, input dagentruntime.TurnInput) (
 }
 
 func (f *fakeRuntime) Observe(ctx context.Context, _ dagentruntime.ObserveOptions) (dagentruntime.Observation, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	f.runCtxs = append(f.runCtxs, ctx)
 	out := make(chan dagentruntime.SessionEvent, 8)
 	go func() {
@@ -181,9 +190,12 @@ func (f *fakeRuntime) Observe(ctx context.Context, _ dagentruntime.ObserveOption
 				return
 			}
 		}
-		out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", Event: &dagentruntime.StreamStoppedEvent{}}
+		select {
+		case out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", Event: &dagentruntime.StreamStoppedEvent{}}:
+		case <-ctx.Done():
+		}
 	}()
-	return dagentruntime.Observation{Events: out, Cancel: func() {}}, nil
+	return dagentruntime.Observation{Events: out, Cancel: cancel}, nil
 }
 
 func (f *fakeRuntime) Status(context.Context) (dagentruntime.SessionStatus, error) {
@@ -200,7 +212,7 @@ func (f *fakeRuntime) Respond(_ context.Context, response dagentruntime.Interact
 }
 
 func (f *fakeRuntime) Cancel(context.Context, string) (dagentruntime.CancelResult, error) {
-	f.stopWakeCalls++
+	f.stopWakeCalls.Add(1)
 	return dagentruntime.CancelResult{Outcome: dagentruntime.CancelAccepted}, nil
 }
 
@@ -257,8 +269,9 @@ func TestSessionSendCancellationClosesWithoutDone(t *testing.T) {
 	require.NoError(t, err)
 	cancel()
 
-	assertClosed(t, out)
 	close(rt.events)
+	assertClosed(t, out)
+	assert.Equal(t, int32(1), rt.stopWakeCalls.Load())
 }
 
 func TestSessionSendStreamsEventsAndDone(t *testing.T) {
@@ -379,7 +392,7 @@ func TestSessionCloseCancelsActiveRunAndClosesRuntime(t *testing.T) {
 
 	require.NoError(t, s.Close())
 	require.True(t, rt.closed)
-	assert.Zero(t, rt.stopWakeCalls, "runtime Close owns final session teardown")
+	require.Eventually(t, func() bool { return rt.stopWakeCalls.Load() == 1 }, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool {
 		return errors.Is(rt.runCtxs[0].Err(), context.Canceled)
 	}, time.Second, time.Millisecond)
@@ -418,7 +431,7 @@ func TestSessionRestartCancelsRunAndReplacesConversation(t *testing.T) {
 	oldSession := s.conversation
 
 	require.NoError(t, s.Restart())
-	assert.Equal(t, 1, rt.stopWakeCalls)
+	require.Eventually(t, func() bool { return rt.stopWakeCalls.Load() == 1 }, time.Second, time.Millisecond)
 	require.NotSame(t, oldSession, s.conversation)
 	require.Empty(t, s.conversation.Messages)
 	require.Eventually(t, func() bool {
@@ -460,4 +473,78 @@ func (f *fakeRuntime) UpdateTitle(context.Context, string) error { return nil }
 
 func (f *fakeRuntime) Steer(ctx context.Context, input dagentruntime.TurnInput) (dagentruntime.Submission, error) {
 	return f.Send(ctx, input)
+}
+
+func (f *fakeRuntime) AwaitTurn(ctx context.Context, _ string) error {
+	for {
+		select {
+		case _, ok := <-f.events:
+			if !ok {
+				return nil
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+type failedDrainRuntime struct{ *fakeRuntime }
+
+func (*failedDrainRuntime) AwaitTurn(context.Context, string) error { return context.DeadlineExceeded }
+
+func TestSessionQuarantinesFailedDrainUntilRestart(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.handle = &failedDrainRuntime{fakeRuntime: rt}
+	out, err := s.Send(t.Context(), "first")
+	require.NoError(t, err)
+	close(rt.events)
+	require.ErrorIs(t, receiveEvent(t, out).Err, context.DeadlineExceeded)
+	assertClosed(t, out)
+	next, err := s.Send(t.Context(), "unsafe successor")
+	require.Nil(t, next)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NoError(t, s.Restart())
+	next, err = s.Send(t.Context(), "safe successor")
+	require.NoError(t, err)
+	require.True(t, receiveEvent(t, next).Done)
+	assertClosed(t, next)
+}
+
+type retryShutdownSupervisor struct {
+	fakeSupervisor
+
+	calls int
+}
+
+func (s *retryShutdownSupervisor) Shutdown(ctx context.Context) error {
+	s.calls++
+	if s.calls == 1 {
+		return context.DeadlineExceeded
+	}
+	return s.fakeSupervisor.Shutdown(ctx)
+}
+
+func TestSessionCloseCanRetryTimedOutDrainWithoutReopeningAdmission(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	owner := &retryShutdownSupervisor{fakeSupervisor: fakeSupervisor{runtime: rt}}
+	s.supervisor = owner
+	require.ErrorIs(t, s.Close(), context.DeadlineExceeded)
+	out, err := s.Send(t.Context(), "must stay closed")
+	require.Nil(t, out)
+	require.ErrorIs(t, err, ErrClosed)
+	require.NoError(t, s.Close())
+	assert.Equal(t, 2, owner.calls)
+	assert.True(t, rt.closed)
+	close(rt.events)
+}
+
+func conversationSnapshot(t *testing.T, s *Session) *session.Session {
+	t.Helper()
+	snapshot, err := s.Conversation(t.Context())
+	require.NoError(t, err)
+	return snapshot
 }

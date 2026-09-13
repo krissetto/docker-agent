@@ -4,6 +4,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 )
@@ -28,6 +30,8 @@ const (
 	// for the AgentSwitching runtime event, which is not persisted to the
 	// session, so it never reappears when a session is reloaded.
 	MessageTypeAgentReturn
+	MessageTypeAgentInput
+	MessageTypeRuntimeNotice
 )
 
 const (
@@ -79,6 +83,11 @@ type AssistantMedia struct {
 
 // Message represents a single message in the chat
 type Message struct {
+	InputOrigin    session.InputOrigin
+	InputMode      string
+	SenderID       string
+	SenderName     string
+	InputReference lifecycle.InputReference
 	Type           MessageType
 	Content        string
 	Sender         string                // Agent name for assistant messages
@@ -138,6 +147,21 @@ func User(content string) *Message {
 		Type:    MessageTypeUser,
 		Content: strings.ReplaceAll(content, "\t", "    "),
 	}
+}
+
+// Input preserves provenance while keeping model-only runtime payloads out of the UI.
+func Input(input *session.Message) *Message {
+	msg := User(input.Message.Content)
+	msg.InputOrigin, msg.InputMode = input.InputOrigin, input.InputMode
+	msg.SenderID, msg.SenderName = input.SenderID, input.SenderName
+	msg.InputReference = lifecycle.ResolveInputReference(nil, "", input.SenderID, input.SenderName)
+	switch input.InputOrigin {
+	case session.InputOriginAgent:
+		msg.Type = MessageTypeAgentInput
+	case session.InputOriginRuntime:
+		msg.Type, msg.Content = MessageTypeRuntimeNotice, ""
+	}
+	return msg
 }
 
 func Cancelled() *Message {

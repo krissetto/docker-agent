@@ -54,7 +54,7 @@ func TestReplaceSessionRestoresTreeThroughSessionRuntime(t *testing.T) {
 
 	a.ReplaceSession(t.Context(), loaded)
 
-	require.Equal(t, snapshot, loaded.GetSubagentTree(), "session restoration must populate the loaded session tree")
+	require.Equal(t, snapshot, a.Session().GetSubagentTree(), "session restoration must populate the loaded session tree")
 	assert.Equal(t, 1, sessions.restores)
 	assert.Zero(t, legacy.restores, "legacy services must not restore when session capability is available")
 }

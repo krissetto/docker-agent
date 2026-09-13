@@ -5,12 +5,16 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
-// QueuedMessage is a user message waiting to be injected into the agent loop,
+// QueuedMessage is an input waiting to be injected into the agent loop,
 // either mid-turn (via the steer queue) or at end-of-turn (via the follow-up
 // queue).
 type QueuedMessage struct {
+	InputOrigin  session.InputOrigin
+	SenderID     string
+	SenderName   string
 	ID           string
 	Content      string
 	MultiContent []chat.MessagePart
@@ -25,7 +29,9 @@ type QueuedMessage struct {
 	AcceptedPersisted bool
 	// Retry requests a fresh turn from existing transcript without appending
 	// user input. It remains an ordinary bounded session mailbox item.
-	Retry bool
+	Retry       bool
+	RuntimeNote bool
+	InputMode   string
 }
 
 // PendingMessageCanceler is implemented by session handles that can withdraw

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -101,7 +102,9 @@ func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID str
 	if boundAgent == "" {
 		return nil, nil, &SessionError{Kind: SessionErrorUnsupported, SessionID: sessionID, Operation: "attach"}
 	}
-	sess.AgentName = boundAgent
+	if sess.AgentName == "" {
+		sess.AgentName = boundAgent
+	}
 	binding := SessionBinding{AgentName: boundAgent, Model: sess.AgentModelOverrides[boundAgent]}
 	handle, err := v.CreateSession(ctx, sess, binding)
 	return handle, sess, err
@@ -121,6 +124,7 @@ func (v *localSessionRuntimeView) SwitchAgent(ctx context.Context, sessionID, ta
 		return nil, nil, err
 	}
 	cloned.AgentName = targetAgent
+	cloned.SetAttribute(SessionAgentAttribute, targetAgent)
 	handle, err := v.CreateSession(ctx, cloned, SessionBinding{AgentName: targetAgent})
 	return handle, cloned, err
 }
@@ -141,9 +145,7 @@ func (v *localSessionRuntimeView) InspectSessionTree(ctx context.Context, rootSe
 	}
 	if node, ok := subtreeForSession(v.runtime.subagents.tree.Snapshot(), rootSessionID); ok {
 		snapshot := subagent.Snapshot{Version: subagent.SnapshotVersion, Root: node.Node.ID, Nodes: []subagent.NodeSnapshot{node}}
-		if store, durable := v.runtime.subagentStore.(subagent.DurableStore); durable {
-			snapshot.Durability = store.Durability()
-		}
+		snapshot.Durability = v.runtime.sessionDurability()
 		return &snapshot, nil
 	}
 	if v.runtime.subagentStore == nil {
@@ -183,6 +185,8 @@ type sessionHandle struct {
 // CreateSession returns the stable handle for sess, creating its session if
 // needed. Binding identity is immutable and must match the session.
 func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
+	r.creationMu.Lock()
+	defer r.creationMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -192,13 +196,13 @@ func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session,
 	if binding.ParentSessionID != "" {
 		return r.createClientChild(ctx, sess, binding)
 	}
-	boundSession, boundAgent, maxIterations := r.sessionDrivers.sessionBindingSnapshot(sess)
+	boundSession, activeAgent, maxIterations := r.sessionDrivers.sessionBindingSnapshot(sess)
+	boundAgent := sess.AttributesSnapshot()[SessionAgentAttribute]
 	if boundAgent == "" {
-		boundAgent = sess.AttributesSnapshot()[SessionAgentAttribute]
+		boundAgent = activeAgent
 	}
 	if binding.Durability == subagent.DurabilityDurable {
-		store, ok := r.subagentStore.(subagent.DurableStore)
-		if !ok || store.Durability() != subagent.DurabilityDurable {
+		if r.sessionDurability() != subagent.DurabilityDurable {
 			return nil, &SessionError{Kind: SessionErrorUnsupported, SessionID: sess.ID, Operation: "durable_session"}
 		}
 	}
@@ -226,40 +230,61 @@ func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session,
 			maxIterations = bound.MaxIterations()
 		}
 	}
-	boundSession.AgentName = boundAgent
+	if activeAgent == "" {
+		activeAgent = boundAgent
+	}
+	boundSession.AgentName = activeAgent
 	boundSession.MaxIterations = maxIterations
-	stampAgent := false
-	// Publish the session only after its durable session row exists. Otherwise a
-	// genuinely fresh first submission fails its message insert and older code
-	// misreported that persistence error as mailbox capacity.
+	modelRef, providers, err := r.resolveSessionModelBinding(ctx, boundSession, binding.Model)
+	if err != nil {
+		return nil, err
+	}
+	createdRow := false
 	if r.sessionStore != nil {
 		if _, err := r.sessionStore.GetSession(ctx, sess.ID); errors.Is(err, session.ErrNotFound) {
-			// SQLite's legacy sessions table has no dedicated agent column. Stamp
-			// only a confirmed-new row: existing legacy rows must not become session
-			// rows merely because they are opened through this runtime.
 			boundSession.SetAttribute(SessionAgentAttribute, boundAgent)
-			stampAgent = true
-			if err := r.sessionStore.AddSession(ctx, boundSession.Clone()); err != nil && !errors.Is(err, session.ErrAlreadyExists) {
-				return nil, err
+			if err := r.sessionStore.AddSession(ctx, boundSession.OwnSnapshot()); err != nil {
+				if !errors.Is(err, session.ErrAlreadyExists) {
+					return nil, err
+				}
+			} else {
+				createdRow = true
 			}
 		} else if err != nil {
 			return nil, err
 		}
 	}
-	// Resolve provider identity before publishing the driver. Failed bindings
-	// leave no session behind and a corrected retry can reuse the session ID.
-	modelRef, providers, err := r.resolveSessionModelBinding(ctx, boundSession, binding.Model)
-	if err != nil {
-		return nil, err
+	if existing, ok := r.sessionDrivers.Lookup(sess.ID); ok && !existing.isStopped() {
+		current := existing.session()
+		creation := current.AttributesSnapshot()[SessionAgentAttribute]
+		if creation == "" {
+			creation = current.AgentName
+		}
+		if creation != boundAgent {
+			return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "bind_agent"}
+		}
+		return &sessionHandle{runtime: r, driver: existing, sessionID: sess.ID, agentName: creation}, nil
 	}
-	d, err := r.sessionDrivers.publishInitializedWithBinding(sess, modelRef, providers, boundAgent, maxIterations, stampAgent, true)
+	owned := boundSession.Clone()
+	d, err := r.sessionDrivers.publishInitializedWithBinding(owned, modelRef, providers, activeAgent, maxIterations, false, true)
 	if err != nil {
+		if createdRow {
+			_ = r.sessionStore.DeleteSession(ctx, sess.ID)
+		}
 		return nil, err
 	}
 	return &sessionHandle{runtime: r, driver: d, sessionID: sess.ID, agentName: boundAgent}, nil
 }
 
 func (r *LocalRuntime) createClientChild(ctx context.Context, requested *session.Session, binding SessionBinding) (SessionHandle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if binding.Durability == subagent.DurabilityDurable {
+		if r.sessionDurability() != subagent.DurabilityDurable {
+			return nil, &SessionError{Kind: SessionErrorUnsupported, SessionID: requested.ID, Operation: "durable_session"}
+		}
+	}
 	parentHandle, err := r.SessionByID(binding.ParentSessionID)
 	if err != nil {
 		return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: binding.ParentSessionID, Operation: "create_parent"}
@@ -282,46 +307,10 @@ func (r *LocalRuntime) createClientChild(ctx context.Context, requested *session
 	child.Permissions = session.ClonePermissionsConfig(permissions)
 	child.ID, child.AsyncSubagent = requested.ID, true
 	requested = child
-	rowCreated := false
-	var priorRow *session.Session
-	if r.sessionStore != nil {
-		if existing, getErr := r.sessionStore.GetSession(ctx, requested.ID); errors.Is(getErr, session.ErrNotFound) {
-			requested.SetAttribute(SessionAgentAttribute, requested.AgentName)
-			if err := r.sessionStore.AddSession(ctx, requested.Clone()); err != nil {
-				return nil, err
-			}
-			rowCreated = true
-		} else if getErr != nil {
-			return nil, getErr
-		} else {
-			priorRow = existing.Clone()
-			requested.SetAttribute(SessionAgentAttribute, requested.AgentName)
-			if err := r.sessionStore.UpdateSession(ctx, requested.Clone()); err != nil {
-				return nil, err
-			}
-		}
-	}
-	rollbackRow := func() {
-		if r.sessionStore == nil {
-			return
-		}
-		if rowCreated {
-			_ = r.sessionStore.DeleteSession(context.WithoutCancel(ctx), requested.ID)
-		} else if priorRow != nil {
-			_ = r.sessionStore.UpdateSession(context.WithoutCancel(ctx), priorRow)
-		}
-	}
-	handle, err := r.CreateSession(ctx, requested, SessionBinding{AgentName: ref.Agent, Model: binding.Model, Durability: binding.Durability})
-	if err != nil {
-		rollbackRow()
-		return nil, err
-	}
 	if err := r.subagents.registerIdleChild(parent, parentAgent.Name(), requested, childAgent, ref); err != nil {
-		_ = r.DeleteSession(context.WithoutCancel(ctx), requested.ID)
-		rollbackRow()
 		return nil, err
 	}
-	return handle, nil
+	return r.SessionByID(requested.ID)
 }
 
 // SessionByID resolves a session previously registered with Session.
@@ -355,19 +344,16 @@ func (h *sessionHandle) Todos(ctx context.Context) ([]session.Todo, error) {
 }
 
 func (h *sessionHandle) ID() string        { return h.sessionID }
-func (h *sessionHandle) AgentName() string { return h.agentName }
+func (h *sessionHandle) AgentName() string { return h.driver.AgentName() }
 func (h *sessionHandle) Metadata() SessionMetadata {
-	durability := subagent.DurabilityVolatile
-	if store, ok := h.runtime.subagentStore.(subagent.DurableStore); ok {
-		durability = store.Durability()
-	}
+	durability := h.runtime.sessionDurability()
 	model, available, levels, current := h.metadataModelBinding()
 	modelSwitching := h.runtime.SupportsModelSwitching()
 	forkSkills := false
 	if st := agentSkillsToolset(h.runtime.resolveSessionAgent(h.driver.session())); st != nil {
 		forkSkills = slices.ContainsFunc(st.Skills(), func(skill skills.Skill) bool { return skill.IsFork() })
 	}
-	return SessionMetadata{SessionID: h.sessionID, AgentName: h.agentName, Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
+	return SessionMetadata{SessionID: h.sessionID, AgentName: h.AgentName(), Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
 		AvailableModels: available, Durability: durability,
 		Compaction: true, TargetCompaction: true, ModelSwitching: modelSwitching, ContextInspection: true, LiveSessions: true, SessionEditing: true,
 		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: len(levels) > 0, Todos: true,
@@ -436,11 +422,11 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 	if err := ctx.Err(); err != nil {
 		return Submission{}, err
 	}
-	turnID, err := newSessionRequestID()
+	turnID, err := sessionInputID(h.sessionID, input.RequestID)
 	if err != nil {
 		return Submission{}, err
 	}
-	msg := QueuedMessage{Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID}
+	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID, InputMode: "steer"}
 	queued, err := h.driver.postSteer(ctx, msg)
 	if err != nil {
 		return Submission{}, err
@@ -453,11 +439,11 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 }
 
 func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation string) (Submission, error) {
-	msg := QueuedMessage{Content: input.Content, MultiContent: input.MultiContent, Retry: input.Retry}
+	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, Retry: input.Retry}
 	if err := ctx.Err(); err != nil {
 		return Submission{}, err
 	}
-	requestID, err := newSessionRequestID()
+	requestID, err := sessionInputID(h.sessionID, input.RequestID)
 	if err != nil {
 		return Submission{}, err
 	}
@@ -755,8 +741,8 @@ func (h *sessionHandle) RefreshModelsCatalog(ctx context.Context) error {
 		return err
 	}
 	h.metadataMu.Lock()
+	defer h.metadataMu.Unlock()
 	h.metadataInitialized = false
-	h.metadataMu.Unlock()
 	return nil
 }
 
@@ -865,7 +851,11 @@ func (h *sessionHandle) Cancel(ctx context.Context, turnID string) (CancelResult
 	if err := ctx.Err(); err != nil {
 		return CancelResult{}, err
 	}
-	return CancelResult{SessionID: h.sessionID, TurnID: turnID, Outcome: h.driver.Cancel(turnID)}, nil
+	outcome, err := h.driver.cancelTurn(ctx, turnID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+	return CancelResult{SessionID: h.sessionID, TurnID: turnID, Outcome: outcome}, nil
 }
 
 // Observe atomically registers replay/tail delivery before cloning the
@@ -994,4 +984,12 @@ func (r *LocalRuntime) Drive(ctx context.Context, sess *session.Session) <-chan 
 		return out
 	}
 	return d.Drive(ctx, sess)
+}
+
+func sessionInputID(sessionID, requestID string) (string, error) {
+	if requestID == "" {
+		return newSessionRequestID()
+	}
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + requestID))
+	return hex.EncodeToString(sum[:]), nil
 }

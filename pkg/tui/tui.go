@@ -1150,7 +1150,15 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Dialog lifecycle ---
 
-	case dialog.OpenDialogMsg, dialog.CloseDialogMsg, dialog.ClosePlanDetailMsg:
+	case dialog.OpenDialogMsg:
+		identity := app.InteractionIdentity(msg.OriginatingEvent)
+		if identity.InteractionID != "" && m.application != nil {
+			if head := m.application.Presentation(); head != nil && !head.HasInteraction(identity) {
+				return m, nil
+			}
+		}
+		return m.forwardDialog(msg)
+	case dialog.CloseDialogMsg, dialog.ClosePlanDetailMsg:
 		return m.forwardDialog(msg)
 
 	case dialog.ExitConfirmedMsg:
@@ -1262,11 +1270,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.SendMsg:
 		// Forward send messages to the active content view.
-		// Runtime-authored notes (subagent turn reports, agent-to-agent
-		// relays) can reach this path — e.g. inline-editing a system_info
-		// bubble resends its content — and must never pollute the user's
-		// prompt history.
-		if m.history != nil && !msg.BypassQueue && !subagentpkg.IsSystemInfo(msg.Content) {
+		if m.history != nil && !msg.BypassQueue {
 			_ = m.history.Add(msg.Content)
 		}
 		return m.forwardChat(msg)
@@ -1540,8 +1544,13 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleOpenURL(msg.URL)
 
 	case messages.SessionRuntimeEventMsg:
+		var reconcile tea.Cmd
+		if msg.Projection != nil {
+			reconcile = m.reconcileInteractions(msg.Projection, msg.Event)
+		}
 		m.applyActiveRuntimeEvent(msg.Event)
-		return m.forwardChat(msg)
+		_, cmd := m.forwardChat(msg)
+		return m, tea.Batch(reconcile, cmd)
 
 	// --- Errors ---
 
@@ -1570,6 +1579,13 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // before the raw event or metadata envelope is forwarded to the chat page.
 func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 	switch event := event.(type) {
+	case *app.SessionViewEvent:
+		m.sessionState.SetYoloMode(event.Session.IsToolsApproved())
+		m.sessionState.SetSessionTitle(event.Session.TitleSnapshot())
+	case *app.SessionResetEvent:
+		if event.Snapshot.Session != nil {
+			m.sessionState.SetSessionTitle(event.Snapshot.Session.TitleSnapshot())
+		}
 	case *runtime.TeamInfoEvent:
 		m.sessionState.SetAvailableAgents(event.AvailableAgents)
 		m.sessionState.SetCurrentAgentName(event.CurrentAgent)
@@ -1609,6 +1625,9 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	var runtimeEvent runtime.Event
 	if bridged, ok := inner.(messages.SessionRuntimeEventMsg); ok {
 		runtimeEvent = bridged.Event
+		if bridged.Projection != nil {
+			m.reconcileInteractions(bridged.Projection, bridged.Event)
+		}
 	} else {
 		runtimeEvent, _ = inner.(runtime.Event)
 	}
@@ -1654,6 +1673,16 @@ func (m *appModel) applyPauseEvent(ss *service.SessionState, msg tea.Msg) {
 		return
 	}
 	switch event := msg.(type) {
+	case *app.SessionResetEvent:
+		status := event.Snapshot.Status
+		pause := service.PauseNone
+		if status.PauseArmed {
+			pause = service.PausePausing
+		}
+		if status.Paused {
+			pause = service.PausePaused
+		}
+		ss.SetPauseState(pause)
 	case *runtime.PauseChangedEvent:
 		if event.Paused {
 			if ss.PauseState() == service.PauseNone {
@@ -2281,7 +2310,7 @@ func (m *appModel) replayPendingEvent(sessionID string) tea.Cmd {
 		if first {
 			if stash, ok := m.stashedDialogs[sessionID]; ok {
 				delete(m.stashedDialogs, sessionID)
-				if stash.event == pendingEvent && stash.dialog != nil {
+				if app.InteractionIdentity(stash.event) == app.InteractionIdentity(pendingEvent) && stash.dialog != nil {
 					cmds = append(cmds, core.CmdHandler(dialog.OpenDialogMsg{
 						Model:            stash.dialog,
 						OriginatingEvent: pendingEvent,
@@ -3650,4 +3679,38 @@ func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.V
 		view.ProgressBar = tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 	}
 	return view
+}
+
+// reconcileInteractions preserves live dialog instances (including drafts and
+// nested rejection flows), pruning only exact IDs absent from the shared head.
+func (m *appModel) reconcileInteractions(head *app.PresentationState, event runtime.Event) tea.Cmd {
+	sessionID := head.Status.SessionID
+	if resolved, ok := event.(*runtime.InteractionResolvedEvent); ok {
+		sessionID = resolved.SessionID
+	}
+	if reset, ok := event.(*app.SessionResetEvent); ok {
+		sessionID = reset.GetSessionID()
+	}
+	if sessionID == "" {
+		return nil
+	}
+	for id, stash := range m.stashedDialogs {
+		identity := app.InteractionIdentity(stash.event)
+		if identity.SessionID == sessionID && identity.InteractionID != "" && !head.HasInteraction(identity) {
+			delete(m.stashedDialogs, id)
+		}
+	}
+	_, cmd := m.dialogMgr.Update(dialog.ReconcileInteractionsMsg{SessionID: sessionID, Projection: head})
+	reset, ok := event.(*app.SessionResetEvent)
+	if !ok || m.application == nil || m.application.Session() == nil || m.application.Session().ID != sessionID {
+		return cmd
+	}
+	var cmds []tea.Cmd
+	cmds = append(cmds, cmd)
+	for _, interaction := range reset.Snapshot.Interactions {
+		if interaction.Event != nil {
+			cmds = append(cmds, m.dialogCmdForPendingEvent(interaction.Event, m.sessionState))
+		}
+	}
+	return tea.Sequence(cmds...)
 }

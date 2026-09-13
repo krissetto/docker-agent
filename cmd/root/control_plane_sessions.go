@@ -34,22 +34,22 @@ func (r *controlPlaneRuntime) acquire() (func(), bool) {
 	r.inflight++
 	return func() {
 		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.inflight--
 		if r.inflight == 0 && r.draining {
 			close(r.drained)
 		}
-		r.mu.Unlock()
 	}, true
 }
 
 func (r *controlPlaneRuntime) startDrain() {
 	r.drainOnce.Do(func() {
 		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.draining = true
 		if r.inflight == 0 {
 			close(r.drained)
 		}
-		r.mu.Unlock()
 	})
 }
 
@@ -102,6 +102,7 @@ func (c *controlPlaneSessions) Add(rt runtime.SessionRuntime) func(context.Conte
 	return func(ctx context.Context) error {
 		removeOnce.Do(func() {
 			c.mu.Lock()
+			defer c.mu.Unlock()
 			for i, extra := range c.extras {
 				if extra == registration {
 					c.extras = append(c.extras[:i], c.extras[i+1:]...)
@@ -114,7 +115,6 @@ func (c *controlPlaneSessions) Add(rt runtime.SessionRuntime) func(context.Conte
 				}
 			}
 			registration.startDrain()
-			c.mu.Unlock()
 		})
 		return registration.waitDrain(ctx)
 	}
@@ -125,12 +125,12 @@ func (c *controlPlaneSessions) cache(sessionID string, owner *controlPlaneRuntim
 		return
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	owner.mu.Lock()
+	defer owner.mu.Unlock()
 	if !owner.draining {
 		c.owners[sessionID] = owner
 	}
-	owner.mu.Unlock()
-	c.mu.Unlock()
 }
 
 // owner returns a leased registration. No registry lock is held while runtime
@@ -195,8 +195,8 @@ func (c *controlPlaneSessions) DeleteSession(ctx context.Context, sessionID stri
 		return err
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.owners, sessionID)
-	c.mu.Unlock()
 	return nil
 }
 

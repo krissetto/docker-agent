@@ -2399,10 +2399,7 @@ func (m *model) queueSection(contentWidth int) string {
 // with the agent name accent-colored (brightened while hovered). Rendered as
 // the first row of the Subagents section.
 func (m *model) parentLine() string {
-	nameStyle := styles.AgentAccentStyleFor(m.parentAgent)
-	if m.hoveredParent {
-		nameStyle = nameStyle.Foreground(styles.Brighten(nameStyle.GetForeground(), subagentHoverBrighten))
-	}
+	nameStyle := styles.AgentIdentityStyle(m.parentAgent, m.hoveredParent)
 	return styles.MutedStyle.Render("parent: ") + nameStyle.Render(m.parentAgent)
 }
 
@@ -2449,10 +2446,6 @@ func (m *model) subagentsInfo(contentWidth int) string {
 	return m.renderTab("Subagents", strings.Join(lines, "\n"), contentWidth)
 }
 
-// subagentHoverBrighten is the HSL lightness bump applied to a hovered
-// subagent name's accent color.
-const subagentHoverBrighten = 0.25
-
 // subagentLine renders one swarm row: branch guides start under the parent's
 // agent name, the state glyph sits just after this row's name, and status text
 // is right-aligned. Indentation recedes before the name truncates, so deep
@@ -2460,10 +2453,7 @@ const subagentHoverBrighten = 0.25
 func (m *model) subagentLine(n subagent.Node, guides string, contentWidth int) string {
 	hovered := m.hoveredSubagent == n.ID
 
-	nameStyle := styles.AgentAccentStyleFor(n.Agent)
-	if hovered {
-		nameStyle = nameStyle.Foreground(styles.Brighten(nameStyle.GetForeground(), subagentHoverBrighten))
-	}
+	nameStyle := styles.AgentIdentityStyle(n.Agent, hovered)
 
 	rightText := string(n.State)
 	if hovered {
@@ -2487,7 +2477,7 @@ func (m *model) subagentLine(n subagent.Node, guides string, contentWidth int) s
 	baseName := n.DisplayName()
 	suffix := ""
 	if hovered {
-		suffix = fmt.Sprintf(" (%s)", n.ID)
+		suffix = fmt.Sprintf(" (%s)", subagent.ShortID(string(n.ID)))
 	}
 	name, suffix, guideWidth, showGlyph := subagentLineParts(baseName, suffix, leftBudget, glyphWidth)
 	guides = subagentGuideTail(guides, guideWidth)

@@ -17,6 +17,7 @@ import (
 
 type projectionSession struct {
 	runtime.UnsupportedSessionHandle
+
 	mu           sync.Mutex
 	id           string
 	next         int
@@ -175,10 +176,10 @@ func TestProjectionResetSeedsSnapshotTitle(t *testing.T) {
 	bridged, ok := msg.(SessionEventMsg)
 	require.True(t, ok)
 	require.True(t, bridged.Seed)
-	title, ok := bridged.Event.(*runtime.SessionTitleEvent)
+	reset, ok := bridged.Event.(*SessionResetEvent)
 	require.True(t, ok)
-	assert.Equal(t, sess.ID, title.SessionID)
-	assert.Equal(t, "generated before attach", title.Title)
+	assert.Equal(t, sess.ID, reset.GetSessionID())
+	assert.Equal(t, "generated before attach", reset.Snapshot.Session.TitleSnapshot())
 }
 
 func TestProjectionResetRemovesPendingInputsMissingFromAuthoritativeSnapshot(t *testing.T) {
@@ -188,31 +189,14 @@ func TestProjectionResetRemovesPendingInputsMissingFromAuthoritativeSnapshot(t *
 	a := New(t.Context(), nil, sess, runtime.SessionBinding{}, WithRuntimeServices(&mockRuntime{}))
 	sink := &appProjectionSink{app: a, ctx: t.Context(), sessionID: sess.ID}
 
-	sink.Reset(runtime.SessionSnapshot{PendingInputs: []runtime.PendingInput{{TurnID: "a", Content: "first"}, {TurnID: "b", Content: "second"}}})
-	assertPendingProjection(t, a.events, "pending_user_message_accepted", "a")
-	assertPendingProjection(t, a.events, "pending_user_message_accepted", "b")
+	sink.Reset(runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: sess.ID}, PendingInputs: []runtime.PendingInput{{TurnID: "a", Content: "first"}, {TurnID: "b", Content: "second"}}})
+	first := (<-a.events).(SessionEventMsg)
+	assert.Equal(t, []string{"a", "b"}, first.Projection.Lifecycle.Pending)
 
-	sink.Reset(runtime.SessionSnapshot{PendingInputs: []runtime.PendingInput{{TurnID: "b", Content: "second"}}})
-	assertPendingProjection(t, a.events, "pending_user_message_canceled", "a")
-	assertPendingProjection(t, a.events, "pending_user_message_accepted", "b")
-}
-
-func assertPendingProjection(t *testing.T, in <-chan any, wantType, wantTurn string) {
-	t.Helper()
-	msg := <-in
-	bridged, ok := msg.(SessionEventMsg)
-	require.True(t, ok)
-	assert.Equal(t, wantTurn, bridged.TurnID)
-	switch event := bridged.Event.(type) {
-	case *runtime.PendingUserMessageAcceptedEvent:
-		assert.Equal(t, wantType, event.Type)
-	case *runtime.PendingUserMessagePromotedEvent:
-		assert.Equal(t, wantType, event.Type)
-	case *runtime.PendingUserMessageCanceledEvent:
-		assert.Equal(t, wantType, event.Type)
-	default:
-		t.Fatalf("unexpected projected event %T", event)
-	}
+	sink.Reset(runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: sess.ID}, PendingInputs: []runtime.PendingInput{{TurnID: "b", Content: "second"}}})
+	replacement := (<-a.events).(SessionEventMsg)
+	assert.Equal(t, []string{"b"}, replacement.Projection.Lifecycle.Pending)
+	assert.Len(t, replacement.Event.(*SessionResetEvent).Snapshot.PendingInputs, 1)
 }
 
 func emitProjection(out chan<- runtime.SessionEvent, requestID string, events ...runtime.Event) {

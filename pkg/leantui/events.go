@@ -6,25 +6,89 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // handleEvent applies a single runtime event emitted by the App to the model,
 // updating the conversation, tool state, status footer, or busy state.
 func (m *model) handleEvent(ctx context.Context, ev any) {
-	turnID := ""
 	seed := false
+	shared := false
 	if bridged, ok := ev.(app.SessionEventMsg); ok {
-		turnID = bridged.TurnID
 		seed = bridged.Seed
 		ev = bridged.Event
+		if bridged.Projection != nil {
+			m.lifecycle = bridged.Projection.Lifecycle
+			shared = true
+			if confirm := m.screen.Confirm; confirm != nil && !bridged.Projection.HasInteraction(app.InteractionKey{SessionID: confirm.SessionID, InteractionID: confirm.RequestID}) {
+				m.screen.Confirm = nil
+			}
+		}
 	}
 	switch e := ev.(type) {
+	case *runtime.SubagentTreeEvent:
+		if m.inputReferences == nil {
+			m.inputReferences = subagentindex.New()
+		}
+		m.inputReferences.Reset(e.Snapshot)
+		m.screen.Transcript.InvalidateInputBlocks()
+	case *app.SessionViewEvent:
+		if m.sessionState != nil {
+			m.sessionState.SetYoloMode(e.Session.IsToolsApproved())
+			m.sessionState.SetSessionTitle(e.Session.TitleSnapshot())
+		}
+	case *app.SessionResetEvent:
+		m.lifecycle = lifecycle.FromSnapshot(e.Snapshot)
+		m.screen.Transcript.Clear()
+		m.inputReplay.Reset(e.Snapshot.Session)
+		m.pendingUsers = nil
+		m.queue = nil
+		if e.Snapshot.Session != nil {
+			m.loadSessionTranscript(e.Snapshot.Session)
+		}
+		m.pendingUsers = nil
+		for _, input := range e.Snapshot.PendingInputs {
+			if !lifecycle.IsUserInput(input.InputOrigin) {
+				continue
+			}
+			kind := ui.PendingUserFollowUp
+			if input.InputMode == "steer" {
+				kind = ui.PendingUserSteer
+			}
+			m.addPendingUser(input.Content, input.Content, input.TurnID, kind)
+		}
+		m.busy = e.Snapshot.Status.State == runtime.SessionStateRunning || e.Snapshot.Status.State == runtime.SessionStateQueued || e.Snapshot.Status.State == runtime.SessionStateCancelling
+		if m.sessionState != nil {
+			pause := service.PauseNone
+			if e.Snapshot.Status.PauseArmed {
+				pause = service.PausePausing
+			}
+			if e.Snapshot.Status.Paused {
+				pause = service.PausePaused
+			}
+			m.sessionState.SetPauseState(pause)
+		}
+		for _, interaction := range e.Snapshot.Interactions {
+			if confirmation, ok := interaction.Event.(*runtime.ToolCallConfirmationEvent); ok {
+				if current := m.screen.Confirm; current == nil || current.SessionID != confirmation.SessionID || current.RequestID != confirmation.RequestID {
+					m.handleEvent(ctx, confirmation)
+				}
+			}
+		}
+	case *runtime.InteractionResolvedEvent:
+		if current := m.screen.Confirm; current != nil && current.SessionID == e.SessionID && current.RequestID == e.InteractionID {
+			m.screen.Confirm = nil
+		}
+
 	case msgtypes.SendMsg:
 		if e.BypassQueue {
 			m.submit(ctx, e.Content, submitOptions{busyMode: busySubmitSteer})
@@ -32,17 +96,39 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.submitFollowUp(ctx, e.Content)
 		}
 	case *runtime.StreamStartedEvent:
-		m.lifecycle, _ = m.lifecycle.Apply(e)
+		if !shared {
+			m.lifecycle, _ = m.lifecycle.Apply(e)
+		}
 		m.ownedSkillStream = m.ownedSkillOperation != ""
 		m.busy = true
 		m.trackStreamStarted(e.SessionID)
+	case *runtime.PendingUserMessageAcceptedEvent:
+		if !shared {
+			m.lifecycle, _ = m.lifecycle.Apply(e)
+		}
+		if lifecycle.IsUserInput(e.InputOrigin) {
+			kind := ui.PendingUserFollowUp
+			if e.InputMode == "steer" {
+				kind = ui.PendingUserSteer
+			}
+			m.addPendingUser(e.Message, e.Message, e.TurnID, kind)
+		}
+	case *runtime.PendingUserMessagePromotedEvent:
+		if !shared {
+			m.lifecycle, _ = m.lifecycle.Apply(e)
+		}
+		m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, e.TurnID, e.SessionPosition)
 	case *runtime.PendingUserMessageCanceledEvent:
+		m.inputReplay.Withdraw(e.SessionPosition)
+		m.lifecycle.Pending = slices.DeleteFunc(slices.Clone(m.lifecycle.Pending), func(id string) bool { return id == e.TurnID })
 		m.pendingUsers = slices.DeleteFunc(m.pendingUsers, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
 		m.queue = slices.DeleteFunc(m.queue, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
 	case *runtime.UserMessageEvent:
-		m.handleUserMessageEvent(e, turnID)
+		m.handleUserMessageEvent(e, e.TurnID)
 	case *runtime.StreamStoppedEvent:
-		m.lifecycle, _ = m.lifecycle.Apply(e)
+		if !shared {
+			m.lifecycle, _ = m.lifecycle.Apply(e)
+		}
 		m.trackStreamStopped()
 		if m.lifecycle.Depth() == 0 {
 			m.handleStreamStopped(ctx)
@@ -83,6 +169,10 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 		if !seed {
 			m.addNotice("⏸ ", "Paused", ui.StMuted())
+		}
+	case *runtime.MessageAddedEvent:
+		if e.CommittedRole() == chat.MessageRoleAssistant {
+			m.screen.Transcript.CommitAssistant(e.GetAgentName(), e.CommittedToolCallIDs())
 		}
 	case *runtime.AgentChoiceReasoningEvent:
 		m.screen.Transcript.AppendReasoning(e.Content)
@@ -140,7 +230,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.TeamInfoEvent:
 		m.applyTeamInfo(ctx, e)
 	case *runtime.SessionCompactionEvent:
-		m.lifecycle, _ = m.lifecycle.Apply(e)
+		if !shared {
+			m.lifecycle, _ = m.lifecycle.Apply(e)
+		}
 		m.handleSessionCompaction(ctx, e)
 	case *runtime.ErrorEvent:
 		m.screen.Transcript.FlushPending()
@@ -162,21 +254,21 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 }
 
 func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent, turnID string) {
-	if m.consumeIgnoredUserEcho(e.Message) {
-		return
+	m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, turnID, e.SessionPosition)
+}
+
+func (m *model) handleInputEcho(origin session.InputOrigin, mode, senderName, senderID, content, turnID string, position int) {
+	display := content
+	for _, kind := range []ui.PendingUserKind{ui.PendingUserSteer, ui.PendingUserFollowUp} {
+		if pending, ok := m.consumePendingUser(kind, turnID); ok {
+			display = pending.Display
+		}
 	}
-	if pending, ok := m.consumePendingUser(ui.PendingUserSteer, turnID, e.Message); ok {
-		m.screen.Transcript.FlushPending()
-		m.addUserEcho(pending.Display)
-		return
-	}
-	if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, turnID, e.Message); ok {
-		m.screen.Transcript.FlushPending()
-		m.addUserEcho(pending.Display)
+	if !m.inputReplay.Consume(turnID, position) {
 		return
 	}
 	m.screen.Transcript.FlushPending()
-	m.addUserEcho(e.Message)
+	m.addInputEcho(origin, mode, senderName, senderID, display)
 }
 
 func (m *model) handleStreamStopped(ctx context.Context) {
@@ -217,11 +309,16 @@ func (m *model) finishBusy(ctx context.Context) bool {
 		next := m.queue[0]
 		m.queue[0] = ui.PendingUserMessage{}
 		m.queue = m.queue[1:]
-		if pending, ok := m.consumePendingUser(ui.PendingUserFollowUp, next.TurnID, next.Content); ok {
-			next.Display = pending.Display
+		if next.TurnID != "" {
+			m.consumePendingUser(ui.PendingUserFollowUp, next.TurnID)
+		} else {
+			for i, pending := range m.pendingUsers {
+				if pending.TurnID == "" && pending.Kind == ui.PendingUserFollowUp {
+					m.pendingUsers = slices.Delete(m.pendingUsers, i, i+1)
+					break
+				}
+			}
 		}
-		m.addUserEcho(next.Display)
-		m.ignoreUserEcho(next.Content)
 		m.startRun(ctx, next.Content, nil)
 		return true
 	}

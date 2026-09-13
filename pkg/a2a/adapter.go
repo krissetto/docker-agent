@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/servesafety"
@@ -146,15 +147,9 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			yield(nil, fmt.Errorf("bind A2A session: %w", err))
 			return
 		}
-		observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		ownedTurn, err := turn.Start(ctx, handle, runtime.TurnInput{Content: message})
 		if err != nil {
-			yield(nil, fmt.Errorf("observe A2A session: %w", err))
-			return
-		}
-		submission, err := handle.Submit(ctx, runtime.TurnInput{Content: message})
-		if err != nil {
-			observation.Cancel()
-			yield(nil, fmt.Errorf("submit A2A message: %w", err))
+			yield(nil, fmt.Errorf("start A2A message: %w", err))
 			return
 		}
 
@@ -178,7 +173,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 
 		// Convert docker agent events to ADK events and yield them
 
-		termination := runtimeclient.ConsumeTurn(ctx, observation, submission.TurnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 			event := envelope.Event
 			if ctx.Ended() {
 				slog.Debug("Invocation ended, stopping agent", "agent", agentName)

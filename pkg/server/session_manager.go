@@ -70,7 +70,6 @@ func (s *sessionRestoreLockSet) length() int {
 type activeRuntimes struct {
 	handle   runtime.SessionHandle
 	registry runtime.SessionRuntime
-	session  *session.Session
 }
 
 type SessionManager struct {
@@ -218,10 +217,14 @@ func (sm *SessionManager) WaitReady(ctx context.Context) error {
 
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
-	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.session != nil {
-		return rs.session.Clone(), nil
+	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.handle != nil {
+		return rs.handle.Snapshot(ctx)
 	}
-	return sm.sessionStore.GetSession(ctx, id)
+	sess, err := sm.sessionStore.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return sess.Clone(), nil
 }
 
 // ErrInvalidWorkingDir marks a rejected client-supplied working_dir in
@@ -233,6 +236,28 @@ var ErrInvalidWorkingDir = errors.New("invalid working directory")
 
 // CreateSession creates a new session from a template.
 func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *session.Session) (*session.Session, error) {
+	sess, err := sm.prepareSession(sessionTemplate)
+	if err != nil {
+		return nil, err
+	}
+	if agentName := sess.AttributesSnapshot()[sessionAgentAttribute]; agentName != "" {
+		registry, _, err := sm.sessionRegistryForCreate(sess.AttributesSnapshot()[sessionSourceAttribute])
+		if err != nil {
+			return nil, err
+		}
+		handle, err := sm.createHTTPSession(ctx, registry, sess, runtime.SessionBinding{AgentName: agentName})
+		if err != nil {
+			return nil, err
+		}
+		return handle.Snapshot(ctx)
+	}
+	if err := sm.sessionStore.AddSession(ctx, sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
+func (sm *SessionManager) prepareSession(sessionTemplate *session.Session) (*session.Session, error) {
 	var opts []session.Opt
 	opts = append(opts,
 		session.WithMaxIterations(sessionTemplate.MaxIterations),
@@ -307,10 +332,6 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	}
 	if len(sessionTemplate.CustomModelsUsed) > 0 {
 		sess.CustomModelsUsed = append([]string(nil), sessionTemplate.CustomModelsUsed...)
-	}
-
-	if err := sm.sessionStore.AddSession(ctx, sess); err != nil {
-		return nil, err
 	}
 
 	return sess, nil
@@ -394,9 +415,19 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
 
-	parent, err := sm.sessionStore.GetSession(ctx, sessionID)
+	parent, err := sm.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	if parent.ParentID != "" || parent.AttributesSnapshot()[sessionAgentAttribute] != "" {
+		handle, err := sm.Handle(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		parent, err = handle.Snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	itemIndex, err := userMessageOrdinalToItemIndex(parent, userMessageOrdinal)
@@ -421,6 +452,24 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 	}
 	forked.SetTitle(session.NextForkTitle(parent.TitleSnapshot(), siblingTitles))
 
+	if parent.ParentID != "" || parent.AttributesSnapshot()[sessionAgentAttribute] != "" {
+		handle, err := sm.Handle(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		registry, _, err := sm.sessionRegistryForCreate(parent.AttributesSnapshot()[sessionSourceAttribute])
+		if err != nil {
+			return nil, err
+		}
+		if active, ok := sm.runtimeSessions.Load(handle.ID()); ok {
+			registry = active.registry
+		}
+		created, err := sm.createHTTPSession(ctx, registry, forked, runtime.SessionBinding{AgentName: handle.AgentName()})
+		if err != nil {
+			return nil, err
+		}
+		return created.Snapshot(ctx)
+	}
 	if err := sm.sessionStore.AddSession(ctx, forked); err != nil {
 		return nil, err
 	}
@@ -488,14 +537,19 @@ func (sm *SessionManager) GetSessions(ctx context.Context) ([]*session.Session, 
 // DeleteSession deletes a session by ID. It cancels the runtime context and
 // removes the session from all registries.
 func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) error {
+	if rs, ok := sm.runtimeSessions.Load(sessionID); ok && rs.registry != nil {
+		if err := rs.registry.DeleteSession(ctx, sessionID); err != nil {
+			return err
+		}
+		sm.runtimeSessions.Delete(sessionID)
+		return nil
+	}
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	registry := sm.sessionRegistry
-	if rs, ok := sm.runtimeSessions.Load(sessionID); ok {
-		registry = rs.registry
-	} else if source := sess.AttributesSnapshot()[sessionSourceAttribute]; source != "" {
+	if source := sess.AttributesSnapshot()[sessionSourceAttribute]; source != "" {
 		registry = sm.sessionRegistries[source]
 		if registry == nil {
 			return &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: sessionID, Operation: "source"}
@@ -506,6 +560,10 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 			return err
 		}
 		sm.runtimeSessions.Delete(sessionID)
+		return nil
+	}
+	if sess.ParentID != "" || sess.AttributesSnapshot()[sessionAgentAttribute] != "" {
+		return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sessionID, Operation: "delete"}
 	}
 	if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
 		return err
@@ -527,120 +585,81 @@ var (
 // blanket approval, and an explicit Balanced/Strict choice survives a
 // toggle round-trip.
 func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID string) error {
-	sm.mux.Lock()
-	rt, active := sm.runtimeSessions.Load(sessionID)
-	if active && rt.session != nil {
-		sess := rt.session
-		sm.mux.Unlock()
-		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
-			sess.ToggleYolo()
-		}, func() {
-			sess.ToggleYolo()
-		})
-	}
-	defer sm.mux.Unlock()
-
-	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	sess.ToggleYolo()
-	return sm.sessionStore.UpdateSession(ctx, sess)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "policy", ToggleToolsApproved: true})
 }
 
-// SetSessionSafetyPolicy updates the SafetyPolicy for a session.
 func (sm *SessionManager) SetSessionSafetyPolicy(ctx context.Context, sessionID string, policy session.SafetyPolicy) error {
 	if !policy.IsValid() {
 		return fmt.Errorf("invalid safety_policy: %q", policy)
 	}
-	sm.mux.Lock()
-	rt, active := sm.runtimeSessions.Load(sessionID)
-	if active && rt.session != nil {
-		sess := rt.session
-		sm.mux.Unlock()
-		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
-			sess.SetSafetyPolicy(policy)
-		}, nil)
-	}
-	defer sm.mux.Unlock()
-
-	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	sess.SetSafetyPolicy(policy)
-	return sm.sessionStore.UpdateSession(ctx, sess)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "policy", SafetyPolicy: &policy})
 }
 
-// UpdateSessionPermissions updates the permissions for a session.
 func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionID string, perms *session.PermissionsConfig) error {
-	sm.mux.Lock()
-	rt, active := sm.runtimeSessions.Load(sessionID)
-	if active && rt.session != nil {
-		sess := rt.session
-		sm.mux.Unlock()
-		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
-			sess.SetPermissions(perms)
-		}, nil)
-	}
-	defer sm.mux.Unlock()
-
-	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	sess.SetPermissions(perms)
-	return sm.sessionStore.UpdateSession(ctx, sess)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "permissions", Permissions: perms})
 }
 
-func (sm *SessionManager) updateActiveSession(ctx context.Context, sessionID string, rt *activeRuntimes, sess *session.Session, update, rollback func()) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-	current, active := sm.runtimeSessions.Load(sessionID)
-	if !active || current != rt || rt.session != sess {
-		return ErrSessionNotRunning
-	}
-	if update != nil {
-		update()
-	}
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		if rollback != nil {
-			rollback()
-		}
-		return err
-	}
-	return nil
-}
-
-// UpdateSessionTitle updates the title for a session.
-// If the session is actively running, it also updates the in-memory session
-// object to prevent subsequent runtime saves from overwriting the title.
 func (sm *SessionManager) UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
-	sm.mux.Lock()
-	rt, active := sm.runtimeSessions.Load(sessionID)
-	if active && rt.session != nil {
-		sess := rt.session
-		sm.mux.Unlock()
-		slog.DebugContext(ctx, "Updated title for active session", "session_id", sessionID, "title", title)
-		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
-			sess.SetTitle(title)
-		}, nil)
-	}
-	defer sm.mux.Unlock()
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "title", Title: title})
+}
 
-	// Session is not actively running, load from store and update
-	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
+// Only unbound historical rows belong to the catalog editor. Canonical rows
+// always route through their runtime, even when currently unloaded.
+func (sm *SessionManager) editSession(ctx context.Context, id string, edit runtime.SessionEdit) error {
+	if handle := sm.loadedSession(id); handle != nil {
+		_, err := handle.Edit(ctx, edit)
+		return err
+	}
+	sess, err := sm.sessionStore.GetSession(ctx, id)
 	if err != nil {
 		return err
 	}
-
-	sess.SetTitle(title)
+	if sess.ParentID != "" || sess.AttributesSnapshot()[sessionAgentAttribute] != "" {
+		handle, err := sm.Handle(ctx, id)
+		if err != nil {
+			return err
+		}
+		_, err = handle.Edit(ctx, edit)
+		return err
+	}
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	// Reload under the catalog lock; never modify a borrowed store pointer.
+	sess, err = sm.sessionStore.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
+	if sm.loadedSession(id) != nil || sess.ParentID != "" || sess.AttributesSnapshot()[sessionAgentAttribute] != "" {
+		return ErrSessionBusy
+	}
+	sess = sess.Clone()
+	switch edit.Kind {
+	case "policy":
+		if edit.ToggleToolsApproved {
+			sess.ToggleYolo()
+		}
+		if edit.SafetyPolicy != nil {
+			sess.SetSafetyPolicy(*edit.SafetyPolicy)
+		}
+		if edit.ToolsApproved != nil {
+			sess.SetToolsApproved(*edit.ToolsApproved)
+		}
+	case "permissions":
+		sess.SetPermissions(edit.Permissions)
+	case "title":
+		sess.SetTitle(edit.Title)
+	case "message":
+		return sm.sessionStore.UpdateMessage(ctx, id, edit.MessageIndex, edit.Message)
+	case "summary":
+		return sm.sessionStore.AddSummary(ctx, id, *edit.Summary)
+	case "tokens":
+		return sm.sessionStore.UpdateSessionTokens(ctx, id, edit.InputTokens, edit.OutputTokens, edit.Cost)
+	default:
+		return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: id, Operation: "edit"}
+	}
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 
-// generateTitle generates a title for a session using the sessiontitle package.
-// The generated title is stored in the session and persisted to the store.
-// A SessionTitleEvent is emitted to notify clients.
 func (sm *SessionManager) sourceLoadError(agentFilename string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
@@ -744,41 +763,19 @@ func (sm *SessionManager) GetAgentToolCount(ctx context.Context, agentFilename, 
 //
 // Rejected with ErrSessionBusy while the session is starting or running.
 func (sm *SessionManager) UpdateMessage(ctx context.Context, sessionID, msgID string, msg *session.Message) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	if rt, ok := sm.runtimeSessions.Load(sessionID); ok {
-		status, err := rt.handle.Status(ctx)
-		if err != nil {
-			return err
-		}
-		if status.State == runtime.SessionStateRunning || status.State == runtime.SessionStateQueued {
-			return ErrSessionBusy
-		}
-	}
-
 	msgPos, err := strconv.ParseInt(msgID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid message ID %q: %w", msgID, err)
 	}
-
-	return sm.sessionStore.UpdateMessage(ctx, sessionID, msgPos, msg)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "message", MessageIndex: msgPos, Message: msg})
 }
 
-// AddSummary adds a summary to a session.
 func (sm *SessionManager) AddSummary(ctx context.Context, sessionID string, item session.Item) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	return sm.sessionStore.AddSummary(ctx, sessionID, item)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "summary", Summary: &item})
 }
 
-// UpdateSessionTokens updates the token counts for a session.
 func (sm *SessionManager) UpdateSessionTokens(ctx context.Context, sessionID string, inputTokens, outputTokens int64, cost float64) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	return sm.sessionStore.UpdateSessionTokens(ctx, sessionID, inputTokens, outputTokens, cost)
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "tokens", InputTokens: inputTokens, OutputTokens: outputTokens, Cost: cost})
 }
 
 // ErrModelSwitchingNotSupported is returned when the runtime backing a

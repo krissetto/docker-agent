@@ -168,7 +168,9 @@ func TestForWorkspace_SbxBackend(t *testing.T) {
 }
 
 func TestExtraWorkspace(t *testing.T) {
-	t.Parallel()
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+
 	t.Run("empty ref", func(t *testing.T) {
 		assert.Empty(t, sandbox.ExtraWorkspace("/workspace", ""))
 	})
@@ -215,6 +217,17 @@ func TestExtraWorkspace(t *testing.T) {
 		assert.Equal(t, agentDir, got)
 	})
 
+	t.Run("default alias points to file outside workspace", func(t *testing.T) {
+		agentDir := t.TempDir()
+		agent := filepath.Join(agentDir, "default.yaml")
+		require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
+		writeAlias(t, "default", agent)
+
+		wd := t.TempDir()
+		assert.Equal(t, agentDir, sandbox.ExtraWorkspace(wd, "default"))
+		assert.Equal(t, agentDir, sandbox.ExtraWorkspace(wd, ""))
+	})
+
 	t.Run("alias points to OCI reference", func(t *testing.T) {
 		// OCI-backed aliases have nothing on the host filesystem to
 		// mount; ExtraWorkspace returns "".
@@ -231,8 +244,9 @@ func writeAlias(t *testing.T, name, path string) {
 	t.Helper()
 
 	dir := t.TempDir()
+	previous := paths.GetConfigDir()
 	paths.SetConfigDir(dir)
-	t.Cleanup(func() { paths.SetConfigDir("") })
+	t.Cleanup(func() { paths.SetConfigDir(previous) })
 
 	content := "aliases:\n  " + name + ":\n    path: " + path + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600))

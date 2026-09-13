@@ -3,9 +3,10 @@ package runtime
 import (
 	"testing"
 
-	"github.com/docker/docker-agent/pkg/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func TestSessionDriverAdmissionParity(t *testing.T) {

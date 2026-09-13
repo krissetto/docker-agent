@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host/lifecycle"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -122,11 +123,10 @@ func (b *localBackend) CreateSession(ctx context.Context, loaded *teamloader.Loa
 		return nil, nil, nil, nil, err
 	}
 
-	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+	supervisor := lifecycle.OwnRuntime(runtime.NewSessionRuntimeSupervisor(rt), loaded.Team)
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
-			stopToolSets(ctx, loaded.Team)
 			if err := supervisor.Shutdown(context.WithoutCancel(ctx)); err != nil {
 				slog.ErrorContext(ctx, "Failed to shut down session runtime", "error", err)
 			}

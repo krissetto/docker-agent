@@ -8,8 +8,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	chatmsg "github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -63,8 +66,21 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	if bridged, ok := msg.(msgtypes.SessionRuntimeEventMsg); ok {
 		msg = bridged.Event
 		seed = bridged.Seed
+		if bridged.Projection != nil {
+			p.lifecycle = bridged.Projection.Lifecycle
+			p.sharedProjection = true
+			defer func() { p.sharedProjection = false }()
+		}
 	}
 	switch msg := msg.(type) {
+	case *app.SessionViewEvent:
+		p.sessionState.SetYoloMode(msg.Session.IsToolsApproved())
+		p.sessionState.SetSessionTitle(msg.Session.TitleSnapshot())
+		return true, nil
+	case *app.SessionResetEvent:
+		return true, p.resetProjection(msg.Snapshot)
+	case *runtime.InteractionResolvedEvent:
+		return true, nil
 	// ===== Error and Warning Events =====
 	case *runtime.SkillOperationEvent:
 		if msg.OperationID != p.ownedSkillOperation {
@@ -109,17 +125,24 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Content Events =====
 	case *runtime.PendingUserMessageAcceptedEvent:
+		p.applyLifecycle(msg)
+		if !lifecycle.IsUserInput(msg.InputOrigin) {
+			return true, nil
+		}
 		for _, queued := range p.messageQueue {
 			if queued.turnID == msg.TurnID {
 				return true, nil
 			}
 		}
-		p.lifecycle, _ = p.lifecycle.Apply(msg)
 		p.messageQueue = append(p.messageQueue, queuedMessage{turnID: msg.TurnID, content: msg.Message})
 		p.syncQueueToSidebar()
 		return true, nil
 
 	case *runtime.PendingUserMessageCanceledEvent:
+		if !p.sharedProjection {
+			p.lifecycle.Pending = slices.DeleteFunc(slices.Clone(p.lifecycle.Pending), func(id string) bool { return id == msg.TurnID })
+		}
+		p.inputReplay.Withdraw(msg.SessionPosition)
 		p.messages.RemovePendingSessionPosition(msg.SessionPosition)
 		if msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
 			p.snapshotEnd--
@@ -129,39 +152,44 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, nil
 
 	case *runtime.PendingUserMessagePromotedEvent:
-		p.lifecycle, _ = p.lifecycle.Apply(msg)
+		p.applyLifecycle(msg)
 		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
 		p.syncQueueToSidebar()
-		p.showStartupBanner = false
-		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
-
-	case *runtime.UserMessageEvent:
-		p.showStartupBanner = false
-		// Attach protocol: a position inside the transcript snapshot is already
-		// on screen — the buffered event would duplicate it.
-		if p.snapshotEnd > 0 && msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+		if !p.inputReplay.Consume(msg.TurnID, msg.SessionPosition) {
 			return true, nil
 		}
-		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+		input := session.UserMessage(msg.Message, msg.MultiContent...)
+		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
+		if lifecycle.VisibleTranscriptMessage(input) {
+			p.showStartupBanner = false
+		}
+		return true, p.messages.AddInputMessage(input, msg.SessionPosition)
+
+	case *runtime.UserMessageEvent:
+		// Attach protocol: a position inside the transcript snapshot is already
+		// on screen — the buffered event would duplicate it.
+		if msg.TurnID == "" && p.snapshotEnd > 0 && msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+			return true, nil
+		}
+		if !p.inputReplay.Consume(msg.TurnID, msg.SessionPosition) {
+			return true, nil
+		}
+		input := session.UserMessage(msg.Message, msg.MultiContent...)
+		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
+		if lifecycle.VisibleTranscriptMessage(input) {
+			p.showStartupBanner = false
+		}
+		return true, p.messages.AddInputMessage(input, msg.SessionPosition)
 
 	case *runtime.MessageAddedEvent:
-		// Attach protocol: each committed assistant message settles the
-		// streamed tail exactly. A commit inside the snapshot means the
-		// streamed bubbles duplicate a message already on screen; a commit
-		// after it finalizes them in place with the canonical content. Emitted
-		// synchronously after the session commit and delivered in order, so
-		// this is exact with no timing assumptions. Root tabs render from
-		// their own run stream and need none of this.
-		if p.app.AttachedSubagent() == nil || msg.Message == nil || msg.Message.Message.Role != chatmsg.MessageRoleAssistant {
-			return true, p.handleMessageAdded(msg)
+		if msg.CommittedRole() != chatmsg.MessageRoleAssistant {
+			return true, nil
 		}
-		alreadyShown := msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd
-		finalized := p.messages.FinalizeStreamedAssistant(
-			msg.GetAgentName(), msg.Message.Message.Content, msg.Message.Message.ReasoningContent, alreadyShown,
-		)
-		if alreadyShown {
-			return true, finalized
+		// Snapshot-covered commits must not settle the current, newer live tail.
+		if msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
+			return true, nil
 		}
+		finalized := p.messages.CompleteAssistant(msg)
 		return true, tea.Batch(finalized, p.handleMessageAdded(msg))
 
 	case *runtime.AgentChoiceEvent:
@@ -235,10 +263,11 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		// Keep the id → name index fresh so subagent tool calls can be
 		// attributed by name while still running.
 		p.subagents.Reset(msg.Snapshot)
+		p.messages.RefreshInputReferences()
 		return true, p.forwardToSidebar(msg)
 
 	case *runtime.SessionCompactionEvent:
-		p.lifecycle, _ = p.lifecycle.Apply(msg)
+		p.applyLifecycle(msg)
 		// The sidebar tracks the started/completed pair to drive its
 		// "compacting…" gauge state (it ignores sessions it is not
 		// currently displaying).
@@ -364,28 +393,6 @@ func subSessionCompactionNotice(msg *runtime.SessionCompactionEvent) tea.Cmd {
 // This handler performs side effects only and returns no command.
 func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 	p.sidebar.SetTokenUsage(msg)
-	if msg.Usage != nil {
-		if sess := p.app.Session(); sess != nil {
-			// Only update the parent session's token counts when the event
-			// belongs to this session. Sub-sessions emit their own
-			// TokenUsageEvents with a different SessionID; writing those
-			// values into the parent would overwrite the parent's own
-			// context-tracking counters.
-			if msg.SessionID == "" || msg.SessionID == sess.ID {
-				sess.SetUsage(msg.Usage.InputTokens, msg.Usage.OutputTokens)
-			}
-
-			// Track per-message usage for /cost dialog
-			if msg.Usage.LastMessage != nil {
-				sess.AddMessageUsageRecord(
-					msg.AgentName,
-					msg.Usage.LastMessage.Model,
-					msg.Usage.LastMessage.Cost,
-					&msg.Usage.LastMessage.Usage,
-				)
-			}
-		}
-	}
 }
 
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed bool) tea.Cmd {
@@ -393,7 +400,7 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent, seed boo
 
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
 	p.streamCancelled = false
-	p.lifecycle, _ = p.lifecycle.Apply(msg)
+	p.applyLifecycle(msg)
 	p.streamStartTime = time.Now()
 	spinnerCmd := p.setWorking(true)
 	var pendingCmd tea.Cmd
@@ -466,7 +473,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		"has_content", p.hasReceivedAssistantContent,
 		"stream_depth", p.lifecycle.Depth())
 
-	p.lifecycle, _ = p.lifecycle.Apply(msg)
+	p.applyLifecycle(msg)
 
 	sidebarCmd := p.forwardToSidebar(msg)
 
@@ -642,4 +649,49 @@ func isSuccessfulStop(reason string) bool {
 	default:
 		return false
 	}
+}
+
+func (p *chatPage) applyLifecycle(event runtime.Event) {
+	if !p.sharedProjection {
+		p.lifecycle, _ = p.lifecycle.Apply(event)
+	}
+}
+
+func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
+	p.lifecycle = lifecycle.FromSnapshot(snapshot)
+	p.inputReplay.Reset(snapshot.Session)
+	p.messageQueue = nil
+	for _, input := range snapshot.PendingInputs {
+		if !lifecycle.IsUserInput(input.InputOrigin) {
+			continue
+		}
+		p.messageQueue = append(p.messageQueue, queuedMessage{turnID: input.TurnID, content: input.Content})
+	}
+	p.syncQueueToSidebar()
+	var cmds []tea.Cmd
+	if snapshot.Session != nil {
+		p.sessionState.SetYoloMode(snapshot.Session.IsToolsApproved())
+		p.sessionState.SetSessionTitle(snapshot.Session.TitleSnapshot())
+		restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(snapshot.Session)
+		if resetter, ok := p.messages.(interface {
+			ResetFromSession(sess *session.Session, media map[int][]types.AssistantMedia) tea.Cmd
+		}); ok {
+			cmds = append(cmds, resetter.ResetFromSession(snapshot.Session, restoredMedia))
+		} else {
+			cmds = append(cmds, p.messages.LoadFromSession(snapshot.Session, restoredMedia))
+		}
+		p.sidebar.LoadFromSession(snapshot.Session)
+		p.snapshotEnd = snapshot.TranscriptPosition
+		if snapshot.Session.MessageCount() > 0 {
+			p.showStartupBanner = false
+		}
+		cmds = append(cmds, p.resolveGeneratedMediaCmd(mediaRequests))
+	}
+	running := snapshot.Status.State == runtime.SessionStateRunning || snapshot.Status.State == runtime.SessionStateQueued || snapshot.Status.State == runtime.SessionStateCancelling
+	p.streamCancelled = false
+	cmds = append(cmds, p.setWorking(running))
+	if !running {
+		p.messages.RemoveSpinner()
+	}
+	return tea.Batch(cmds...)
 }

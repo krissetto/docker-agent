@@ -8,6 +8,7 @@ package tool
 import (
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	subagentpkg "github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
@@ -122,8 +123,10 @@ func resolve(key string) (Builder, bool) {
 // At each tier a registered custom renderer wins over the built-in one.
 func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, indexes ...*subagentindex.Index) layout.Model {
 	var lookup subagenttool.NameLookup
+	var reference subagenttool.ReferenceLookup
 	if len(indexes) > 0 && indexes[0] != nil {
 		lookup = indexes[0].Name
+		reference = func(id subagentpkg.NodeID) lifecycle.InputReference { return indexes[0].Resolve("", string(id), "") }
 	}
 	name := msg.ToolCall.Function.Name
 	if b, ok := customBuilder(name); ok {
@@ -131,13 +134,13 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 	}
 	switch name {
 	case subagentpkg.ToolSpawnSubagent:
-		return withInlineImages(subagenttool.NewSpawn(ar, msg, sessionState, lookup), msg.Images, sessionState)
+		return withInlineImages(subagenttool.NewSpawn(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
 	case subagentpkg.ToolSendMessage:
-		return withInlineImages(subagenttool.NewSend(ar, msg, sessionState, lookup), msg.Images, sessionState)
+		return withInlineImages(subagenttool.NewSend(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
 	case subagentpkg.ToolReadSubagent:
-		return withInlineImages(subagenttool.NewRead(ar, msg, sessionState, lookup), msg.Images, sessionState)
+		return withInlineImages(subagenttool.NewRead(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
 	case subagentpkg.ToolStopSubagent:
-		return withInlineImages(subagenttool.NewStop(ar, msg, sessionState, lookup), msg.Images, sessionState)
+		return withInlineImages(subagenttool.NewStop(ar, msg, sessionState, lookup, reference), msg.Images, sessionState)
 	}
 	var view layout.Model
 	if b, ok := resolve(msg.ToolCall.Function.Name); ok {

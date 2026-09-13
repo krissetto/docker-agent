@@ -220,7 +220,8 @@ type chatPage struct {
 	cancel          context.CancelFunc
 	streamCancelled bool
 	// lifecycle owns nested stream and pending-turn transitions.
-	lifecycle lifecycle.State
+	lifecycle   lifecycle.State
+	inputReplay lifecycle.InputReplay
 	// ownedSkillOperation is the exact operation admitted by this page.
 	// Foreign journal lifecycle events never affect its busy boundary.
 	ownedSkillOperation string
@@ -277,7 +278,8 @@ type chatPage struct {
 
 	ctx func() context.Context
 
-	app *app.App
+	app              *app.App
+	sharedProjection bool
 
 	// Command parser for handling slash commands in the editor
 	commandParser *commands.Parser
@@ -512,6 +514,7 @@ func (p *chatPage) Init() tea.Cmd {
 
 	// Load state from existing session (for session restore and branching)
 	if sess := p.app.Session(); sess != nil {
+		p.inputReplay.Reset(sess)
 		p.sidebar.LoadFromSession(sess)
 		// Seed the subagent id → name index from the persisted swarm so restored
 		// subagent tool calls are attributed by name, not just id.
@@ -1289,10 +1292,6 @@ func (p *chatPage) restorePendingMessages() tea.Cmd {
 		)()
 	}
 }
-
-// processNextQueuedMessage is intentionally a no-op: session promotion, not a
-// local stream boundary, advances accepted input.
-func (p *chatPage) processNextQueuedMessage() tea.Cmd { return nil }
 
 // handleClearQueue cannot mutate the session mailbox behind its projection.
 func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {

@@ -291,3 +291,35 @@ func TestSessionTransportAllCommandsDeleteAndReconnect(t *testing.T) {
 	assert.Contains(t, requests, "GET /api/sessions/s/events?since=2")
 	assert.Contains(t, requests, "DELETE /api/sessions/s")
 }
+
+func TestRemoteSnapshotPreservesTypedInputMetadata(t *testing.T) {
+	for _, origin := range []session.InputOrigin{session.InputOriginUser, session.InputOriginAgent, session.InputOriginRuntime, "", "future"} {
+		var wire remoteSessionSnapshot
+		data := fmt.Sprintf(`{"session":{"id":"s"},"status":{"session_id":"s"},"pending_inputs":[{"turn_id":"input","content":"body","input_origin":%q,"sender_id":"child","sender_name":"worker","input_mode":"steer","session_position":3}]}`, origin)
+		require.NoError(t, json.Unmarshal([]byte(data), &wire))
+		snapshot, err := (&Client{}).decodeSessionSnapshot(wire)
+		require.NoError(t, err)
+		require.Len(t, snapshot.PendingInputs, 1)
+		assert.Equal(t, PendingInput{TurnID: "input", Content: "body", InputOrigin: origin, SenderID: "child", SenderName: "worker", InputMode: "steer", SessionPosition: 3}, snapshot.PendingInputs[0])
+	}
+}
+
+func TestRemoteInputEventsPreserveTypedMetadataAndInputIdentity(t *testing.T) {
+	c := &Client{registry: map[string]func() Event{
+		"user_message":                  func() Event { return &UserMessageEvent{} },
+		"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
+		"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
+	}}
+	for _, kind := range []string{"user_message", "pending_user_message_accepted", "pending_user_message_promoted"} {
+		raw := fmt.Sprintf(`{"type":%q,"message":"body","turn_id":"accepted","input_origin":"agent","sender_id":"child","sender_name":"worker","input_mode":"steer"}`, kind)
+		event, err := c.decodeSessionEvent([]byte(raw))
+		require.NoError(t, err)
+		data, err := json.Marshal(event)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"turn_id":"accepted"`)
+		assert.Contains(t, string(data), `"input_origin":"agent"`)
+		assert.Contains(t, string(data), `"sender_id":"child"`)
+		assert.Contains(t, string(data), `"sender_name":"worker"`)
+		assert.Contains(t, string(data), `"input_mode":"steer"`)
+	}
+}

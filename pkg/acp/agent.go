@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
@@ -55,7 +56,6 @@ type Session struct {
 	rt             runtime.SessionRuntime
 	supervisor     runtime.SessionRuntimeSupervisor
 	session        runtime.SessionHandle
-	activeTurnID   string
 	workingDir     string
 	additionalDirs []string
 
@@ -199,14 +199,16 @@ func (a *Agent) Stop(ctx context.Context) {
 	}
 	t := a.team
 	a.mu.Unlock()
+	drained := true
 	for _, acpSess := range sessions {
 		if acpSess.supervisor != nil {
 			if err := acpSess.supervisor.Shutdown(ctx); err != nil {
+				drained = false
 				slog.ErrorContext(ctx, "Failed to stop ACP session supervisor", "session_id", acpSess.id, "error", err)
 			}
 		}
 	}
-	if t != nil {
+	if drained && t != nil {
 		if err := t.StopToolSets(ctx); err != nil {
 			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
 		}
@@ -594,10 +596,6 @@ func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
 
 	if ok && acpSess != nil && acpSess.session != nil {
 		acpSess.cancelTurn()
-		acpSess.mu.Lock()
-		turnID := acpSess.activeTurnID
-		acpSess.mu.Unlock()
-		_, _ = acpSess.session.Cancel(context.Background(), turnID)
 	}
 
 	return nil
@@ -815,43 +813,13 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 		slog.DebugContext(ctx, "Failed to emit available commands", "error", err)
 	}
 
-	observation, err := acpSess.session.Observe(context.WithoutCancel(ctx), runtime.ObserveOptions{})
+	ownedTurn, err := turn.Start(ctx, acpSess.session, input)
 	if err != nil {
-		return fmt.Errorf("observe ACP session: %w", err)
+		return fmt.Errorf("start ACP prompt: %w", err)
 	}
-	submission, err := acpSess.session.Submit(ctx, input)
-	if err != nil {
-		observation.Cancel()
-		return fmt.Errorf("submit ACP prompt: %w", err)
-	}
-	acpSess.mu.Lock()
-	acpSess.activeTurnID = submission.TurnID
-	acpSess.mu.Unlock()
-	// ACP prompt replacement/cancellation stops the admitted turn, not just
-	// its observer. Drain the turn before admitting a successor.
-	stopCancel := context.AfterFunc(ctx, func() {
-		_, _ = acpSess.session.Cancel(context.WithoutCancel(ctx), submission.TurnID)
-	})
-	defer stopCancel()
-	defer func() {
-		acpSess.mu.Lock()
-		acpSess.activeTurnID = ""
-		acpSess.mu.Unlock()
-	}()
 	toolCallArgs := map[string]string{}
-
-	// The shared consumer normally stops on context cancellation. ACP must
-	// instead retain admission ownership until the canceled turn drains.
-	turnCtx := ctx
-	termination := runtimeclient.ConsumeTurn(context.WithoutCancel(ctx), observation, submission.TurnID, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
-		ctx := turnCtx
+	termination := ownedTurn.Consume(ctx, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 		event := envelope.Event
-		if ctx.Err() != nil {
-			if _, stopped := event.(*runtime.StreamStoppedEvent); stopped {
-				return runtimeclient.TurnTerminate, ctx.Err()
-			}
-			return runtimeclient.TurnContinue, nil
-		}
 
 		switch e := event.(type) {
 		case *runtime.AgentChoiceEvent:
@@ -946,6 +914,11 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 		}
 		return runtimeclient.TurnContinue, nil
 	})
+	var drainErr *turn.DrainError
+	if errors.As(termination.Err, &drainErr) {
+		acpSess.close()
+	}
+
 	if termination.Err != nil {
 		if termination.ObservationError {
 			return fmt.Errorf("observe ACP session: %w", termination.Err)

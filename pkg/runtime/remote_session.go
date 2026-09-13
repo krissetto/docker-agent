@@ -60,13 +60,18 @@ func (r *SessionTransport) CreateSession(ctx context.Context, sess *session.Sess
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
+	template := sess.Clone()
 	request := struct {
-		Source          string `json:"source,omitempty"`
-		AgentName       string `json:"agent_name"`
-		Model           string `json:"model,omitempty"`
-		Title           string `json:"title,omitempty"`
-		ParentSessionID string `json:"parent_session_id,omitempty"`
-	}{r.source, binding.AgentName, binding.Model, sess.TitleSnapshot(), binding.ParentSessionID}
+		Source          string                     `json:"source,omitempty"`
+		AgentName       string                     `json:"agent_name"`
+		Model           string                     `json:"model,omitempty"`
+		Title           string                     `json:"title,omitempty"`
+		ParentSessionID string                     `json:"parent_session_id,omitempty"`
+		WorkingDir      string                     `json:"working_dir,omitempty"`
+		SafetyPolicy    session.SafetyPolicy       `json:"safety_policy,omitempty"`
+		ToolsApproved   bool                       `json:"tools_approved,omitempty"`
+		Permissions     *session.PermissionsConfig `json:"permissions,omitempty"`
+	}{r.source, binding.AgentName, binding.Model, template.Title, binding.ParentSessionID, template.WorkingDir, template.SafetyPolicy, template.ToolsApproved, template.Permissions}
 	var metadata remoteSessionMetadata
 	if err := r.client.sessionJSON(ctx, http.MethodPost, "/api/sessions", request, &metadata); err != nil {
 		return nil, err
@@ -185,8 +190,8 @@ func (s *remoteSession) input(ctx context.Context, operation string, input TurnI
 		Content      string             `json:"content"`
 		MultiContent []chat.MessagePart `json:"multi_content,omitempty"`
 		Mode         string             `json:"mode,omitempty"`
-		ClientID     string             `json:"client_id,omitempty"`
-	}{input.Content, input.MultiContent, operation, input.ClientID}
+		RequestID    string             `json:"request_id,omitempty"`
+	}{input.Content, input.MultiContent, operation, input.RequestID}
 	var out Submission
 	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("messages"), request, &out)
 	if err == nil && (out.SessionID != s.ID() || out.TurnID == "") {
@@ -251,6 +256,17 @@ func (s *remoteSession) Respond(ctx context.Context, response InteractionRespons
 		ClientID      string          `json:"client_id,omitempty"`
 	}{InteractionID: response.InteractionID, Kind: response.Kind, Confirmation: string(response.Resume.Type), Reason: response.Resume.Reason, ToolName: response.Resume.ToolName, ElicitationID: response.ElicitationID, Action: string(response.Elicitation.Action), Content: response.Elicitation.Content, ClientID: response.ClientID}
 	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("responses"), request, nil)
+}
+
+func (s *remoteSession) Edit(ctx context.Context, edit SessionEdit) (*session.Session, error) {
+	var updated session.Session
+	if err := s.runtime.client.sessionJSON(ctx, http.MethodPatch, "/api/sessions/"+url.PathEscape(s.ID()), edit, &updated); err != nil {
+		return nil, err
+	}
+	if updated.ID != s.ID() {
+		return nil, errors.New("invalid session edit identity")
+	}
+	return &updated, nil
 }
 
 func (s *remoteSession) UpdateTitle(ctx context.Context, title string) error {
@@ -577,10 +593,14 @@ type remoteSessionSnapshot struct {
 		Event         json.RawMessage `json:"event"`
 	} `json:"interactions"`
 	PendingInputs []struct {
-		TurnID          string             `json:"turn_id"`
-		Content         string             `json:"content"`
-		MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
-		SessionPosition int                `json:"session_position"`
+		InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
+		SenderID        string              `json:"sender_id,omitempty"`
+		SenderName      string              `json:"sender_name,omitempty"`
+		InputMode       string              `json:"input_mode,omitempty"`
+		TurnID          string              `json:"turn_id"`
+		Content         string              `json:"content"`
+		MultiContent    []chat.MessagePart  `json:"multi_content,omitempty"`
+		SessionPosition int                 `json:"session_position"`
 	} `json:"pending_inputs"`
 	Cursor             uint64 `json:"cursor"`
 	TranscriptPosition int    `json:"transcript_position"`
@@ -602,6 +622,7 @@ type remoteSessionStreamMessage struct {
 	Snapshot *remoteSessionSnapshot `json:"snapshot,omitempty"`
 	Envelope *remoteSessionEnvelope `json:"envelope,omitempty"`
 	Cursor   uint64                 `json:"cursor,omitempty"`
+	Chunk    []byte                 `json:"chunk,omitempty"`
 }
 
 func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body, result any) error {
@@ -636,7 +657,7 @@ func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body,
 	if result == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 4<<20))
+	dec := json.NewDecoder(resp.Body)
 	// Responses are versioned by required identities; tolerate additive fields
 	// so newer servers remain usable by older clients.
 	if err := dec.Decode(result); err != nil {
@@ -653,12 +674,13 @@ func decodeSessionHTTPError(resp *http.Response) error {
 		Operation string             `json:"operation"`
 		Reason    SessionErrorReason `json:"reason"`
 		SessionID string             `json:"session_id"`
+		Detail    string             `json:"detail,omitempty"`
 	}
 	_ = json.Unmarshal(body, &payload)
 	kind := SessionErrorInvalid
 	validKind := func(candidate SessionErrorKind) bool {
 		switch candidate {
-		case SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession:
+		case SessionErrorPersistence, SessionErrorConflict, SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession:
 			return true
 		default:
 			return false
@@ -668,6 +690,8 @@ func decodeSessionHTTPError(resp *http.Response) error {
 		kind = candidate
 	} else {
 		switch resp.StatusCode {
+		case http.StatusServiceUnavailable:
+			kind = SessionErrorPersistence
 		case http.StatusNotFound:
 			kind = SessionErrorNotFound
 		case http.StatusTooManyRequests:
@@ -680,7 +704,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 			kind = SessionErrorStopped
 		}
 	}
-	return &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason}
+	return &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}
 }
 
 func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (Observation, error) {
@@ -876,7 +900,75 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	return Observation{Initial: snapshots, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
 }
 
+const remoteSnapshotChunkBytes = 64 << 10
+
 func scanSessionMessage(scanner *bufio.Scanner) (remoteSessionStreamMessage, error) {
+	message, err := scanSessionFrame(scanner)
+	if err != nil || message.Type != "snapshot_begin" {
+		return message, err
+	}
+	if message.Version != sessionWireVersion {
+		return message, errors.New("unsupported snapshot wire version")
+	}
+	reader := &snapshotChunkReader{scanner: scanner, cursor: message.Cursor}
+	decoder := json.NewDecoder(reader)
+	var snapshot remoteSessionSnapshot
+	if err := decoder.Decode(&snapshot); err != nil {
+		return message, fmt.Errorf("decode chunked snapshot: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return message, errors.New("chunked snapshot has invalid ending")
+	}
+	if snapshot.Cursor != message.Cursor {
+		return message, errors.New("chunked snapshot cursor mismatch")
+	}
+	return remoteSessionStreamMessage{Version: message.Version, Type: "snapshot", Snapshot: &snapshot}, nil
+}
+
+type snapshotChunkReader struct {
+	scanner *bufio.Scanner
+	cursor  uint64
+	pending []byte
+	done    bool
+}
+
+func (r *snapshotChunkReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 && !r.done {
+		message, err := scanSessionFrame(r.scanner)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return 0, err
+		}
+		if message.Version != sessionWireVersion || message.Cursor != r.cursor {
+			return 0, errors.New("invalid snapshot chunk boundary")
+		}
+		switch message.Type {
+		case "snapshot_chunk":
+			if len(message.Chunk) == 0 || len(message.Chunk) > remoteSnapshotChunkBytes {
+				return 0, errors.New("invalid snapshot chunk size")
+			}
+			r.pending = message.Chunk
+		case "snapshot_end":
+			r.done = true
+		default:
+			return 0, errors.New("unexpected snapshot chunk frame")
+		}
+	}
+	if r.done {
+		return 0, io.EOF
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
+func scanSessionFrame(scanner *bufio.Scanner) (remoteSessionStreamMessage, error) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 || line[0] == ':' {
@@ -885,6 +977,15 @@ func scanSessionMessage(scanner *bufio.Scanner) (remoteSessionStreamMessage, err
 		data, ok := bytes.CutPrefix(line, []byte("data: "))
 		if !ok {
 			continue
+		}
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(data, &head); err != nil {
+			return remoteSessionStreamMessage{}, err
+		}
+		if head.Type == "snapshot_chunk" && len(data) > 2*remoteSnapshotChunkBytes {
+			return remoteSessionStreamMessage{}, errors.New("snapshot chunk frame exceeds limit")
 		}
 		var m remoteSessionStreamMessage
 		// SSE envelopes retain strict identity/version checks below while allowing
@@ -906,7 +1007,7 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 	}
 	out := SessionSnapshot{Session: in.Session, Status: in.Status, Cursor: in.Cursor, TranscriptPosition: in.TranscriptPosition}
 	for _, pending := range in.PendingInputs {
-		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition})
+		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, InputMode: pending.InputMode})
 	}
 	for _, v := range in.Interactions {
 		if v.SessionID != in.Session.ID {
@@ -932,9 +1033,19 @@ func (c *Client) decodeSessionEnvelope(in remoteSessionEnvelope) (SessionEvent, 
 			return out, err
 		}
 		switch e.(type) {
-		case *ToolCallConfirmationEvent, *MaxIterationsReachedEvent, *ElicitationRequestEvent:
+		case *ToolCallConfirmationEvent, *MaxIterationsReachedEvent, *ElicitationRequestEvent, *InteractionResolvedEvent:
 			if in.InteractionID == "" {
 				return out, errors.New("interaction event is missing interaction_id")
+			}
+		}
+		if resolved, ok := e.(*InteractionResolvedEvent); ok {
+			if resolved.SessionID != in.SessionID || resolved.InteractionID != in.InteractionID {
+				return out, errors.New("interaction resolution identity mismatch")
+			}
+			switch string(resolved.Reason) {
+			case "responded", "canceled", "stopped":
+			default:
+				return out, errors.New("invalid interaction resolution reason")
 			}
 		}
 		out.Event = e
@@ -964,3 +1075,7 @@ var (
 	_ SessionRuntime = (*SessionTransport)(nil)
 	_ SessionHandle  = (*remoteSession)(nil)
 )
+
+func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {
+	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
+}

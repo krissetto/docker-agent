@@ -6,8 +6,10 @@
 package subagenttool
 
 import (
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -16,43 +18,50 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-type NameLookup func(subagent.NodeID) (string, bool)
+type (
+	NameLookup      func(subagent.NodeID) (string, bool)
+	ReferenceLookup func(subagent.NodeID) lifecycle.InputReference
+)
 
-func NewSpawn(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSpawn, lookup))
+func NewSpawn(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
+	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSpawn, lookup, references...))
 }
 
-func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSend, lookup))
+func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
+	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSend, lookup, references...))
 }
 
-func NewRead(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderRead, lookup))
+func NewRead(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
+	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderRead, lookup, references...))
 }
 
-func NewStop(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderStop, lookup))
+func NewStop(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
+	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderStop, lookup, references...))
 }
 
 type renderFunc func(*types.Message, spinner.Spinner, service.SessionStateReader, int, int, NameLookup) string
 
-func renderer(render renderFunc, lookup NameLookup) toolcommon.Renderer {
+func renderer(render renderFunc, lookup NameLookup, references ...ReferenceLookup) toolcommon.Renderer {
 	return func(msg *types.Message, s spinner.Spinner, state service.SessionStateReader, width, height int) string {
-		return render(msg, s, state, width, height, lookup)
+		projected := *msg
+		if id, ok := NodeIDFor(msg); ok && len(references) > 0 && references[0] != nil {
+			projected.InputReference = references[0](id)
+		}
+		return render(&projected, s, state, width, height, lookup)
 	}
 }
 
-func renderSpawn(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, _, _ int, lookup NameLookup) string {
+func renderSpawn(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
 	name, id := attribution(msg, "", lookup)
 	if name == "" {
 		if params, err := toolcommon.ParseArgs[subagent.SpawnArgs](msg.ToolCall.Function.Arguments); err == nil {
 			name = params.Agent
 		}
 	}
-	return line(msg, s, verb(msg, "Spawning", "Spawned"), name, id)
+	return line(msg, s, verb(msg, "Spawning", "Spawned"), name, id, width)
 }
 
-func renderSend(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, _, _ int, lookup NameLookup) string {
+func renderSend(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
 	v := verb(msg, "Messaging", "Messaged")
 	params, err := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
 	if err == nil && params.To == subagent.ParentAlias {
@@ -63,25 +72,25 @@ func renderSend(msg *types.Message, s spinner.Spinner, _ service.SessionStateRea
 		argID = params.To
 	}
 	name, id := attribution(msg, argID, lookup)
-	return line(msg, s, v, name, id)
+	return line(msg, s, v, name, id, width)
 }
 
-func renderRead(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, _, _ int, lookup NameLookup) string {
+func renderRead(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
 	var argID string
 	if params, err := toolcommon.ParseArgs[subagent.ReadArgs](msg.ToolCall.Function.Arguments); err == nil {
 		argID = params.SubagentID
 	}
 	name, id := attribution(msg, argID, lookup)
-	return line(msg, s, "Inspecting", name, id)
+	return line(msg, s, "Inspecting", name, id, width)
 }
 
-func renderStop(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, _, _ int, lookup NameLookup) string {
+func renderStop(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
 	var argID string
 	if params, err := toolcommon.ParseArgs[subagent.StopArgs](msg.ToolCall.Function.Arguments); err == nil {
 		argID = params.SubagentID
 	}
 	name, id := attribution(msg, argID, lookup)
-	return line(msg, s, verb(msg, "Stopping", "Stopped"), name, id)
+	return line(msg, s, verb(msg, "Stopping", "Stopped"), name, id, width)
 }
 
 // NodeIDFor resolves the subagent node id a rendered subagent tool message
@@ -147,17 +156,29 @@ func attribution(msg *types.Message, argID string, lookup NameLookup) (name, id 
 	return "", argID
 }
 
-// line assembles `icon <verb> <agent> (id)` with the name accent-colored and
-// everything else muted. Unknown parts are simply omitted.
-func line(msg *types.Message, s spinner.Spinner, verb, name, id string) string {
-	out := statusIcon(msg, s) + " " + styles.MutedStyle.Render(verb)
-	if name != "" {
-		out += " " + styles.AgentAccentStyleFor(name).Render(name)
+// line keeps the stamped display name while resolving its canonical agent color.
+func line(msg *types.Message, s spinner.Spinner, verb, name, id string, width int) string {
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: id, Name: name, Agent: name, DisplayID: subagent.ShortID(id)}
+	if id == "" {
+		ref.Kind = lifecycle.InputReferenceUnknown
 	}
-	if id != "" {
-		out += styles.MutedStyle.Render(" (" + id + ")")
+	if msg.InputReference.Kind != lifecycle.InputReferenceUnknown {
+		ref.Agent = msg.InputReference.Agent
 	}
-	return out
+	return agentidentity.Wrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(verb)+" ", ref, "", width)
+}
+
+// RenderInput trusts only the resolved typed sender, never the runtime envelope.
+func RenderInput(msg *types.Message, width int) string {
+	icon := styles.ToolCompletedIcon.Render("✓")
+	ref := msg.InputReference
+	if ref.Name == "" && ref.DisplayID == "" {
+		return icon + " " + styles.MutedStyle.Render("Runtime update received")
+	}
+	if ref.Name == "" {
+		ref.Name = "subagent"
+	}
+	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" has replied"), width)
 }
 
 // verb picks the wording from the tool status: the in-progress form while

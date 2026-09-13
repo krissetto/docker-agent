@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
-	"strings"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -29,13 +27,12 @@ type subagentManager struct {
 	metricsMu sync.Mutex
 	persistMu sync.Mutex
 	persist   *subagentPersistence
+	coord     session.CoordinationStore
 	closed    bool
 	sessions  map[string]*sessionSubagents
 	children  map[subagent.NodeID]*childRecord
 
-	wakeOnce   sync.Once
-	wakeSignal chan struct{}
-	restoreMu  sync.Mutex
+	restoreMu sync.Mutex
 }
 
 // sessionSubagents tracks the outstanding subagents of one session and the tree
@@ -62,9 +59,10 @@ type childRecord struct {
 	agent           *agent.Agent
 	unwatch         func()
 
-	state  subagent.NodeState
-	result string
-	errMsg string
+	durable session.ChildRecord
+	state   subagent.NodeState
+	result  string
+	errMsg  string
 }
 
 func newSubagentManager(r *LocalRuntime) *subagentManager {
@@ -139,6 +137,7 @@ func (m *subagentManager) ensureSessionLocked(sess *session.Session, agentName s
 		st.node = subagent.SessionRootID(sess.ID)
 		st.topLevel = true
 		st.sess = sess
+
 		state := subagent.NodeRunning
 		if m.r.sessionDrivers != nil {
 			if driver, ok := m.r.sessionDrivers.Lookup(sess.ID); ok && driver.Status().State != SessionStateRunning {
@@ -148,13 +147,19 @@ func (m *subagentManager) ensureSessionLocked(sess *session.Session, agentName s
 		_ = m.tree.Add(subagent.Node{ID: st.node, Agent: agentName, State: state})
 		if m.r.sessionDrivers != nil {
 			if driver, ok := m.r.sessionDrivers.Lookup(sess.ID); ok {
-				unwatchStarted := driver.OnStarted(func() { m.updateRootLifecycle(sess.ID, subagent.NodeRunning, "") })
+				st.sess = nil
+				sessionID := sess.ID
+				unwatchStarted := driver.OnStarted(func() { m.updateRootLifecycle(sessionID, subagent.NodeRunning, "") })
 				unwatchSettled := driver.OnSettled(func() {
-					if lastErr := driver.LastError(); lastErr != "" {
-						m.updateRootLifecycle(sess.ID, subagent.NodeFailed, lastErr)
+					current, ok := m.r.sessionDrivers.Lookup(sessionID)
+					if !ok {
 						return
 					}
-					m.updateRootLifecycle(sess.ID, subagent.NodeIdle, "")
+					if lastErr := current.LastError(); lastErr != "" {
+						m.updateRootLifecycle(sessionID, subagent.NodeFailed, lastErr)
+						return
+					}
+					m.updateRootLifecycle(sessionID, subagent.NodeIdle, "")
 				})
 				st.unwatch = func() { unwatchStarted(); unwatchSettled() }
 			}
@@ -177,39 +182,41 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 		defer m.metricsMu.Unlock()
 	}
 	full := m.tree.Snapshot()
-	if store, ok := m.r.subagentStore.(subagent.DurableStore); ok {
-		full.Durability = store.Durability()
-	}
+	full.Durability = m.r.sessionDurability()
 
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return
 	}
-	type sessionSnapshot struct {
+	type projection struct {
+		id   string
 		sess *session.Session
 		snap subagent.Snapshot
 	}
-	var snapshots []sessionSnapshot
-	for _, st := range m.sessions {
-		if !st.topLevel || st.sess == nil {
+	var projections []projection
+	for id, tracked := range m.sessions {
+		if !tracked.topLevel {
 			continue
 		}
-		rootID := subagent.SessionRootID(st.sess.ID)
-		if snap, ok := snapshotForRoot(full, rootID); ok {
-			snapshots = append(snapshots, sessionSnapshot{sess: st.sess, snap: snap})
+		if snap, ok := snapshotForRoot(full, subagent.SessionRootID(id)); ok {
+			projections = append(projections, projection{id, tracked.sess, snap})
 		}
 	}
 	m.mu.Unlock()
-
-	for _, item := range snapshots {
-		item.sess.SetSubagentTree(&item.snap)
-		if _, ok := m.r.subagentStore.(*subagent.InMemoryStore); ok {
-			_ = m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), item.sess.ID, item.snap)
-			continue
+	for _, item := range projections {
+		if m.r.sessionDrivers != nil {
+			if d, ok := m.r.sessionDrivers.Lookup(item.id); ok {
+				item.sess = d.session()
+			}
 		}
-		if persist := m.persistence(); persist != nil {
-			persist.enqueueTree(item.sess.ID, item.snap)
+		if item.sess != nil {
+			item.sess.SetSubagentTree(&item.snap)
+		}
+		if _, ok := m.r.subagentStore.(*subagent.InMemoryStore); ok {
+			_ = m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), item.id, item.snap)
+		} else if persist := m.persistence(); persist != nil {
+			persist.enqueueTree(item.id, item.snap)
 		}
 	}
 }
@@ -251,194 +258,106 @@ func (m *subagentManager) updateRootLifecycle(sessionID string, state subagent.N
 	m.persistSnapshot()
 }
 
-func (m *subagentManager) registerIdleChild(parentSess *session.Session, parentAgentName string, childSess *session.Session, childAgent *agent.Agent, ref subagent.AllowedSubagent) error {
-	priorTree := m.tree.Snapshot()
-	priorParentTree := parentSess.GetSubagentTree()
-	m.mu.Lock()
-	if err := m.spawnAdmissionErrorLocked(parentSess); err != nil {
-		m.mu.Unlock()
-		return err
-	}
-	parent := m.ensureSessionLocked(parentSess, parentAgentName, "")
-	childID := m.tree.NewNodeID()
-	if err := m.tree.Add(subagent.Node{ID: childID, Agent: ref.Agent, Name: ref.Name, Description: ref.Description, Parent: parent.node, SessionID: childSess.ID, State: subagent.NodeIdle}); err != nil {
-		m.mu.Unlock()
-		return err
-	}
-	m.ensureSessionLocked(childSess, ref.Agent, childID)
-	rec := &childRecord{name: ref.DisplayName(), parentSession: parentSess.ID, parentAgentName: parentAgentName, sessionID: childSess.ID, session: childSess, parentSess: parentSess, agent: childAgent, state: subagent.NodeIdle}
-	if driver, ok := m.r.sessionDrivers.Lookup(childSess.ID); ok {
-		settled, started := driver.OnSettled(func() { m.reportChildSettled(childID) }), driver.OnStarted(func() { m.markChildRunning(childID) })
-		rec.unwatch = func() { settled(); started() }
-	}
-	m.children[childID] = rec
-	m.mu.Unlock()
-	full := m.tree.Snapshot()
-	rootID := subagent.SessionRootID(m.rootSessionLockedSafe(parentSess.ID))
-	if snapshot, ok := snapshotForRoot(full, rootID); ok && m.r.subagentStore != nil {
-		if err := m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), string(rootID)[5:], snapshot); err != nil {
-			if rec.unwatch != nil {
-				rec.unwatch()
-			}
-			m.mu.Lock()
-			delete(m.children, childID)
-			delete(m.sessions, childSess.ID)
-			_ = m.tree.Remove(childID)
-			m.mu.Unlock()
-			parentSess.SetSubagentTree(priorParentTree)
-			if prior, ok := snapshotForRoot(priorTree, rootID); ok {
-				_ = m.r.subagentStore.SaveTree(context.WithoutCancel(m.ctx), string(rootID)[5:], prior)
-			}
-			return err
-		}
-	}
-	parentSess.SetSubagentTree(func() *subagent.Snapshot { snapshot, _ := snapshotForRoot(full, rootID); return &snapshot }())
-	if persist := m.persistence(); persist != nil {
-		if err := persist.flushNow(); err != nil {
-			return err
-		}
-	}
-	return nil
+func (m *subagentManager) registerIdleChild(parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent) error {
+	_, err := m.admitChild(parent, parentAgent, child, target, ref, "")
+	return err
 }
 
-// Spawn starts a subagent concurrently and returns its node id immediately.
-func (m *subagentManager) Spawn(parentSess *session.Session, parentAgentName string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
+func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
 	m.mu.Lock()
-	if err := m.spawnAdmissionErrorLocked(parentSess); err != nil {
-		m.mu.Unlock()
-		return "", err
-	}
+	err := m.spawnAdmissionErrorLocked(parent)
 	m.mu.Unlock()
-
-	childID := m.tree.NewNodeID()
-
-	childAgent, err := m.r.team.Agent(ref.Agent)
 	if err != nil {
-		m.mu.Lock()
-		if !m.parentAcceptsSpawnLocked(parentSess.ID) {
-			m.mu.Unlock()
-			return "", errors.New("parent session is stopped")
-		}
-		parent := m.ensureSessionLocked(parentSess, parentAgentName, "")
-		_ = m.tree.Add(subagent.Node{ID: childID, Agent: ref.Agent, Name: ref.Name, Parent: parent.node, State: subagent.NodeFailed, Error: err.Error(), NeedsAttention: true, WaitingOn: "failed"})
-		m.children[childID] = &childRecord{name: ref.DisplayName(), parentSession: parentSess.ID, state: subagent.NodeFailed, errMsg: err.Error()}
-		m.mu.Unlock()
-		m.persistSnapshot()
-		m.deliverToParent(parentSess.ID, systemInfo(fmt.Sprintf("Subagent %q (%s) failed to start: %v", ref.DisplayName(), childID, err)))
-		return childID, nil
-	}
-
-	toolsApproved, safetyPolicy, permissions := parentSess.SafetySettings()
-	cfg := SubSessionConfig{
-		AgentName:      ref.Agent,
-		ToolsApproved:  toolsApproved,
-		SafetyPolicy:   safetyPolicy,
-		Permissions:    permissions,
-		NonInteractive: true,
-		PinAgent:       true,
-	}
-	childSess := newSubSession(parentSess, cfg, childAgent)
-	childSess.AsyncSubagent = true
-	// No Task in the config: async subagents are persistent sessions whose
-	// "user" is their parent, so instead of the delegation boilerplate the
-	// task IS the child's first regular user prompt — its session reads like
-	// an ordinary session in attached tabs, read_subagent transcripts, and
-	// the model's own context alike.
-	childSess.AddMessage(session.UserMessage(task))
-	// Like any other session, the child gets its title generated from its
-	// first user message (the task) instead of a hardcoded label.
-
-	m.mu.Lock()
-	if err := m.spawnAdmissionErrorLocked(parentSess); err != nil {
-		m.mu.Unlock()
 		return "", err
 	}
-	parent := m.ensureSessionLocked(parentSess, parentAgentName, "")
-	if err := m.tree.Add(subagent.Node{
-		ID:          childID,
-		Agent:       ref.Agent,
-		Name:        ref.Name,
-		Description: ref.Description,
-		Parent:      parent.node,
-		SessionID:   childSess.ID,
-		Task:        task,
-		State:       subagent.NodeStarting,
-	}); err != nil {
-		m.mu.Unlock()
-		return "", err
-	}
-	// Register the child session under its own node so subagents it spawns are
-	// linked beneath it (correct deep-tree linkage).
-	m.ensureSessionLocked(childSess, ref.Agent, childID)
-	rec := &childRecord{
-		name:            ref.DisplayName(),
-		parentSession:   parentSess.ID,
-		parentAgentName: parentAgentName,
-		sessionID:       childSess.ID,
-		session:         childSess,
-		parentSess:      parentSess,
-		agent:           childAgent,
-		state:           subagent.NodeStarting,
-	}
-	m.children[childID] = rec
-	childDriver, err := m.r.sessionDrivers.GetInitialized(m.ctx, childSess)
+	target, err := m.r.team.Agent(ref.Agent)
 	if err != nil {
-		delete(m.children, childID)
-		delete(m.sessions, childSess.ID)
-		_ = m.tree.Remove(childID)
-		m.mu.Unlock()
 		return "", err
 	}
+	approved, policy, permissions := parent.SafetySettings()
+	child := newSubSession(parent, SubSessionConfig{AgentName: ref.Agent, ToolsApproved: approved, SafetyPolicy: policy, Permissions: permissions, NonInteractive: true, PinAgent: true}, target)
+	child.AsyncSubagent = true
+	turnID, err := newSessionRequestID()
+	if err != nil {
+		return "", err
+	}
+	input := session.UserMessage(task)
+	input.Pending, input.Accepted, input.TurnID = true, true, turnID
+	input.InputOrigin, input.SenderID, input.SenderName, input.InputMode = session.InputOriginAgent, parent.ID, parentAgent, "turn"
+	child.AddMessage(input)
+	id, err := m.admitChild(parent, parentAgent, child, target, ref, task)
+	if err != nil {
+		return "", err
+	}
+	if d, ok := m.r.sessionDrivers.Lookup(child.ID); ok {
+		d.WakePending()
+	}
+	return id, nil
+}
+
+func (m *subagentManager) admitChild(parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
+	m.restoreMu.Lock()
+	defer m.restoreMu.Unlock()
 	if m.r.sessionStore != nil {
-		childSess.SetAttribute(SessionAgentAttribute, childSess.AgentName)
-		if _, getErr := m.r.sessionStore.GetSession(m.ctx, childSess.ID); errors.Is(getErr, session.ErrNotFound) {
-			if addErr := m.r.sessionStore.AddSession(m.ctx, childSess.Clone()); addErr != nil && !errors.Is(addErr, session.ErrAlreadyExists) {
-				_ = m.r.sessionDrivers.ReleaseDriver(context.WithoutCancel(m.ctx), childSess.ID, childDriver)
-				delete(m.children, childID)
-				delete(m.sessions, childSess.ID)
-				_ = m.tree.Remove(childID)
-				m.mu.Unlock()
-				return "", addErr
+		if _, err := m.r.sessionStore.GetSession(m.ctx, parent.ID); errors.Is(err, session.ErrNotFound) {
+			parent.SetAttribute(SessionAgentAttribute, parentAgent)
+			if err := m.r.sessionStore.AddSession(m.ctx, parent.OwnSnapshot()); err != nil && !errors.Is(err, session.ErrAlreadyExists) {
+				return "", err
 			}
-		} else if getErr != nil {
-			_ = m.r.sessionDrivers.ReleaseDriver(context.WithoutCancel(m.ctx), childSess.ID, childDriver)
-			delete(m.children, childID)
-			delete(m.sessions, childSess.ID)
-			_ = m.tree.Remove(childID)
-			m.mu.Unlock()
-			return "", getErr
 		}
 	}
-	childDriver.SetPreStartErrorGate(func() error { return m.admitChildRun(childID) }, func() { m.abortChildStart(childID) })
-	rec.unwatch = childDriver.OnSettled(func() { m.reportChildSettled(childID) })
-	unwatchStarted := childDriver.OnStarted(func() { m.markChildRunning(childID) })
-	previousUnwatch := rec.unwatch
-	rec.unwatch = func() {
-		previousUnwatch()
-		unwatchStarted()
+	child.SetAttribute(SessionAgentAttribute, ref.Agent)
+	child.SetAttribute(SessionParentAgentAttribute, parentAgent)
+	reservation, err := m.r.sessionDrivers.PrepareRestore(m.ctx, child)
+	if err != nil {
+		return "", err
 	}
-	// Register accepted work before releasing m.mu, the lock Close uses to
-	// close admission. This guarantees Close cannot observe an empty group and
-	// return before a committed spawn starts its work.
-	if m.r.TitleGenerator(m.ctx) != nil {
-		m.wg.Go(func() { m.startChildTitle(childSess, task) })
-	}
-	m.wg.Go(func() {
-		for range childDriver.Drive(m.ctx, childSess) {
-		}
-	})
-	m.wg.Add(1) // covers the synchronous post-commit persistence below
-	m.mu.Unlock()
-
-	defer m.wg.Done()
-	m.persistSnapshot()
-	if persist := m.persistence(); persist != nil {
-		if err := persist.flushNow(); err != nil {
+	defer reservation.Discard()
+	if task != "" {
+		if err := m.r.sessionDrivers.admitRun(reservation.driver); err != nil {
 			return "", err
 		}
 	}
-
-	return childID, nil
+	m.mu.Lock()
+	if err := m.spawnAdmissionErrorLocked(parent); err != nil {
+		m.mu.Unlock()
+		return "", err
+	}
+	tracked := m.ensureSessionLocked(parent, parentAgent, "")
+	id := m.tree.NewNodeID()
+	node := subagent.Node{ID: id, Parent: tracked.node, SessionID: child.ID, Agent: ref.Agent, Name: ref.Name, Description: ref.Description, State: subagent.NodeIdle}
+	node.Task, _ = subagent.PreviewText(task, subagent.PreviewLen)
+	record := session.ChildRecord{RootSessionID: m.rootSessionLocked(parent.ID), ParentSessionID: parent.ID, Node: node, Revision: 1}
+	rec := &childRecord{name: ref.DisplayName(), parentSession: parent.ID, parentAgentName: parentAgent, sessionID: child.ID, agent: target, state: subagent.NodeIdle, durable: record}
+	d := reservation.driver
+	d.SetPreStartErrorGate(func() error { return m.admitChildRun(id) }, nil)
+	rec.unwatch = d.OnStarted(func() { m.markChildRunning(id) })
+	err = m.r.sessionDrivers.ActivateRestoreBatch([]*restoreDriverReservation{reservation}, func() error {
+		if err := m.admitDurableChild(parent, child, record); err != nil {
+			return err
+		}
+		if err := m.tree.Add(node); err != nil {
+			return err
+		}
+		m.children[id] = rec
+		m.sessions[child.ID] = &sessionSubagents{node: id}
+		return nil
+	})
+	if err == nil && task != "" && m.r.TitleGenerator(m.ctx) != nil {
+		m.wg.Go(func() { m.startChildTitle(child, task) })
+	}
+	m.mu.Unlock()
+	if err != nil {
+		rec.unwatch()
+		return "", err
+	}
+	m.persistSnapshot()
+	if persistence := m.persistence(); persistence != nil {
+		if err := persistence.flushNow(); err != nil {
+			slog.WarnContext(m.ctx, "Failed to checkpoint admitted topology", "error", err)
+		}
+	}
+	return id, nil
 }
 
 type childAdmissionDenial string
@@ -446,11 +365,8 @@ type childAdmissionDenial string
 const (
 	childAdmissionParentStopped childAdmissionDenial = "parent_stopped"
 	childAdmissionDepth         childAdmissionDenial = "depth"
-	childAdmissionGlobalActive  childAdmissionDenial = "global_active"
-	childAdmissionRootActive    childAdmissionDenial = "root_active"
 	childAdmissionMissing       childAdmissionDenial = "missing"
 	childAdmissionStopped       childAdmissionDenial = "stopped"
-	childAdmissionRunning       childAdmissionDenial = "running"
 )
 
 type childAdmissionRequest struct {
@@ -483,28 +399,8 @@ func (m *subagentManager) childAdmissionLocked(request childAdmissionRequest) ch
 		if rec.state == subagent.NodeStarting {
 			return childAdmissionDecision{}
 		}
-		if rec.state == subagent.NodeRunning {
-			return childAdmissionDecision{denial: childAdmissionRunning, parentSession: parentSession}
-		}
 	}
 
-	active, rootActive := 0, 0
-	rootID := m.rootSessionLocked(parentSession)
-	for _, rec := range m.children {
-		if !activeSubagentState(rec.state) {
-			continue
-		}
-		active++
-		if m.rootSessionLocked(rec.parentSession) == rootID {
-			rootActive++
-		}
-	}
-	if !limitAllows(active, m.r.maxActiveDescendants) {
-		return childAdmissionDecision{denial: childAdmissionGlobalActive, parentSession: parentSession, limit: m.r.maxActiveDescendants}
-	}
-	if !limitAllows(rootActive, m.r.maxActiveDescendantsRoot) {
-		return childAdmissionDecision{denial: childAdmissionRootActive, parentSession: parentSession, limit: m.r.maxActiveDescendantsRoot}
-	}
 	if request.spawn && !limitAllows(m.sessionDepthLocked(parentSession), m.r.maxSubagentDepth) {
 		return childAdmissionDecision{denial: childAdmissionDepth, parentSession: parentSession, limit: m.r.maxSubagentDepth}
 	}
@@ -519,10 +415,6 @@ func (m *subagentManager) childAdmissionError(request childAdmissionRequest, dec
 		return errors.New("parent session is stopped")
 	case childAdmissionDepth:
 		return &SessionError{Kind: SessionErrorCapacity, SessionID: decision.parentSession, Operation: "subagent_depth", Limit: decision.limit}
-	case childAdmissionGlobalActive:
-		return &SessionError{Kind: SessionErrorCapacity, SessionID: decision.parentSession, Operation: "active_descendants", Limit: decision.limit}
-	case childAdmissionRootActive:
-		return &SessionError{Kind: SessionErrorCapacity, SessionID: decision.parentSession, Operation: "active_descendants_root", Limit: decision.limit}
 	case childAdmissionMissing:
 		return &SessionError{Kind: SessionErrorNotFound, Operation: "admit_child_run"}
 	case childAdmissionStopped:
@@ -531,12 +423,6 @@ func (m *subagentManager) childAdmissionError(request childAdmissionRequest, dec
 			sessionID = rec.sessionID
 		}
 		return &SessionError{Kind: SessionErrorStopped, SessionID: sessionID, Operation: "admit_child_run"}
-	case childAdmissionRunning:
-		sessionID := ""
-		if rec := m.children[request.childID]; rec != nil {
-			sessionID = rec.sessionID
-		}
-		return &SessionError{Kind: SessionErrorInvalid, SessionID: sessionID, Operation: "admit_child_running"}
 	default:
 		return &SessionError{Kind: SessionErrorInvalid, Operation: "subagent_admission"}
 	}
@@ -561,84 +447,15 @@ func (m *subagentManager) admitChildRun(childID subagent.NodeID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	request := childAdmissionRequest{childID: childID}
-	decision := m.childAdmissionLocked(request)
-	if err := m.childAdmissionError(request, decision); err != nil {
-		return err
-	}
-	rec := m.children[childID]
-	if rec.state == subagent.NodeStarting {
-		return nil // Spawn committed this reservation before starting its driver.
-	}
-	rec.state = subagent.NodeStarting
-	_ = m.tree.Update(childID, func(n *subagent.Node) { n.State = subagent.NodeStarting })
-	return nil
+	return m.childAdmissionError(request, m.childAdmissionLocked(request))
 }
 
-func (m *subagentManager) abortChildStart(childID subagent.NodeID) {
-	m.mu.Lock()
-	rec := m.children[childID]
-	if rec == nil || rec.state != subagent.NodeStarting {
-		m.mu.Unlock()
-		return
-	}
-	rec.state = subagent.NodeIdle
-	_ = m.tree.Update(childID, func(n *subagent.Node) { n.State = subagent.NodeIdle })
-	m.mu.Unlock()
-	m.signalCapacityRelease()
-}
+func (m *subagentManager) abortChildStart(subagent.NodeID) { m.signalCapacityRelease() }
 
 // signalCapacityRelease coalesces admission opportunities. The worker is
 // started lazily so focused tests that build a manager literal get the same
 // lifecycle behavior as production constructors.
-func (m *subagentManager) signalCapacityRelease() {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
-	m.wakeOnce.Do(func() {
-		m.wakeSignal = make(chan struct{}, 1)
-		m.wg.Go(m.capacityReleaseWorker)
-	})
-	wake := m.wakeSignal
-	m.mu.Unlock()
-	select {
-	case wake <- struct{}{}:
-	default:
-	}
-}
-
-func (m *subagentManager) capacityReleaseWorker() {
-	for {
-		select {
-		case <-m.ctx.Done():
-			return
-		case <-m.wakeSignal:
-			m.mu.Lock()
-			type candidate struct {
-				id        subagent.NodeID
-				sessionID string
-			}
-			candidates := make([]candidate, 0, len(m.children))
-			for id, rec := range m.children {
-				if rec != nil && rec.state != subagent.NodeStopped && !activeSubagentState(rec.state) {
-					candidates = append(candidates, candidate{id: id, sessionID: rec.sessionID})
-				}
-			}
-			m.mu.Unlock()
-			slices.SortFunc(candidates, func(a, b candidate) int { return strings.Compare(a.sessionID, b.sessionID) })
-
-			// Driver locks are intentionally acquired only after releasing m.mu;
-			// WakePending's gate may call back into the manager.
-			for _, candidate := range candidates {
-				d, ok := m.r.sessionDrivers.Lookup(candidate.sessionID)
-				if ok && d.HasPending() {
-					d.WakePending()
-				}
-			}
-		}
-	}
-}
+func (m *subagentManager) signalCapacityRelease() { m.r.sessionDrivers.signalWork() }
 
 func (m *subagentManager) rootSessionLockedSafe(sessionID string) string {
 	m.mu.Lock()
@@ -690,6 +507,14 @@ func (m *subagentManager) parentAcceptsSpawnLocked(sessionID string) bool {
 	if m.closed {
 		return false
 	}
+	if m.r.sessionDrivers != nil {
+		m.r.sessionDrivers.mu.Lock()
+		_, deleted := m.r.sessionDrivers.deleted[sessionID]
+		m.r.sessionDrivers.mu.Unlock()
+		if deleted {
+			return false
+		}
+	}
 	for _, rec := range m.children {
 		if rec.sessionID == sessionID {
 			return rec.state != subagent.NodeStopped
@@ -725,7 +550,7 @@ func (m *subagentManager) startChildTitle(childSess *session.Session, task strin
 func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 	m.mu.Lock()
 	rec := m.children[childID]
-	if rec == nil || rec.state != subagent.NodeStarting {
+	if rec == nil || rec.state == subagent.NodeStopped {
 		m.mu.Unlock()
 		return
 	}
@@ -733,129 +558,6 @@ func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 	_ = m.tree.Update(childID, func(n *subagent.Node) { n.State = subagent.NodeRunning })
 	m.mu.Unlock()
 	m.persistSnapshot()
-}
-
-// reportChildSettled records a child driver's finished turn and notifies its
-// parent when the child has no pending input left. The child remains alive and
-// re-messageable until explicitly stopped.
-func (m *subagentManager) reportChildSettled(childID subagent.NodeID) {
-	m.mu.Lock()
-	rec := m.children[childID]
-	// Only the currently active turn may settle. Stop and any newer lifecycle
-	// transition win permanently over a delayed callback.
-	if rec == nil || rec.state != subagent.NodeRunning {
-		m.mu.Unlock()
-		return
-	}
-	// Driver state has its own lock. Snapshot identity, release the manager
-	// lock, then revalidate before committing the completion so stop/new-run
-	// transitions cannot be overwritten.
-	sessionID := rec.sessionID
-	m.mu.Unlock()
-	errMsg := ""
-	if d, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
-		errMsg = d.LastError()
-	}
-
-	m.mu.Lock()
-	rec = m.children[childID]
-	if rec == nil || rec.state != subagent.NodeRunning || rec.sessionID != sessionID {
-		m.mu.Unlock()
-		return
-	}
-	rec.result = rec.session.GetLastAssistantMessageContent()
-	rec.errMsg = errMsg
-	parentSess, childSess, parentAgentName, childAgent := rec.parentSess, rec.session, rec.parentAgentName, rec.agent
-	state := subagent.NodeIdle
-	if rec.errMsg != "" {
-		state = subagent.NodeFailed
-	}
-	rec.state = state
-	_ = m.tree.Update(childID, func(n *subagent.Node) {
-		n.State = state
-		n.Error = rec.errMsg
-		n.NeedsAttention = state == subagent.NodeFailed
-		if n.NeedsAttention {
-			n.WaitingOn = "failed"
-		} else {
-			n.WaitingOn = ""
-		}
-	})
-	errMsg = rec.errMsg
-	m.mu.Unlock()
-	m.signalCapacityRelease()
-
-	if parentSess != nil && childSess != nil {
-		parentSess.AddSubSession(childSess)
-		if persist := m.persistence(); persist != nil {
-			persist.enqueueTranscript(parentSess.ID, childSess)
-		}
-	}
-	if parentSess != nil && childSess != nil && childAgent != nil {
-		parentAgent, _ := m.r.team.Agent(parentAgentName)
-		m.r.executeSubagentStopHooks(context.WithoutCancel(m.ctx), parentSess, childSess, parentAgent, childAgent.Name(), childSess.GetLastAssistantMessageContent())
-	}
-
-	m.reportTurn(childID, state, errMsg)
-}
-
-// reportTurn records a child's finished turn in the tree and delivers a short
-// report once its subtree is quiet. The child stays alive and idle, accepting
-// future input until explicitly stopped.
-func (m *subagentManager) reportTurn(childID subagent.NodeID, state subagent.NodeState, errMsg string) {
-	m.mu.Lock()
-	rec := m.children[childID]
-	// Hooks and persistence may have allowed a stop or a new admitted run while
-	// this report was being prepared. Never publish that stale completion.
-	if rec == nil || rec.state != state {
-		m.mu.Unlock()
-		return
-	}
-	parentID, name := rec.parentSession, rec.name
-	childSessionID := rec.sessionID
-	detail := rec.result
-	if errMsg != "" {
-		detail = errMsg
-	}
-	_ = m.tree.Update(childID, func(n *subagent.Node) {
-		n.State = state
-		n.Error = errMsg
-	})
-	m.mu.Unlock()
-
-	m.persistSnapshot()
-
-	// Wait for quiet: a turn that ends while the subagent's own subtree is
-	// still working is bookkeeping, not news — the parent can act on nothing
-	// yet, and in deep chains reporting it would wake every ancestor once per
-	// leaf event (a model turn each). Stay silent; the subagent is re-woken by
-	// its own children's reports, and its next turn end re-evaluates this
-	// check, so a report always bubbles up once the subtree settles.
-	// send_message(parent) never waits.
-	if m.hasRunningSubagents(childSessionID) {
-		return
-	}
-
-	verb := "finished its turn"
-	label := "Full response"
-	if state == subagent.NodeFailed {
-		verb = "failed"
-		label = "Error"
-	}
-	preview, truncated := subagent.PreviewText(detail, subagent.PreviewLen)
-	msg := fmt.Sprintf("Subagent %q (%s) %s.", name, childID, verb)
-	// Embed the response (or its head) so the parent can often decide without
-	// a read_subagent round-trip. A trailing "[...]" marks truncation: the
-	// full text requires inspection. Without it, the report carries the
-	// ENTIRE response.
-	if preview != "" {
-		if truncated {
-			msg += fmt.Sprintf(" %s preview: %q", label, preview+" [...]")
-		} else {
-			msg += fmt.Sprintf(" %s: %q", label, preview)
-		}
-	}
-	m.deliverToParent(parentID, systemInfo(msg))
 }
 
 // stopChild explicitly finalizes a subagent of parentID: it cancels any
@@ -897,22 +599,20 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 	}
 
 	for _, stoppedRec := range stopped {
-		if stoppedRec.parentSess != nil && stoppedRec.session != nil {
-			stoppedRec.parentSess.AddSubSession(stoppedRec.session)
+		if stoppedRec.durable.Revision == 0 {
+			continue
 		}
-		if stoppedRec.parentSession != "" && stoppedRec.session != nil {
-			if persist := m.persistence(); persist != nil {
-				persist.enqueueTranscript(stoppedRec.parentSession, stoppedRec.session)
-			}
-		}
-	}
-
-	m.persistSnapshot()
-	if persist := m.persistence(); persist != nil {
-		if err := persist.flushNow(); err != nil {
+		record := stoppedRec.durable
+		record.Node.State = subagent.NodeStopped
+		if err := m.coordination().CommitChild(context.WithoutCancel(m.ctx), session.ChildCommit{ExpectedRevision: record.Revision, Record: record}); err != nil {
 			return "", err
 		}
+		record.Revision++
+		m.mu.Lock()
+		stoppedRec.durable = record
+		m.mu.Unlock()
 	}
+	m.persistSnapshot()
 	return name, nil
 }
 
@@ -935,24 +635,30 @@ func (m *subagentManager) markStoppedLocked(rec *childRecord, id subagent.NodeID
 // deliver routes input to a subagent's session driver. The manager validates
 // stopped/ownership state before calling this, so a known idle child may wake.
 func (m *subagentManager) deliver(sessionID, content string) bool {
-	return m.r.sessionDrivers.PostKnown(m.ctx, sessionID, QueuedMessage{Content: content}, true)
+	return m.deliverAgent(sessionID, content, "", "")
 }
 
-// deliverToParent routes a runtime-authored note (turn report, child
-// message, spawn failure) up to a parent session. Notes must never be lost:
-// when the parent driver has not been seen yet they remain buffered until the
-// session appears.
-func (m *subagentManager) deliverToParent(sessionID, content string) {
-	if !m.r.deliverOrBuffer(m.ctx, sessionID, content) {
-		slog.WarnContext(m.ctx, "Dropped runtime lifecycle note: session mailbox full or stopped", "session_id", sessionID)
+func (m *subagentManager) deliverAgent(sessionID, content, senderID, senderName string) bool {
+	id, err := newSessionRequestID()
+	if err != nil {
+		return false
 	}
+	return m.r.sessionDrivers.PostKnown(m.ctx, sessionID, QueuedMessage{Content: content, RequestID: id, InputOrigin: session.InputOriginAgent, SenderID: senderID, SenderName: senderName, InputMode: "steer"}, true)
 }
 
 // deliverExplicitToParent preserves child-to-top-level delivery when the
 // parent's driver has not been observed yet, but otherwise uses direct
 // admission semantics so capacity denial is surfaced to the tool caller.
-func (m *subagentManager) deliverExplicitToParent(sessionID, content string) bool {
-	return m.r.sessionDrivers.PostOrBuffer(m.ctx, sessionID, QueuedMessage{Content: content}, true)
+func (m *subagentManager) deliverExplicitToParent(sessionID, content string, sender ...string) bool {
+	var senderID, senderName string
+	if len(sender) == 2 {
+		senderID, senderName = sender[0], sender[1]
+	}
+	id, err := newSessionRequestID()
+	if err != nil {
+		return false
+	}
+	return m.r.sessionDrivers.PostOrBuffer(m.ctx, sessionID, QueuedMessage{Content: content, RequestID: id, InputOrigin: session.InputOriginAgent, SenderID: senderID, SenderName: senderName, InputMode: "steer"}, true)
 }
 
 // systemInfo wraps a runtime-authored note so the model can distinguish
@@ -1042,14 +748,14 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 	if err != nil {
 		return fail(err)
 	}
-	driver, err := m.r.sessionDrivers.GetInitialized(ctx, loaded)
+	reservation, err := m.r.sessionDrivers.PrepareRestore(ctx, loaded)
 	if err != nil {
 		return fail(err)
 	}
+	defer reservation.Discard()
+	driver := reservation.driver
 	driver.SetPreStartErrorGate(func() error { return m.admitChildRun(id) }, func() { m.abortChildStart(id) })
-	unwatchSettled := driver.OnSettled(func() { m.reportChildSettled(id) })
-	unwatchStarted := driver.OnStarted(func() { m.markChildRunning(id) })
-	unwatch := func() { unwatchSettled(); unwatchStarted() }
+	unwatch := driver.OnStarted(func() { m.markChildRunning(id) })
 
 	m.mu.Lock()
 	current := m.children[id]
@@ -1059,8 +765,13 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 		_ = m.r.sessionDrivers.ReleaseDriver(context.WithoutCancel(ctx), sessionID, driver)
 		return fmt.Errorf("subagent %q is no longer available", id)
 	}
+	if err := m.r.sessionDrivers.ActivateRestoreBatch([]*restoreDriverReservation{reservation}, nil); err != nil {
+		m.mu.Unlock()
+		unwatch()
+		return fail(err)
+	}
 	oldUnwatch := current.unwatch
-	current.session = loaded
+	current.session = nil
 	current.agent = childAgent
 	current.unwatch = unwatch
 	m.sessions[sessionID] = &sessionSubagents{node: id}
@@ -1096,10 +807,14 @@ func (m *subagentManager) sendToChild(parentID string, id subagent.NodeID, body 
 	if err := m.ensureChildDriver(m.ctx, id); err != nil {
 		return "", err
 	}
-	if !m.deliver(sessionID, body) {
+	senderName := ""
+	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok {
+		senderName = parent.AgentName()
+	}
+	if !m.deliverAgent(sessionID, body, parentID, senderName) {
 		// Capacity reclamation can race the first lookup. Rebind once more and
 		// retry rather than reporting a persistent child as permanently gone.
-		if err := m.ensureChildDriver(m.ctx, id); err != nil || !m.deliver(sessionID, body) {
+		if err := m.ensureChildDriver(m.ctx, id); err != nil || !m.deliverAgent(sessionID, body, parentID, senderName) {
 			if err != nil {
 				return "", err
 			}
@@ -1124,8 +839,15 @@ func (m *subagentManager) hasRunningSubagentsLocked(sessionID string) bool {
 		if rec.parentSession != sessionID {
 			continue
 		}
-		if rec.state == subagent.NodeRunning || rec.state == subagent.NodeStarting {
-			return true
+		if m.r.sessionDrivers != nil {
+			if d, ok := m.r.sessionDrivers.Lookup(rec.sessionID); ok {
+				d.mu.Lock()
+				active := d.running || d.starting || d.settling || len(d.pending) != 0
+				d.mu.Unlock()
+				if active {
+					return true
+				}
+			}
 		}
 		if rec.sessionID != "" && m.hasRunningSubagentsLocked(rec.sessionID) {
 			return true
@@ -1137,55 +859,95 @@ func (m *subagentManager) hasRunningSubagentsLocked(sessionID string) bool {
 // readChild returns a snapshot of a direct subagent of parentID. It errors when
 // the id is unknown or belongs to another session.
 func (m *subagentManager) readChild(parentID string, id subagent.NodeID) (childRecord, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	rec := m.children[id]
-	if rec == nil {
+	rec, ok := m.Read(id)
+	if !ok {
 		return childRecord{}, fmt.Errorf("no subagent with id %q", id)
 	}
 	if rec.parentSession != parentID {
 		return childRecord{}, fmt.Errorf("subagent %q is not one of yours", id)
 	}
-	return *rec, nil
+	return rec, nil
 }
 
-// Read returns a snapshot of a subagent's record by id.
 func (m *subagentManager) Read(id subagent.NodeID) (childRecord, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	rec, ok := m.children[id]
 	if !ok {
+		m.mu.Unlock()
 		return childRecord{}, false
 	}
-	return *rec, true
+	snapshot := *rec
+	m.mu.Unlock()
+	if d, ok := m.r.sessionDrivers.Lookup(snapshot.sessionID); ok {
+		snapshot.session = d.session()
+	} else if m.r.sessionStore != nil {
+		snapshot.session, _ = m.r.sessionStore.GetSession(m.r.lifetime(), snapshot.sessionID)
+	}
+	if snapshot.session != nil {
+		snapshot.result = ownAssistantResult(snapshot.session)
+	}
+	return snapshot, true
 }
 
 func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) error {
 	m.mu.Lock()
 	var stopped []*childRecord
+	var unwatches []func()
+	deleting := map[string]bool{sessionID: true}
+	pending := []string{sessionID}
+	for len(pending) != 0 {
+		parentID := pending[0]
+		pending = pending[1:]
+		for _, rec := range m.children {
+			if rec.parentSession == parentID && !deleting[rec.sessionID] {
+				deleting[rec.sessionID] = true
+				pending = append(pending, rec.sessionID)
+				stopped = append(stopped, rec)
+			}
+		}
+	}
 	for id, rec := range m.children {
-		if rec.parentSession == sessionID && rec.state != subagent.NodeStopped {
-			stopped = m.markStoppedLocked(rec, id, stopped)
+		if deleting[rec.sessionID] {
+			rec.state = subagent.NodeStopped
+			_ = m.tree.Update(id, func(node *subagent.Node) {
+				node.State, node.NeedsAttention, node.WaitingOn = subagent.NodeStopped, false, ""
+			})
+			if rec.unwatch != nil {
+				unwatches = append(unwatches, rec.unwatch)
+				rec.unwatch = nil
+			}
 		}
 	}
-	delete(m.sessions, sessionID)
-	for _, rec := range stopped {
-		delete(m.sessions, rec.sessionID)
+	// Reserve the entire cascade before releasing manager admission, including
+	// descendants already stopped by an earlier, interrupted delete.
+	m.r.sessionDrivers.mu.Lock()
+	for id := range deleting {
+		m.r.sessionDrivers.deleted[id] = struct{}{}
 	}
+	m.r.sessionDrivers.mu.Unlock()
 	m.mu.Unlock()
-	for _, rec := range stopped {
-		if rec.unwatch != nil {
-			rec.unwatch()
-		}
-		m.r.sessionEvents.Delete(rec.sessionID)
+	for _, unwatch := range unwatches {
+		unwatch()
 	}
 	for _, rec := range stopped {
+		m.r.sessionEvents.Delete(rec.sessionID)
 		m.r.sessionDrivers.StopAll(rec.sessionID)
 	}
 	for _, rec := range stopped {
 		if err := m.r.sessionDrivers.Delete(ctx, rec.sessionID); err != nil {
 			return err
 		}
+	}
+	// Late metrics and lifecycle callbacks still need their original topology
+	// until every descendant publisher has quiesced.
+	m.metricsMu.Lock()
+	m.mu.Lock()
+	for id := range deleting {
+		delete(m.sessions, id)
+	}
+	m.mu.Unlock()
+	m.metricsMu.Unlock()
+	for _, rec := range stopped {
 		m.r.interactions.deleteSession(rec.sessionID)
 		if m.r.sessionStore != nil {
 			_ = m.r.sessionStore.DeleteSession(ctx, rec.sessionID)
@@ -1199,13 +961,27 @@ func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) e
 }
 
 // Close cancels every running subagent and waits for their goroutines to exit.
-func (m *subagentManager) Close() {
+func (m *subagentManager) closeAdmission() {
 	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
 	m.closed = true
+	m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+}
+
+func (m *subagentManager) CloseContext(ctx context.Context) error {
+	m.closeAdmission()
+	done := make(chan struct{})
+	go func() { m.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	m.restoreMu.Lock()
+	defer m.restoreMu.Unlock()
+	m.mu.Lock()
 	for _, tracked := range m.sessions {
 		if tracked.unwatch != nil {
 			tracked.unwatch()
@@ -1213,23 +989,16 @@ func (m *subagentManager) Close() {
 		}
 	}
 	m.mu.Unlock()
-
-	// Restore owns this gate from admission through its final persistence.
-	// Marking closed first rejects new restores; acquiring it waits for any
-	// admitted restore before workers and persistence are shut down.
-	m.restoreMu.Lock()
-	defer m.restoreMu.Unlock()
-	m.cancel()
-	m.wg.Wait()
 	m.persistMu.Lock()
 	persist := m.persist
 	m.persistMu.Unlock()
 	if persist != nil {
-		if err := persist.close(); err != nil {
-			slog.Warn("Failed to flush subagent persistence", "error", err)
-		}
+		return persist.close()
 	}
+	return nil
 }
+
+func (m *subagentManager) Close() { _ = m.CloseContext(context.Background()) }
 
 // allowedFromAgent builds the spawn allow-list for an agent from its declared
 // async subagents, resolving each target's description from the team when the
@@ -1314,7 +1083,7 @@ type SubagentAttachInfo struct {
 // session (failed spawns, unresumable restores).
 func (r *LocalRuntime) SubagentAttachInfo(id subagent.NodeID) (SubagentAttachInfo, bool) {
 	rec, ok := r.subagents.Read(id)
-	if !ok || rec.session == nil {
+	if !ok {
 		return SubagentAttachInfo{}, false
 	}
 	if rec.state != subagent.NodeStopped {

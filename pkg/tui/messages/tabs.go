@@ -3,15 +3,16 @@ package messages
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
 )
 
-// SessionRuntimeEventMsg carries a runtime event plus exact session-hub seed
-// provenance to a page. Supervisor strips the App wrapper before its existing
-// state handling, then uses this TUI envelope only for routed delivery.
+// SessionRuntimeEventMsg shares the App-owned presentation head and exact
+// seed provenance with each routed page.
 type SessionRuntimeEventMsg struct {
-	Event runtime.Event
-	Seed  bool
+	Event      runtime.Event
+	Seed       bool
+	Projection *lifecycle.Projection
 }
 
 // RoutedMsg wraps a message with a session ID for routing.

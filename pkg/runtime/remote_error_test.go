@@ -38,3 +38,18 @@ func TestDecodeSessionHTTPErrorInfersLegacyMissingReason(t *testing.T) {
 	assert.Empty(t, sessionErr.Reason)
 	assert.Equal(t, "session compact_busy: operation is busy", sessionErr.Error())
 }
+
+func TestDecodeSessionHTTPErrorPreservesPersistenceDetail(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"persistence","operation":"submit","session_id":"s","detail":"session writes are blocked: schema mismatch"}`,
+		`{"operation":"submit","session_id":"s","detail":"session writes are blocked: schema mismatch"}`,
+	} {
+		resp := &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(body))}
+		var sessionErr *SessionError
+		require.ErrorAs(t, decodeSessionHTTPError(resp), &sessionErr)
+		assert.Equal(t, SessionErrorPersistence, sessionErr.Kind)
+		assert.Equal(t, "s", sessionErr.SessionID)
+		assert.Equal(t, "session writes are blocked: schema mismatch", sessionErr.Detail)
+		assert.Contains(t, sessionErr.Error(), sessionErr.Detail)
+	}
+}

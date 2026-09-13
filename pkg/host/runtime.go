@@ -2,16 +2,15 @@ package host
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/host/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
@@ -67,17 +66,5 @@ func NewSessionRuntime(ctx context.Context, source config.Source, runConfig *con
 	if err != nil {
 		return fail(fmt.Errorf("creating session runtime: %w", err))
 	}
-	return &supervisor{SessionRuntimeSupervisor: runtime.NewSessionRuntimeSupervisor(r), team: loaded.Team}, nil
-}
-
-type supervisor struct {
-	runtime.SessionRuntimeSupervisor
-
-	team *team.Team
-}
-
-func (s *supervisor) Shutdown(ctx context.Context) error {
-	runtimeErr := s.SessionRuntimeSupervisor.Shutdown(ctx)
-	toolErr := s.team.StopToolSets(ctx)
-	return errors.Join(runtimeErr, toolErr)
+	return lifecycle.OwnRuntime(runtime.NewSessionRuntimeSupervisor(r), loaded.Team), nil
 }

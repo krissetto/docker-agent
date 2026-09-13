@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools"
@@ -46,6 +47,7 @@ type block struct {
 	cacheW int
 	cache  []string
 	cached bool
+	input  bool
 }
 
 func (b *block) lines(width int) []string {
@@ -132,6 +134,21 @@ func (t *Transcript) FlushPending() {
 	}
 }
 
+// CommitAssistant fences text and discards only orphan, unpublished tool fragments.
+func (t *Transcript) CommitAssistant(agentName string, committed []string) {
+	t.FlushPending()
+	var orphaned []string
+	t.toolz.ForEach(func(view *ToolView) {
+		msg := view.Message()
+		if msg != nil && msg.Sender == agentName && msg.ToolStatus == tuitypes.ToolStatusPending && !slices.Contains(committed, msg.ToolCall.ID) {
+			orphaned = append(orphaned, msg.ToolCall.ID)
+		}
+	})
+	for _, id := range orphaned {
+		t.toolz.Remove(id)
+	}
+}
+
 // UpsertTool creates or updates an in-flight tool call.
 func (t *Transcript) UpsertTool(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status tuitypes.ToolStatus) {
 	t.toolz.Upsert(agentName, toolCall, toolDef, status)
@@ -215,4 +232,16 @@ func (t *Transcript) pendingLines(width int) []string {
 func spinnerLine(frame int) string {
 	f := spinnerFrames[frame%len(spinnerFrames)]
 	return StAccent().Render(f) + " " + StMuted().Render("Working…")
+}
+
+func (t *Transcript) AddInputBlock(render func(int) []string) {
+	t.blocks = append(t.blocks, &block{render: render, input: true})
+}
+
+func (t *Transcript) InvalidateInputBlocks() {
+	for _, b := range t.blocks {
+		if b.input {
+			b.cached = false
+		}
+	}
 }

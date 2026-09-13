@@ -202,8 +202,8 @@ func TestSessionRuntimeFactoryRebuildsAfterSourceRefresh(t *testing.T) {
 	}
 }
 
-func configureWorkspaceRuntimePool(router *workspaceSessionRuntimes, ttl time.Duration, cap int) {
-	router.configureIdlePolicy(ttl, cap, nil)
+func configureWorkspaceRuntimePool(router *workspaceSessionRuntimes, ttl time.Duration, capacity int) {
+	router.configureIdlePolicy(ttl, capacity, nil)
 }
 
 func TestWorkspaceRuntimeUnusedRouterStartsNoPruner(t *testing.T) {
@@ -241,6 +241,7 @@ func TestWorkspaceRuntimePoolBoundsIdleDirectories(t *testing.T) {
 
 type generationSource struct {
 	memorySource
+
 	generation atomic.Uint64
 }
 
@@ -248,6 +249,7 @@ func (s *generationSource) Generation() uint64 { return s.generation.Load() }
 
 type recordingSupervisor struct {
 	runtime.SessionRuntimeSupervisor
+
 	shutdown *atomic.Int32
 }
 
@@ -342,8 +344,9 @@ func TestWorkspaceRuntimeDoesNotInferReleasedOrRestoredOwnership(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, handle.Release(t.Context()))
 	source.generation.Add(1)
+	expired := time.Now().Add(time.Hour)
+	router.configureIdlePolicy(10*time.Millisecond, defaultWorkspaceRuntimeIdleCap, func() time.Time { return expired })
 	router.prune()
-	time.Sleep(30 * time.Millisecond)
 	assert.Zero(t, shutdown.Load(), "a missing/released borrowed handle is not proof that restored children are absent")
 
 	require.NoError(t, router.DeleteSession(t.Context(), sess.ID))
@@ -369,8 +372,10 @@ func TestWorkspaceRuntimeContextCancelRejectsAcquireAndShutsDownOnce(t *testing.
 	release()
 	cancel()
 	require.Eventually(t, func() bool { return shutdown.Load() == 1 }, time.Second, time.Millisecond)
-	_, _, _, err = router.acquireRuntime(t.TempDir())
+	rt, _, release, err = router.acquireRuntime(t.TempDir())
+	release()
 	require.Error(t, err)
+	require.Nil(t, rt)
 	require.NoError(t, router.Shutdown(t.Context()))
 	require.Equal(t, int32(1), shutdown.Load(), "cancellation and explicit shutdown are idempotent")
 }
@@ -451,9 +456,12 @@ func TestWorkspaceRuntimeCanceledShutdownWaiterDoesNotPoisonTeardown(t *testing.
 func TestWorkspaceRuntimeConcurrentFirstBuildOnce(t *testing.T) {
 	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
 	var builds atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
 	build := func(ctx context.Context, source config.Source, dir string) (runtime.SessionRuntimeSupervisor, error) {
-		builds.Add(1)
-		time.Sleep(25 * time.Millisecond)
+		if builds.Add(1) == 1 {
+			close(started)
+		}
+		<-release
 		return factory.build(ctx, source, dir)
 	}
 	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
@@ -462,15 +470,20 @@ func TestWorkspaceRuntimeConcurrentFirstBuildOnce(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 12)
+	ready := make(chan struct{}, 12)
 	for i := range 12 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
+			ready <- struct{}{}
 			sess := session.New(session.WithID(fmt.Sprintf("concurrent-%d", i)), session.WithAgentName("root"), session.WithWorkingDir(dir))
 			_, err := router.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
 			errs <- err
-		}()
+		})
 	}
+	for range 12 {
+		<-ready
+	}
+	<-started
+	close(release)
 	wg.Wait()
 	close(errs)
 	for err := range errs {

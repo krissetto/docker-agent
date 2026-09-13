@@ -77,6 +77,7 @@ func (s queueTestServices) OnBackgroundEvent(func(runtime.Event)) {}
 
 type sessionTestSession struct {
 	runtime.UnsupportedSessionHandle
+
 	mu             sync.Mutex
 	id             string
 	state          runtime.SessionState
@@ -546,7 +547,7 @@ func TestSessionFixtureObserveRetryAndTypedUnsupported(t *testing.T) {
 	events := make(chan runtime.SessionEvent)
 	close(events)
 	handle := &sessionTestSession{id: sess.ID, state: runtime.SessionStateSettled, observation: runtime.Observation{
-		Initial: []runtime.SessionSnapshot{runtime.SessionSnapshot{Session: sess.Clone(), Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled}}},
+		Initial: []runtime.SessionSnapshot{{Session: sess.Clone(), Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled}}},
 		Events:  events, Cancel: func() {},
 	}}
 	_, handle = newSessionTestApp(t, sess, nil, handle)

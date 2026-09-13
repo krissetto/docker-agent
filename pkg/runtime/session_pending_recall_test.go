@@ -102,6 +102,12 @@ func TestPendingRecallFailureLeavesAcceptedInput(t *testing.T) {
 				h.driver.sess.ParentID = "parent"
 			}
 			ok, err := h.CancelPendingMessage(ctx, turn.TurnID)
+			if kind == "stored_child" {
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.Empty(t, h.driver.steering)
+				return
+			}
 			require.Error(t, err)
 			assert.False(t, ok)
 			if kind == "unsupported" || kind == "stored_child" {

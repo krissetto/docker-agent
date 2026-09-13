@@ -17,6 +17,7 @@ import (
 
 type serverSession struct {
 	runtime.UnsupportedSessionHandle
+
 	id        string
 	agent     string
 	state     runtime.SessionState

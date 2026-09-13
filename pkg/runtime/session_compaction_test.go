@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -347,7 +348,7 @@ func TestDoCompactInMemoryStoreAppendsSummaryOnce(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, summaries)
-	assert.Same(t, sess, reloaded, "aliasing store must mutate the live session exactly once")
+	assert.NotSame(t, sess, reloaded, "store reads are detached own-row snapshots")
 }
 
 func TestDoCompactPersistenceFailureReportsFailedWithoutApplying(t *testing.T) {
@@ -461,6 +462,7 @@ func TestDoCompactObservedRunDoesNotDuplicateSummary(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), sess))
 
 	inner := make(chan Event, 32)
+	rt.observeRunStart(t.Context(), sess)
 	observed := rt.observe(t.Context(), sess, inner)
 	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(inner))
 	close(inner)
@@ -575,4 +577,130 @@ func TestDoCompactSummaryEventCarriesCost(t *testing.T) {
 		"the summary item records the summarization stream's cost")
 	assert.InDelta(t, last.Cost, summaryEvent.Cost, 1e-9,
 		"the emitted event must carry the same cost that was applied to the session")
+}
+
+func TestRunCompactionAgentPreservesSeedAndDetachedAccounting(t *testing.T) {
+	t.Parallel()
+
+	for _, summary := range []string{"summary", ""} {
+		t.Run("summary="+summary, func(t *testing.T) {
+			stream := newStreamBuilder().AddContent(summary).AddStopWithUsage(100, 50).Build()
+			prov := &stepProvider{id: "test/mock-model", steps: []providerStep{{stream: stream}}}
+			a := agent.New("root", "", agent.WithModel(prov))
+			rt := &LocalRuntime{modelsStore: mockModelStoreWithCostAndLimit{
+				limit: 100_000, cost: modelsdev.Cost{Input: 10, Output: 20},
+			}}
+			sess := session.New(session.WithMessages([]session.Item{
+				session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleSystem, Content: "Summarize the conversation."}}),
+				session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "original question"}}),
+				session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "original answer"}}),
+				session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "Generate the summary now."}}),
+			}))
+			sess.SetTokensAndCost(7, 8, 0.37)
+			sess.AddMessageUsageRecord("root", "seed/model", 0.37, &chat.Usage{InputTokens: 7, OutputTokens: 8})
+			original := sess.Clone()
+			seedItems := sess.Messages
+
+			require.NoError(t, rt.runCompactionAgent(t.Context(), a, sess))
+			prov.mu.Lock()
+			requests := prov.messages
+			prov.mu.Unlock()
+			require.Len(t, requests, 1)
+			var userInputs []string
+			for _, message := range requests[0] {
+				if message.Role == chat.MessageRoleUser {
+					userInputs = append(userInputs, message.Content)
+				}
+			}
+			assert.Equal(t, []string{"original question", "Generate the summary now."}, userInputs)
+			assert.Equal(t, original.MessageUsageHistorySnapshot(), sess.MessageUsageHistorySnapshot())
+			require.GreaterOrEqual(t, len(sess.Messages), len(original.Messages))
+			assert.Equal(t, original.Messages, sess.Messages[:len(original.Messages)], "seed must remain exact")
+			assert.Equal(t, original.Messages, seedItems, "execution must not mutate the supplied seed items")
+			for _, item := range sess.Messages[len(original.Messages):] {
+				if item.Message != nil {
+					assert.NotEqual(t, chat.MessageRoleUser, item.Message.Message.Role, "retry must not append duplicate or empty input")
+				}
+			}
+			if summary != "" {
+				assert.Equal(t, summary, sess.GetLastAssistantMessageContent())
+			} else {
+				for _, item := range sess.Messages[len(original.Messages):] {
+					if item.Message != nil {
+						assert.Empty(t, item.Message.Message.Content, "empty output must not reuse a seeded assistant answer")
+					}
+				}
+			}
+			input, output, cost := sess.TokensAndCost()
+			assert.Equal(t, int64(100), input)
+			assert.Equal(t, int64(50), output)
+			assert.InDelta(t, original.Cost, cost, 1e-9, "preserve the compatibility counter independently of message cost")
+			if summary != "" {
+				assert.InDelta(t, 0.002, sess.TotalCost(), 1e-9)
+			} else {
+				assert.Zero(t, sess.TotalCost(), "empty assistant responses are not recorded")
+			}
+			var usage chat.Usage
+			for _, item := range sess.Messages[len(original.Messages):] {
+				if item.Message != nil {
+					assert.Equal(t, "test/mock-model", item.Message.Message.Model)
+					usage.Add(item.Message.Message.Usage)
+				}
+			}
+			if summary != "" {
+				assert.Equal(t, int64(100), usage.InputTokens)
+				assert.Equal(t, int64(50), usage.OutputTokens)
+			} else {
+				assert.Zero(t, usage)
+			}
+			sess.Messages[0].Message.Message.Content = "detached edit"
+			assert.Equal(t, original.Messages, seedItems, "result must not alias the seed")
+		})
+	}
+}
+
+func TestRunCompactionAgentFailureLeavesPrivateResultUnchanged(t *testing.T) {
+	t.Parallel()
+
+	for _, cancelRun := range []bool{false, true} {
+		name := "model error"
+		if cancelRun {
+			name = "cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			step := providerStep{stream: &handoffErrorStream{}}
+			if cancelRun {
+				step.started = make(chan struct{})
+				step.release = make(chan struct{})
+			}
+			prov := &stepProvider{id: "test/mock-model", steps: []providerStep{step}}
+			a := agent.New("root", "", agent.WithModel(prov))
+			rt := &LocalRuntime{modelsStore: mockModelStore{}}
+			sess := session.New(session.WithUserMessage("Generate the summary."))
+			original := sess.Clone()
+			result := make(chan error, 1)
+			go func() { result <- rt.runCompactionAgent(ctx, a, sess) }()
+			if cancelRun {
+				waitClosed(t, step.started, "compaction provider to start")
+				cancel()
+			}
+			select {
+			case err := <-result:
+				if cancelRun {
+					require.ErrorIs(t, err, context.Canceled)
+				} else {
+					require.ErrorContains(t, err, "turn failed")
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("compaction callback did not drain within its cleanup bounds")
+			}
+			assert.Equal(t, original.Messages, sess.Messages)
+			input, output, cost := sess.TokensAndCost()
+			assert.Zero(t, input)
+			assert.Zero(t, output)
+			assert.Zero(t, cost)
+		})
+	}
 }

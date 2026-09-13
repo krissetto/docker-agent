@@ -24,6 +24,8 @@ type Migration struct {
 	AppliedAt   time.Time
 	// UpFunc is an optional Go function to run after UpSQL (for data migrations)
 	UpFunc func(ctx context.Context, db *sql.DB) error
+	// UpTxFunc runs conditional schema changes before recording the migration.
+	UpTxFunc func(ctx context.Context, tx *sql.Tx) error
 }
 
 // MigrationManager handles database migrations
@@ -157,6 +159,12 @@ func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migrat
 		_, err = tx.ExecContext(ctx, migration.UpSQL)
 		if err != nil {
 			return fmt.Errorf("failed to execute migration SQL: %w", err)
+		}
+	}
+
+	if migration.UpTxFunc != nil {
+		if err := migration.UpTxFunc(ctx, tx); err != nil {
+			return fmt.Errorf("failed to execute transactional migration: %w", err)
 		}
 	}
 
@@ -516,6 +524,54 @@ func getAllMigrations() []Migration {
 				);
 			`,
 			DownSQL: `DROP TABLE IF EXISTS session_todos`,
+		},
+		{
+			ID:          34,
+			Name:        "034_add_child_coordination",
+			Description: "Persist child admission, revisioned outcomes and report acknowledgments",
+			UpSQL: `
+                ALTER TABLE sessions ADD COLUMN execution_settings TEXT NOT NULL DEFAULT '{}';
+                ALTER TABLE session_items ADD COLUMN actor_input_mode TEXT NOT NULL DEFAULT '';
+                ALTER TABLE session_items ADD COLUMN write_id TEXT NOT NULL DEFAULT '';
+                ALTER TABLE session_items ADD COLUMN write_hash TEXT NOT NULL DEFAULT '';
+                CREATE UNIQUE INDEX session_items_write_id ON session_items(session_id, write_id) WHERE write_id != '';
+                CREATE TABLE child_records (
+                    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                    root_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL,
+                    record TEXT NOT NULL
+                );
+                CREATE INDEX child_records_root ON child_records(root_session_id);
+                CREATE TABLE child_reports (
+                    id TEXT PRIMARY KEY,
+                    parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    child_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    turn_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    message_id INTEGER
+                );
+                CREATE INDEX child_reports_pending ON child_reports(parent_session_id) WHERE message_id IS NULL;
+            `,
+			DownSQL: `DROP TABLE IF EXISTS child_reports; DROP TABLE IF EXISTS child_records;`,
+		},
+		{
+			ID:          35,
+			Name:        "035_complete_child_coordination_schema",
+			Description: "Complete execution settings and keyed append columns on early coordination databases",
+			UpTxFunc:    completeChildCoordinationSchema,
+		},
+		{
+			ID:          36,
+			Name:        "036_add_input_provenance",
+			Description: "Persist trusted input origin and sender attribution",
+			UpSQL: `
+                ALTER TABLE session_items ADD COLUMN input_origin TEXT NOT NULL DEFAULT '';
+                ALTER TABLE session_items ADD COLUMN sender_id TEXT NOT NULL DEFAULT '';
+                ALTER TABLE session_items ADD COLUMN sender_name TEXT NOT NULL DEFAULT '';
+            `,
+			DownSQL: `ALTER TABLE session_items DROP COLUMN sender_name; ALTER TABLE session_items DROP COLUMN sender_id; ALTER TABLE session_items DROP COLUMN input_origin;`,
 		},
 	}
 }

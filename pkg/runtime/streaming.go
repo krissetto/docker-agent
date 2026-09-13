@@ -52,6 +52,7 @@ type streamResult struct {
 	// chat.MessageDelta.Media.
 	Media        []chat.MediaDelta
 	Stopped      bool
+	Steered      bool
 	FinishReason chat.FinishReason
 	Usage        *chat.Usage
 }
@@ -208,8 +209,27 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		tel.RecordTokenUsage(ctx, modelName, input, messageUsage.OutputTokens, sess.TotalCost())
 	}
 
+	interrupted := func() (streamResult, error) {
+		if cancelStream != nil {
+			cancelStream(errSteeringBoundary)
+		}
+		finishAssistantText()
+		recordUsage()
+		return streamResult{
+			Content: fullContent.String(), ReasoningContent: fullReasoningContent.String(),
+			ThinkingSignature: thinkingSignature, ThoughtSignature: thoughtSignature,
+			Media: media, Usage: messageUsage, Stopped: true, Steered: true,
+		}, nil
+	}
+	steering := steeringSignal(ctx)
+
 mainLoop:
 	for {
+		select {
+		case <-steering:
+			return interrupted()
+		default:
+		}
 		select {
 		case res := <-recvCh:
 			// Reset the idle timer on every received chunk.
@@ -371,7 +391,13 @@ mainLoop:
 				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
+		case <-steering:
+			return interrupted()
+
 		case <-ctx.Done():
+			if errors.Is(context.Cause(ctx), errSteeringBoundary) {
+				return interrupted()
+			}
 			// Context cancelled (SIGTERM, Ctrl+C, or idle-timeout cancel from
 			// this function). Return promptly so graceful shutdown can proceed.
 			return streamResult{Stopped: true}, ctx.Err()

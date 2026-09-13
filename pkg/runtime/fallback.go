@@ -208,6 +208,11 @@ func (e *fallbackExecutor) classifyAttemptError(
 	}
 	decision = e.handleModelError(ctx, err, a, modelEntry, attempt, hasFallbacks, primaryFailedWithNonRetryable)
 	if decision == retryDecisionReturn {
+		select {
+		case <-steeringSignal(ctx):
+			return retryDecisionContinue, errSteeringBoundary
+		default:
+		}
 		return retryDecisionContinue, ctx.Err()
 	}
 	return decision, nil
@@ -279,7 +284,10 @@ func (e *fallbackExecutor) execute(
 			if attempt > 0 {
 				backoffDelay := backoff.Calculate(attempt - 1)
 				logRetryBackoff(a.Name(), modelEntry.provider.ID(), attempt, backoffDelay)
-				if !backoff.SleepWithContext(ctx, backoffDelay) {
+				if err := waitForRetryBoundary(ctx, backoffDelay); err != nil {
+					if errors.Is(err, errSteeringBoundary) {
+						return streamResult{Stopped: true, Steered: true}, modelEntry.provider, nil
+					}
 					fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
 					return streamResult{}, nil, ctx.Err()
 				}
@@ -315,12 +323,35 @@ func (e *fallbackExecutor) execute(
 			// the goroutine reading the response body.
 			streamCtx, streamCancel := context.WithCancelCause(ctx)
 
+			creating := make(chan struct{})
+			creationWatcherDone := make(chan struct{})
+			go func() {
+				defer close(creationWatcherDone)
+				select {
+				case <-steeringSignal(streamCtx):
+					streamCancel(errSteeringBoundary)
+				case <-creating:
+				case <-streamCtx.Done():
+				}
+			}()
 			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, agentTools)
+			close(creating)
+			<-creationWatcherDone
+			if errors.Is(context.Cause(streamCtx), errSteeringBoundary) {
+				if stream != nil {
+					stream.Close()
+				}
+				streamCancel(nil)
+				return streamResult{Stopped: true, Steered: true}, modelEntry.provider, nil
+			}
 			if err != nil {
 				streamCancel(nil)
 				lastErr = err
 				decision, retErr := e.classifyAttemptError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
 				if retErr != nil {
+					if errors.Is(retErr, errSteeringBoundary) {
+						return streamResult{Stopped: true, Steered: true}, modelEntry.provider, nil
+					}
 					fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
 					return streamResult{}, nil, retErr
 				}
@@ -348,6 +379,9 @@ func (e *fallbackExecutor) execute(
 				lastErr = err
 				decision, retErr := e.classifyAttemptError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
 				if retErr != nil {
+					if errors.Is(retErr, errSteeringBoundary) {
+						return streamResult{Stopped: true, Steered: true}, modelEntry.provider, nil
+					}
 					fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
 					return streamResult{}, nil, retErr
 				}
@@ -357,7 +391,9 @@ func (e *fallbackExecutor) execute(
 				continue
 			}
 
-			e.recordSuccess(a, modelEntry, primaryFailedWithNonRetryable)
+			if !res.Steered {
+				e.recordSuccess(a, modelEntry, primaryFailedWithNonRetryable)
+			}
 			fbSpan.SetFinalModel(modelEntry.provider.ID().Model)
 			fbSpan.SetOutcome(genai.FallbackOutcomeSuccess)
 			return res, modelEntry.provider, nil
@@ -452,7 +488,7 @@ func (e *fallbackExecutor) handleModelError(
 			"wait", waitDuration,
 			"retry_after_from_header", retryAfter > 0,
 			"error", err)
-		if !backoff.SleepWithContext(ctx, waitDuration) {
+		if waitForRetryBoundary(ctx, waitDuration) != nil {
 			return retryDecisionReturn
 		}
 		return retryDecisionContinue

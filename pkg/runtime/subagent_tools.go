@@ -110,23 +110,17 @@ func (r *LocalRuntime) handleSendMessage(_ context.Context, sess *session.Sessio
 		if sess.ParentID == "" {
 			return tools.ResultError("you have no parent to message"), nil
 		}
-		// Stamp the sender's node id so consumers (model and TUI) can attribute
-		// the message to a specific subagent, matching the turn reports.
-		from := fmt.Sprintf("subagent %q", r.resolveSessionAgent(sess).Name())
+		senderID := sess.ID
 		if id, ok := r.subagents.nodeForSession(sess.ID); ok {
-			from += fmt.Sprintf(" (%s)", id)
+			senderID = string(id)
 		}
-		body := systemInfo(fmt.Sprintf("Message from %s:\n\n%s", from, args.Message))
-		if !r.subagents.deliverExplicitToParent(sess.ParentID, body) {
+		if !r.subagents.deliverExplicitToParent(sess.ParentID, args.Message, senderID, r.resolveSessionAgent(sess).Name()) {
 			return tools.ResultError("parent is not currently reachable; message was not delivered"), nil
 		}
 		return tools.ResultSuccess("Message delivered to parent."), nil
 	}
 
-	// Parent-to-child messages are ordinary user input: the parent is the
-	// child's "user", so no system_info framing — the child's session stays
-	// identical in shape to a user-driven session (and viewers render it as
-	// such).
+	// Direct messages retain agent provenance in either direction.
 	name, err := r.subagents.sendToChild(sess.ID, subagent.NodeID(to), args.Message)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil

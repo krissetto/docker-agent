@@ -7,6 +7,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 var underlineStyle = lipgloss.NewStyle().Underline(true)
@@ -51,7 +54,10 @@ func urlAtPosition(renderedLine string, col int) string {
 	}
 	for _, span := range findAllURLSpans(renderedLine) {
 		if col >= span.startCol && col < span.endCol {
-			return span.url
+			if span.url != agentidentity.Link {
+				return span.url
+			}
+			return ""
 		}
 	}
 	return ""
@@ -338,7 +344,10 @@ func (m *model) urlAt(line, col int) string {
 	rendered := m.renderedLine(line)
 	for _, span := range m.urlSpans.get(line, rendered) {
 		if col >= span.startCol && col < span.endCol {
-			return span.url
+			if span.url != agentidentity.Link {
+				return span.url
+			}
+			return ""
 		}
 	}
 	return ""
@@ -381,6 +390,15 @@ func (m *model) applyURLUnderline(lines []string, viewportStartLine int) []strin
 
 	result := make([]string, len(lines))
 	copy(result, lines)
-	result[viewIdx] = styleLineSegment(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, underlineStyle)
+	style := underlineStyle
+	if m.urlAt(m.hoveredURL.line, m.hoveredURL.startCol) == "" {
+		index, local := m.globalLineToMessageLineCached(m.hoveredURL.line)
+		if ref, ok := m.referenceForMessage(index, local); ok {
+			style = styles.AgentIdentityStyle(ref.Agent, true)
+		} else {
+			return lines
+		}
+	}
+	result[viewIdx] = styleLineSegment(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, style)
 	return result
 }

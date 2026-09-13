@@ -1,7 +1,6 @@
 package supervisor
 
 import (
-	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,7 +52,7 @@ func TestRetargetRouteStopsOnShutdown(t *testing.T) {
 	s := New(nil)
 	sess := session.New(session.WithID("old"))
 	a := app.New(t.Context(), nil, sess, runtime.SessionBinding{})
-	s.runners[sess.ID] = &SessionTab{ID: sess.ID, App: a, lifetimeCtx: context.Background()}
+	s.runners[sess.ID] = &SessionTab{ID: sess.ID, App: a, lifetimeCtx: t.Context()}
 	s.order = []string{sess.ID}
 	s.activeID = sess.ID
 	require.True(t, s.RetargetRunner(t.Context(), sess.ID, "new", "new-dir"))

@@ -10,10 +10,12 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -133,17 +135,18 @@ type markdownImagePlaceholder struct {
 // can change its output. The key is small enough (a string and a few flags)
 // that comparing it is much cheaper than rendering markdown.
 type renderCache struct {
-	valid     bool
-	content   string
-	msgType   types.MessageType
-	width     int
-	selected  bool
-	hovered   bool
-	expanded  bool
-	editable  bool
-	sameAgent bool
-	result    string
-	imageID   int
+	inputOrigin session.InputOrigin
+	valid       bool
+	content     string
+	msgType     types.MessageType
+	width       int
+	selected    bool
+	hovered     bool
+	expanded    bool
+	editable    bool
+	sameAgent   bool
+	result      string
+	imageID     int
 }
 
 // New creates a new message view
@@ -199,7 +202,7 @@ func (mv *messageModel) SetMessage(msg *types.Message) tea.Cmd {
 	}
 	mv.imageScanOffset = -1
 	mv.renderCache.valid = false
-	if msg == nil || msg.Type != types.MessageTypeAssistant {
+	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.InputOrigin == session.InputOriginAgent {
 		return nil
 	}
 	refs := tuiimage.MarkdownReferences(msg.Content)
@@ -259,7 +262,7 @@ func nextUnresolvedImageOpener(content string, start int, refs []tuiimage.Markdo
 }
 
 func (mv *messageModel) loadMarkdownImages(msg *types.Message) tea.Cmd {
-	if msg == nil || msg.Type != types.MessageTypeAssistant {
+	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.InputOrigin == session.InputOriginAgent {
 		return nil
 	}
 	return mv.loadMarkdownImageReferences(tuiimage.MarkdownReferences(msg.Content))
@@ -348,7 +351,7 @@ func (mv *messageModel) Toggle() {
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
 func (mv *messageModel) IsToggleLine(lineIdx int) bool {
-	if mv.message == nil || mv.message.Type != types.MessageTypeUser {
+	if mv.message == nil || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
 		return false
 	}
 	content := strings.TrimRight(mv.message.Content, "\n\r\t ")
@@ -367,8 +370,15 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 }
 
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	if mv.finalized {
+		defer func() {
+			mv.mdRenderer = nil
+			mv.streamLines = assistantStreamLines{}
+			mv.segmentCodeBlocks = nil
+		}()
+	}
 	msg := mv.message
-	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
+	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.InputOrigin == session.InputOriginAgent || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
 		return AssistantSegments{}, false
 	}
 	messageStyle := styles.AssistantMessageStyle
@@ -463,6 +473,7 @@ func (mv *messageModel) Render(width int) string {
 		if c.valid &&
 			c.width == width &&
 			c.msgType == msg.Type &&
+			c.inputOrigin == msg.InputOrigin &&
 			c.selected == mv.selected &&
 			c.hovered == mv.hovered &&
 			c.expanded == mv.expanded &&
@@ -478,17 +489,18 @@ func (mv *messageModel) Render(width int) string {
 
 	if cacheable {
 		mv.renderCache = renderCache{
-			valid:     true,
-			content:   msg.Content,
-			msgType:   msg.Type,
-			width:     width,
-			selected:  mv.selected,
-			hovered:   mv.hovered,
-			expanded:  mv.expanded,
-			editable:  msg.SessionPosition != nil,
-			sameAgent: mv.sameAgentAsPrevious(msg),
-			result:    result,
-			imageID:   mv.markdownImageID,
+			valid:       true,
+			content:     msg.Content,
+			msgType:     msg.Type,
+			inputOrigin: msg.InputOrigin,
+			width:       width,
+			selected:    mv.selected,
+			hovered:     mv.hovered,
+			expanded:    mv.expanded,
+			editable:    msg.SessionPosition != nil,
+			sameAgent:   mv.sameAgentAsPrevious(msg),
+			result:      result,
+			imageID:     mv.markdownImageID,
 		}
 	}
 	return result
@@ -501,7 +513,7 @@ func (mv *messageModel) isSpinnerDriven() bool {
 	case types.MessageTypeSpinner, types.MessageTypeLoading:
 		return true
 	case types.MessageTypeAssistant:
-		return mv.message.Content == "" && len(mv.message.AssistantMedia) == 0
+		return mv.message.InputOrigin != session.InputOriginAgent && mv.message.Content == "" && len(mv.message.AssistantMedia) == 0
 	}
 	return false
 }
@@ -517,13 +529,7 @@ func (mv *messageModel) render(width int) string {
 		// Delegated stream: animated glyph + per-agent-colored "parent → child".
 		glyph := styles.SpinnerDotsAccentStyle.MarginLeft(2).Render(mv.spinner.RawFrame())
 		return glyph + " " + styles.AgentAccentStyleFor(msg.Sender).Render(msg.Content)
-	case types.MessageTypeUser:
-		// Notes the runtime writes on a subagent's behalf are harness plumbing,
-		// not prose the user typed: render a compact attribution line instead of
-		// a user bubble.
-		if subagent.IsSystemInfo(msg.Content) {
-			return renderSystemInfoUser(msg.Content)
-		}
+	case types.MessageTypeUser, types.MessageTypeAgentInput:
 		// Choose style based on selection state
 		messageStyle := styles.UserMessageStyle
 		if mv.selected && msg.SessionPosition != nil {
@@ -565,7 +571,11 @@ func (mv *messageModel) render(width int) string {
 
 		// Use a modified style with no top padding (the action row replaces it)
 		noTopPaddingStyle := messageStyle.PaddingTop(0)
-		return noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
+		rendered := noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
+		if msg.Type == types.MessageTypeAgentInput {
+			return agentidentity.Border(rendered, msg.InputReference, width)
+		}
+		return rendered
 	case types.MessageTypeAssistant:
 		if msg.Content == "" && len(msg.AssistantMedia) == 0 {
 			return mv.spinner.View()
@@ -620,6 +630,8 @@ func (mv *messageModel) render(width int) string {
 		}
 
 		return prefix + messageStyle.Width(width).Render(topRow+"\n"+rendered)
+	case types.MessageTypeRuntimeNotice:
+		return subagenttool.RenderInput(msg, width)
 	case types.MessageTypeShellOutput:
 		if rendered, blocks, err := markdown.NewFastRenderer(width).RenderWithCodeBlocks(fmt.Sprintf("```console\n%s\n```", msg.Content)); err == nil {
 			// The view has no envelope, so block lines map 1:1 to View() lines,
@@ -802,8 +814,8 @@ func assistantMediaLines(media types.AssistantMedia, width int) []string {
 // inside an IncrementalRenderer is not earning its keep — keeping it resident
 // across the lifetime of every historical message in a session is the
 // dominant source of retained memory in long sessions. The parent message
-// list's bounded rendered-item LRU can still memoize finalized message output
-// without storing an additional per-view copy.
+// list retains finalized lines once in its transcript buffer, indexed by
+// lightweight ranges rather than another per-view payload.
 //
 // It also returns the list of fenced code blocks emitted by the renderer so
 // that callers can map clicks on the per-block copy affordance back to the
@@ -949,6 +961,8 @@ func (mv *messageModel) Finalize() {
 		return
 	}
 	mv.renderCache = renderCache{}
+	mv.streamLines = assistantStreamLines{}
+	mv.segmentCodeBlocks = nil
 	mv.imageScanOffset = -1
 	if mv.mdRenderer != nil {
 		mv.mdRenderer.Reset()
@@ -1013,16 +1027,4 @@ func preserveIndentation(line string) string {
 		return line
 	}
 	return strings.Repeat("\u00A0", leadingSpaces) + line[leadingSpaces:]
-}
-
-// renderSystemInfoUser renders a runtime-authored <system_info> note
-// (subagent turn report or relayed message) as a compact attribution line:
-// the subagent's name in its accent color followed by "(id) replied".
-func renderSystemInfoUser(content string) string {
-	name, id, ok := subagent.MentionedSubagent(content)
-	if !ok {
-		return styles.MutedStyle.MarginLeft(2).Render("system info received")
-	}
-	return styles.AgentAccentStyleFor(name).MarginLeft(2).Render(name) +
-		styles.MutedStyle.Render(fmt.Sprintf(" (%s) replied", id))
 }
