@@ -119,6 +119,7 @@ func (r *Runtime) Unregister() {
 	}
 	if r.active == 0 {
 		r.abandonLeaseLocked()
+		r.lastDeliveredAt = time.Time{}
 	}
 }
 
@@ -337,4 +338,4 @@ func StartTickIfFirst() tea.Cmd { return legacyRuntime.legacyStart() }
 func IsCurrentGen(msg TickMsg) bool { return legacyRuntime.isCurrent(msg) }
 
 // TickRate is the shared interval between animation ticks.
-const TickRate = time.Second / 14
+const TickRate = time.Second / 60

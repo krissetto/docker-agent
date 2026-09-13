@@ -214,3 +214,27 @@ func TestRuntimeNowAdvancesByDeliveredTime(t *testing.T) {
 	assert.Equal(t, 125*time.Millisecond, ar.Now())
 	ar.Unregister()
 }
+
+func TestRuntimeRestartExcludesIdleTime(t *testing.T) {
+	ar := NewRuntime()
+	sub := ar.Subscribe()
+	first := runTick(t, func() any { return sub.Start()() })
+	_, ok := ar.Accept(first)
+	require.True(t, ok)
+	before := ar.Now()
+	sub.Stop()
+	// A new lease's first tick must use its own timer baseline, not the
+	// previous animation's last delivery before the idle period.
+	require.True(t, ar.lastDeliveredAt.IsZero())
+	sub.Start()
+	started := first.deliveredAt.Add(time.Hour)
+	next := TickMsg{
+		runtimeIdentity: ar.runtimeIdentity, generation: ar.generation,
+		timerStartedAt: started, deliveredAt: started.Add(TickRate),
+	}
+	_, ok = ar.Accept(next)
+	require.True(t, ok)
+	require.Equal(t, before+TickRate, ar.Now())
+	sub.Stop()
+	require.Nil(t, ar.Continue())
+}

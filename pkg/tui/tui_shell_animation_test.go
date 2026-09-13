@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiinput "github.com/docker/docker-agent/pkg/tui/input"
@@ -21,6 +22,12 @@ import (
 )
 
 type shellSnapshot struct {
+	editorHeight, editorTarget int
+	heightMoving               bool
+	ticks, compositions        int
+	tickTimes                  []time.Time
+	overlayTimes               []time.Time
+
 	open, closing, paused                                                 bool
 	resizeDragging                                                        bool
 	focus                                                                 FocusedPanel
@@ -38,6 +45,8 @@ type (
 	shellSnapshotMsg  struct{ reply chan shellSnapshot }
 	shellProgramModel struct {
 		root                                       *appModel
+		ticks, compositions                        int
+		tickTimes, overlayTimes                    []time.Time
 		holdMessages, delayMessages, overlayFrames int
 		lastOverlayX                               int
 		hadOverlay                                 bool
@@ -48,10 +57,12 @@ func (m *shellProgramModel) Init() tea.Cmd { return nil }
 func (m *shellProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if q, ok := msg.(shellSnapshotMsg); ok {
 		s := shellSnapshot{
+			editorHeight: m.root.editorHeight, editorTarget: m.root.editorHeightTarget, heightMoving: m.root.editorHeightMotion.Running(), ticks: m.ticks, compositions: m.compositions,
+			tickTimes: append([]time.Time(nil), m.tickTimes...), overlayTimes: append([]time.Time(nil), m.overlayTimes...),
 			resizeDragging: m.root.isDragging, focus: m.root.focusedPanel, open: m.root.dialogMgr.Open(), closing: m.root.dialogMgr.Closing(), paused: m.root.tickPaused, active: m.root.ar.ActiveCount(), editor: m.root.editor.Value(), content: m.root.View().Content,
 			tabView: m.root.tabBar.View(), tabY: m.root.contentHeight + 1, tabHeight: m.root.tabBar.Height(), holdMessages: m.holdMessages, delayMessages: m.delayMessages, overlayFrames: m.overlayFrames,
 		}
-		if layer := m.root.tabBar.GetDragLayerInfo(m.root.width-appPaddingHorizontal, s.tabY); layer != nil {
+		if layer := m.root.tabBar.GetDragLayerInfo(tabFrameWidth(m.root.width), s.tabY); layer != nil {
 			s.overlay = true
 			s.overlayX = layer.X
 		}
@@ -71,16 +82,25 @@ func (m *shellProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tabbar.ScrollDelayMsg:
 		m.delayMessages++
 	}
+	before := m.root.ar.Now()
 	_, cmd := m.root.Update(msg)
+	if _, tick := msg.(animation.TickMsg); tick && m.root.ar.Now() != before {
+		m.ticks++
+		m.tickTimes = append(m.tickTimes, time.Now())
+	}
 	return m, cmd
 }
 
 func (m *shellProgramModel) View() tea.View {
+	if !m.root.viewCacheValid {
+		m.compositions++
+	}
 	view := m.root.View()
-	layer := m.root.tabBar.GetDragLayerInfo(m.root.width-appPaddingHorizontal, m.root.contentHeight+1)
+	layer := m.root.tabBar.GetDragLayerInfo(tabFrameWidth(m.root.width), m.root.contentHeight+1)
 	if layer != nil {
 		if !m.hadOverlay || layer.X != m.lastOverlayX {
 			m.overlayFrames++
+			m.overlayTimes = append(m.overlayTimes, time.Now())
 		}
 		m.lastOverlayX = layer.X
 	}
@@ -242,7 +262,10 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 	}
 	writer := &cacheProgramWriter{}
 	model := &shellProgramModel{root: root}
-	program := startTestProgram(t, root, model, tea.WithOutput(writer))
+	coalescer := tuiinput.NewMouseCoalescer()
+	t.Cleanup(coalescer.Stop)
+	program := startTestProgram(t, root, model, tea.WithOutput(writer), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg { return coalescer.Filter(msg) }))
+	coalescer.SetSender(program.Send)
 	root.supervisor.SetProgram(program)
 	snapshot := func() shellSnapshot {
 		reply := make(chan shellSnapshot, 1)
@@ -262,7 +285,7 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 		for y, line := range strings.Split(s.tabView, "\n") {
 			before, _, found := strings.Cut(ansi.Strip(line), label)
 			if found {
-				return ansi.StringWidth(before) + 1, s.tabY + y
+				return ansi.StringWidth(before) + tabFrameOrigin() + 1, s.tabY + y
 			}
 		}
 		t.Fatalf("tab label %q missing from %q", label, s.tabView)
@@ -275,11 +298,13 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 	grabbed := snapshot()
 	targetX, _ := tabPoint(grabbed, "Charlie")
 	program.Send(tea.MouseMotionMsg{X: targetX + 12, Y: y, Button: tea.MouseLeft})
+	require.Eventually(t, func() bool { return snapshot().overlayX != grabbed.overlayX }, time.Second, time.Millisecond)
 	moved := snapshot()
 	require.True(t, moved.overlay)
 	require.NotEqual(t, grabbed.overlayX, moved.overlayX)
 	require.NotEqual(t, grabbed.content, moved.content, "floating overlay motion must invalidate root composition")
-	program.Send(tea.MouseReleaseMsg{X: targetX + 12, Y: y, Button: tea.MouseLeft})
+	program.Send(tea.MouseMotionMsg{X: 115, Y: y, Button: tea.MouseLeft})
+	program.Send(tea.MouseReleaseMsg{X: 115, Y: y, Button: tea.MouseLeft})
 	require.Eventually(t, func() bool {
 		s := snapshot()
 		return len(s.tabIDs) == 3 && s.tabIDs[2] == "second-full-session-id" && !s.overlay && s.active == 0
@@ -287,6 +312,9 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 	settled := snapshot()
 	require.GreaterOrEqual(t, settled.overlayFrames, 2, "actual program must publish distinct floating overlay positions")
 	require.Positive(t, settled.holdMessages)
+	assertAnimationCadence(t, "tab drag/drop", settled.tickTimes)
+	require.GreaterOrEqual(t, len(settled.overlayTimes), 8, "drop must publish multiple cell positions at animation cadence")
+	assertAnimationCadence(t, "visible overlay", settled.overlayTimes)
 	x, y = tabPoint(settled, "Bravo")
 	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	program.Send(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -317,4 +345,117 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 	}
 	writes := len(writer.snapshot())
 	require.Never(t, func() bool { return len(writer.snapshot()) != writes }, 80*time.Millisecond, time.Millisecond, "hidden settled tabbar must stop terminal writes")
+}
+
+func assertAnimationCadence(t *testing.T, label string, times []time.Time) {
+	t.Helper()
+	require.GreaterOrEqual(t, len(times), 8, label)
+	elapsed := times[len(times)-1].Sub(times[0])
+	hz := float64(len(times)-1) / elapsed.Seconds()
+	t.Logf("%s: %d samples over %s = %.1f Hz", label, len(times), elapsed, hz)
+	require.Greater(t, hz, 25.0, "%s must exceed the former 14Hz ceiling", label)
+}
+
+func TestActualProgramEditorAnimatedResizeAndPostSendCollapse(t *testing.T) {
+	root, _, _ := wallClockRoot(t, 120, 40)
+	writer := &cacheProgramWriter{}
+	coalescer := tuiinput.NewMouseCoalescer()
+	t.Cleanup(coalescer.Stop)
+	model := &shellProgramModel{root: root}
+	program := startTestProgram(t, root, model, tea.WithOutput(writer), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg { return coalescer.Filter(msg) }))
+	coalescer.SetSender(program.Send)
+	snapshot := func() shellSnapshot {
+		reply := make(chan shellSnapshot, 1)
+		program.Send(shellSnapshotMsg{reply: reply})
+		select {
+		case s := <-reply:
+			return s
+		case <-time.After(time.Second):
+			t.Fatal("editor snapshot timed out")
+			return shellSnapshot{}
+		}
+	}
+	initial := snapshot()
+	require.Equal(t, 1, initial.editorHeight)
+	program.Send(tea.MouseClickMsg{X: 40, Y: initial.tabY - 1, Button: tea.MouseLeft})
+	require.True(t, snapshot().resizeDragging)
+	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 10, Button: tea.MouseLeft})
+	require.Eventually(t, func() bool {
+		s := snapshot()
+		return s.resizeDragging && s.heightMoving && s.editorHeight > initial.editorHeight && s.editorHeight < s.editorTarget
+	}, time.Second, time.Millisecond, "coalesced motion animates before release")
+	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 11, Button: tea.MouseLeft})
+	// Release flushes the pending coalesced motion before ending the gesture.
+	program.Send(tea.MouseReleaseMsg{X: 40, Y: initial.tabY - 10, Button: tea.MouseLeft})
+	released := snapshot()
+	require.False(t, released.resizeDragging)
+	require.True(t, released.heightMoving)
+	require.Greater(t, released.editorTarget, initial.editorHeight)
+	require.Eventually(t, func() bool {
+		s := snapshot()
+		return s.editorHeight > initial.editorHeight && s.editorHeight < s.editorTarget
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { s := snapshot(); return !s.heightMoving && s.active == 0 }, time.Second, time.Millisecond)
+	expanded := snapshot()
+	require.Equal(t, expanded.editorTarget, expanded.editorHeight, "empty input honors manual resize")
+	assertAnimationCadence(t, "editor drag", expanded.tickTimes)
+	// Automatic content growth remains immediate. Sending clears the manual
+	// request and animates back to the automatic one-line empty-input target.
+	for i, line := range []string{"first", "second", "third", "fourth", "fifth", "sixth"} {
+		if i > 0 {
+			program.Send(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+		}
+		program.Send(tea.PasteMsg{Content: line})
+	}
+	require.Contains(t, snapshot().editor, "sixth")
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	sent := snapshot()
+	require.Empty(t, sent.editor)
+	require.Equal(t, 1, sent.editorTarget)
+	require.Greater(t, sent.editorHeight, 1, "send must not snap the displayed editor to one line")
+	require.True(t, sent.heightMoving)
+	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight < sent.editorHeight && s.editorHeight > 1 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight == 1 && !s.heightMoving }, 2*time.Second, time.Millisecond)
+	// The fake runtime leaves a pending-response spinner. Its 100ms frames
+	// must not cause whole-root composition on every shared 60Hz tick.
+	busy := snapshot()
+	select {
+	case <-time.After(400 * time.Millisecond):
+	case <-t.Context().Done():
+		t.Fatal("cancelled measuring spinner cadence")
+	}
+	afterBusy := snapshot()
+	ticks, compositions := afterBusy.ticks-busy.ticks, afterBusy.compositions-busy.compositions
+	t.Logf("pending spinner over400ms: %d accepted ticks, %d root compositions", ticks, compositions)
+	require.GreaterOrEqual(t, ticks, 10)
+	require.Less(t, compositions, ticks/2)
+	program.Send(runtime.StreamStopped("profile", "root", "completed"))
+	require.Eventually(t, func() bool { return snapshot().active == 0 }, time.Second, time.Millisecond)
+	settled := snapshot()
+	select {
+	case <-time.After(80 * time.Millisecond):
+	case <-t.Context().Done():
+		t.Fatal("cancelled awaiting terminal flush")
+	}
+	writes := len(writer.snapshot())
+	require.Never(t, func() bool { return len(writer.snapshot()) != writes || snapshot().ticks != settled.ticks }, 80*time.Millisecond, time.Millisecond)
+	program.Send(tea.PasteMsg{Content: "first-idle-input"})
+	require.Equal(t, "first-idle-input", snapshot().editor, "first idle input is applied in its event, without a frame lease")
+	program.Send(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+	program.Send(tea.PasteMsg{Content: "automatic-second-line"})
+	require.Equal(t, 2, snapshot().editorHeight, "automatic multiline growth remains immediate after manual request clears")
+	program.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	automatic := snapshot()
+	require.True(t, automatic.heightMoving)
+	require.Equal(t, 2, automatic.editorHeight, "automatic multiline send also animates rather than snapping")
+	require.Equal(t, 1, automatic.editorTarget)
+	for i, line := range []string{"new", "draft", "during-collapse"} {
+		if i > 0 {
+			program.Send(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+		}
+		program.Send(tea.PasteMsg{Content: line})
+	}
+	resumed := snapshot()
+	require.Equal(t, 3, resumed.editorHeight, "new content grows immediately even during a collapse")
+	require.False(t, resumed.heightMoving, "growth cancels the stale collapse target")
 }

@@ -3,7 +3,9 @@ package sidebar
 import (
 	"strings"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -383,8 +385,8 @@ func TestTransferAnimationAdvancesAcrossTicks(t *testing.T) {
 	first := snapshot()
 	width := lipgloss.Width(first)
 	positions := map[string]bool{first: true}
-	for frame := 1; frame <= 2*transferFramesPerStep*transferRailCells; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for frame := 1; frame <= 2*2*transferRailCells; frame++ {
+		_, _ = m.Update(transferTick(t, time.Second/14))
 		relation := snapshot()
 		assert.Equal(t, width, lipgloss.Width(relation), "the width is constant across frames")
 		positions[relation] = true
@@ -405,8 +407,8 @@ func TestTransferAnimationTickKeepsLayoutClean(t *testing.T) {
 	require.False(t, m.layoutDirty)
 	linesBefore := len(m.cachedLines)
 
-	for range transferFramesPerStep {
-		_, _ = m.Update(animation.TickMsg{})
+	for range 2 {
+		_, _ = m.Update(transferTick(t, time.Second/14))
 	}
 	assert.True(t, m.cacheDirty, "a rendered phase boundary refreshes the frame")
 	assert.False(t, m.layoutDirty, "a tick is animation-only and keeps the layout clean")
@@ -430,22 +432,22 @@ func TestTransferStackNestedRestore(t *testing.T) {
 	)
 
 	m.SetAgentSwitching(true, "A", "B")
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for frame := 1; frame <= 2; frame++ {
+		_, _ = m.Update(transferTick(t, time.Second/14))
 	}
-	require.NotZero(t, m.transferAnimationFrame)
+	require.NotZero(t, m.transferAnimationElapsed)
 
 	m.SetAgentSwitching(true, "B", "C")
-	assert.Zero(t, m.transferAnimationFrame, "a nested hop restarts the dot on the left")
+	assert.Zero(t, m.transferAnimationElapsed, "a nested hop restarts the dot on the left")
 	idx := transferRelationIndex(m)
 	require.GreaterOrEqual(t, idx, 0)
 	assert.Contains(t, agentBody(m)[idx], "B ●──► C", "the innermost hop is shown, dot on the left")
 
-	for frame := 1; frame <= transferFramesPerStep; frame++ {
-		_, _ = m.Update(animation.TickMsg{})
+	for frame := 1; frame <= 2; frame++ {
+		_, _ = m.Update(transferTick(t, time.Second/14))
 	}
 	m.SetAgentSwitching(false, "C", "B") // stop of B→C carries the inverse pair
-	assert.Zero(t, m.transferAnimationFrame, "the Return restarts the dot on the left")
+	assert.Zero(t, m.transferAnimationElapsed, "the Return restarts the dot on the left")
 	assert.True(t, m.transferAnimation.IsActive(), "the animation keeps running for the Return")
 	assert.Equal(t, transferReturnBoxTitle, visibleBoxTitle(m), "the stop presents a Return box first")
 	idx = transferRelationIndex(m)
@@ -481,7 +483,7 @@ func TestTransferStackOutOfOrderStop(t *testing.T) {
 
 	m.SetAgentSwitching(true, "A", "B")
 	m.SetAgentSwitching(true, "B", "C")
-	_, _ = m.Update(animation.TickMsg{})
+	_, _ = m.Update(transferTick(t, time.Second/14))
 
 	m.SetAgentSwitching(false, "B", "A") // the outer stop arrives first
 	require.Len(t, m.agentTransfers, 1)
@@ -517,7 +519,7 @@ func TestTransferStopFallbackPop(t *testing.T) {
 	assert.Empty(t, m.agentTransfers, "a nameless stop pops the innermost hop")
 	assert.Nil(t, m.agentReturn, "a nameless stop presents no Return")
 	assert.False(t, m.transferAnimation.IsActive(), "an emptied stack stops the animation")
-	assert.Zero(t, m.transferAnimationFrame)
+	assert.Zero(t, m.transferAnimationElapsed)
 
 	res = m.SetAgentSwitching(false, "Coder", "Scout")
 	assert.False(t, res.Accepted)
@@ -629,7 +631,7 @@ func TestTransferClearedOnCancelResetAndLoad(t *testing.T) {
 		assert.Nil(t, m.agentReturn, context)
 		assert.Equal(t, -1, transferRelationIndex(m), context)
 		assert.False(t, m.transferAnimation.IsActive(), context)
-		assert.Zero(t, m.transferAnimationFrame, context)
+		assert.Zero(t, m.transferAnimationElapsed, context)
 	}
 
 	// The timers armed before each clear must be stale afterwards.
@@ -642,7 +644,7 @@ func TestTransferClearedOnCancelResetAndLoad(t *testing.T) {
 
 	m.SetAgentSwitching(true, "Scout", "Coder")
 	hopGen := m.agentTransfers[0].gen
-	_, _ = m.Update(animation.TickMsg{})
+	_, _ = m.Update(transferTick(t, time.Second/14))
 	require.GreaterOrEqual(t, transferRelationIndex(m), 0)
 	_, _ = m.Update(messages.StreamCancelledMsg{})
 	assertCleared("cancel clears the box and stops the animation")
@@ -679,4 +681,37 @@ func TestNoTransferPanelWhenIdle(t *testing.T) {
 	assert.NotContains(t, body, transferBoxTitle)
 	assert.NotContains(t, body, "╭")
 	assert.NotContains(t, renderAgentPanel(m)[0], "↔")
+}
+
+// transferTick exercises real runtime acceptance without waiting for wall time.
+func transferTick(t *testing.T, elapsed time.Duration) animation.TickMsg {
+	t.Helper()
+	ar := animation.NewRuntimeWithScheduler(transferScheduler{elapsed: elapsed})
+	sub := ar.Subscribe()
+	tick, ok := ar.Accept(sub.Start()().(animation.TickMsg))
+	require.True(t, ok)
+	sub.Stop()
+	return tick
+}
+
+type transferScheduler struct{ elapsed time.Duration }
+
+func (s transferScheduler) Now() time.Time { return time.Unix(1, 0) }
+func (s transferScheduler) Tick(_ time.Duration, f func(time.Time) tea.Msg) tea.Cmd {
+	return func() tea.Msg { return f(s.Now().Add(s.elapsed)) }
+}
+
+func TestTransferCadenceUsesElapsedTime(t *testing.T) {
+	m := newAgentPanelSidebar(t, 40, transferRoster()...)
+	m.SetAgentSwitching(true, "Scout", "Coder")
+	for range 8 {
+		m.Update(transferTick(t, animation.TickRate))
+	}
+	require.Zero(t, m.transferPhase(), "eight 60Hz ticks are shorter than a rail step")
+	m.Update(transferTick(t, animation.TickRate))
+	require.Equal(t, 1, m.transferPhase())
+	m.Update(transferTick(t, 2*transferStepDuration))
+	require.Zero(t, m.transferPhase(), "delayed delivery advances by elapsed time, not one tick")
+	m.SetAgentSwitching(true, "Coder", "root")
+	require.Zero(t, m.transferAnimationElapsed, "new visible relation starts at the left")
 }

@@ -200,9 +200,14 @@ type appModel struct {
 	contentHeight int
 
 	// Editor resize state
-	editorLines      int
-	isDragging       bool
-	isHoveringHandle bool
+	editorLines        int
+	manualEditorHeight int
+	editorHeight       int
+	editorHeightFrom   int
+	editorHeightTarget int
+	editorHeightMotion animation.Transition
+	isDragging         bool
+	isHoveringHandle   bool
 
 	// Focus state
 	focusedPanel FocusedPanel
@@ -900,11 +905,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	_, tick := msg.(animation.TickMsg)
 	bannerHeight, contentLines := 0, 0
+	hadEditorValue := false
 	if !tick {
 		bannerHeight, contentLines = m.editor.BannerHeight(), m.editor.ContentLineCount()
+		hadEditorValue = m.editor.Value() != ""
 	}
 	model, cmd := m.update(msg)
-	if !tick && (bannerHeight != m.editor.BannerHeight() || contentLines != m.editor.ContentLineCount()) {
+	editorCleared := !tick && hadEditorValue && m.editor.Value() == ""
+	if editorCleared {
+		m.manualEditorHeight = 0
+	}
+	if !tick && (editorCleared || bannerHeight != m.editor.BannerHeight() || contentLines != m.editor.ContentLineCount()) {
 		cmd = tea.Batch(cmd, m.resizeAll())
 	}
 	if obs := m.tour.Observe(msg); obs != nil {
@@ -973,6 +984,15 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		cmds := []tea.Cmd{m.updateChatCmd(msg), m.updateDialogCmd(msg)}
+		if m.editorHeightMotion.Running() {
+			m.editorHeightMotion.Tick()
+			height := m.editorHeightMotion.Lerp(m.editorHeightFrom, m.editorHeightTarget)
+			if height != m.editorHeight {
+				m.editorHeight = height
+				cmds = append(cmds, m.resizeAll())
+				msg.MarkDirty()
+			}
+		}
 		m.tabBar.Tick()
 		tabDirty, dialogDirty := m.tabBar.TakeVisualDirty(), m.dialogMgr.TakeVisualDirty()
 		if tabDirty || dialogDirty {
@@ -2590,7 +2610,7 @@ func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 	m.wWidth, m.wHeight = width, height
 
 	m.statusBar.SetWidth(width)
-	tabCmd := m.tabBar.SetWidth(width - appPaddingHorizontal)
+	tabCmd := m.tabBar.SetWidth(tabFrameWidth(width))
 
 	m.width = width
 	m.height = height
@@ -2624,13 +2644,21 @@ func (m *appModel) resizeAll() tea.Cmd {
 	maxLines := max(minLines, (height-6)/2)
 	m.editorLines = max(minLines, min(m.editorLines, maxLines))
 
-	targetEditorHeight := min(m.editorLines-1, max(1, m.editor.ContentLineCount()))
-	cmds = append(cmds, m.editor.SetSize(innerWidth, targetEditorHeight))
-	// Width changes can change wrapping without changing the editor value.
-	wrappedHeight := min(m.editorLines-1, max(1, m.editor.ContentLineCount()))
-	if wrappedHeight != targetEditorHeight {
-		cmds = append(cmds, m.editor.SetSize(innerWidth, wrappedHeight))
+	// Measure wrapping at the new width without first snapping the displayed height.
+	cmds = append(cmds, m.editor.SetSize(innerWidth, max(1, m.editorHeight)))
+	targetEditorHeight := min(m.editorLines-1, max(1, m.editor.ContentLineCount(), m.manualEditorHeight))
+	if m.editorHeight == 0 || m.editorHeight > maxLines-1 || (targetEditorHeight > m.editorHeight && m.manualEditorHeight == 0) {
+		m.editorHeightMotion.Cancel()
+		m.editorHeight = targetEditorHeight
+		m.editorHeightTarget = targetEditorHeight
+	} else if targetEditorHeight != m.editorHeightTarget {
+		m.editorHeightFrom, m.editorHeightTarget = m.editorHeight, targetEditorHeight
+		if !m.editorHeightMotion.Running() {
+			m.editorHeightMotion.SetRuntime(m.ar)
+		}
+		cmds = append(cmds, m.editorHeightMotion.Start(animation.ShortDuration, animation.EaseOutCubic))
 	}
+	cmds = append(cmds, m.editor.SetSize(innerWidth, m.editorHeight))
 	_, editorHeight := m.editor.GetSize()
 	editorRenderedHeight := editorHeight + m.editor.BannerHeight()
 
@@ -2724,46 +2752,21 @@ func (m *appModel) AllBindings() []key.Binding {
 	return bindings
 }
 
-// Bindings returns the key bindings shown in the status bar (a curated subset).
-// This filters AllBindings() to show only the most essential commands.
+// Bindings returns primary hints; the help dialog retains the complete bindings.
 func (m *appModel) Bindings() []key.Binding {
-	all := m.AllBindings()
-
-	// Define which keys should appear in the status bar
 	keys := core.GetKeys()
-	statusBarKeys := map[string]bool{
-		keys.Quit.Keys()[0]:          true, // quit
-		keys.SwitchFocus.Keys()[0]:   true, // switch focus
-		"ctrl+t":                     true, // new tab (from tabBar)
-		"ctrl+w":                     true, // close tab (from tabBar)
-		"ctrl+p":                     true, // prev tab (from tabBar)
-		"ctrl+n":                     true, // next tab (from tabBar)
-		keys.Commands.Keys()[0]:      true, // commands
-		keys.Help.Keys()[0]:          true, // help
-		"shift+enter":                true, // newline
-		keys.EditorNewline.Keys()[0]: true, // newline fallback
-		keys.EditExternal.Keys()[0]:  true, // edit in external editor (editor context)
-		keys.HistorySearch.Keys()[0]: true, // history search (editor context)
-		// Content panel bindings (↑↓, c, e, d) are always included
-		"up":   true,
-		"down": true,
-		"c":    true,
-		"e":    true,
-		"d":    true,
+	if m.leanMode {
+		return []key.Binding{keys.Quit}
 	}
 
-	// Filter to only include status bar keys
-	var filtered []key.Binding
-	for _, binding := range all {
-		if len(binding.Keys()) > 0 {
-			bindingKey := binding.Keys()[0]
-			if statusBarKeys[bindingKey] {
-				filtered = append(filtered, binding)
-			}
+	bindings := []key.Binding{keys.Help, keys.Commands}
+	for _, binding := range m.AllBindings() {
+		if binding.Help().Desc == "newline" {
+			bindings = append(bindings, binding)
+			break
 		}
 	}
-
-	return filtered
+	return append(bindings, keys.Quit)
 }
 
 // handleKeyPress handles all keyboard input with proper priority routing.
@@ -3072,7 +3075,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		// pass through so the user can keep navigating between tabs.
 		if !m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar {
 			adjustedMsg := msg
-			adjustedMsg.X = msg.X - styles.AppPadding
+			adjustedMsg.X = msg.X - tabFrameOrigin()
 			adjustedMsg.Y = msg.Y - m.contentHeight - 1
 			if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 				return m, cmd
@@ -3097,7 +3100,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 	case regionTabBar:
 		// Adjust coordinates for tab bar (relative to its start, accounting for padding)
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - styles.AppPadding
+		adjustedMsg.X = msg.X - tabFrameOrigin()
 		adjustedMsg.Y = msg.Y - m.contentHeight - 1
 		if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 			return m, cmd
@@ -3168,7 +3171,7 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	// Forward drag motion to tab bar when a tab drag is active.
 	if m.tabBar.IsDragging() {
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - styles.AppPadding
+		adjustedMsg.X = msg.X - tabFrameOrigin()
 		if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 			return m, batchWith(cmd)
 		}
@@ -3214,7 +3217,7 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 	// Forward release to tab bar when a tab drag is active.
 	if m.tabBar.IsDragging() {
 		adjustedMsg := msg
-		adjustedMsg.X = msg.X - styles.AppPadding
+		adjustedMsg.X = msg.X - tabFrameOrigin()
 		if cmd := m.tabBar.Update(adjustedMsg); cmd != nil {
 			return m, cmd
 		}
@@ -3354,8 +3357,9 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	minLines := 4
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
-	if newLines != m.editorLines {
+	if newLines != m.editorLines || m.manualEditorHeight != newLines-1 {
 		m.editorLines = newLines
+		m.manualEditorHeight = newLines - 1
 		return m.resizeAll()
 	}
 	return nil
@@ -3523,7 +3527,7 @@ func (m *appModel) composeView() tea.View {
 	}
 	if tabBarView != "" {
 		viewParts = append(viewParts, lipgloss.NewStyle().
-			Padding(0, styles.AppPadding).
+			Padding(0, styles.EditorStyle.GetMarginRight(), 0, tabFrameOrigin()).
 			Render(tabBarView))
 	}
 	if banner := m.editor.BannerView(m.width); banner != "" {
@@ -3549,8 +3553,8 @@ func (m *appModel) composeView() tea.View {
 			allLayers = append(allLayers, tourLayer)
 		}
 
-		if drag := m.tabBar.GetDragLayerInfo(m.width-appPaddingHorizontal, m.contentHeight+1); drag != nil {
-			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+styles.AppPadding).Y(drag.Y))
+		if drag := m.tabBar.GetDragLayerInfo(tabFrameWidth(m.width), m.contentHeight+1); drag != nil {
+			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+tabFrameOrigin()).Y(drag.Y))
 		}
 		if m.dialogMgr.Open() {
 			for _, layer := range m.dialogMgr.GetLayerInfos() {
@@ -3669,6 +3673,7 @@ func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
 		m.modelPickerGeneration++
 		m.dialogMgr.Cleanup()
+		m.editorHeightMotion.Cancel()
 		if m.tabBar != nil {
 			m.tabBar.StopAnimations()
 		}

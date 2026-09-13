@@ -3,6 +3,7 @@ package messages
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -83,17 +84,17 @@ func TestBottomSlackDecaysOnAnimationTick(t *testing.T) {
 	// Pretend a previous shrinkage left some slack behind.
 	m.bottomSlack = 3
 
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 2, m.bottomSlack, "tick should decay slack by one line")
 
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 1, m.bottomSlack)
 
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 0, m.bottomSlack, "slack should reach zero after enough ticks")
 
 	// Further ticks must not produce negative slack.
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 0, m.bottomSlack)
 }
 
@@ -116,13 +117,13 @@ func TestBottomSlackAnimationSubscribesWhileDecaying(t *testing.T) {
 	// is non-nil only for the first global subscriber, which is racy when
 	// tests touching the animation coordinator run in parallel.
 	m.bottomSlack = 2
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.True(t, m.slackAnimationSub.IsActive(),
 		"subscription should be active while slack > 0")
 
 	// Once slack hits zero, the subscription must release the global tick.
-	m.Update(animation.TickMsg{})
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 0, m.bottomSlack)
 	assert.False(t, m.slackAnimationSub.IsActive(),
 		"subscription should be released once slack reaches zero")
@@ -216,14 +217,14 @@ func TestBottomSlackDecayPausesWhenUserScrollsAway(t *testing.T) {
 	m.bottomSlack = 3
 
 	// First tick decays one line as expected.
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	require.Equal(t, 2, m.bottomSlack)
 
 	// User scrolls away mid-decay. updateScrollState resets slack to zero
 	// for the userHasScrolled path; the next tick should leave it there
 	// and not produce a negative value.
 	m.userHasScrolled = true
-	m.Update(animation.TickMsg{})
+	m.Update(slackTick(t, time.Second/14))
 	assert.Equal(t, 0, m.bottomSlack,
 		"slack must drop to zero (not be decayed below it) once the user scrolls away")
 }
@@ -252,4 +253,43 @@ func TestAdjustBottomSlackRespectsCapAndFloor(t *testing.T) {
 	m.AdjustBottomSlack(0)
 	assert.Equal(t, 2, m.bottomSlack,
 		"AdjustBottomSlack(0) must leave slack unchanged")
+}
+
+func slackTick(t *testing.T, elapsed time.Duration) animation.TickMsg {
+	t.Helper()
+	ar := animation.NewRuntimeWithScheduler(slackScheduler{elapsed: elapsed})
+	sub := ar.Subscribe()
+	tick, ok := ar.Accept(sub.Start()().(animation.TickMsg))
+	require.True(t, ok)
+	sub.Stop()
+	return tick
+}
+
+type slackScheduler struct{ elapsed time.Duration }
+
+func (s slackScheduler) Now() time.Time { return time.Unix(1, 0) }
+func (s slackScheduler) Tick(_ time.Duration, f func(time.Time) tea.Msg) tea.Cmd {
+	return func() tea.Msg { return f(s.Now().Add(s.elapsed)) }
+}
+
+func TestBottomSlackCadenceUsesElapsedTime(t *testing.T) {
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.SetSize(80, 24)
+	addShrinkingView(m, 10)
+	m.View()
+	m.bottomSlack = 3
+	for range 4 {
+		m.Update(slackTick(t, animation.TickRate))
+	}
+	require.Equal(t, 3, m.bottomSlack, "four60Hz ticks are shorter than the decay interval")
+	m.Update(slackTick(t, animation.TickRate))
+	require.Equal(t, 2, m.bottomSlack)
+	m.Update(slackTick(t, time.Second/7))
+	require.Zero(t, m.bottomSlack, "delayed delivery catches up")
+	require.Zero(t, m.bottomSlackElapsed)
+	require.False(t, m.slackAnimationSub.IsActive())
+	m.bottomSlack = 2
+	m.Update(slackTick(t, animation.TickRate))
+	require.Equal(t, 2, m.bottomSlack, "new decay has no leftover elapsed credit")
+	m.slackAnimationSub.Stop()
 }

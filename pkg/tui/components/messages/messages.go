@@ -251,16 +251,17 @@ type model struct {
 	height   int
 
 	// Height tracking system fields
-	scrollOffset      int                       // Current scroll position in lines
-	bottomSlack       int                       // Extra blank lines added after content shrinks
-	slackAnimationSub animation.Subscription    // Subscription to animation ticks while slack > 0
-	renderedLines     []string                  // Cached flattened content excluding a segmented active suffix
-	activeSegments    *activeTranscriptSegments // Segmented final assistant item while visibly streaming
-	renderedItems     renderedItemIndex         // Metadata into renderedLines, not a second payload cache
-	urlSpans          *urlSpanCache             // Cached URL spans per rendered line
-	lineOffsets       []int                     // Prefix-sum: lineOffsets[i] = starting global line of view i
-	totalHeight       int                       // Total height of all content in lines
-	renderDirty       bool                      // True when rendered content needs rebuild
+	scrollOffset       int // Current scroll position in lines
+	bottomSlackElapsed time.Duration
+	bottomSlack        int                       // Extra blank lines added after content shrinks
+	slackAnimationSub  animation.Subscription    // Subscription to animation ticks while slack > 0
+	renderedLines      []string                  // Cached flattened content excluding a segmented active suffix
+	activeSegments     *activeTranscriptSegments // Segmented final assistant item while visibly streaming
+	renderedItems      renderedItemIndex         // Metadata into renderedLines, not a second payload cache
+	urlSpans           *urlSpanCache             // Cached URL spans per rendered line
+	lineOffsets        []int                     // Prefix-sum: lineOffsets[i] = starting global line of view i
+	totalHeight        int                       // Total height of all content in lines
+	renderDirty        bool                      // True when rendered content needs rebuild
 
 	visualGeneration  uint64
 	contentGeneration uint64
@@ -956,20 +957,28 @@ func (m *model) maxBottomSlack() int {
 	return max(1, min(5, m.height/3))
 }
 
-// handleAnimationTick refreshes scroll state, decays any leftover slack by
-// one line, and keeps the slack subscription alive while slack > 0 so
+// handleAnimationTick refreshes scroll state, decays leftover slack at its
+// own cadence, and keeps the slack subscription alive while slack > 0 so
 // further ticks fire even after fade animations finish. Returns the command
 // to schedule the next tick when the subscription transitions to active.
 func (m *model) handleAnimationTick(tick animation.TickMsg) tea.Cmd {
 	m.updateScrollState()
 	if !m.userHasScrolled && m.bottomSlack > 0 {
-		m.bottomSlack--
-		tick.MarkDirty()
+		before, after := tick.ElapsedBounds()
+		m.bottomSlackElapsed += after - before
+		const slackStepDuration = time.Second / 14
+		steps := int(m.bottomSlackElapsed / slackStepDuration)
+		m.bottomSlackElapsed %= slackStepDuration
+		if steps > 0 {
+			m.bottomSlack = max(0, m.bottomSlack-steps)
+			tick.MarkDirty()
+		}
 	}
 	if m.bottomSlack > 0 {
 		return m.slackAnimationSub.Start()
 	}
 	m.slackAnimationSub.Stop()
+	m.bottomSlackElapsed = 0
 	return nil
 }
 

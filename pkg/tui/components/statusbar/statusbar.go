@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -110,7 +109,7 @@ func (s *StatusBar) rebuild() {
 		rightW = lipgloss.Width(right)
 	}
 
-	// Build the styled left side: help bindings (possibly truncated).
+	// Keep shortcut labels intact; the first hint opens the complete help.
 	const pad = 1
 	maxHelpW := s.width - rightW - 2*pad - 1
 
@@ -119,22 +118,25 @@ func (s *StatusBar) rebuild() {
 	if s.help != nil {
 		if help := s.help.Help(); help != nil {
 			var parts []string
+			var helpW int
 			for _, b := range help.ShortHelp() {
-				if b.Help().Key != "" && b.Help().Desc != "" {
-					parts = append(parts,
-						styles.HighlightWhiteStyle.Render(b.Help().Key)+
-							" "+
-							styles.SecondaryStyle.Render(b.Help().Desc))
+				if !b.Enabled() || b.Help().Key == "" || b.Help().Desc == "" {
+					continue
 				}
+				part := styles.HighlightWhiteStyle.Render(b.Help().Key) +
+					" " + styles.SecondaryStyle.Render(b.Help().Desc)
+				partW := lipgloss.Width(part)
+				if len(parts) > 0 {
+					partW += 2
+				}
+				if helpW+partW > maxHelpW {
+					break
+				}
+				parts = append(parts, part)
+				helpW += partW
 			}
-			if len(parts) > 0 && maxHelpW > 0 {
-				helpStr := strings.Join(parts, "  ")
-				helpW := lipgloss.Width(helpStr)
-				if helpW > maxHelpW {
-					helpStr = ansi.Truncate(helpStr, maxHelpW, "...")
-					helpW = lipgloss.Width(helpStr)
-				}
-				left = " " + helpStr
+			if len(parts) > 0 {
+				left = " " + strings.Join(parts, "  ")
 				leftW = pad + helpW
 			}
 		}
