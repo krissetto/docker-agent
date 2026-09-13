@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -182,9 +183,17 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
 	d := newBackgroundAgentTUI(t, 120, 40)
 
-	// Both agents are listed before anything runs, with no context percent.
-	d.WaitFor(tuitest.ContainsAll("root", "worker")).
-		Assert(tuitest.Absent("%"))
+	// The empty editor has its own context strip; agent rows have no usage yet.
+	d.WaitFor(tuitest.ContainsAll("root", "worker", "Context 0%"))
+	frame := d.Frame()
+	agentsStart := strings.Index(frame, "Agents ─")
+	require.NotEqual(t, -1, agentsStart)
+	toolsStart := strings.Index(frame[agentsStart:], "Tools ─")
+	require.NotEqual(t, -1, toolsStart)
+	agentRoster := frame[agentsStart : agentsStart+toolsStart]
+	require.Contains(t, agentRoster, "root")
+	require.Contains(t, agentRoster, "worker")
+	require.NotContains(t, agentRoster, "%", "initial agent roster must not fabricate context usage")
 
 	d.Type("Please dispatch the worker.").
 		Enter().

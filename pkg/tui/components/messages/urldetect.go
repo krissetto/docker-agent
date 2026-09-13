@@ -9,7 +9,6 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
-	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 var underlineStyle = lipgloss.NewStyle().Underline(true)
@@ -394,7 +393,8 @@ func (m *model) applyURLUnderline(lines []string, viewportStartLine int) []strin
 	if m.urlAt(m.hoveredURL.line, m.hoveredURL.startCol) == "" {
 		index, local := m.globalLineToMessageLineCached(m.hoveredURL.line)
 		if ref, ok := m.referenceForMessage(index, local); ok {
-			style = styles.AgentIdentityStyle(ref.Agent, true)
+			result[viewIdx] = agentidentity.Hover(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, ref)
+			return result
 		} else {
 			return lines
 		}

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
@@ -13,7 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 )
 
-func TestKeyboardEnhancementsInvalidateStatusBarHelp(t *testing.T) {
+func TestKeyboardEnhancementsPreserveCommandOnlyFooter(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.focusedPanel = PanelEditor
 	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
@@ -21,16 +23,25 @@ func TestKeyboardEnhancementsInvalidateStatusBarHelp(t *testing.T) {
 	m.statusBar.SetWidth(400)
 
 	before := m.statusBar.View()
-	if !strings.Contains(before, "Ctrl+j") {
-		t.Fatalf("status bar before keyboard enhancements = %q, want Ctrl+j newline help", before)
+	require.Equal(t, "Ctrl+k", strings.TrimSpace(ansi.Strip(before)))
+	var beforeNewline string
+	for _, binding := range m.AllBindings() {
+		if binding.Help().Desc == "newline" {
+			beforeNewline = binding.Help().Key
+		}
 	}
+	require.Equal(t, "Ctrl+j", beforeNewline)
 
 	_, _ = m.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
 
-	after := m.statusBar.View()
-	if !strings.Contains(after, "Shift+Enter") {
-		t.Fatalf("status bar after keyboard enhancements = %q, want Shift+Enter newline help", after)
+	require.Equal(t, before, m.statusBar.View(), "keyboard enhancements must not add footer clutter")
+	var afterNewline string
+	for _, binding := range m.AllBindings() {
+		if binding.Help().Desc == "newline" {
+			afterNewline = binding.Help().Key
+		}
 	}
+	require.Equal(t, "Shift+Enter", afterNewline)
 }
 
 func TestParseCtrlNumberKey(t *testing.T) {

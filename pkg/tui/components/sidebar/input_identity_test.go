@@ -32,17 +32,23 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.Equal(t, styles.AgentAccentStyleFor(node.Agent).Render("name"), styles.AgentIdentityStyle(node.Agent, false).Render("name"))
 	assert.Equal(t, styles.AgentAccentStyleFor(node.Agent).Foreground(styles.Brighten(styles.AgentAccentStyleFor(node.Agent).GetForeground(), 0.25)).Render("name"), styles.AgentIdentityStyle(node.Agent, true).Render("name"))
 	label := agentidentity.Label(ref, 80)
-	assert.Contains(t, label, styles.AgentIdentityStyle(node.Agent, false).Render(ref.Label()))
+	name := styles.AgentIdentityStyle(node.Agent, false).Render(node.DisplayName())
+	suffix := styles.MutedStyle.Render(" (" + ref.DisplayID + ")")
+	assert.Equal(t, ansi.SetHyperlink(agentidentity.Link)+name+suffix+ansi.ResetHyperlink(), label)
 	input := &types.Message{Type: types.MessageTypeAgentInput, Content: "literal **body**", InputReference: ref}
 	border := message.New(animation.NewRuntime(), input, nil).Render(80)
-	assert.Contains(t, border, label)
+	assert.Contains(t, border, ansi.SetHyperlink(agentidentity.Link))
+	assert.Contains(t, border, ansi.ResetHyperlink())
+	// The border reapplies its USER background after each inner style reset.
+	assert.Contains(t, border, strings.TrimSuffix(name, "\x1b[m"))
+	assert.Contains(t, border, strings.TrimSuffix(suffix, "\x1b[m"))
 	input.Type = types.MessageTypeRuntimeNotice
 	assert.Contains(t, subagenttool.RenderInput(input, 80), label)
 	tool := types.ToolCallMessage("root", tools.ToolCall{Function: tools.FunctionCall{Name: subagent.ToolSpawnSubagent, Arguments: `{"agent":"worker"}`}}, tools.Tool{}, types.ToolStatusCompleted)
 	tool.Content = `Spawned subagent "Visible worker" (a1b2c).`
 	view := subagenttool.NewSpawn(animation.NewRuntime(), tool, &service.SessionState{}, nil, func(subagent.NodeID) lifecycle.InputReference { return ref })
 	assert.Contains(t, ansi.Strip(view.View()), ref.Label())
-	assert.Contains(t, view.View(), styles.AgentIdentityStyle(node.Agent, false).Render(ref.Label()), "tool uses canonical agent color despite display alias")
+	assert.Contains(t, view.View(), label, "tool uses canonical name color and neutral ID despite display alias")
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
 	assert.Contains(t, strings.Split(ansi.Strip(border), "\n")[0], "━ "+ref.Label())
 }

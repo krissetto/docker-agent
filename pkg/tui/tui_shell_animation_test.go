@@ -33,6 +33,7 @@ type shellSnapshot struct {
 	focus                                                                 FocusedPanel
 	active                                                                int32
 	editor                                                                string
+	contextView                                                           string
 	content                                                               string
 	tabView                                                               string
 	tabY, tabHeight, overlayX, holdMessages, delayMessages, overlayFrames int
@@ -61,6 +62,9 @@ func (m *shellProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tickTimes: append([]time.Time(nil), m.tickTimes...), overlayTimes: append([]time.Time(nil), m.overlayTimes...),
 			resizeDragging: m.root.isDragging, focus: m.root.focusedPanel, open: m.root.dialogMgr.Open(), closing: m.root.dialogMgr.Closing(), paused: m.root.tickPaused, active: m.root.ar.ActiveCount(), editor: m.root.editor.Value(), content: m.root.View().Content,
 			tabView: m.root.tabBar.View(), tabY: m.root.contentHeight + 1, tabHeight: m.root.tabBar.Height(), holdMessages: m.holdMessages, delayMessages: m.delayMessages, overlayFrames: m.overlayFrames,
+		}
+		if m.root.contextBar != nil {
+			s.contextView = m.root.contextBar.View()
 		}
 		if layer := m.root.tabBar.GetDragLayerInfo(tabFrameWidth(m.root.width), s.tabY); layer != nil {
 			s.overlay = true
@@ -207,7 +211,8 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 	_, height := root.editor.GetSize()
 	require.Greater(t, height, 3, "narrow width must remeasure wrapped content before layout")
 	require.Equal(t, regionEditor, root.hitTestRegion(root.editorTop()))
-	require.Equal(t, regionStatusBar, root.hitTestRegion(root.editorTop()+height))
+	require.Equal(t, regionContextUsage, root.hitTestRegion(root.editorTop()+height))
+	require.Equal(t, regionStatusBar, root.hitTestRegion(root.editorTop()+height+1))
 	require.Equal(t, strings.Repeat("wrapped draft ", 9), root.editor.Value())
 	for _, width := range []int{120, 83, 40} {
 		_, _ = root.Update(tea.WindowSizeMsg{Width: width, Height: 30})
@@ -414,6 +419,7 @@ func TestActualProgramEditorAnimatedResizeAndPostSendCollapse(t *testing.T) {
 	require.Equal(t, 1, sent.editorTarget)
 	require.Greater(t, sent.editorHeight, 1, "send must not snap the displayed editor to one line")
 	require.True(t, sent.heightMoving)
+	require.Never(t, func() bool { return snapshot().editorHeight != sent.editorHeight }, 250*time.Millisecond, time.Millisecond, "post-send collapse holds before its animation")
 	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight < sent.editorHeight && s.editorHeight > 1 }, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight == 1 && !s.heightMoving }, 2*time.Second, time.Millisecond)
 	// The fake runtime leaves a pending-response spinner. Its 100ms frames

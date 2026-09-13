@@ -75,15 +75,18 @@ func TestBackgroundAt(t *testing.T) {
 		col  int
 		want color.Color
 	}{
-		"plain text":               {line: "hello", col: 2, want: nil},
-		"truecolor background":     {line: "\x1b[48;2;1;2;3mhello\x1b[m", col: 2, want: rgb(1, 2, 3)},
-		"basic background":         {line: "\x1b[41mhello\x1b[m", col: 0, want: ansi.Red},
-		"bright background":        {line: "\x1b[102mhello\x1b[m", col: 0, want: ansi.BrightGreen},
-		"indexed background":       {line: "\x1b[48;5;10mhello\x1b[m", col: 0, want: ansi.IndexedColor(10)},
-		"reset before column":      {line: "\x1b[41mab\x1b[mcd", col: 3, want: nil},
-		"bg 49 clears background":  {line: "\x1b[41mab\x1b[49mcd", col: 3, want: nil},
-		"fg only keeps outer bg":   {line: "\x1b[48;2;1;2;3m  \x1b[38;5;8mhello", col: 4, want: rgb(1, 2, 3)},
-		"invalid utf-8 terminates": {line: "\x1b[41m\x80\x80hello", col: 4, want: ansi.Red},
+		"plain text":                           {line: "hello", col: 2, want: nil},
+		"truecolor background":                 {line: "\x1b[48;2;1;2;3mhello\x1b[m", col: 2, want: rgb(1, 2, 3)},
+		"basic background":                     {line: "\x1b[41mhello\x1b[m", col: 0, want: ansi.Red},
+		"bright background":                    {line: "\x1b[102mhello\x1b[m", col: 0, want: ansi.BrightGreen},
+		"indexed background":                   {line: "\x1b[48;5;10mhello\x1b[m", col: 0, want: ansi.IndexedColor(10)},
+		"reset before column":                  {line: "\x1b[41mab\x1b[mcd", col: 3, want: nil},
+		"bg 49 clears background":              {line: "\x1b[41mab\x1b[49mcd", col: 3, want: nil},
+		"fg only keeps outer bg":               {line: "\x1b[48;2;1;2;3m  \x1b[38;5;8mhello", col: 4, want: rgb(1, 2, 3)},
+		"foreground payload is not background": {line: "\x1b[48;2;36;40;59m\x1b[38;2;104;49;0mhello", col: 2, want: rgb(36, 40, 59)},
+		"underline payload is not background":  {line: "\x1b[48;2;36;40;59m\x1b[58;2;104;49;0mhello", col: 2, want: rgb(36, 40, 59)},
+		"indexed foreground is not background": {line: "\x1b[48;2;36;40;59m\x1b[38;5;104mhello", col: 2, want: rgb(36, 40, 59)},
+		"invalid utf-8 terminates":             {line: "\x1b[41m\x80\x80hello", col: 4, want: ansi.Red},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -30,16 +30,21 @@ func TestMouseCoalescerBoundaryPrecedesStaleTimer(t *testing.T) {
 func TestMouseCoalescerWheelPositionAndReleaseBoundary(t *testing.T) {
 	c := NewMouseCoalescer()
 	t.Cleanup(c.Stop)
-	c.Filter(tea.MouseMotionMsg{X: 1, Y: 1})
-	c.Filter(tea.MouseWheelMsg{X: 2, Y: 3, Button: tea.MouseWheelDown})
-	c.Filter(tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelDown})
-	c.Filter(tea.MouseMotionMsg{X: 90, Y: 90})
-	boundary := c.Filter(tea.MouseReleaseMsg{X: 4, Y: 5, Button: tea.MouseLeft}).(messages.PointerBoundaryMsg)
-	require.True(t, boundary.Pending.HasWheel)
-	require.Equal(t, 2, boundary.Pending.WheelDelta)
-	require.Equal(t, 4, boundary.Pending.X)
-	require.Equal(t, 5, boundary.Pending.Y)
-	require.Nil(t, boundary.Pending.Motion)
+	motion := tea.MouseMotionMsg{X: 1, Y: 1, Button: tea.MouseLeft}
+	require.Nil(t, c.Filter(motion))
+	pending := c.Filter(tea.MouseWheelMsg{X: 2, Y: 3, Button: tea.MouseWheelDown}).(messages.PointerUpdateMsg)
+	require.Equal(t, &motion, pending.Motion)
+	pending = c.Filter(tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelDown}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 2, Y: 3, WheelDelta: 1, HasWheel: true}, pending)
+	require.Nil(t, c.Filter(tea.MouseWheelMsg{X: 4, Y: 5, Button: tea.MouseWheelDown}))
+	motion = tea.MouseMotionMsg{X: 90, Y: 90, Button: tea.MouseLeft}
+	pending = c.Filter(motion).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 4, Y: 5, WheelDelta: 2, HasWheel: true}, pending)
+	release := tea.MouseReleaseMsg{X: 90, Y: 90, Button: tea.MouseLeft}
+	boundary := c.Filter(release).(messages.PointerBoundaryMsg)
+	require.Equal(t, &motion, boundary.Pending.Motion)
+	require.False(t, boundary.Pending.HasWheel)
+	require.Equal(t, release, boundary.Event)
 }
 
 func TestMouseCoalescerFlushMarkerAndStop(t *testing.T) {
@@ -103,4 +108,74 @@ func TestMouseCoalescerResizeFlushesOldGeometryAndStoppedWakeDrops(t *testing.T)
 	seq = c.timerSequence
 	c.Stop()
 	require.Nil(t, c.Filter(mouseFlushMsg{sequence: seq}))
+}
+
+func TestMouseCoalescerWheelAxesAndCoordinatesStayOrdered(t *testing.T) {
+	c := NewMouseCoalescer()
+	t.Cleanup(c.Stop)
+	for _, event := range []tea.MouseWheelMsg{
+		{X: 5, Y: 2, Button: tea.MouseWheelRight},
+		{X: 5, Y: 2, Button: tea.MouseWheelRight},
+	} {
+		require.Nil(t, c.Filter(event))
+	}
+	sequence := c.timerSequence
+	pending := c.Filter(tea.MouseWheelMsg{X: 5, Y: 2, Button: tea.MouseWheelUp, Mod: tea.ModShift}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 5, Y: 2, WheelDelta: 2, WheelHorizontal: true, HasWheel: true}, pending)
+	require.Greater(t, c.timerSequence, sequence)
+	require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}), "old wake cannot flush the fresh axis")
+
+	sequence = c.timerSequence
+	pending = c.Filter(tea.MouseWheelMsg{X: 5, Y: 9, Button: tea.MouseWheelDown}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 5, Y: 2, WheelDelta: -1, HasWheel: true}, pending)
+	require.Greater(t, c.timerSequence, sequence)
+	require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}), "old wake cannot reroute the fresh position")
+
+	pending = c.Filter(tea.MouseWheelMsg{X: 6, Y: 9, Button: tea.MouseWheelDown}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 5, Y: 9, WheelDelta: 1, HasWheel: true}, pending)
+	pending = c.Filter(tea.MouseWheelMsg{X: 6, Y: 9, Button: tea.MouseWheelLeft}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 6, Y: 9, WheelDelta: 1, HasWheel: true}, pending)
+	sequence = c.timerSequence
+	release := tea.MouseReleaseMsg{X: 12, Y: 10, Button: tea.MouseLeft}
+	boundary := c.Filter(release).(messages.PointerBoundaryMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 6, Y: 9, WheelDelta: -1, WheelHorizontal: true, HasWheel: true}, boundary.Pending)
+	require.Equal(t, release, boundary.Event)
+	require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}))
+	require.Equal(t, release, c.Filter(release), "the final wheel was consumed exactly once")
+	require.Nil(t, c.timer)
+}
+
+func TestMouseCoalescerWheelCancellationKeepsAxisAndFlushesOnce(t *testing.T) {
+	for _, buttons := range [][2]tea.MouseButton{
+		{tea.MouseWheelLeft, tea.MouseWheelRight},
+		{tea.MouseWheelUp, tea.MouseWheelDown},
+	} {
+		c := NewMouseCoalescer()
+		t.Cleanup(c.Stop)
+		require.Nil(t, c.Filter(tea.MouseWheelMsg{X: 3, Y: 4, Button: buttons[0]}))
+		require.Nil(t, c.Filter(tea.MouseWheelMsg{X: 3, Y: 4, Button: buttons[1]}))
+		sequence := c.timerSequence
+		pending := c.Filter(mouseFlushMsg{sequence: sequence}).(messages.PointerUpdateMsg)
+		require.Equal(t, messages.PointerUpdateMsg{X: 3, Y: 4, HasWheel: true, WheelHorizontal: buttons[0] == tea.MouseWheelLeft}, pending)
+		require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}))
+		require.Nil(t, c.timer)
+	}
+}
+
+func TestMouseCoalescerWheelToMotionFlushUsesFreshGeneration(t *testing.T) {
+	c := NewMouseCoalescer()
+	t.Cleanup(c.Stop)
+	c.Filter(tea.MouseWheelMsg{X: 3, Y: 4, Button: tea.MouseWheelLeft})
+	sequence := c.timerSequence
+	motion := tea.MouseMotionMsg{X: 30, Y: 40, Button: tea.MouseLeft}
+	pending := c.Filter(motion).(messages.PointerUpdateMsg)
+	require.True(t, pending.WheelHorizontal)
+	require.Equal(t, -1, pending.WheelDelta)
+	require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}))
+	require.Greater(t, c.timerSequence, sequence)
+	sequence = c.timerSequence
+	pending = c.Filter(mouseFlushMsg{sequence: sequence}).(messages.PointerUpdateMsg)
+	require.Equal(t, messages.PointerUpdateMsg{X: 30, Y: 40, Motion: &motion}, pending)
+	require.Nil(t, c.Filter(mouseFlushMsg{sequence: sequence}))
+	require.Nil(t, c.timer)
 }

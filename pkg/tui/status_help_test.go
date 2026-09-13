@@ -18,15 +18,13 @@ func TestPrimaryHelpKeepsCompleteKeyboardHelp(t *testing.T) {
 	for _, enhanced := range []bool{false, true} {
 		m.keyboardEnhancementsSupported = enhanced
 		bindings := m.Bindings()
-		require.Len(t, bindings, 4)
-		require.Equal(t, []string{"help", "commands", "newline", "quit"}, []string{
-			bindings[0].Help().Desc, bindings[1].Help().Desc, bindings[2].Help().Desc, bindings[3].Help().Desc,
-		})
+		require.Len(t, bindings, 1)
+		require.Equal(t, "commands", bindings[0].Help().Desc)
+		require.Equal(t, []string{"ctrl+k"}, bindings[0].Keys())
 		nl := "ctrl+j"
 		if enhanced {
 			nl = "shift+enter"
 		}
-		require.Equal(t, []string{nl}, bindings[2].Keys())
 		var fullKeys []string
 		for _, binding := range m.AllBindings() {
 			fullKeys = append(fullKeys, binding.Keys()...)
@@ -90,7 +88,16 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 		if enhanced {
 			msg = tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift}
 		}
-		require.True(t, key.Matches(msg, m.Bindings()[2]), "displayed newline is the dispatched key")
+		for _, hint := range m.Bindings() {
+			require.False(t, key.Matches(msg, hint), "newline is absent from the command-only footer")
+		}
+		var newline key.Binding
+		for _, binding := range m.AllBindings() {
+			if binding.Help().Desc == "newline" {
+				newline = binding
+			}
+		}
+		require.True(t, key.Matches(msg, newline), "complete help retains the dispatched newline key")
 		_, _ = m.Update(msg)
 		require.Equal(t, "first\n", m.editor.Value())
 	}

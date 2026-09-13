@@ -573,7 +573,7 @@ func (mv *messageModel) render(width int) string {
 		noTopPaddingStyle := messageStyle.PaddingTop(0)
 		rendered := noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
 		if msg.Type == types.MessageTypeAgentInput {
-			return agentidentity.Border(rendered, msg.InputReference, width)
+			return agentidentity.Border(rendered, msg.InputReference, width, messageStyle)
 		}
 		return rendered
 	case types.MessageTypeAssistant:

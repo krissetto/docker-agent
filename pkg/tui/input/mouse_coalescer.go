@@ -12,20 +12,22 @@ import (
 const mouseFlushInterval = 16 * time.Millisecond
 
 // MouseCoalescer batches motion and wheel input on a 16 ms cadence.
+// Wheel axis/position changes and motion transitions flush the preceding batch.
 // Clicks and releases flush pending input first.
 type MouseCoalescer struct {
 	mu sync.Mutex
 
-	latestMotion  tea.MouseMotionMsg
-	hasMotion     bool
-	wheelDelta    int
-	hasWheel      bool
-	pointerX      int
-	pointerY      int
-	timerPending  bool
-	timerSequence uint64
-	timer         *time.Timer
-	stopped       bool
+	latestMotion    tea.MouseMotionMsg
+	hasMotion       bool
+	wheelDelta      int
+	wheelHorizontal bool
+	hasWheel        bool
+	pointerX        int
+	pointerY        int
+	timerPending    bool
+	timerSequence   uint64
+	timer           *time.Timer
+	stopped         bool
 
 	sender func(tea.Msg)
 }
@@ -72,24 +74,28 @@ func (c *MouseCoalescer) Filter(msg tea.Msg) tea.Msg {
 		if !ok {
 			return msg
 		}
+		horizontal := msg.Button == tea.MouseWheelLeft || msg.Button == tea.MouseWheelRight
+		var pending tea.Msg
+		if c.hasMotion || c.hasWheel && (c.wheelHorizontal != horizontal || c.pointerX != msg.X || c.pointerY != msg.Y) {
+			pending, _ = c.takeLocked()
+		}
 		c.wheelDelta += delta
+		c.wheelHorizontal = horizontal
 		c.hasWheel = true
 		c.pointerX, c.pointerY = msg.X, msg.Y
-		// Wheel input supplies the latest pointer position.
-		c.hasMotion = false
 		c.scheduleLocked()
-		return nil
+		return pending
 
 	case tea.MouseMotionMsg:
+		var pending tea.Msg
 		if c.hasWheel {
-			// Wheel position takes precedence within the current interval.
-			return nil
+			pending, _ = c.takeLocked()
 		}
 		c.latestMotion = msg
 		c.hasMotion = true
 		c.pointerX, c.pointerY = msg.X, msg.Y
 		c.scheduleLocked()
-		return nil
+		return pending
 
 	case tea.MouseClickMsg:
 		return c.boundaryLocked(msg)
@@ -141,6 +147,7 @@ func (c *MouseCoalescer) discardLocked() {
 	c.timerSequence++
 	c.hasMotion, c.hasWheel, c.timerPending = false, false, false
 	c.wheelDelta = 0
+	c.wheelHorizontal = false
 }
 
 // Stop releases pending timers without delivering input to a closed program.
@@ -161,10 +168,11 @@ func (c *MouseCoalescer) takeLocked() (messages.PointerUpdateMsg, bool) {
 		c.timer = nil
 	}
 	update := messages.PointerUpdateMsg{
-		X:          c.pointerX,
-		Y:          c.pointerY,
-		WheelDelta: c.wheelDelta,
-		HasWheel:   c.hasWheel,
+		X:               c.pointerX,
+		Y:               c.pointerY,
+		WheelDelta:      c.wheelDelta,
+		WheelHorizontal: c.wheelHorizontal,
+		HasWheel:        c.hasWheel,
 	}
 	if c.hasMotion {
 		motion := c.latestMotion
@@ -172,6 +180,7 @@ func (c *MouseCoalescer) takeLocked() (messages.PointerUpdateMsg, bool) {
 	}
 	c.hasMotion = false
 	c.wheelDelta = 0
+	c.wheelHorizontal = false
 	c.hasWheel = false
 	c.timerPending = false
 	return update, update.Motion != nil || update.HasWheel
@@ -179,9 +188,9 @@ func (c *MouseCoalescer) takeLocked() (messages.PointerUpdateMsg, bool) {
 
 func wheelDelta(msg tea.MouseWheelMsg) (int, bool) {
 	switch msg.Button {
-	case tea.MouseWheelUp:
+	case tea.MouseWheelUp, tea.MouseWheelLeft:
 		return -1, true
-	case tea.MouseWheelDown:
+	case tea.MouseWheelDown, tea.MouseWheelRight:
 		return 1, true
 	default:
 		return 0, false

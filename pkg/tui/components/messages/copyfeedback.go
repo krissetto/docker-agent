@@ -131,13 +131,15 @@ func applySGRBackground(bg color.Color, params ansi.Params) color.Color {
 			bg = ansi.Black + ansi.BasicColor(param-40)
 		case param >= 100 && param <= 107:
 			bg = ansi.BrightBlack + ansi.BasicColor(param-100)
-		case param == 48:
+		case param == 38 || param == 48 || param == 58:
 			var c color.Color
 			n := ansi.ReadStyleColor(params[i:], &c)
 			if n == 0 {
 				return bg // malformed extended color; stop parsing this sequence
 			}
-			bg = c
+			if param == 48 {
+				bg = c
+			}
 			i += n - 1
 		}
 	}

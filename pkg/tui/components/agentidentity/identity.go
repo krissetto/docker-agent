@@ -4,6 +4,7 @@ package agentidentity
 import (
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -17,21 +18,44 @@ func Label(ref lifecycle.InputReference, width int) string {
 	if ref.Kind == lifecycle.InputReferenceUnknown {
 		return styles.MutedStyle.Render(text)
 	}
-	return ansi.SetHyperlink(Link) + styles.AgentIdentityStyle(ref.Agent, false).Render(text) + ansi.ResetHyperlink()
+	nameWidth := min(ansi.StringWidth(ref.Name), ansi.StringWidth(text))
+	name := ansi.Cut(text, 0, nameWidth)
+	suffix := ansi.Cut(text, nameWidth, ansi.StringWidth(text))
+	return ansi.SetHyperlink(Link) + styles.AgentIdentityStyle(ref.Agent, false).Render(name) + styles.MutedStyle.Render(suffix) + ansi.ResetHyperlink()
+}
+
+// Hover changes only the name's accent, preserving the suffix, link and surface.
+func Hover(line string, startCol, endCol int, ref lifecycle.InputReference) string {
+	sequence := func(hovered bool) string {
+		styled := styles.AgentIdentityStyle(ref.Agent, hovered).Render("x")
+		return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(styled, "\x1b[0m"), "\x1b[m"), "x")
+	}
+	normal, bright := sequence(false), sequence(true)
+	if normal == "" {
+		return line
+	}
+	segment := ansi.Cut(line, startCol, endCol)
+	return ansi.Cut(line, 0, startCol) + strings.ReplaceAll(segment, normal, bright) + ansi.Cut(line, endCol, ansi.StringWidth(line))
 }
 
 // Border replaces the top padding row with an identity embedded in the border.
-func Border(rendered string, ref lifecycle.InputReference, width int) string {
+func Border(rendered string, ref lifecycle.InputReference, width int, messageStyle lipgloss.Style) string {
 	lines := strings.Split(rendered, "\n")
 	if len(lines) == 0 || width < 1 {
 		return rendered
 	}
+	rule := lipgloss.NewStyle().
+		Foreground(messageStyle.GetBorderLeftForeground()).
+		Background(messageStyle.GetBackground())
+	corner := lipgloss.NewStyle().
+		Foreground(messageStyle.GetBorderLeftForeground()).
+		Background(messageStyle.GetBorderLeftBackground()).Render("┏")
 	if width < 4 {
-		lines[0] = styles.MutedStyle.Render(strings.Repeat("━", width))
+		lines[0] = corner + rule.Render(strings.Repeat("━", width-1))
 		return strings.Join(lines, "\n")
 	}
 	label := Label(ref, width-4)
-	lines[0] = styles.MutedStyle.Render("┏━ ") + label + styles.MutedStyle.Render(" "+strings.Repeat("━", max(width-4-ansi.StringWidth(label), 0)))
+	lines[0] = corner + styles.RenderComposite(rule, "━ "+label+" "+strings.Repeat("━", max(width-4-ansi.StringWidth(label), 0)))
 	return strings.Join(lines, "\n")
 }
 

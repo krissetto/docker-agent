@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -85,6 +86,24 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						afterHover := m.View()
 						assert.Equal(t, ansi.Strip(beforeHover), ansi.Strip(afterHover), "hover never moves hit coordinates")
 						assert.NotEqual(t, beforeHover, afterHover, "identity brightens like sidebar")
+						if origin == session.InputOriginAgent {
+							rawHeader, rawBody := m.renderedLine(start), m.renderedLine(start+1)
+							hoveredHeader := m.applyURLUnderline([]string{rawHeader}, start)[0]
+							// Render an ordinary USER body at the same viewport edge to compare the actual fade.
+							bodyLines := append([]string(nil), m.renderedLines...)
+							bodyLines[start] = rawBody
+							bodyViewport := scrollview.New(scrollview.WithReserveScrollbarSpace(true))
+							bodyViewport.SetSize(width, 8)
+							bodyViewport.SetContent(bodyLines, m.totalScrollableHeight())
+							bodyViewport.SetScrollOffset(m.scrollOffset)
+							fadedBody := strings.Split(bodyViewport.View(), "\n")[labelLine]
+							for x := 1; x < m.contentWidth(); x++ {
+								assert.Equal(t, backgroundAt(rawBody, 1), backgroundAt(rawHeader, x), "raw identity rule and label share USER background at x=%d", x)
+								assert.Equal(t, backgroundAt(rawBody, 1), backgroundAt(hoveredHeader, x), "raw hovered identity preserves USER background at x=%d", x)
+								assert.Equal(t, backgroundAt(fadedBody, 1), backgroundAt(lines[labelLine], x), "displayed identity uses the same USER background under edge fade at x=%d", x)
+								assert.Equal(t, backgroundAt(lines[labelLine], x), backgroundAt(strings.Split(afterHover, "\n")[labelLine], x), "hover preserves USER background at x=%d", x)
+							}
+						}
 						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + width - 2, Y: 3 + labelLine})
 						if origin == session.InputOriginAgent {
 							for y, line := range lines {

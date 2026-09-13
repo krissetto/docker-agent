@@ -303,18 +303,18 @@ func (t *TabBar) SetWidth(width int) tea.Cmd {
 		t.viewDirty = true
 	}
 	t.reconcileScroll()
-	t.retargetSettlingDrop()
+	cmd := t.retargetSettlingDrop()
 	if t.IsAnimating() {
-		return t.ar.EnsureRunning()
+		return tea.Batch(cmd, t.ar.EnsureRunning())
 	}
-	return t.syncIndicatorSub()
+	return tea.Batch(cmd, t.syncIndicatorSub())
 }
 
 // SetCloseTabEnabled enables or disables the close-tab key binding.
 func (t *TabBar) SetCloseTabEnabled(v bool) { t.keyMap.CloseTab.SetEnabled(v) }
 
 // SetMaxTitleLength updates the title truncation limit.
-func (t *TabBar) SetMaxTitleLength(n int) tea.Cmd {
+func (t *TabBar) SetMaxTitleLength(n int) (cmd tea.Cmd) {
 	defer t.recordVisualState()
 	if n <= 0 {
 		n = defaultMaxTitleLen
@@ -327,12 +327,12 @@ func (t *TabBar) SetMaxTitleLength(n int) tea.Cmd {
 		t.zones = nil
 		t.dragBounds = nil
 		t.reconcileScroll()
-		t.retargetSettlingDrop()
+		cmd = t.retargetSettlingDrop()
 	}
 	if t.IsAnimating() {
-		return t.ar.EnsureRunning()
+		return tea.Batch(cmd, t.ar.EnsureRunning())
 	}
-	return t.syncIndicatorSub()
+	return tea.Batch(cmd, t.syncIndicatorSub())
 }
 
 // InvalidateCache is triggered when SetTabs updates the list of tabs and active index.
@@ -386,7 +386,7 @@ func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
 	if cmd := t.maybeStartReorderAnimation(prevTabs, prevLayouts); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	t.retargetSettlingDrop()
+	cmds = append(cmds, t.retargetSettlingDrop())
 	if cmd := t.syncIndicatorSub(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -428,10 +428,10 @@ func (t *TabBar) SetVisible(visible bool) tea.Cmd {
 }
 
 // Tick advances local tab bar transitions and reports only visible frame changes.
-func (t *TabBar) Tick() {
+func (t *TabBar) Tick() tea.Cmd {
 	defer t.recordVisualState()
 	if t.Height() == 0 {
-		return
+		return nil
 	}
 	animated := t.hasAnimatedIndicator() || t.scrollAnim.Running() || t.reorderAnim.Running() || t.settleAnim.Running() || t.dragAnim.Running() || t.settlingDrop != nil
 	previousView, hadPreviousView := t.cachedView, t.cachedView != ""
@@ -463,14 +463,8 @@ func (t *TabBar) Tick() {
 		}
 	}
 	t.reconcileScroll()
-	t.retargetSettlingDrop()
-	// Stop-only path: once local scroll/drag/reorder animations settle,
-	// hasAnimatedIndicator() goes false and syncIndicatorSub() stops the shared
-	// indicator subscription. Any Start() command is intentionally dropped here
-	// because the global tick chain that drives Tick is already running;
-	// subscriptions that need to *start* a chain are created from SetTabs / drag
-	// start, not from this per-frame callback.
-	t.syncIndicatorSub()
+	cmd := t.retargetSettlingDrop()
+	cmd = tea.Batch(cmd, t.syncIndicatorSub())
 	if animated {
 		t.viewDirty = true
 		currentView := t.View()
@@ -486,6 +480,7 @@ func (t *TabBar) Tick() {
 			t.visualGeneration++
 		}
 	}
+	return cmd
 }
 
 // StopAnimations synchronously cancels every tab-owned transition and releases
@@ -675,10 +670,11 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		t.captureSettlingPosition()
 		t.scrollAnim.Cancel()
 		t.scrollPending = false
+		t.scrollSeq++
+		t.lastEnsuredIdx = t.activeIdx
 		t.scrollOffset = max(0, t.scrollOffset+msg.Delta*scrollStep)
-		t.clampScroll()
-		t.retargetSettlingDrop()
-		return nil
+		t.reconcileScroll()
+		return t.retargetSettlingDrop()
 
 	case tea.MouseMotionMsg:
 		if t.Height() == 0 {
@@ -790,7 +786,7 @@ func (t *TabBar) handleMouseRelease(x int) (cmd tea.Cmd) {
 				}
 			}
 		}
-		t.beginSettlingDrop(sessionID, float64(startX), float64(targetX))
+		cmd = t.beginSettlingDrop(sessionID, float64(startX), float64(targetX))
 	}
 	t.drag = dragState{dropIdx: noTab}
 	t.dragAnim.Cancel()
@@ -798,10 +794,7 @@ func (t *TabBar) handleMouseRelease(x int) (cmd tea.Cmd) {
 	if noop {
 		t.dragOffsetFrom = nil
 		t.dragOffsetTo = nil
-		if cmd := t.syncIndicatorSub(); cmd != nil {
-			return cmd
-		}
-		return nil
+		return tea.Batch(cmd, t.syncIndicatorSub())
 	}
 
 	// Keep bystander offsets alive until SetTabs arrives.
@@ -812,7 +805,7 @@ func (t *TabBar) handleMouseRelease(x int) (cmd tea.Cmd) {
 		finalTo--
 	}
 
-	return core.CmdHandler(messages.ReorderTabMsg{FromIdx: from, ToIdx: finalTo})
+	return tea.Batch(cmd, core.CmdHandler(messages.ReorderTabMsg{FromIdx: from, ToIdx: finalTo}))
 }
 
 func (t *TabBar) previewTabs() []messages.TabInfo {
@@ -1425,7 +1418,7 @@ func (t *TabBar) syncIndicatorSub() tea.Cmd {
 	return nil
 }
 
-func (t *TabBar) maybeStartReorderAnimation(prevTabs []messages.TabInfo, prevLayouts []tabLayout) tea.Cmd {
+func (t *TabBar) maybeStartReorderAnimation(prevTabs []messages.TabInfo, prevLayouts []tabLayout) (cmd tea.Cmd) {
 	// Consume the drag source ID regardless of whether we start an animation,
 	// so it never leaks into a subsequent unrelated SetTabs call.
 	dragSrcID := t.lastDragSourceID
@@ -1503,20 +1496,18 @@ func (t *TabBar) maybeStartReorderAnimation(prevTabs []messages.TabInfo, prevLay
 		// Logical order is already committed. Retarget the one stable-ID overlay
 		// from its interpolated on-screen position into the new rendered cell.
 		if t.settlingDrop == nil || t.settlingDrop.sessionID != dragSrcID {
-			t.beginSettlingDrop(dragSrcID, float64(dropStartX), float64(dropStartX))
+			cmd = t.beginSettlingDrop(dragSrcID, float64(dropStartX), float64(dropStartX))
 		}
-		t.retargetSettlingDrop()
+		cmd = tea.Batch(cmd, t.retargetSettlingDrop())
 	}
 	// Clear drag-preview offsets: the reorder animation handles bystander
 	// movement from here, producing a seamless handoff.
 	t.dragAnim.Cancel()
 	t.dragOffsetFrom = nil
 	t.dragOffsetTo = nil
-	cmd := t.reorderAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
+	cmd = tea.Batch(cmd, t.reorderAnim.Start(reorderAnimDuration, animation.EaseOutQuint))
 	if dragSrcID != "" && t.settlingDrop != nil && !t.settleAnim.Running() {
-		if settleCmd := t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint); cmd == nil {
-			cmd = settleCmd
-		}
+		cmd = tea.Batch(cmd, t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint))
 	}
 	return cmd
 }
@@ -1559,14 +1550,14 @@ func (t *TabBar) settlingX() int {
 	return int(x - 0.5)
 }
 
-func (t *TabBar) beginSettlingDrop(sessionID string, currentX, targetX float64) {
+func (t *TabBar) beginSettlingDrop(sessionID string, currentX, targetX float64) tea.Cmd {
 	t.settleAnim.Cancel()
 	t.settlingDrop = &settlingDropState{sessionID: sessionID, currentX: currentX, targetX: targetX}
 	if currentX == targetX {
 		t.endSettlingDrop()
-		return
+		return nil
 	}
-	t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
+	return t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
 }
 
 func (t *TabBar) captureSettlingPosition() {
@@ -1578,20 +1569,20 @@ func (t *TabBar) captureSettlingPosition() {
 	t.settlingDrop.currentX = current
 }
 
-func (t *TabBar) retargetSettlingDrop() {
+func (t *TabBar) retargetSettlingDrop() tea.Cmd {
 	if t.settlingDrop == nil {
-		return
+		return nil
 	}
 	layouts := t.computeLayouts()
 	lay, ok := t.layoutForSessionID(layouts, t.settlingDrop.sessionID)
 	if !ok {
 		t.endSettlingDrop()
-		return
+		return nil
 	}
 	viewStart, _, cursor := t.currentTabViewMetrics()
 	target := float64(t.clampFloatingX(cursor+lay.startCol-viewStart, lay.tab.Width()))
 	if target == t.settlingDrop.targetX && t.settleAnim.Running() {
-		return
+		return nil
 	}
 	current := t.settlingFloatX()
 	t.settleAnim.Cancel()
@@ -1599,9 +1590,9 @@ func (t *TabBar) retargetSettlingDrop() {
 	t.settlingDrop.targetX = target
 	if current == target {
 		t.endSettlingDrop()
-		return
+		return nil
 	}
-	t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
+	return t.settleAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
 }
 
 func (t *TabBar) endSettlingDrop() {
