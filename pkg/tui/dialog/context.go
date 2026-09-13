@@ -107,9 +107,21 @@ func (d *contextDialog) selectedAttachedIndex() (int, bool) {
 func (d *contextDialog) Init() tea.Cmd { return nil }
 
 func (d *contextDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if m, ok := msg.(tea.MouseClickMsg); ok && m.Button == tea.MouseLeft {
 		x, y, w, h := d.BodyScrollBounds()
 		if m.X >= x && m.X < x+w && m.Y >= y && m.Y < y+h {
@@ -734,11 +746,11 @@ func (d *contextDialog) helpKeys() []string {
 	if d.selectableCount() > 0 {
 		keys = []string{"↑↓", "select"}
 	}
-	if len(d.liveSessions) > 0 {
-		keys = append(keys, "Enter", "compact")
+	if _, ok := d.selectedLiveSession(); ok {
+		keys = append(keys, "Enter", "compact selected")
 	}
-	if len(d.breakdown.AttachedFiles) > 0 {
-		keys = append(keys, "d", "drop")
+	if _, ok := d.selectedAttachedIndex(); ok {
+		keys = append(keys, "d", "drop attachment")
 	}
 	return append(keys, "c", "copy")
 }

@@ -90,3 +90,37 @@ func TestSettingsWideNarrowWideRetainsSelectionAndBounds(t *testing.T) {
 	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	require.Less(t, d.selected[d.tab], selected)
 }
+
+func TestEmptyPickerActionsCannotActivateSelection(t *testing.T) {
+	fixtures := []struct {
+		name string
+		new  func() Dialog
+	}{
+		{"commands", func() Dialog { return NewCommandPaletteDialog(nil) }},
+		{"theme", func() Dialog { return NewThemePickerDialog(nil, "") }},
+		{"model", func() Dialog { return NewModelPickerDialog(nil) }},
+		{"effort", func() Dialog { return NewEffortPickerDialog(nil, "") }},
+		{"sessions", func() Dialog { return NewSessionBrowserDialog(nil, "") }},
+		{"plans", func() Dialog { return NewPlanBrowserDialog(plans.ListResult{}) }},
+	}
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			d := f.new()
+			d.SetSize(80, 24)
+			view := d.View()
+			row, col := d.Position()
+			dl := NewDialogLayout(view, row, col)
+			actions := d.(interface {
+				ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bool)
+			})
+			for y := row; y < row+dl.Height; y++ {
+				for x := col; x < col+dl.Width; x++ {
+					k, hit := actions.ActionKeyAt(x, y, dl)
+					if hit {
+						require.NotEqual(t, tea.KeyEnter, k.Code, "empty list must not advertise an actionable selection")
+					}
+				}
+			}
+		})
+	}
+}

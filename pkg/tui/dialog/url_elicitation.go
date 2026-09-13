@@ -74,6 +74,12 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 	case tea.KeyPressMsg:
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, d.CancelDialogCmd()
 		}
@@ -101,6 +107,7 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, d.respond(tools.ElicitationActionCancel)
 		}
 		if action, ok := d.ActionKeyAt(msg.X, msg.Y, NewDialogLayout(view, row, col)); ok {
+			d.BlurActions()
 			return d.Update(action)
 		}
 	}
@@ -139,8 +146,10 @@ func (d *URLElicitationDialog) content() (style lipgloss.Style, width int, heade
 	header = RenderTitle("MCP Server Request", contentWidth, styles.DialogTitleStyle)
 
 	// Message from server
-	content.AddContent(styles.DialogContentStyle.Width(bodyWidth).Render(d.message))
-	content.AddSpace()
+	if d.message != "" {
+		content.AddContent(styles.DialogContentStyle.Width(bodyWidth).Render(d.message))
+		content.AddSpace()
+	}
 
 	// URL to visit
 	if d.url != "" {

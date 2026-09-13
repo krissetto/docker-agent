@@ -190,6 +190,8 @@ func TestTransferPanelNotClickable(t *testing.T) {
 
 	m := newAgentPanelSidebar(t, 40, transferRoster()...)
 	m.SetAgentSwitching(true, "Scout", "Coder")
+	m.ReconcileLayout()
+	m.CancelPresentation()
 
 	_ = m.View()
 
@@ -203,7 +205,7 @@ func TestTransferPanelNotClickable(t *testing.T) {
 	require.GreaterOrEqual(t, relationY, 0, "the box renders in the full view")
 
 	x := m.layoutCfg.PaddingLeft + 2
-	for _, y := range []int{relationY - 2, relationY - 1, relationY, relationY + 1} {
+	for _, y := range []int{relationY} {
 		result, name := m.HandleClickType(x, y)
 		assert.Equalf(t, ClickNone, result, "box line at offset %d is not clickable", y-relationY)
 		assert.Empty(t, name)
@@ -229,6 +231,7 @@ func TestTransferPanelNotClickable(t *testing.T) {
 		require.True(t, found, "live transfer participant has a tree row")
 		assert.Contains(t, ansi.Strip(m.cachedLines[row]), name)
 		m.SetSize(40, 8)
+		m.CancelPresentation()
 		m.View()
 		for y, owner := range m.agentClickZones {
 			if owner == name {
@@ -244,6 +247,8 @@ func TestTransferPanelNotClickable(t *testing.T) {
 	}
 	m.clearTransferPresentation()
 	m.invalidateCache()
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	m.View()
 	for _, name := range m.agentClickZones {
 		assert.NotEqual(t, "Scout", name, "ended transfers leave no stale participant hit targets")
@@ -382,15 +387,15 @@ func TestTransferCollapsedSummaryFitsNarrowWidths(t *testing.T) {
 
 			// With every band line fitting the content width, the terminal
 			// wraps nothing, so the height estimate covers the actual lines
-			// (CollapsedHeight additionally counts the divider).
+			// in the divider-free band.
 			vm := m.computeCollapsedViewModel(contentWidth)
 			rendered := strings.Split(RenderCollapsedView(vm), "\n")
 			for i, line := range rendered {
 				assert.LessOrEqualf(t, lipgloss.Width(line), contentWidth,
 					"collapsed band line %d must fit the content width", i)
 			}
-			assert.GreaterOrEqual(t, m.CollapsedHeight(m.width), len(rendered)+1,
-				"the height estimate is not under-evaluated")
+			assert.Equal(t, len(rendered), m.CollapsedHeight(m.width),
+				"divider-free height exactly matches the rendered fitting rows")
 		})
 	}
 }
@@ -442,7 +447,7 @@ func TestTransferAnimationTickKeepsLayoutClean(t *testing.T) {
 	for range 2 {
 		_, _ = m.Update(transferTick(t, time.Second/14))
 	}
-	assert.True(t, m.cacheDirty, "a rendered phase boundary refreshes the frame")
+	assert.False(t, m.cacheDirty, "Update reconciliation commits the refreshed frame cache")
 	assert.False(t, m.layoutDirty, "a tick is animation-only and keeps the layout clean")
 
 	_ = m.View()

@@ -95,11 +95,24 @@ func (d *exitConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, func() tea.Msg { return CloseDialogMsg{} }
 			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				d.BlurActions()
 				return d.Update(action)
 			}
 		}
 
 	case tea.KeyPressMsg:
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		switch d.HandleConfirmKey(msg, ConfirmKeyMap{Yes: d.keyMap.Yes, No: d.keyMap.No}) {
 		case ConfirmKeyConfirmed:
 			return d, confirmExitCmd()

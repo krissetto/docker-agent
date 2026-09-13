@@ -53,6 +53,7 @@ type animatedDialog struct {
 	renderAlpha               float64
 	renderWidth, renderHeight int
 	closing, hiding           bool
+	resizing                  bool
 	disabled                  bool
 	lastBoundsEvent           dialogBoundsEvent
 	boundsMeasurementCount    int
@@ -136,6 +137,7 @@ func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd
 		return nil
 	}
 	a.sample()
+	a.resizing = a.renderAlpha >= 1
 	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
 	a.fromWidth = w
 	a.targetAlpha, a.targetWidth, a.targetHeight = 1, w, h
@@ -146,6 +148,7 @@ func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd
 func (a *animatedDialog) reopen(maxWidth, maxHeight int) tea.Cmd {
 	a.sample()
 	a.closing, a.hiding = false, false
+	a.resizing = false
 	w, h := a.measureBounds("reopen", maxWidth, maxHeight, true)
 	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
 	a.fromWidth = w
@@ -169,6 +172,7 @@ func (a *animatedDialog) startClose(hiding bool) tea.Cmd {
 	visible := a.targetWidth > 0 && a.targetHeight > 0
 	a.sample()
 	a.closing, a.hiding = true, hiding
+	a.resizing = false
 	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
 	a.fromWidth = a.renderWidth
 	a.targetAlpha, a.targetHeight = 0, 0
@@ -220,8 +224,13 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 	fullH := lipgloss.Height(view)
 	lines := strings.Split(view, "\n")
 	if h < fullH {
-		y := max(0, (fullH-h)/2)
-		lines = lines[y:min(len(lines), y+h)]
+		if a.resizing {
+			// Resize reveals/conceals the interior from the same anchored top and bottom edges.
+			lines = append(lines[:max(0, h-1)], lines[len(lines)-1])
+		} else {
+			y := max(0, (fullH-h)/2)
+			lines = lines[y:min(len(lines), y+h)]
+		}
 	} else if h > fullH {
 		padded := make([]string, 0, h)
 		// Resize padding remains card chrome, not transparent/trimmed full-width blank rows.

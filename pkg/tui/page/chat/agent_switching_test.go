@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -287,7 +288,41 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 
 	handled, _ := p.handleRuntimeEvent(runtime.AgentSwitching(true, "root", "researcher"))
 	require.True(t, handled)
-	require.Contains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker, "the outbound box shows on the hop start")
+	layoutCmd := tea.Batch(rec.results[0].Cmd, p.reconcileSidebarLayout())
+	var nextTick func(tea.Cmd) (animation.TickMsg, bool)
+	nextTick = func(cmd tea.Cmd) (animation.TickMsg, bool) {
+		if cmd == nil {
+			return animation.TickMsg{}, false
+		}
+		msg := cmd()
+		if tick, ok := msg.(animation.TickMsg); ok {
+			return tick, true
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, nested := range batch {
+				if tick, found := nextTick(nested); found {
+					return tick, true
+				}
+			}
+		}
+		return animation.TickMsg{}, false
+	}
+	advance := func(cmd tea.Cmd) tea.Cmd {
+		if tick, found := nextTick(cmd); found {
+			if accepted, current := p.ar.Accept(tick); current {
+				_, updateCmd := p.Update(accepted)
+				return tea.Batch(updateCmd, p.ar.Continue())
+			}
+		}
+		return nil
+	}
+	// The shared spinner owns the initial tick command returned by the hop.
+	for step := 0; step < 30 && !strings.Contains(ansi.Strip(p.sidebar.View()), "researcher"); step++ {
+		layoutCmd = advance(layoutCmd)
+	}
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "researcher", "hop relation enters through its original animation command")
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "root")
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "►")
 	require.Len(t, rec.results, 1)
 	timers := rec.results[0].Timers
 	require.Len(t, timers, 2)
@@ -301,13 +336,13 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "tab-1", routed.SessionID)
 
-		_, _ = p.Update(routed.Inner)
+		_, timerCmd := p.Update(routed.Inner)
+		layoutCmd = tea.Batch(layoutCmd, timerCmd)
 	}
 
-	// Min then max elapsed without activity: the outbound box is gone.
-	assert.NotContains(t, ansi.Strip(p.sidebar.View()), transferBoxMarker)
+	// Min then max elapsed without activity: drain the existing presentation exit.
+	for step := 0; step < 30 && strings.Contains(ansi.Strip(p.sidebar.View()), "►"); step++ {
+		layoutCmd = advance(layoutCmd)
+	}
+	assert.NotContains(t, ansi.Strip(p.sidebar.View()), "►")
 }
-
-// transferBoxMarker is the visible marker of the sidebar transfer box (the
-// box title embedded in the rounded top border).
-const transferBoxMarker = "─ Transfer "

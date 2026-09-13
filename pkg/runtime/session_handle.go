@@ -914,6 +914,8 @@ func sessionEnvelope(sessionID string, item SequencedSessionEvent) SessionEvent 
 	switch event := item.Event.(type) {
 	case *PendingUserMessageAcceptedEvent:
 		position = event.SessionPosition
+	case *PendingUserMessageEditedEvent:
+		position = event.SessionPosition
 	case *PendingUserMessagePromotedEvent:
 		position = event.SessionPosition
 	case *MessageAddedEvent:

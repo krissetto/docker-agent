@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,12 +18,12 @@ func TestQueueSection_SingleMessage(t *testing.T) {
 	sessionState := &service.SessionState{}
 	m := New(animation.NewRuntime(), t.Context(), sessionState).(*model)
 
-	m.SetQueuedMessages("Hello world")
+	m.SetQueuedMessages([]QueuedMessage{{ID: "one", Text: "Hello world"}})
 
 	result := m.queueSection(40)
 
 	// Should contain the title with count
-	assert.Contains(t, result, "Queue (1)")
+	assert.Contains(t, result, "Queue:")
 
 	// Should contain the message
 	assert.Contains(t, result, "Hello world")
@@ -30,7 +31,7 @@ func TestQueueSection_SingleMessage(t *testing.T) {
 	assert.NotContains(t, result, "Ctrl+X to clear")
 
 	// Should use └ prefix for single (last) item
-	assert.Contains(t, result, "└")
+	assert.NotContains(t, result, "└")
 }
 
 func TestQueueSection_MultipleMessages(t *testing.T) {
@@ -39,12 +40,12 @@ func TestQueueSection_MultipleMessages(t *testing.T) {
 	sessionState := &service.SessionState{}
 	m := New(animation.NewRuntime(), t.Context(), sessionState).(*model)
 
-	m.SetQueuedMessages("First", "Second", "Third")
+	m.SetQueuedMessages([]QueuedMessage{{ID: "one", Text: "First"}, {ID: "two", Text: "Second"}, {ID: "three", Text: "Third"}})
 
 	result := m.queueSection(40)
 
 	// Should contain the title with count
-	assert.Contains(t, result, "Queue (3)")
+	assert.Contains(t, result, "Queue:")
 
 	// Should contain all messages
 	assert.Contains(t, result, "First")
@@ -54,11 +55,11 @@ func TestQueueSection_MultipleMessages(t *testing.T) {
 	assert.NotContains(t, result, "Ctrl+X to clear")
 
 	// Should have tree-style prefixes
-	assert.Contains(t, result, "├") // For non-last items
-	assert.Contains(t, result, "└") // For last item
+	assert.NotContains(t, result, "├") // For non-last items
+	assert.NotContains(t, result, "└") // For last item
 }
 
-func TestQueueSection_LongMessageTruncation(t *testing.T) {
+func TestQueueSection_LongMessageWrapping(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -66,15 +67,16 @@ func TestQueueSection_LongMessageTruncation(t *testing.T) {
 
 	// Create a very long message
 	longMessage := strings.Repeat("x", 100)
-	m.SetQueuedMessages(longMessage)
+	m.SetQueuedMessages([]QueuedMessage{{ID: "long", Text: longMessage}})
 
 	result := m.queueSection(30) // Narrow width to force truncation
 
 	// Should contain truncation indicator
 	require.NotEmpty(t, result)
 
-	// The full long message should not appear (it's truncated)
-	assert.NotContains(t, result, longMessage)
+	assert.Len(t, strings.Split(result, "\n"), 3, "heading plus at most two preview rows")
+	assert.Contains(t, ansi.Strip(result), "…")
+	assert.Equal(t, longMessage, m.queuedMessages[0].Text, "preview does not mutate canonical text")
 }
 
 func TestQueueSection_InRenderSections(t *testing.T) {
@@ -90,9 +92,9 @@ func TestQueueSection_InRenderSections(t *testing.T) {
 	assert.NotContains(t, outputWithoutQueue, "Queue")
 
 	// With queued messages, queue section should appear
-	m.SetQueuedMessages("Pending task")
+	m.SetQueuedMessages([]QueuedMessage{{ID: "pending", Text: "Pending task"}})
 	linesWithQueue := m.renderSections(35)
 	outputWithQueue := strings.Join(linesWithQueue, "\n")
-	assert.Contains(t, outputWithQueue, "Queue (1)")
+	assert.Contains(t, outputWithQueue, "Queue:")
 	assert.Contains(t, outputWithQueue, "Pending task")
 }

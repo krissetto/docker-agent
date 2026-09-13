@@ -41,3 +41,23 @@ func startStreamingMotionProgram(t *testing.T, model *streamingMotionModel, opts
 	<-model.ready
 	return program
 }
+
+// neverInTestLoop keeps snapshot assertions on the test goroutine and joins each
+// observation before returning, unlike Never's detached predicate goroutine.
+func neverInTestLoop(t *testing.T, condition func() bool, waitFor time.Duration, message string) {
+	t.Helper()
+	deadline := time.NewTimer(waitFor)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+			if condition() {
+				t.Fatal(message)
+			}
+		}
+	}
+}

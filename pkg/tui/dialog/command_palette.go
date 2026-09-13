@@ -69,10 +69,22 @@ func IsCommandPalette(d Dialog) bool {
 func (d *commandPaletteDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -270,15 +282,21 @@ func (d *commandPaletteDialog) targetListHeight(maxListHeight int) int {
 func (d *commandPaletteDialog) View() string { return d.renderBody(false) }
 
 func (d *commandPaletteDialog) renderBody(prepare bool) string {
-	d.textInput.SetStyles(styles.DialogInputStyle)
+	input := d.textInput
+	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
-	d.textInput.SetWidth(inner)
-	header := RenderTitle("Commands", inner, styles.DialogTitleStyle) + "\n" + d.textInput.View() + "\n" + RenderSeparator(inner)
+	input.SetWidth(inner)
+	if prepare {
+		d.textInput = input
+	}
+	header := RenderTitle("Commands", inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + RenderSeparator(inner)
 	lines := d.buildList(inner).Lines()
 	if len(lines) == 0 {
 		lines = []string{"No results found"}
 	}
-	footer := d.RenderActionKeys(d.regionWidth(inner), "enter", "Select")
+	actions := actionsForKeys("enter", "Run")
+	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
+	footer := d.RenderActions(d.regionWidth(inner), actions...)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }
 

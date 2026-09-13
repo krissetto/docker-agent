@@ -13,6 +13,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/fake"
+	agentruntime "github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -122,8 +124,9 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 // turn with its own answer. The switch must also be persisted to user config.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	closed := make(chan bool, 1)
+	accepted, promoted := make(chan queuedIdentity, 1), make(chan queuedIdentity, 1)
 	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions(), func(model tea.Model) tea.Model {
-		return &settingsCloseObserver{Model: model, closed: closed}
+		return &settingsCloseObserver{Model: model, closed: closed, accepted: accepted, promoted: promoted}
 	})
 	if runtime.GOOS == "windows" {
 		tuitest.WithTimeout(30 * time.Second)(d)
@@ -163,14 +166,35 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	// With queue send mode, session admission immediately projects the pending
 	// FIFO in the sidebar instead of maintaining a local queue/toast mirror.
 	d.Enter().
-		WaitFor(tuitest.Contains("Queue (1)")).
+		WaitFor(tuitest.Matches(`(?m)- Also, what's 3\+3\?\s*$`)).
 		WaitFor(tuitest.Contains("Also, what's 3+3?"))
 	d.Assert(tuitest.Absent("Message sent to the working agent"))
+	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "exactly one pending FIFO row")
+	var admitted queuedIdentity
+	select {
+	case admitted = <-accepted:
+		require.NotEmpty(t, admitted.turnID)
+	case <-time.After(10 * time.Second):
+		t.Fatal("canonical pending admission was not observed")
+	}
 
 	// Promotion removes it from the sidebar and renders it once in chat.
 	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
 		WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))
+	d.Assert(tuitest.Not(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s*$`)))
+	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "FIFO promotion renders the accepted input once in transcript")
+	select {
+	case advanced := <-promoted:
+		require.Equal(t, admitted, advanced, "promotion preserves accepted session/turn/position identity")
+	case <-time.After(10 * time.Second):
+		t.Fatal("canonical pending promotion was not observed")
+	}
+}
+
+type queuedIdentity struct {
+	sessionID, turnID string
+	position          int
 }
 
 // settingsCloseObserver exposes the real manager cleanup boundary only to this test.
@@ -178,12 +202,37 @@ type settingsCloseObserver struct {
 	tea.Model
 
 	closed               chan bool
+	accepted, promoted   chan queuedIdentity
 	settings             *settingsCleanupObserver
 	armed, closeDeferred bool
 	once                 sync.Once
 }
 
 func (m *settingsCloseObserver) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	inner := msg
+	if routed, ok := inner.(messages.RoutedMsg); ok {
+		inner = routed.Inner
+	}
+	if bridged, ok := inner.(messages.SessionRuntimeEventMsg); ok {
+		inner = bridged.Event
+	}
+	switch event := inner.(type) {
+	case *agentruntime.PendingUserMessageAcceptedEvent:
+		if event.Message == "Also, what's 3+3?" {
+			select {
+			case m.accepted <- queuedIdentity{event.SessionID, event.TurnID, event.SessionPosition}:
+			default:
+			}
+		}
+	case *agentruntime.PendingUserMessagePromotedEvent:
+		if event.Message == "Also, what's 3+3?" {
+			select {
+			case m.promoted <- queuedIdentity{event.SessionID, event.TurnID, event.SessionPosition}:
+			default:
+			}
+		}
+	}
+
 	switch event := msg.(type) {
 	case messages.OpenSettingsDialogMsg:
 		m.armed = true

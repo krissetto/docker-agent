@@ -348,7 +348,7 @@ func TestMultiChoiceDialog_View(t *testing.T) {
 	assert.Contains(t, view, "2")
 	assert.Contains(t, view, "Second")
 	assert.Contains(t, view, "Skip")
-	assert.Contains(t, view, "Continue")
+	assert.NotContains(t, view, "Continue", "empty primary must not masquerade as a second Skip")
 }
 
 func TestMultiChoiceDialog_View_DefaultButton(t *testing.T) {
@@ -364,14 +364,39 @@ func TestMultiChoiceDialog_View_DefaultButton(t *testing.T) {
 	d := NewMultiChoiceDialog(config).(*multiChoiceDialog)
 	d.SetSize(100, 40)
 
-	// No selection - Skip should be default (show ↵)
+	// Content Enter follows the displayed default, not merely the first pill.
 	view1 := d.View()
-	assert.Contains(t, view1, "Skip ↵")
+	assert.Contains(t, view1, "Skip ↵ ctrl+s")
+	assert.Equal(t, 1, strings.Count(view1, "↵"))
+	assert.NotContains(t, view1, "Continue")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.True(t, result.Result.IsSkipped)
 
-	// With selection - Continue should be default
-	d.selected = selection(0)
+	d = NewMultiChoiceDialog(config).(*multiChoiceDialog)
+	d.SetSize(100, 40)
+	_, _ = d.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
 	view2 := d.View()
-	assert.Contains(t, view2, "Continue ↵")
+	assert.Contains(t, view2, "Continue ↵ ctrl+enter")
+	assert.Equal(t, 1, strings.Count(view2, "↵"))
+	assert.NotContains(t, view2, "Skip ↵")
+
+	// Enter's marker moves with action focus while the selected option stays intact.
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	focused := d.View()
+	assert.Contains(t, focused, "Skip ↵ ctrl+s")
+	assert.Equal(t, 1, strings.Count(focused, "↵"))
+	assert.NotContains(t, focused, "Continue ↵")
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.Contains(t, d.View(), "Continue ↵ ctrl+enter")
+	assert.Equal(t, 1, strings.Count(d.View(), "↵"))
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	result, ok = findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.False(t, result.Result.IsSkipped)
+	assert.Equal(t, "opt1", result.Result.OptionID)
+	assert.Equal(t, "value1", result.Result.Value)
 }
 
 func TestMultiChoiceDialog_Clickables(t *testing.T) {
@@ -645,107 +670,55 @@ func TestMultiChoiceDialog_TypingInCustomMode_NumbersForwarded(t *testing.T) {
 	assert.Contains(t, d.customInput.Value(), "123")
 }
 
-func TestMultiChoiceDialog_TabOverride(t *testing.T) {
+func TestMultiChoiceDialog_TabCyclesContentAndActions(t *testing.T) {
 	t.Parallel()
-
-	config := MultiChoiceConfig{
-		DialogID:       "test-tab-override",
-		Title:          "Tab Override Test",
-		Options:        []MultiChoiceOption{{ID: "opt1", Label: "Option 1", Value: "value1"}},
-		AllowSecondary: true,
-	}
-
-	d := NewMultiChoiceDialog(config).(*multiChoiceDialog)
+	d := NewMultiChoiceDialog(MultiChoiceConfig{Title: "Choose", Options: []MultiChoiceOption{{ID: "one", Label: "One", Value: "value"}}, AllowCustom: true, AllowSecondary: true}).(*multiChoiceDialog)
 	d.SetSize(100, 40)
-
-	tabKey := tea.KeyPressMsg{Code: tea.KeyTab}
-
-	// No selection, secondary is default
-	assert.True(t, d.isSecondaryDefault())
-	view1 := d.View()
-	assert.Contains(t, view1, "Skip ↵")
-
-	// Press Tab to toggle
-	updated, _ := d.Update(tabKey)
-	d = updated.(*multiChoiceDialog)
-	assert.False(t, d.isSecondaryDefault())
-	view2 := d.View()
-	// With no selection, primary submission still falls back to Skip.
-	assert.Contains(t, view2, "Skip ↵")
-	assert.NotContains(t, view2, "Continue ↵")
-
-	// Press Tab again to toggle back
-	updated, _ = d.Update(tabKey)
-	d = updated.(*multiChoiceDialog)
-	assert.True(t, d.isSecondaryDefault())
-
-	for _, action := range []string{"enter", "Skip", "Continue"} {
-		t.Run(action, func(t *testing.T) {
-			probe := NewMultiChoiceDialog(config).(*multiChoiceDialog)
-			probe.SetSize(100, 40)
-			_, _ = probe.Update(tabKey)
-			var cmd tea.Cmd
-			if action == "enter" {
-				_, cmd = probe.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-			} else {
-				x, y := familyActionCell(t, probe, action)
-				_, cmd = probe.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			}
-			msgs := collectMsgs(cmd)
-			require.True(t, hasMsg[CloseDialogMsg](msgs))
-			result, ok := findMsg[MultiChoiceResultMsg](msgs)
-			require.True(t, ok)
-			assert.Equal(t, "skip", result.Result.OptionID)
-			assert.True(t, result.Result.IsSkipped, "empty primary falls back to secondary")
-		})
-	}
+	assert.True(t, d.isSecondaryDefault(), "empty content Enter defaults to Skip")
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.Equal(t, selection(0), d.selected)
+	assert.False(t, d.ActionsFocused())
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.Equal(t, selectionCustom, d.selected)
+	assert.True(t, d.customInput.Focused())
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.True(t, d.ActionsFocused())
+	assert.False(t, d.customInput.Focused())
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	assert.False(t, d.ActionsFocused())
+	assert.Equal(t, selectionCustom, d.selected)
+	assert.True(t, d.customInput.Focused())
 }
 
-func TestMultiChoiceDialog_TabOverride_WithSelection(t *testing.T) {
+func TestMultiChoiceDialog_ActionFocusPreservesContentDefaultAndExplicitChoice(t *testing.T) {
 	t.Parallel()
-
-	config := MultiChoiceConfig{
-		DialogID:       "test-tab-override-selection",
-		Title:          "Tab Override With Selection Test",
-		Options:        []MultiChoiceOption{{ID: "opt1", Label: "Option 1", Value: "value1"}},
-		AllowSecondary: true,
+	for _, tc := range []struct {
+		name string
+		keys []tea.KeyPressMsg
+		skip bool
+	}{
+		{"content-enter", nil, false},
+		{"first-action-skip", []tea.KeyPressMsg{{Code: tea.KeyTab}}, true},
+		{"next-action-primary", []tea.KeyPressMsg{{Code: tea.KeyTab}, {Code: tea.KeyRight}}, false},
+		{"reverse-boundary-primary", []tea.KeyPressMsg{{Code: tea.KeyTab, Mod: tea.ModShift}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewMultiChoiceDialog(MultiChoiceConfig{Title: "Choose", Options: []MultiChoiceOption{{ID: "one", Label: "One", Value: "value"}}, AllowSecondary: true}).(*multiChoiceDialog)
+			d.SetSize(100, 40)
+			_, _ = d.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
+			for _, k := range tc.keys {
+				_, _ = d.Update(k)
+			}
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+			require.True(t, ok)
+			assert.Equal(t, tc.skip, result.Result.IsSkipped)
+			if !tc.skip {
+				assert.Equal(t, "one", result.Result.OptionID)
+				assert.Equal(t, "value", result.Result.Value)
+			}
+		})
 	}
-
-	d := NewMultiChoiceDialog(config).(*multiChoiceDialog)
-	d.SetSize(100, 40)
-	d.selected = selection(0) // Has selection
-
-	tabKey := tea.KeyPressMsg{Code: tea.KeyTab}
-
-	// With selection, primary is default
-	assert.False(t, d.isSecondaryDefault())
-	view1 := d.View()
-	assert.Contains(t, view1, "Continue ↵")
-
-	// Press Tab to toggle - skip becomes default
-	updated, _ := d.Update(tabKey)
-	d = updated.(*multiChoiceDialog)
-	assert.True(t, d.isSecondaryDefault())
-	view2 := d.View()
-	assert.Contains(t, view2, "Skip ↵")
-	assert.NotContains(t, view2, "Continue ↵")
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
-	require.True(t, ok)
-	assert.True(t, result.Result.IsSkipped, "Enter follows the Tab-overridden default")
-
-	// Explicit action clicks do not inherit the keyboard default override.
-	probe := NewMultiChoiceDialog(config).(*multiChoiceDialog)
-	probe.SetSize(100, 40)
-	probe.selected = selection(0)
-	_, _ = probe.Update(tabKey)
-	x, y := familyActionCell(t, probe, "Continue")
-	_, cmd = probe.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-	result, ok = findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
-	require.True(t, ok)
-	assert.Equal(t, "opt1", result.Result.OptionID)
-	assert.Equal(t, "value1", result.Result.Value)
-	assert.False(t, result.Result.IsSkipped)
 }
 
 func TestMultiChoiceDialog_EscapeCancels(t *testing.T) {

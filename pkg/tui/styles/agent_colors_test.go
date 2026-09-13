@@ -407,3 +407,25 @@ func TestUnknownAgentStylesFollowWarmThemeSwitch(t *testing.T) { //nolint:parall
 		assert.GreaterOrEqual(t, contrastRatio(colors.Fg, colors.Bg), 4.5)
 	}
 }
+
+func TestAgentColorGenerationChangesOnlyWithRosterOrPalette(t *testing.T) {
+	original := CurrentTheme()
+	t.Cleanup(func() { SetAgentOrder(nil); ApplyTheme(original) })
+	SetAgentOrder(nil)
+	before := AgentColorGeneration()
+	SetAgentOrder(nil)
+	InvalidateAgentColorCache()
+	assert.Equal(t, before, AgentColorGeneration())
+	SetAgentOrder([]string{"generation-agent"})
+	assert.Greater(t, AgentColorGeneration(), before)
+	before = AgentColorGeneration()
+	SetAgentOrder([]string{"generation-agent"})
+	assert.Equal(t, before, AgentColorGeneration())
+	theme := DefaultTheme()
+	theme.Colors.Accent = "#abcdef"
+	ApplyTheme(theme)
+	assert.Greater(t, AgentColorGeneration(), before)
+	before = AgentColorGeneration()
+	ApplyTheme(theme)
+	assert.Equal(t, before, AgentColorGeneration())
+}

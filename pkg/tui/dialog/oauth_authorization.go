@@ -68,11 +68,24 @@ func (d *oauthAuthorizationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d.respond(tools.ElicitationActionDecline)
 			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				d.BlurActions()
 				return d.Update(action)
 			}
 		}
 
 	case tea.KeyPressMsg:
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, d.CancelDialogCmd()
 		}
@@ -117,7 +130,7 @@ func (d *oauthAuthorizationDialog) content() (style lipgloss.Style, width int, h
 	body = NewContent(bodyWidth).AddContent(serverInfo).AddSpace().AddContent(description).
 		AddSpace().AddContent(styles.DialogContentStyle.Width(bodyWidth).Render("After authorizing in your browser, return here and the agent will continue automatically.")).Build()
 	footer = d.RenderActions(contentWidth,
-		Action{Label: "Decline", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}},
+		Action{Label: "Decline", Default: true, Key: tea.KeyPressMsg{Code: 'n', Text: "n"}},
 		Action{Label: "Authorize", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}},
 	)
 	return styles.DialogWarningStyle, dialogWidth, header, body, footer

@@ -224,8 +224,8 @@ func TestComputeSidebarLayout_Bottom(t *testing.T) {
 	assert.True(t, sl.isInBand(sl.chatHeight))
 	assert.True(t, sl.isInBand(sl.chatHeight+sl.sidebarHeight-1))
 	assert.False(t, sl.isInBand(sl.chatHeight+sl.sidebarHeight))
-	assert.Equal(t, 0, sl.bandContentY(sl.chatHeight+1),
-		"bottom band renders its divider first, so content starts one line lower")
+	assert.Equal(t, 0, sl.bandContentY(sl.chatHeight),
+		"bottom band content starts at its first row without a divider")
 }
 
 func TestComputeSidebarLayout_NarrowWindowKeepsConfiguredBandEdge(t *testing.T) {
@@ -353,7 +353,8 @@ func assertActiveSidebarLayout(t *testing.T, p *chatPage) {
 	plain := ansi.Strip(view)
 	assert.Contains(t, plain, "gpt-4")
 	assert.Contains(t, plain, "openai")
-	assert.Contains(t, plain, "root")
+	assert.NotContains(t, plain, "root", "current agent is not rendered as its own descendant")
+	assert.NotContains(t, plain, "0 total", "empty descendant tree has no recap row or control")
 	assert.NotContains(t, plain, "Eff high")
 	assert.NotContains(t, plain, "idle")
 	assert.NotContains(t, plain, "gpt-4o")
@@ -424,4 +425,24 @@ func TestViewPlacesBandAtConfiguredEdge(t *testing.T) {
 	bottomIdx := sidebarTitleLine(bottom.View())
 	require.GreaterOrEqual(t, bottomIdx, 0)
 	assert.GreaterOrEqual(t, bottomIdx, bottom.computeSidebarLayout().chatHeight, "bottom band renders below the chat")
+}
+
+func TestCollapsedBandRowsHaveNoExternalDivider(t *testing.T) {
+	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarTop, msgtypes.SidebarBottom} {
+		t.Run(string(position), func(t *testing.T) {
+			p := newLayoutTestPage(t, position)
+			p.SetSize(160, 40)
+			sl := p.computeSidebarLayout()
+			band := strings.Split(p.renderCollapsedSidebar(sl), "\n")
+			content := strings.Split(p.sidebar.View(), "\n")
+			require.Len(t, band, len(content), "band height counts only sidebar content")
+			require.Len(t, band, sl.sidebarHeight)
+			for i, line := range band {
+				require.Equal(t, strings.TrimRight(ansi.Strip(content[i]), " "), strings.TrimRight(ansi.Strip(line), " "))
+				require.NotEqual(t, strings.Repeat("─", sl.innerWidth), ansi.Strip(line))
+				require.Equal(t, i, sl.bandContentY(sl.bandY()+i))
+			}
+			require.Equal(t, 40, lipgloss.Height(p.View()))
+		})
+	}
 }

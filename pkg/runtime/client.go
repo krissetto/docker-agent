@@ -74,6 +74,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			Timeout: 30 * time.Second,
 		},
 		registry: map[string]func() Event{
+			"pending_user_message_edited":   func() Event { return &PendingUserMessageEditedEvent{} },
 			"pending_user_message_accepted": func() Event { return &PendingUserMessageAcceptedEvent{} },
 			"pending_user_message_promoted": func() Event { return &PendingUserMessagePromotedEvent{} },
 			"interaction_resolved":          func() Event { return &InteractionResolvedEvent{} },

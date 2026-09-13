@@ -42,6 +42,13 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	updated, cmd := m.dialogMgr.Update(msg)
 	m.dialogMgr = updated.(dialog.Manager)
+	if _, opening := msg.(dialog.OpenDialogMsg); opening && m.dialogMgr.Open() && !m.dialogMgr.TopIsBackground() {
+		cmds := []tea.Cmd{cmd, chat.ClearSidebarHover(m.chatPage)}
+		if m.tabBar != nil {
+			cmds = append(cmds, m.tabBar.Update(tea.MouseMotionMsg{X: -1, Y: -1}))
+		}
+		return tea.Batch(cmds...)
+	}
 	return cmd
 }
 

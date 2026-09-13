@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -168,10 +167,10 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 // stripped part is reported at Debug level with its media kind and a
 // reason, so operators can trace why content never reached the model.
 //
-// It swaps the default slog logger and is deliberately NOT parallel so
-// no other test logs into the buffer concurrently.
+// It swaps the default slog logger and must not run in parallel with other
+// logger replacements; background session drivers may still write to the sink.
 func TestStripUnsupportedModalitiesTransform_EmitsDebugLog(t *testing.T) {
-	var buf bytes.Buffer
+	var buf runtimeTestLogBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })

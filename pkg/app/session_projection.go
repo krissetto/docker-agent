@@ -84,6 +84,11 @@ func (a *App) Presentation() *PresentationState { return a.presentation.Load() }
 
 func (a *App) projectEvent(event runtime.Event) *PresentationState {
 	previous := a.presentation.Load()
+	if edited, ok := event.(*runtime.PendingUserMessageEditedEvent); ok {
+		if sess := a.Session(); sess == nil || edited.SessionID != sess.ID {
+			return previous
+		}
+	}
 	if previous != nil {
 		a.projectTranscript(event)
 	}
@@ -113,6 +118,8 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *runtime.PendingUserMessageAcceptedEvent, *runtime.PendingUserMessagePromotedEvent, *runtime.SessionCompactionEvent:
 		next.Lifecycle, _ = next.Lifecycle.Apply(event)
 		next.Status.State = next.Lifecycle.Status
+	case *runtime.PendingUserMessageEditedEvent:
+		// Editing changes payload only, not lifecycle or pending membership.
 	case *runtime.InteractionResolvedEvent:
 		next.Interactions = slices.DeleteFunc(slices.Clone(next.Interactions), func(i runtime.InteractionSnapshot) bool {
 			return interactionSnapshotKey(i) == (InteractionKey{SessionID: e.SessionID, InteractionID: e.InteractionID})
@@ -136,6 +143,12 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		return previous
 	}
 	switch e := event.(type) {
+	case *runtime.PendingUserMessageEditedEvent:
+		if index := slices.IndexFunc(next.PendingInputs, func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID }); index >= 0 {
+			next.PendingInputs = slices.Clone(next.PendingInputs)
+			next.PendingInputs[index].Content = e.Message
+			next.PendingInputs[index].MultiContent = e.MultiContent
+		}
 	case *runtime.PendingUserMessageAcceptedEvent:
 		if !slices.ContainsFunc(next.PendingInputs, func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID }) {
 			next.PendingInputs = append(slices.Clone(next.PendingInputs), runtime.PendingInput{TurnID: e.TurnID, Content: e.Message, MultiContent: e.MultiContent, SessionPosition: e.SessionPosition, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, InputMode: e.InputMode})
@@ -198,6 +211,10 @@ func (a *App) projectTranscript(event runtime.Event) {
 		}
 	case *runtime.PendingUserMessagePromotedEvent:
 		sess.PromotePendingUserMessageByTurnID(e.TurnID)
+	case *runtime.PendingUserMessageEditedEvent:
+		if e.SessionID == sess.ID {
+			sess.ReplacePendingUserMessagePayload(e.TurnID, e.Message, e.MultiContent)
+		}
 	case *runtime.PendingUserMessageCanceledEvent:
 		sess.RemovePendingUserMessageByTurnID(e.TurnID)
 	}
@@ -215,6 +232,8 @@ func (a *App) EditSession(ctx context.Context, edit runtime.SessionEdit) error {
 		return err
 	}
 	switch edit.Kind {
+	case runtime.SessionEditPendingMessage:
+		// The canonical edited event updates the projection without a new bridge.
 	case runtime.SessionEditMessage, runtime.SessionEditSummary, runtime.SessionEditTokens:
 		a.startSessionEventBridge(ctx)
 	default:

@@ -61,6 +61,29 @@ func PendingUserMessageAccepted(sessionID, turnID, message string, multiContent 
 
 func (e *PendingUserMessageAcceptedEvent) GetSessionID() string { return e.SessionID }
 
+// PendingUserMessageEditedEvent replaces an accepted payload without admission or promotion.
+type PendingUserMessageEditedEvent struct {
+	AgentContext
+
+	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
+	SenderID    string              `json:"sender_id,omitempty"`
+	SenderName  string              `json:"sender_name,omitempty"`
+	InputMode   string              `json:"input_mode,omitempty"`
+
+	Type            string             `json:"type"`
+	SessionID       string             `json:"session_id"`
+	TurnID          string             `json:"turn_id"`
+	Message         string             `json:"message"`
+	MultiContent    []chat.MessagePart `json:"multi_content,omitempty"`
+	SessionPosition int                `json:"session_position"`
+}
+
+func PendingUserMessageEdited(sessionID, turnID, message string, multiContent []chat.MessagePart, position int) Event {
+	return &PendingUserMessageEditedEvent{Type: "pending_user_message_edited", SessionID: sessionID, TurnID: turnID, Message: message, MultiContent: multiContent, SessionPosition: position, AgentContext: newAgentContext("")}
+}
+
+func (e *PendingUserMessageEditedEvent) GetSessionID() string { return e.SessionID }
+
 // PendingUserMessagePromotedEvent atomically removes an admitted input from
 // the pending FIFO and makes it part of the next model turn.
 type PendingUserMessagePromotedEvent struct {

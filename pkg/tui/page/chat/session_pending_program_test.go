@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,8 +29,9 @@ import (
 )
 
 type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu      sync.Mutex
+	b       bytes.Buffer
+	sidebar string
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
@@ -44,6 +46,37 @@ func (b *lockedBuffer) String() string {
 	return b.b.String()
 }
 
+type pendingQueueProbe struct{ reply chan int }
+
+func (b *lockedBuffer) SidebarString() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sidebar
+}
+
+func standaloneQueueRows(view, text string) int {
+	count := 0
+	for row := range strings.SplitSeq(view, "\n") {
+		if strings.TrimSpace(row) == "- "+text {
+			count++
+		}
+	}
+	return count
+}
+
+func programPendingQueueLength(t *testing.T, program *tea.Program) int {
+	t.Helper()
+	reply := make(chan int, 1)
+	program.Send(pendingQueueProbe{reply: reply})
+	select {
+	case n := <-reply:
+		return n
+	case <-time.After(time.Second):
+		t.Fatal("pending queue probe timed out")
+		return -1
+	}
+}
+
 type teaPageModel struct {
 	page  *chatPage
 	frame *lockedBuffer
@@ -51,6 +84,20 @@ type teaPageModel struct {
 
 func (m teaPageModel) Init() tea.Cmd { return nil }
 func (m teaPageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if tick, ok := msg.(animation.TickMsg); ok {
+		accepted, current := m.page.ar.Accept(tick)
+		if !current {
+			return m, nil
+		}
+		updated, cmd := m.page.Update(accepted)
+		m.page = updated.(*chatPage)
+		return m, tea.Batch(cmd, m.page.ar.Continue())
+	}
+
+	if probe, ok := msg.(pendingQueueProbe); ok {
+		probe.reply <- m.page.QueueLength()
+		return m, nil
+	}
 	var next layout.Model
 	var cmd tea.Cmd
 	next, cmd = m.page.Update(msg)
@@ -63,6 +110,7 @@ func (m teaPageModel) View() tea.View {
 	m.frame.mu.Lock()
 	m.frame.b.Reset()
 	_, _ = m.frame.b.WriteString(view)
+	m.frame.sidebar = m.page.sidebar.View()
 	m.frame.mu.Unlock()
 	return tea.NewView(view)
 }
@@ -182,8 +230,8 @@ func TestActualProgramSettlingRunAutomaticallyDispatchesQueuedFIFO(t *testing.T)
 	_, err = a.FollowUpMessage(t.Context(), "C queued", nil)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		view := frame.String()
-		return strings.Contains(view, "Queue (2)") && strings.Contains(view, "B queued") && strings.Contains(view, "C queued") && provider.count() == 1
+		status, statusErr := a.SessionHandle().Status(t.Context())
+		return statusErr == nil && status.Pending == 2 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "B queued") == 1 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "C queued") == 1 && provider.count() == 1
 	}, 3*time.Second, time.Millisecond, "queued inputs must render before A settles")
 
 	close(aRelease) // no Program.Send, key, command injection, or external wake after this point
@@ -194,8 +242,9 @@ func TestActualProgramSettlingRunAutomaticallyDispatchesQueuedFIFO(t *testing.T)
 	}
 	require.Equal(t, 2, provider.count(), "B starts solely from A settlement")
 	require.Eventually(t, func() bool {
-		view := frame.String()
-		return strings.Contains(view, "Queue (1)") && strings.Contains(view, "C queued") && strings.Contains(view, "B streamed")
+		view := ansi.Strip(frame.String())
+		status, statusErr := a.SessionHandle().Status(t.Context())
+		return statusErr == nil && status.Pending == 1 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "C queued") == 1 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "B queued") == 0 && strings.Contains(view, "B streamed")
 	}, 3*time.Second, time.Millisecond)
 	close(bRelease) // B settlement is the sole trigger for C
 	select {
@@ -217,7 +266,7 @@ func TestActualProgramSettlingRunAutomaticallyDispatchesQueuedFIFO(t *testing.T)
 		return statusErr == nil && status.State == runtime.SessionStateSettled && status.Pending == 0
 	}, 5*time.Second, time.Millisecond)
 	assert.Equal(t, 3, provider.count(), "A, B, and C each invoke the provider exactly once")
-	view := frame.String()
+	view := ansi.Strip(frame.String())
 	assert.Equal(t, 1, strings.Count(view, "B queued"), "B appears in chat exactly once")
 	assert.Equal(t, 1, strings.Count(view, "C queued"), "C appears in chat exactly once")
 	assert.NotEmpty(t, output.String(), "actual tea.Program rendered output")
@@ -244,14 +293,13 @@ func TestProgramRendersCanonicalPendingPromotion(t *testing.T) {
 
 	program.Send(runtime.PendingUserMessageAccepted(sess.ID, "queued-turn", "queued visible", nil, 1))
 	require.Eventually(t, func() bool {
-		view := frame.String()
-		return strings.Contains(view, "Queue (1)") && strings.Contains(view, "queued visible")
+		return programPendingQueueLength(t, program) == 1 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "queued visible") == 1
 	}, 3*time.Second, 10*time.Millisecond)
 
 	program.Send(runtime.PendingUserMessagePromoted(sess.ID, "queued-turn", "queued visible", nil, 1))
 	require.Eventually(t, func() bool {
-		view := frame.String()
-		return !strings.Contains(view, "Queue (1)") && strings.Count(view, "queued visible") == 1
+		view := ansi.Strip(frame.String())
+		return programPendingQueueLength(t, program) == 0 && standaloneQueueRows(ansi.Strip(frame.SidebarString()), "queued visible") == 0 && strings.Count(view, "queued visible") == 1
 	}, 3*time.Second, 10*time.Millisecond)
 	assert.NotEmpty(t, out.String(), "actual tea.Program rendered frames")
 

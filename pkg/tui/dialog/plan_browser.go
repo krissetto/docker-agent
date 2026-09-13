@@ -249,9 +249,21 @@ func (d *planBrowserDialog) ensureSelectedVisible() {
 }
 
 func (d *planBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -473,10 +485,14 @@ func (d *planBrowserDialog) dialogSize() (dialogWidth, maxHeight, contentWidth i
 func (d *planBrowserDialog) View() string { return d.renderBody(false) }
 
 func (d *planBrowserDialog) renderBody(prepare bool) string {
-	d.filterInput.SetStyles(styles.DialogInputStyle)
+	input := d.filterInput
+	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
-	d.filterInput.SetWidth(inner)
-	header := RenderTitle(fmt.Sprintf("Plans (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + d.filterInput.View()
+	input.SetWidth(inner)
+	if prepare {
+		d.filterInput = input
+	}
+	header := RenderTitle(fmt.Sprintf("Plans (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + input.View()
 	lines := make([]string, 0, len(d.filtered))
 	for i, p := range d.filtered {
 		lines = append(lines, d.renderPlan(p, i == d.selected, inner))
@@ -494,7 +510,24 @@ func (d *planBrowserDialog) renderBody(prepare bool) string {
 	if len(d.warnings) > 0 {
 		header += "\n" + d.footerLine(inner)
 	}
-	footer := d.RenderActionKeys(inner+d.scrollview.ReservedCols(), "enter", "Detail", "/", "Filter", "r", "Refresh", "n", "New", "e", "Edit", "s", "Status", "x", "Export", "d", "Delete")
+	actions := actionsForKeys("enter", "Detail", "/", "Filter", "r", "Refresh", "n", "New", "e", "Edit", "s", "Status", "x", "Export", "d", "Delete")
+	selected, hasSelection := d.selectedPlan()
+	for i := range actions {
+		code := actions[i].Key.Code
+		switch code {
+		case tea.KeyEnter, 'x':
+			actions[i].Disabled = !hasSelection
+		case 'e', 's', 'd':
+			actions[i].Disabled = !hasSelection || selected.Version == nil
+		}
+		if d.filtering && code != tea.KeyEnter {
+			actions[i].Disabled = true
+		}
+	}
+	if d.filtering {
+		actions = append(actions, actionsForKeys("esc", "Done filtering")...)
+	}
+	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""
@@ -650,6 +683,15 @@ func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.UpdateBodyScroll(msg); handled {
 		return d, cmd
 	}
@@ -694,18 +736,24 @@ func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (d *planStatusDialog) View() string { return d.renderBody(false) }
 func (d *planStatusDialog) renderBody(prepare bool) string {
-	d.input.SetStyles(styles.DialogInputStyle)
+	input := d.input
+	input.SetStyles(styles.DialogInputStyle)
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
-	d.input.SetWidth(contentWidth)
+	input.SetWidth(contentWidth)
+	if prepare {
+		d.input = input
+	}
 
 	header := RenderTitle(fmt.Sprintf("Set status: %s (v%d)", d.name, d.version), contentWidth, styles.DialogTitleStyle)
-	footer := d.RenderActionKeys(contentWidth, "esc", "Cancel", "enter", "Apply")
+	actions := actionsForKeys("esc", "Cancel", "enter", "Apply")
+	actions[1].Disabled = strings.TrimSpace(d.input.Value()) == ""
+	footer := d.RenderActions(contentWidth, actions...)
 	if prepare {
-		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, input.View(), footer)
 		return ""
 	}
-	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, input.View(), footer)
 }
 
 func (d *planStatusDialog) Position() (row, col int) {
@@ -749,6 +797,15 @@ func (d *planDeleteConfirmDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.UpdateBodyScroll(msg); handled {
 		return d, cmd
 	}
@@ -826,6 +883,15 @@ func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.UpdateBodyScroll(msg); handled {
 		return d, cmd
 	}
@@ -866,18 +932,24 @@ func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (d *planNameDialog) View() string { return d.renderBody(false) }
 func (d *planNameDialog) renderBody(prepare bool) string {
-	d.input.SetStyles(styles.DialogInputStyle)
+	input := d.input
+	input.SetStyles(styles.DialogInputStyle)
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
-	d.input.SetWidth(contentWidth)
+	input.SetWidth(contentWidth)
+	if prepare {
+		d.input = input
+	}
 
 	header := RenderTitle("New shared plan", contentWidth, styles.DialogTitleStyle)
-	footer := d.RenderActionKeys(contentWidth, "esc", "Cancel", "enter", "Open editor")
+	actions := actionsForKeys("esc", "Cancel", "enter", "Open editor")
+	actions[1].Disabled = strings.TrimSpace(d.input.Value()) == ""
+	footer := d.RenderActions(contentWidth, actions...)
 	if prepare {
-		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, input.View(), footer)
 		return ""
 	}
-	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, input.View(), footer)
 }
 
 func (d *planNameDialog) Position() (row, col int) {

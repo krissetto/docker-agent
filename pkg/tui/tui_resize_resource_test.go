@@ -33,7 +33,7 @@ func TestRootAcceptedResizeWorkIsViewportBounded(t *testing.T) {
 			require.True(t, ok, "real chat must expose actual transcript render work")
 			_, _ = root.Update(tea.MouseClickMsg{X: 40, Y: root.contentHeight, Button: tea.MouseLeft})
 			resize := func(lines int) {
-				y := root.height - lines - styles.EditorStyle.GetVerticalFrameSize() - root.tabBar.Height() - root.editor.BannerHeight() - 1
+				y := root.height - lines - styles.EditorStyle.GetVerticalFrameSize() - root.tabBar.Height() - root.editor.BannerHeight() - 1 - root.messageBarHeight()
 				motion := tea.MouseMotionMsg{X: 40, Y: y, Button: tea.MouseLeft}
 				_, _ = root.Update(messages.PointerUpdateMsg{X: 40, Y: y, Motion: &motion})
 			}

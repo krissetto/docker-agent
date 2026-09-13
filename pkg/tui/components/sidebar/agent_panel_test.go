@@ -506,7 +506,7 @@ func TestClickZonesEveryLine(t *testing.T) {
 		}
 	}
 	assert.False(t, foundCurrent, "the active agent does not replace the canonical root")
-	assert.True(t, foundOther, "clicking another agent's line switches to it")
+	assert.False(t, foundOther, "unused configured agents are not descendant rows")
 }
 
 // TestRosterSeparatesAgentsWithBlankLine verifies a blank separator line is

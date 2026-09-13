@@ -115,8 +115,8 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 							require.Nil(t, strip[x].bg, "label cutout x=%d", x)
 						}
 					}
-					require.Equal(t, len(rows)-1, y, "context strip is the final screen row")
-					require.Equal(t, regionOutside, root.hitTestRegion(y+1))
+					require.Equal(t, len(rows)-2, y, "context strip is directly above the stable message row")
+					require.Equal(t, regionMessageBar, root.hitTestRegion(y+1))
 					require.NotContains(t, ansi.Strip(root.View().Content), "Ctrl+c quit")
 				})
 			}

@@ -41,6 +41,9 @@ type ReconcileInteractionsMsg struct {
 // CloseDialogMsg is sent to close the current (topmost) dialog
 type CloseDialogMsg struct{}
 
+// CloseDialogByModelMsg closes only the specified dialog instance, including a buried editor.
+type CloseDialogByModelMsg struct{ Model Dialog }
+
 // HideDialogMsg fades the current dialog out without cleaning up its state.
 type HideDialogMsg struct{}
 
@@ -200,6 +203,8 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case CloseDialogMsg:
 		return d.beginClose(false)
+	case CloseDialogByModelMsg:
+		return d.closeByModel(msg.Model)
 
 	case HideDialogMsg:
 		return d.beginClose(true)
@@ -226,6 +231,9 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				row, col := e.position(d.width, d.height)
 				dl := NewDialogLayout(e.view(), row+e.offsetY, col+e.offsetX)
 				if action, hit := actions.ActionKeyAt(msg.X, msg.Y, dl); hit {
+					if focus, ok := e.dialog.(interface{ BlurActions() }); ok {
+						focus.BlurActions()
+					}
 					return d, d.forwardToTop(action)
 				}
 			}
@@ -235,6 +243,11 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 			if d.handleDragStart(msg.X, msg.Y) {
 				return d, nil
+			}
+		}
+		if msg.Button == tea.MouseLeft {
+			if focus, ok := d.stack[len(d.stack)-1].dialog.(interface{ BlurActions() }); ok {
+				focus.BlurActions()
 			}
 		}
 		return d, d.forwardToTop(adjusted)
@@ -351,15 +364,20 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 			return cmd
 		}
 	}
+	tick, ticking := msg.(animation.TickMsg)
+	wasTickDirty := ticking && tick.Dirty()
 	u, cmd := d.stack[top].dialog.Update(msg)
 	d.stack[top].dialog = u.(Dialog)
 	switch msg.(type) {
-	case tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+	case animation.TickMsg, tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		// Registered viewports publish actual visual changes below; boundary input stays warm.
 	default:
 		d.stack[top].invalidateView()
 	}
 	d.takeTopVisualDirty()
+	if ticking && !wasTickDirty && tick.Dirty() {
+		d.stack[top].invalidateView()
+	}
 	if !retarget {
 		return cmd
 	}
@@ -489,9 +507,8 @@ func (d *manager) closeButtonHit(x, y int) bool {
 	row, col := e.position(d.width, d.height)
 	row += e.offsetY
 	col += e.offsetX
-	width := e.renderWidth
-	return y == row+styles.DialogStyle.GetBorderTopSize() &&
-		x == col+width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
+	closeX, closeY, ok := closeControlCell(e.renderWidth, e.renderHeight)
+	return ok && x == col+closeX && y == row+closeY
 }
 
 func dialogClosable(dialog Dialog) bool {
@@ -563,6 +580,25 @@ func resetDialogCloseHover(dialog Dialog) {
 	}
 }
 
+// clearTopPointerState releases only pointer presentation when another dialog occludes this entry.
+func (d *manager) clearTopPointerState() {
+	d.drag.active = false
+	if len(d.stack) == 0 {
+		return
+	}
+	entry := &d.stack[len(d.stack)-1]
+	changed := entry.closeHovered
+	entry.closeHovered = false
+	if chrome, ok := entry.dialog.(interface{ SetCloseHover(hovered bool) }); ok {
+		chrome.SetCloseHover(false)
+	} else {
+		resetDialogCloseHover(entry.dialog)
+	}
+	entry.invalidateView()
+	d.takeTopVisualDirty()
+	d.visualDirty = d.visualDirty || changed
+}
+
 // handleOpen processes dialog opening requests and adds to stack
 func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	key := lifecycle.InteractionIdentity(msg.OriginatingEvent)
@@ -583,6 +619,7 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	for i := len(d.stack) - 1; i >= 0; i-- {
 		entry := &d.stack[i]
 		if entry.dialog == msg.Model && entry.closing && entry.hiding {
+			d.clearTopPointerState()
 			entry.originatingEvent = msg.OriginatingEvent
 			entry.interactionKey = key
 			entry.cancelPending = false
@@ -596,6 +633,8 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 	if msg.OriginatingEvent != nil && key.InteractionID != "" && slices.ContainsFunc(d.stack, func(entry dialogEntry) bool { return lifecycle.InteractionIdentity(entry.originatingEvent) == key }) {
 		return d, nil
 	}
+
+	d.clearTopPointerState()
 
 	if bindable, ok := msg.Model.(interface {
 		BindAnimationRuntime(runtime *animation.Runtime)
@@ -612,6 +651,10 @@ func (d *manager) handleOpen(msg OpenDialogMsg) (layout.Model, tea.Cmd) {
 		Height: d.height,
 	})
 	animated, animationCmd := newAnimatedDialog(d.runtime, msg.Model, d.width, d.height)
+	// The measured initial view already contains preparation changes; consume their dirty baseline.
+	if dirty, ok := msg.Model.(interface{ TakeVisualDirty() bool }); ok {
+		dirty.TakeVisualDirty()
+	}
 	d.stack = append(d.stack, dialogEntry{
 		animatedDialog:   animated,
 		originatingEvent: msg.OriginatingEvent,
@@ -687,11 +730,15 @@ func (d *manager) Cleanup() {
 
 // handleTick advances lifecycle transitions and removes completed closes.
 func (d *manager) handleTick(msg animation.TickMsg) (layout.Model, tea.Cmd) {
+	transitioning := false
 	for i := range d.stack {
 		if d.stack[i].opening() || d.stack[i].closing {
-			msg.MarkDirty()
+			transitioning = true
 			break
 		}
+	}
+	if transitioning {
+		defer msg.MarkDirty()
 	}
 	remaining := d.stack[:0]
 	var cmds []tea.Cmd
@@ -856,4 +903,21 @@ func (d *manager) GetLayerInfos() []styles.LayerInfo {
 		layers = append(layers, styles.LayerInfo{Content: d.entryView(e), X: col + e.offsetX, Y: row + e.offsetY})
 	}
 	return layers
+}
+
+func (d *manager) closeByModel(model Dialog) (layout.Model, tea.Cmd) {
+	for i, entry := range slices.Backward(d.stack) {
+		if entry.dialog != model {
+			continue
+		}
+		if i == len(d.stack)-1 {
+			return d.beginClose(false)
+		}
+		d.stack[i].cancel()
+		CleanupDialog(d.stack[i].dialog)
+		d.stack = slices.Delete(d.stack, i, i+1)
+		d.visualDirty = true
+		return d, nil
+	}
+	return d, nil
 }

@@ -80,9 +80,21 @@ func NewCostDialog(sess *session.Session) Dialog {
 func (d *costDialog) Init() tea.Cmd { return nil }
 
 func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -221,8 +233,8 @@ func (d *costData) totalStats() []stat {
 	if actual := d.actualMessageCount(); actual > 1 && d.total.cost > 0 {
 		stats = append(stats, stat{"avg cost/message:", formatCost(d.total.cost / float64(actual))})
 	}
-	if candidateIn := d.total.CachedInputTokens + d.total.InputTokens; candidateIn > 0 && d.total.CachedInputTokens > 0 {
-		stats = append(stats, stat{"cache hit rate:", fmt.Sprintf("%.0f%%", float64(d.total.CachedInputTokens)/float64(candidateIn)*100)})
+	if candidateIn := d.total.CachedInputTokens + d.total.InputTokens; candidateIn > 0 {
+		stats = append(stats, stat{"cache hit rate:", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", float64(d.total.CachedInputTokens)/float64(candidateIn)*100), "0"), ".") + "%"})
 	}
 	return stats
 }
@@ -554,7 +566,7 @@ func (d *costDialog) renderUsageLine(u totalUsage, totalCost float64, labelWidth
 
 func (d *costDialog) applyScrolling(allLines []string, contentWidth, _ int) string {
 	width, _, _ := d.dialogSize()
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy", "esc", "Close")
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy")
 	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
 }
 
@@ -730,7 +742,7 @@ func (d *costDialog) prepareContent(contentWidth int) {
 	}
 	width, _, _ := d.dialogSize()
 	allLines := d.cachedLines
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy", "esc", "Close")
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy")
 	d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
 }
 

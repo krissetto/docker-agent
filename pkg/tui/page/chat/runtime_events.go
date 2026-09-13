@@ -135,7 +135,15 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			}
 		}
 		p.messageQueue = append(p.messageQueue, queuedMessage{turnID: msg.TurnID, content: msg.Message})
-		p.syncQueueToSidebar()
+		return true, p.syncQueueToSidebar()
+
+	case *runtime.PendingUserMessageEditedEvent:
+		for i := range p.messageQueue {
+			if p.messageQueue[i].turnID == msg.TurnID {
+				p.messageQueue[i].content = msg.Message
+				return true, p.syncQueueToSidebar()
+			}
+		}
 		return true, nil
 
 	case *runtime.PendingUserMessageCanceledEvent:
@@ -148,22 +156,21 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			p.snapshotEnd--
 		}
 		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
-		p.syncQueueToSidebar()
-		return true, nil
+		return true, p.syncQueueToSidebar()
 
 	case *runtime.PendingUserMessagePromotedEvent:
 		p.applyLifecycle(msg)
 		p.messageQueue = slices.DeleteFunc(p.messageQueue, func(queued queuedMessage) bool { return queued.turnID == msg.TurnID })
-		p.syncQueueToSidebar()
+		queueCmd := p.syncQueueToSidebar()
 		if !p.inputReplay.Consume(msg.TurnID, msg.SessionPosition) {
-			return true, nil
+			return true, queueCmd
 		}
 		input := session.UserMessage(msg.Message, msg.MultiContent...)
 		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
 		if lifecycle.VisibleTranscriptMessage(input) {
 			p.showStartupBanner = false
 		}
-		return true, p.messages.AddInputMessage(input, msg.SessionPosition)
+		return true, tea.Batch(queueCmd, p.messages.AddInputMessage(input, msg.SessionPosition))
 
 	case *runtime.UserMessageEvent:
 		// Attach protocol: a position inside the transcript snapshot is already
@@ -667,8 +674,7 @@ func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
 		}
 		p.messageQueue = append(p.messageQueue, queuedMessage{turnID: input.TurnID, content: input.Content})
 	}
-	p.syncQueueToSidebar()
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{p.syncQueueToSidebar()}
 	if snapshot.Session != nil {
 		p.sessionState.SetYoloMode(snapshot.Session.IsToolsApproved())
 		p.sessionState.SetSessionTitle(snapshot.Session.TitleSnapshot())
@@ -680,7 +686,7 @@ func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
 		} else {
 			cmds = append(cmds, p.messages.LoadFromSession(snapshot.Session, restoredMedia))
 		}
-		p.sidebar.LoadFromSession(snapshot.Session)
+		cmds = append(cmds, p.hydrateSidebarSession(snapshot.Session))
 		p.snapshotEnd = snapshot.TranscriptPosition
 		if snapshot.Session.MessageCount() > 0 {
 			p.showStartupBanner = false

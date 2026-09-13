@@ -12,16 +12,23 @@ import (
 type SessionEditKind string
 
 const (
-	SessionEditAttachment  SessionEditKind = "attachment"
-	SessionEditPolicy      SessionEditKind = "policy"
-	SessionEditPermissions SessionEditKind = "permissions"
-	SessionEditTitle       SessionEditKind = "title"
-	SessionEditMessage     SessionEditKind = "message"
-	SessionEditSummary     SessionEditKind = "summary"
-	SessionEditTokens      SessionEditKind = "tokens"
+	SessionEditPendingMessage SessionEditKind = "pending_message"
+	SessionEditAttachment     SessionEditKind = "attachment"
+	SessionEditPolicy         SessionEditKind = "policy"
+	SessionEditPermissions    SessionEditKind = "permissions"
+	SessionEditTitle          SessionEditKind = "title"
+	SessionEditMessage        SessionEditKind = "message"
+	SessionEditSummary        SessionEditKind = "summary"
+	SessionEditTokens         SessionEditKind = "tokens"
 )
 
+type PendingMessageEdit struct {
+	TurnID  string `json:"turn_id"`
+	Content string `json:"content"`
+}
+
 type SessionEdit struct {
+	PendingMessage      *PendingMessageEdit        `json:"pending_message,omitempty"`
 	AttachmentPath      string                     `json:"attachment_path,omitempty"`
 	Kind                SessionEditKind            `json:"kind"`
 	SafetyPolicy        *session.SafetyPolicy      `json:"safety_policy,omitempty"`
@@ -46,6 +53,9 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 	}
 	if d.stopped {
 		return nil, ErrSessionStopped
+	}
+	if edit.Kind == SessionEditPendingMessage {
+		return h.editPendingMessageLocked(ctx, edit.PendingMessage)
 	}
 	transcript := edit.Kind == SessionEditMessage || edit.Kind == SessionEditSummary || edit.Kind == SessionEditTokens
 	if transcript && (d.running || d.starting || d.settling || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {

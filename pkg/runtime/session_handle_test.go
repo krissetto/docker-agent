@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,17 +93,38 @@ func TestRetryStopRaceReturnsErrorWhenMailboxIsCleared(t *testing.T) {
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
 	d := handle.(*sessionHandle).driver
+	// Fence scheduler starts too: the caller hook alone does not stop a wake.
+	rt.sessionDrivers.runMu.Lock()
+	unlockStarts := sync.OnceFunc(rt.sessionDrivers.runMu.Unlock)
 	appended := make(chan struct{})
 	release := make(chan struct{})
+	releaseCaller := sync.OnceFunc(func() { close(release) })
+	done := make(chan struct{})
+	defer func() {
+		d.StopAll()
+		unlockStarts()
+		releaseCaller()
+		waitClosed(t, done, "stopped retry caller")
+		d.Wait()
+	}()
 	d.beforePrepareStart = func() { close(appended); <-release }
 	result := make(chan error, 1)
 	go func() {
+		defer close(done)
 		_, err := handle.Retry(t.Context())
 		result <- err
 	}()
 	waitClosed(t, appended, "retry mailbox append")
+	func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		require.Len(t, d.pending, 1, "stop must precede retry promotion")
+		assert.True(t, d.pending[0].Retry)
+		assert.Zero(t, d.generation, "no start may cross the dispatch fence")
+	}()
 	d.StopAll()
-	close(release)
+	unlockStarts()
+	releaseCaller()
 	var stopped *SessionError
 	require.ErrorAs(t, <-result, &stopped)
 	assert.Equal(t, SessionErrorStopped, stopped.Kind, "cleared retry must report stopped rather than accepted or capacity-limited")
@@ -111,6 +133,7 @@ func TestRetryStopRaceReturnsErrorWhenMailboxIsCleared(t *testing.T) {
 	defer d.mu.Unlock()
 	assert.Empty(t, d.pending, "stopping clears accepted retry work")
 	assert.False(t, d.running, "cleared retry must not start execution")
+	assert.Zero(t, d.generation, "stopped retry must never create an execution generation")
 }
 
 func TestIdleConcurrentPostsStaySuccessfulWhenLaterCallerWinsStart(t *testing.T) {

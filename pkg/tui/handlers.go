@@ -965,6 +965,9 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	// hot reload) can move the active theme to a different backing file.
 	m.watchCurrentTheme()
 	cmds := []tea.Cmd{m.updateDialogCmd(messages.ThemeChangedMsg{})}
+	if m.messageBar != nil {
+		cmds = append(cmds, m.messageBar.Update(messages.ThemeChangedMsg{}))
+	}
 	for _, ed := range m.editors {
 		_, cmd := ed.Update(messages.ThemeChangedMsg{})
 		cmds = append(cmds, cmd)

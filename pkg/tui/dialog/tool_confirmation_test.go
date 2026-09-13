@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -49,11 +50,11 @@ func TestToolConfirmationDialog_CompactRealShellLSGeometry(t *testing.T) {
 
 	view := dialog.View()
 	plain := ansi.Strip(view)
-	assert.Contains(t, strings.Join(strings.Fields(plain), " "), "shell ls")
-	assert.Equal(t, 1, dialog.(*toolConfirmationDialog).scrollView.RenderedContentHeight(),
-		"decoded shell ls renders one intrinsic tool row")
-	assert.LessOrEqual(t, lipgloss.Height(view), 12,
-		"one-row content uses content height plus fixed prompt chrome, not the 80% viewport cap")
+	assert.Contains(t, plain, "Proposed: shell")
+	assert.Contains(t, plain, "cmd:")
+	assert.Contains(t, plain, "ls")
+	assert.Less(t, lipgloss.Height(view), height/2,
+		"a short proposed call stays content-sized with its inputs and policy explanation")
 	row, col := dialog.Position()
 	assert.Equal(t, (height-lipgloss.Height(view))/2, row)
 	assert.Equal(t, (width-lipgloss.Width(view))/2, col)
@@ -105,8 +106,8 @@ func TestToolConfirmationDialog_MetadataKeysSorted(t *testing.T) {
 }
 
 // TestToolConfirmationDialog_RendersSafetyWarning pins the destructive-
-// command UX: when the confirmation event carries the safer_shell
-// builtin's `blast_radius` metadata, the dialog composes a polished
+// command UX: when the confirmation event carries `blast_radius`
+// assessment metadata, the dialog composes a readable
 // warning block instead of rendering raw key/value pairs. The
 // convention keys (blast_radius, category, reason) are suppressed
 // from the plain Metadata section.
@@ -179,8 +180,8 @@ func TestToolConfirmationDialog_UnknownRadiusIsNotDestructive(t *testing.T) {
 
 // TestToolConfirmationDialog_RendersSafetyWarningPlusExtraMetadata
 // covers the case where a permission_request hook contributes its own
-// metadata alongside safer_shell's verdict. The warning block uses
-// the safer_shell convention keys, and the extra keys still render
+// metadata alongside an assessment. The warning block uses
+// the assessment convention keys, and the extra keys still render
 // as plain pairs in the Metadata section.
 func TestToolConfirmationDialog_RendersSafetyWarningPlusExtraMetadata(t *testing.T) {
 	t.Parallel()
@@ -283,8 +284,8 @@ func TestToolConfirmationDialog_ClickOnYFiresAtEveryWidth(t *testing.T) {
 		d, ok := dialog.(*toolConfirmationDialog)
 		require.True(t, ok)
 
-		y, x, found := locateInView(d, "Y yes")
-		require.Truef(t, found, "width %d: 'Y yes' must be visible on some options row", width)
+		y, x, found := locateInView(d, "Yes, once")
+		require.Truef(t, found, "width %d: 'Yes, once' must be visible on some options row", width)
 
 		resume, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(clickCell(d, y, x)))
 		require.Truef(t, ok, "width %d: click on 'Y' at col %d must fire", width, x)
@@ -309,17 +310,17 @@ func TestToolConfirmationDialog_ActionCellsAndGaps(t *testing.T) {
 				}
 				seen[action.Text] = true
 				msgs := collectMsgs(clickCell(d, y, x))
-				if action.Text == "N" {
+				if action.Text == "R" {
 					require.True(t, hasMsg[OpenDialogMsg](msgs))
 					continue
 				}
 				response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
 				require.True(t, ok, "width %d cell %d,%d action %s", width, x, y, action.Text)
-				want := map[string]runtime.ResumeRequest{"Y": runtime.ResumeApprove(), "T": runtime.ResumeApproveTool("shell"), "B": runtime.ResumeApproveBalanced(), "A": runtime.ResumeApproveAutonomous()}
+				want := map[string]runtime.ResumeRequest{"N": runtime.ResumeReject(""), "Y": runtime.ResumeApprove(), "T": runtime.ResumeApproveTool("shell"), "B": runtime.ResumeApproveBalanced(), "A": runtime.ResumeApproveAutonomous()}
 				assert.Equal(t, want[action.Text], response.Response.Resume)
 			}
 		}
-		assert.Len(t, seen, 5, "width %d: all decisions stay reachable", width)
+		assert.Len(t, seen, 6, "width %d: all decisions stay reachable", width)
 		assert.Nil(t, clickCell(d, row+lipgloss.Height(view), col), "outside clicks never authorize")
 	}
 }
@@ -390,5 +391,231 @@ func TestToolConfirmationDialog_TinyHeightScrollsEveryAction(t *testing.T) {
 		_, cmd := d.Update(tea.MouseWheelMsg{X: col + 3, Y: row + lipgloss.Height(view) - 2, Button: tea.MouseWheelDown})
 		assert.Nil(t, cmd, "wheel movement never authorizes a tool")
 	}
-	assert.Len(t, seen, 5, "all five decisions remain mouse reachable at six rows")
+	assert.Len(t, seen, 6, "all six actions remain mouse reachable at six rows")
+}
+
+func TestToolConfirmationDialogPlainActionsSafeDefaultAndSelectedPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		steps       int
+		explanation string
+		want        runtime.ResumeRequest
+	}{
+		{"reject", 0, "Reject this tool call", runtime.ResumeReject("")},
+		{"once", 1, "Allow only this tool call", runtime.ResumeApprove()},
+		{"tool", 2, "future calls matching shell", runtime.ResumeApproveTool("shell")},
+		{"balanced", 3, "classifier-safe calls run automatically", runtime.ResumeApproveBalanced()},
+		{"all", 4, "all future tool calls in this session", runtime.ResumeApproveAutonomous()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := newConfirmationEvent(nil)
+			event.SessionID = "session"
+			event.RequestID = "request"
+			d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+			d.SetSize(160, 40)
+			initial := ansi.Strip(d.View())
+			assert.Contains(t, initial, "No ↵")
+			assert.NotContains(t, initial, "No ↵ N")
+			for _, old := range []string{"Y yes Y", "N no N", "T always allow", "B balanced B", "A all tools A"} {
+				assert.NotContains(t, initial, old)
+			}
+			for range tc.steps {
+				_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+			}
+			view := d.View()
+			assert.Equal(t, 1, strings.Count(ansi.Strip(view), "↵"))
+			assert.Contains(t, strings.Join(strings.Fields(ansi.Strip(view)), " "), tc.explanation)
+			assertToolActionsNotUnderlined(t, view)
+			footer := strings.Fields(ansi.Strip(d.renderOptions(120)))
+			for _, alias := range []string{"Y", "T", "B", "A", "R"} {
+				count := 0
+				for _, word := range footer {
+					if word == alias {
+						count++
+					}
+				}
+				assert.Equal(t, 1, count, "each actual shortcut appears once: %s", alias)
+			}
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			msgs := collectMsgs(cmd)
+			response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
+			require.True(t, ok)
+			assert.Equal(t, "session", response.SessionID)
+			assert.Equal(t, "request", response.Response.InteractionID)
+			assert.Equal(t, tc.want, response.Response.Resume)
+			_, duplicate := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			assert.Nil(t, duplicate, "resolved dialog cannot emit another decision")
+		})
+	}
+}
+
+func TestToolConfirmationDialogUnknownSafetyPlaceholderDoesNotHideOtherMetadata(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(map[string]string{"safety_label": "unknown", "reason": "approval required", "policy": "team"}), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(120, 30)
+	view := ansi.Strip(d.View())
+	assert.NotContains(t, view, "safety_label")
+	assert.NotContains(t, view, "unknown")
+	assert.Contains(t, view, "reason: approval required")
+	assert.Contains(t, view, "policy: team")
+	for _, classification := range []string{"safe", "destructive"} {
+		d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(map[string]string{"safety_label": classification}), &service.SessionState{}).(*toolConfirmationDialog)
+		d.SetSize(120, 30)
+		label := classification
+		if classification == "safe" {
+			label = "read-only"
+		}
+		assert.Contains(t, ansi.Strip(d.View()), "Safety assessment: recognized "+label+".")
+		assert.NotContains(t, ansi.Strip(d.View()), "safety_label")
+	}
+}
+
+func TestToolConfirmationDialogMnemonicRoutesSettleOnce(t *testing.T) {
+	for _, tc := range []struct {
+		key  rune
+		want runtime.ResumeRequest
+	}{
+		{'n', runtime.ResumeReject("")},
+		{'y', runtime.ResumeApprove()},
+		{'t', runtime.ResumeApproveTool("shell")},
+		{'b', runtime.ResumeApproveBalanced()},
+		{'a', runtime.ResumeApproveAutonomous()},
+	} {
+		t.Run(string(tc.key), func(t *testing.T) {
+			event := newConfirmationEvent(nil)
+			event.SessionID = "session"
+			event.RequestID = "request"
+			d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+			d.SetSize(80, 24)
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tc.key, Text: string(tc.key)})
+			response, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(cmd))
+			require.True(t, ok)
+			assert.Equal(t, "session", response.SessionID)
+			assert.Equal(t, "request", response.Response.InteractionID)
+			assert.Equal(t, tc.want, response.Response.Resume)
+			_, cmd = d.Update(tea.KeyPressMsg{Code: tc.key, Text: string(tc.key)})
+			assert.Nil(t, cmd)
+		})
+	}
+}
+
+func TestToolConfirmationDialogLeftRightTraverseEveryPolicyWithoutApproving(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(30, 12)
+	for _, direction := range []rune{tea.KeyRight, tea.KeyLeft} {
+		seen := map[rune]bool{}
+		for range 6 {
+			_, cmd := d.Update(tea.KeyPressMsg{Code: direction})
+			assert.Nil(t, cmd, "navigation never authorizes")
+			action, ok := d.SelectedActionKey()
+			require.True(t, ok)
+			seen[action.Code] = true
+			view := d.View()
+			assert.LessOrEqual(t, lipgloss.Width(view), 30)
+			assert.LessOrEqual(t, lipgloss.Height(view), 12)
+		}
+		assert.Len(t, seen, 6, "all policies remain reachable in either direction")
+	}
+	assert.False(t, d.responseSent)
+}
+
+func TestToolConfirmationDialogReasonCancelReturnsUnansweredNoDefault(t *testing.T) {
+	event := newConfirmationEvent(nil)
+	event.SessionID = "session"
+	event.RequestID = "request"
+	parent := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+	parent.SetSize(100, 30)
+	_, _ = parent.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	selected, ok := parent.SelectedActionKey()
+	require.True(t, ok)
+	assert.Equal(t, 'R', selected.Code)
+	_, cmd := parent.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	opened, ok := findMsg[OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	child := opened.Model.(*multiChoiceDialog)
+	child.SetSize(100, 30)
+	_, cancel := child.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cancel))
+	require.True(t, ok)
+	correlation := result.Context.(tuimessages.InteractionResponseMsg)
+	assert.Nil(t, HandleToolRejectionResult(result.Result, correlation))
+	assert.False(t, parent.responseSent)
+	selected, ok = parent.SelectedActionKey()
+	require.True(t, ok)
+	assert.Equal(t, 'N', selected.Code)
+	assert.Contains(t, ansi.Strip(parent.View()), "No ↵")
+	_, cmd = parent.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	response, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.Equal(t, runtime.ResumeReject(""), response.Response.Resume)
+}
+
+func TestToolConfirmationDialogReasonPreservesTextAndCorrelationOnce(t *testing.T) {
+	event := newConfirmationEvent(nil)
+	event.SessionID = "session"
+	event.RequestID = "request"
+	parent := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+	parent.SetSize(100, 30)
+	_, cmd := parent.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	opened, ok := findMsg[OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	child := opened.Model.(*multiChoiceDialog)
+	child.SetSize(100, 30)
+	_, _ = child.Update(tea.PasteMsg{Content: "Reject because this needs review"})
+	_, cmd = child.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	result, ok := findMsg[MultiChoiceResultMsg](msgs)
+	require.True(t, ok)
+	response := HandleToolRejectionResult(result.Result, result.Context.(tuimessages.InteractionResponseMsg))
+	require.NotNil(t, response)
+	assert.Equal(t, "session", response.SessionID)
+	assert.Equal(t, "request", response.Response.InteractionID)
+	assert.Equal(t, runtime.ResumeReject("Reject because this needs review"), response.Response.Resume)
+	assert.False(t, hasMsg[tuimessages.InteractionResponseMsg](msgs), "child sends result for root routing, not a second direct runtime response")
+	_, cmd = child.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.Nil(t, cmd)
+}
+
+func TestToolConfirmationDialogSpawnPreviewIsStaticBeforeApproval(t *testing.T) {
+	event := newConfirmationEvent(nil)
+	event.ToolCall = tools.ToolCall{ID: "spawn", Function: tools.FunctionCall{Name: "spawn_subagent", Arguments: `{"agent":"reviewer","task":"Inspect **only** the proposed files","expected_output":"A review","extra":9007199254740993}`}}
+	event.ToolDefinition = tools.Tool{Name: "spawn_subagent"}
+	d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(100, 40)
+	assert.Nil(t, d.Init(), "preview must not start execution animations")
+	view := d.View()
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, "Proposed:")
+	assert.Contains(t, plain, "reviewer")
+	assert.Contains(t, plain, "Inspect")
+	assert.Contains(t, plain, "9007199254740993")
+	assert.NotContains(t, plain, "Spawning")
+	assert.NotContains(t, plain, "Running")
+	for range 5 {
+		assert.Equal(t, view, d.View())
+	}
+	_, cmd := d.Update(tea.MouseMotionMsg{X: 0, Y: 0})
+	assert.Nil(t, cmd)
+	assert.False(t, d.responseSent)
+}
+
+func assertToolActionsNotUnderlined(t *testing.T, view string) {
+	t.Helper()
+	for _, sequence := range regexp.MustCompile(`\x1b\[([0-9;:]*)m`).FindAllStringSubmatch(view, -1) {
+		params := strings.Split(sequence[1], ";")
+		for i := 0; i < len(params); i++ {
+			parameter := params[i]
+			if (parameter == "38" || parameter == "48" || parameter == "58") && i+1 < len(params) {
+				switch params[i+1] {
+				case "2":
+					i += 4
+				case "5":
+					i += 2
+				}
+				continue
+			}
+			assert.NotEqual(t, "4", parameter, "underline SGR must not be enabled")
+			assert.NotEqual(t, "21", parameter, "double underline SGR must not be enabled")
+			assert.False(t, strings.HasPrefix(parameter, "4:"), "underline variants must not be enabled")
+		}
+	}
 }

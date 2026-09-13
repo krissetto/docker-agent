@@ -199,6 +199,9 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
+		if d.ActionsFocused() {
+			return d, nil
+		}
 		// Forward paste to the active text input
 		if d.hasFreeFormInput() {
 			var cmd tea.Cmd
@@ -225,6 +228,33 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	backward := msg.String() == "shift+tab"
+	boundary := (msg.String() == "tab" && (d.hasFreeFormInput() || d.currentField == len(d.fields)-1)) || (backward && (d.hasFreeFormInput() || d.currentField == 0))
+	if d.ActionsFocused() || boundary {
+		wasFocused := d.ActionsFocused()
+		if action, handled := d.HandleActionKey(msg); handled {
+			if d.ActionsFocused() {
+				d.responseInput.Blur()
+				for i := range d.inputs {
+					d.inputs[i].Blur()
+				}
+			} else if wasFocused {
+				switch {
+				case d.hasFreeFormInput():
+					d.responseInput.Focus()
+				case backward:
+					d.focusField(len(d.fields) - 1)
+				default:
+					d.focusField(0)
+				}
+			}
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	switch {
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
 		// Space cycles forward through options, same as down arrow
@@ -300,6 +330,9 @@ func (d *ElicitationDialog) submit() (layout.Model, tea.Cmd) {
 }
 
 func (d *ElicitationDialog) updateCurrentInput(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	if d.ActionsFocused() {
+		return d, nil
+	}
 	if d.hasFreeFormInput() {
 		var cmd tea.Cmd
 		d.responseInput, cmd = d.responseInput.Update(msg)
@@ -335,6 +368,7 @@ func (d *ElicitationDialog) focusField(idx int) {
 	if len(d.inputs) > 0 && d.currentField < len(d.inputs) {
 		d.inputs[d.currentField].Blur()
 	}
+	d.BlurActions()
 	d.currentField = idx
 	// Only focus text input for fields that use it
 	if d.isTextInputField() {
@@ -581,7 +615,7 @@ func (d *ElicitationDialog) content() (width int, header, body, footer string) {
 	l := d.layout()
 	header = lipgloss.JoinVertical(lipgloss.Left, RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle), RenderSeparator(l.contentWidth))
 	body = strings.Join(l.bodyLines, "\n")
-	footer = d.RenderActions(l.contentWidth, Action{Label: "Submit", Key: tea.KeyPressMsg{Code: tea.KeyEnter}})
+	footer = d.RenderActions(l.contentWidth, Action{Label: "Submit", Default: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}})
 	return l.dialogWidth, header, body, footer
 }
 
@@ -696,6 +730,7 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 		return d, cmd
 	}
 	if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		d.BlurActions()
 		return d.Update(action)
 	}
 	if msg.X < d.scrollableCol || msg.X >= d.scrollableCol+d.scrollview.ContentWidth() {
@@ -704,6 +739,7 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 	if d.hasFreeFormInput() {
 		line := msg.Y - d.scrollableRow + d.BodyScrollOffset()
 		if msg.Y >= d.scrollableRow && msg.Y < d.scrollableRow+d.scrollview.VisibleHeight() && line == len(d.layout().bodyLines)-1 {
+			d.BlurActions()
 			cmd := d.responseInput.Focus()
 			SetTextInputCursorAtCell(&d.responseInput, msg.X-d.scrollableCol)
 			return d, cmd

@@ -40,9 +40,21 @@ func NewSnapshotsDialog(fileCounts []int) Dialog {
 func (d *snapshotsDialog) Init() tea.Cmd { return nil }
 
 func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	switch m := msg.(type) {
 	case tea.MouseClickMsg:
 		if m.Button == tea.MouseLeft {
@@ -55,7 +67,7 @@ func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, nil
 			}
 		}
-	case tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+	case tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		if handled, cmd := d.UpdateBodyScroll(msg); handled {
 			return d, cmd
 		}

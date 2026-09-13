@@ -13,6 +13,8 @@ import (
 
 const Link = "docker-agent:identity"
 
+var nameLink = ansi.SetHyperlink(Link, "id=docker-agent-identity-name")
+
 func Label(ref lifecycle.InputReference, width int) string {
 	text := ansi.Truncate(ref.Label(), max(width, 0), "…")
 	if text == "" {
@@ -24,21 +26,40 @@ func Label(ref lifecycle.InputReference, width int) string {
 	nameWidth := min(ansi.StringWidth(ref.Name), ansi.StringWidth(text))
 	name := ansi.Cut(text, 0, nameWidth)
 	suffix := ansi.Cut(text, nameWidth, ansi.StringWidth(text))
-	return ansi.SetHyperlink(Link) + styles.AgentIdentityStyle(ref.Agent, false).Render(name) + styles.MutedStyle.Render(suffix) + ansi.ResetHyperlink()
+	label := nameLink + styles.AgentIdentityStyle(ref.Agent, false).Render(name) + ansi.ResetHyperlink()
+	if suffix != "" {
+		label += ansi.SetHyperlink(Link) + styles.MutedStyle.Render(suffix) + ansi.ResetHyperlink()
+	}
+	return label
 }
 
-// Hover changes only the name's accent, preserving the suffix, link and surface.
+// Hover keeps compatibility with callers that have a boolean hover state.
 func Hover(line string, startCol, endCol int, ref lifecycle.InputReference) string {
-	sequence := func(hovered bool) string {
-		styled := styles.AgentIdentityStyle(ref.Agent, hovered).Render("x")
-		return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(styled, "\x1b[0m"), "\x1b[m"), "x")
+	return HoverProgress(line, startCol, endCol, ref, 1)
+}
+
+// HoverProgress highlights only the linked name run, never its neutral ID suffix.
+func HoverProgress(line string, startCol, endCol int, ref lifecycle.InputReference, progress float64) string {
+	if progress <= 0 || ref.Kind == lifecycle.InputReferenceUnknown {
+		return line
 	}
-	normal, bright := sequence(false), sequence(true)
-	if normal == "" {
+	startCol = max(0, startCol)
+	endCol = min(ansi.StringWidth(line), endCol)
+	if endCol <= startCol {
 		return line
 	}
 	segment := ansi.Cut(line, startCol, endCol)
-	return ansi.Cut(line, 0, startCol) + strings.ReplaceAll(segment, normal, bright) + ansi.Cut(line, endCol, ansi.StringWidth(line))
+	nameStart := strings.Index(segment, nameLink)
+	if nameStart < 0 {
+		return line
+	}
+	nameStart += len(nameLink)
+	nameEnd := len(segment)
+	if end := strings.Index(segment[nameStart:], ansi.ResetHyperlink()); end >= 0 {
+		nameEnd = nameStart + end
+	}
+	segment = segment[:nameStart] + styles.HoverText(segment[nameStart:nameEnd], progress, nil) + segment[nameEnd:]
+	return ansi.Cut(line, 0, startCol) + segment + ansi.Cut(line, endCol, ansi.StringWidth(line))
 }
 
 // Border insets an identity in the ordinary USER padding row without a top rule.
@@ -62,14 +83,21 @@ func Wrap(prefix string, ref lifecycle.InputReference, suffix string, width int)
 	text := ansi.Wrap(prefix+Label(ref, ansi.StringWidth(ref.Label()))+suffix, max(width, 1), "")
 	open, reset := ansi.SetHyperlink(Link), ansi.ResetHyperlink()
 	lines := strings.Split(text, "\n")
-	active := false
+	active := ""
 	for i, line := range lines {
-		if active {
-			line = open + line
+		if active != "" {
+			line = active + line
 		}
-		lastOpen, lastClose := strings.LastIndex(line, open), strings.LastIndex(line, reset)
-		active = lastOpen > lastClose
-		if active {
+		lastName, lastOpen, lastClose := strings.LastIndex(line, nameLink), strings.LastIndex(line, open), strings.LastIndex(line, reset)
+		switch {
+		case lastName > lastClose && lastName > lastOpen:
+			active = nameLink
+		case lastOpen > lastClose:
+			active = open
+		default:
+			active = ""
+		}
+		if active != "" {
 			line += reset
 		}
 		lines[i] = line

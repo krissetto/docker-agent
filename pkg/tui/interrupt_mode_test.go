@@ -59,8 +59,8 @@ func TestChatPageOpts_PassesRetainedInterruptMode(t *testing.T) {
 		`a page built from chatPageOpts must inherit the retained "none" mode`)
 
 	m.interruptMode = messages.InterruptModeAlways
-	assert.True(t, opensInterruptDialog(buildPageFromOpts(t, m)),
-		`the default "always" mode keeps the confirmation dialog`)
+	assert.False(t, opensInterruptDialog(buildPageFromOpts(t, m)),
+		`response confirmation is owned by the shell, not a page dialog`)
 }
 
 // newApplySettingsModel wires the minimal appModel state handleApplySettings
@@ -170,8 +170,8 @@ func TestNew_AppliesPersistedInterruptModeAtStartup(t *testing.T) {
 
 			_, _ = m.chatPage.Update(runtime.StreamStarted(sess.ID, "root"))
 			t.Cleanup(func() { _, _ = m.chatPage.Update(messages.StreamCancelledMsg{}) })
-			assert.Equal(t, tt.want == messages.InterruptModeAlways, opensInterruptDialog(m.chatPage),
-				"the initial page must honor the persisted mode")
+			assert.False(t, opensInterruptDialog(m.chatPage),
+				"the initial page never opens a superseded response dialog")
 		})
 	}
 }

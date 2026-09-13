@@ -459,3 +459,24 @@ func TestPlanDialogMarkers(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, plans.SharedRef("release"), viewer.PlanRef())
 }
+
+func TestPlanBrowserFilteringPillsCannotTypeActionLetters(t *testing.T) {
+	d := newTestPlanBrowser(t, testPlanListing())
+	d.Update(letterKey('/'))
+	d.View()
+	require.True(t, d.filtering)
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	done := false
+	for y := row; y < row+dl.Height; y++ {
+		for x := col; x < col+dl.Width; x++ {
+			k, hit := d.ActionKeyAt(x, y, dl)
+			if hit {
+				require.Contains(t, []rune{tea.KeyEnter, tea.KeyEscape}, k.Code)
+				done = done || k.Code == tea.KeyEscape
+			}
+		}
+	}
+	require.True(t, done, "filter mode supplies an actual Done filtering action")
+}

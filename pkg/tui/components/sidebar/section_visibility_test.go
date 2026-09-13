@@ -36,8 +36,8 @@ func TestRenderSections_AllVisibleByDefault(t *testing.T) {
 	s := newVisibilityTestSidebar(t)
 	out := renderedSections(s)
 
-	assert.Contains(t, out, "Token Usage")
-	assert.Contains(t, out, "root")
+	assert.Contains(t, out, "$0.00")
+	assert.NotContains(t, out, "0 total")
 	assert.NotContains(t, out, "Tools")
 	assert.NotContains(t, out, "12 tools available")
 }
@@ -50,7 +50,7 @@ func TestRenderSections_HideUsage(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "Token Usage")
-	assert.Contains(t, out, "root", "the tree stays visible")
+	assert.NotContains(t, out, "0 total", "empty summary is hidden")
 }
 
 func TestRenderSections_HideTools(t *testing.T) {
@@ -61,7 +61,7 @@ func TestRenderSections_HideTools(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "12 tools available")
-	assert.Contains(t, out, "Token Usage")
+	assert.Contains(t, out, "$0.00")
 }
 
 func TestRenderSections_HideSessionPath(t *testing.T) {
@@ -82,12 +82,11 @@ func TestRenderSections_HideSessionPath(t *testing.T) {
 
 	assert.NotContains(t, out, "~/projects/myapp")
 	assert.NotContains(t, out, "main", "the branch goes with the path")
-	assert.Contains(t, out, "Session", "the session tab and title stay visible")
-	assert.Contains(t, out, "Token Usage", "other sections stay visible")
+	assert.Contains(t, out, "New session", "the title stays visible")
+	assert.Contains(t, out, "$0.00", "usage stays visible")
 
 	hiddenLines := len(s.renderSections(40))
-	assert.Equal(t, visibleLines-3, hiddenLines,
-		"hiding the path drops its line and separator without leaving a blank row")
+	assert.Equal(t, visibleLines-3, hiddenLines, "hiding directory and branch also removes their preceding breathing row")
 }
 
 func TestRenderSections_HideAgentsClearsClickZones(t *testing.T) {
@@ -96,13 +95,13 @@ func TestRenderSections_HideAgentsClearsClickZones(t *testing.T) {
 	s := newVisibilityTestSidebar(t)
 
 	s.renderSections(40)
-	assert.NotEmpty(t, s.agentClickZones, "visible agents register click zones")
+	assert.Empty(t, s.agentClickZones, "no descendants means no agent hit targets")
 
 	s.SetSectionVisibility(SectionVisibility{HideAgents: true})
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "openai/gpt-4")
-	assert.Len(t, s.agentClickZones, 1, "legacy roster visibility does not hide the canonical tree")
+	assert.Empty(t, s.agentClickZones, "legacy roster flags cannot invent current-root row")
 }
 
 func TestCollapsedViewModel_HideUsage(t *testing.T) {
@@ -151,7 +150,7 @@ func TestCollapsedView_HiddenPathLeavesNoBlankRow(t *testing.T) {
 	assert.Equal(t, withPath-1, vm.LineCount(), "the path+usage row disappears entirely")
 
 	lines := strings.Split(RenderCollapsedView(vm), "\n")
-	assert.Len(t, lines, vm.LineCount()-1, "LineCount includes the divider, the render does not")
+	assert.Len(t, lines, vm.LineCount(), "LineCount matches the divider-free band render")
 	for _, line := range lines {
 		assert.NotEmpty(t, strings.TrimSpace(ansi.Strip(line)), "no blank metadata row may remain")
 	}
@@ -191,7 +190,8 @@ func TestCollapsedInfoLine_ShowsTeamRoster(t *testing.T) {
 	_ = s.SetAgentInfo("root", "openai/gpt-4", "", 0, "", 0)
 
 	info := ansi.Strip(s.collapsedInfoLine(120))
-	assert.Contains(t, info, "▶ root openai/gpt-4", "current agent leads with its model")
+	assert.Contains(t, info, "▶ root", "current agent identity remains available")
+	assert.Equal(t, "gpt-4\nopenai", ansi.Strip(s.computeCollapsedViewModel(120).ModelInfo), "model/provider use their dedicated clickable rows")
 	assert.NotContains(t, info, "planner")
 	assert.NotContains(t, info, "reviewer")
 	assert.NotContains(t, info, "+2", "roster names replace the bare count")
@@ -251,8 +251,8 @@ func TestRenderSections_SectionGap(t *testing.T) {
 	for _, gap := range []int{1, 2, 3} {
 		s.SetSectionGap(gap)
 		lines := s.renderSections(40)
-		assert.Equal(t, gap, sectionTitleGap(lines, "Token Usage"), "gap %d before Token Usage", gap)
-		assert.Equal(t, gap, sectionTitleGap(lines, "gpt-4"), "gap %d before model", gap)
+		assert.Equal(t, 1, sectionTitleGap(lines, "$0.00"), "old gap %d cannot change deliberate breathing room", gap)
+		assert.Equal(t, 1, sectionTitleGap(lines, "gpt-4"), "old gap %d cannot change deliberate breathing room", gap)
 	}
 }
 
@@ -261,6 +261,7 @@ func TestRenderSections_SectionGapKeepsAgentClickZones(t *testing.T) {
 
 	s := newVisibilityTestSidebar(t)
 	s.SetSectionGap(3)
+	s.SetTokenUsage(&runtime.TokenUsageEvent{SessionID: "legacy-child", AgentContext: runtime.AgentContext{AgentName: "worker"}, Usage: &runtime.Usage{ContextLength: 10, ContextLimit: 100}})
 	lines := s.renderSections(40)
 
 	require.NotEmpty(t, s.agentClickZones)

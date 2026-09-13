@@ -74,6 +74,15 @@ func (c *SidebarComponent) Counts() (completed, total int) {
 }
 
 func (c *SidebarComponent) Render() string {
+	body := c.RenderBody()
+	if body == "" {
+		return ""
+	}
+	return c.renderTab("TO-DO", body)
+}
+
+// RenderBody renders the cached todo rows without section chrome.
+func (c *SidebarComponent) RenderBody() string {
 	if len(c.todos) == 0 {
 		return ""
 	}
@@ -86,7 +95,7 @@ func (c *SidebarComponent) Render() string {
 	for _, todo := range c.todos {
 		lines = append(lines, c.renderTodoLine(todo))
 	}
-	rendered := c.renderTab("TO-DO", strings.Join(lines, "\n"))
+	rendered := strings.Join(lines, "\n")
 
 	if c.renderCache == nil || len(c.renderCache) >= renderCacheCap {
 		c.renderCache = make(map[int]string, 2)

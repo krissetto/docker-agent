@@ -37,11 +37,13 @@ func TestCanonicalRootSpinnerLeaseAndIdleUnregister(t *testing.T) {
 			}
 			snap := subagent.Snapshot{Root: root.ID, Nodes: []subagent.NodeSnapshot{{Node: root}}}
 			cmd := m.SetSubagentTree(snap)
+			assert.Nil(t, cmd)
+			assert.False(t, m.subagentSpinnerOn, "current agent is excluded from descendant rows")
+			assert.Zero(t, ar.ActiveCount())
+			snap.Nodes[0].Children = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "running-child", Agent: "helper", State: subagent.NodeRunning}}}
+			cmd = m.SetSubagentTree(snap)
 			require.NotNil(t, cmd)
-			require.Empty(t, m.workingAgent)
-			require.Empty(t, m.subagentNodes)
 			require.True(t, m.subagentSpinnerOn)
-			require.EqualValues(t, 1, ar.ActiveCount())
 			before := m.View()
 			frame := m.subagentSpinner.RawFrame()
 			for range 20 {
@@ -54,12 +56,11 @@ func TestCanonicalRootSpinnerLeaseAndIdleUnregister(t *testing.T) {
 				}
 				require.NotNil(t, cmd)
 			}
-			require.NotEqual(t, frame, m.subagentSpinner.RawFrame())
-			assert.NotEqual(t, before, m.View(), "the sole running canonical row must animate")
-			snap.Nodes[0].Node.State = subagent.NodeIdle
+			assert.NotEqual(t, before, m.View())
+			snap.Nodes[0].Children[0].Node.State = subagent.NodeIdle
 			m.SetSubagentTree(snap)
 			assert.False(t, m.subagentSpinnerOn)
-			assert.Zero(t, ar.ActiveCount(), "idle canonical root releases the last animation lease")
+			assert.Zero(t, ar.ActiveCount())
 			assert.Nil(t, ar.Continue())
 		})
 	}

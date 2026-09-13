@@ -47,13 +47,9 @@ func TestSidebar_HandleClickType_Usage_Vertical(t *testing.T) {
 	require.GreaterOrEqual(t, m.usageReadingLine, 0, "the usage reading line must be recorded")
 	require.Less(t, m.usageReadingLine, m.usageSectionEnd)
 
-	titleLine := m.usageReadingLine - 2 // tab title line + TabStyle top padding line
-	assert.Contains(t, ansi.Strip(m.cachedLines[titleLine]), "Token Usage")
-
+	assert.NotContains(t, ansi.Strip(strings.Join(m.cachedLines, "\n")), "Token Usage")
 	paddingLeft := m.layoutCfg.PaddingLeft
-
-	result, _ := sb.HandleClickType(paddingLeft+2, titleLine)
-	assert.Equal(t, ClickNone, result, "the Token Usage title line must not be a click target")
+	var result ClickResult
 
 	result, _ = sb.HandleClickType(paddingLeft+2, m.usageReadingLine)
 	assert.Equal(t, ClickUsageContext, result, "a click on the token/context segment should report ClickUsageContext")
@@ -164,7 +160,8 @@ func TestSidebar_HandleClickType_Usage_Vertical_ScrollbarNotUsage(t *testing.T) 
 	m.titleGenerated = true
 	m.sessionTitle = "Test"
 	m.width = 40
-	m.height = 4 // force overflow so the scrollbar renders
+	m.height = 4 // force overflow with real queued content below usage
+	m.SetQueuedMessages([]QueuedMessage{{ID: "one", Text: "queued one"}, {ID: "two", Text: "queued two"}, {ID: "three", Text: "queued three"}, {ID: "four", Text: "queued four"}})
 
 	_ = sb.View()
 

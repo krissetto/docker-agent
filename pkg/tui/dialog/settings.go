@@ -151,6 +151,9 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 func (d *settingsDialog) Init() tea.Cmd { return nil }
 
 func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.prepareBody()
 	}
@@ -174,7 +177,7 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 		}
 		// The tab bar sits immediately above the body viewport.
-		if msg.Y == y-1 {
+		if msg.Y == y-1-d.bodyHeaderGap {
 			col := x
 			for i, label := range settingsTabLabels {
 				if msg.X >= col && msg.X < col+len(label)+2 {
@@ -192,6 +195,15 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
+		}
+		if d.ActionsFocused() || (msg.Code == tea.KeyTab && ((msg.Mod&tea.ModShift == 0 && d.tab == tabCount-1) || (msg.Mod&tea.ModShift != 0 && d.tab == 0))) {
+			if action, handled := d.HandleActionKey(msg); handled {
+				if action.Code == 0 {
+					return d, nil
+				}
+				cmd := d.handleKey(action)
+				return d, cmd
+			}
 		}
 		cmd := d.handleKey(msg)
 		return d, cmd
@@ -274,6 +286,9 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (d *settingsDialog) changeValue(delta int) tea.Cmd {
+	if !d.selectable(d.tab, d.selected[d.tab]) {
+		return nil
+	}
 	switch d.tab {
 	case tabAppearance:
 		switch d.selected[d.tab] {
@@ -414,7 +429,7 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	default:
 		local.renderAppearanceTab(content, inner)
 	}
-	body := content.Build()
+	body := strings.TrimLeft(content.Build(), "\n")
 	rows := make(map[int]int)
 	physicalLine := 0
 	for line := range strings.SplitSeq(ansi.Strip(body), "\n") {
@@ -426,7 +441,7 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 		physicalLine += max(1, lipgloss.Height(ansi.Hardwrap(strings.TrimRight(line, " "), inner, true)))
 	}
 	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + d.renderTabBar(inner)
-	footer := d.RenderActionKeys(inner, "tab", "Next tab", "left", "Decrease", "right", "Change", "ctrl+s", "Apply")
+	footer := d.RenderActions(inner, d.actions()...)
 	return width, header, body, footer, rows
 }
 
@@ -720,4 +735,47 @@ func (d *settingsDialog) recordRow(row int, text string) string {
 		d.rowText[row] = ansi.Strip(text)
 	}
 	return text
+}
+
+func (d *settingsDialog) actions() []Action {
+	var actions []Action
+	row := d.selected[d.tab]
+	if d.selectable(d.tab, row) {
+		switch {
+		case d.tab == tabAppearance && row == rowTheme:
+			actions = append(actions, actionsForKeys("right", "Choose theme")...)
+		case (d.tab == tabBehavior && row == rowTabTitleLength) || (d.tab == tabNotifications && row == rowSoundThreshold):
+			step := actionsForKeys("left", "Decrease", "right", "Increase")
+			value, low, high := d.current.TabTitleMaxLength, 5, 100
+			if d.tab == tabNotifications {
+				value, low, high = d.current.SoundThreshold, 1, 300
+			}
+			step[0].Disabled = value <= low
+			step[1].Disabled = value >= high
+			actions = append(actions, step...)
+		case (d.tab == tabAppearance && row >= rowPosition && row <= rowInfoMode) || (d.tab == tabBehavior && (row == rowSendMode || row == rowInterruptConfirmation)):
+			actions = append(actions, actionsForKeys("left", "Previous", "right", "Next")...)
+		default:
+			label := "Toggle"
+			if d.tab == tabBehavior && row == rowYOLO && !d.current.YOLO {
+				label = "Enable auto-approve"
+				if d.confirmYOLO {
+					label = "Confirm enable"
+				}
+			}
+			actions = append(actions, actionsForKeys("right", label)...)
+		}
+	}
+	actions = append(actions, actionsForKeys("esc", "Cancel", "ctrl+s", "Apply")...)
+	for i := range actions {
+		switch {
+		case d.tab == tabAppearance && row == rowTheme:
+			actions[i].Default = actions[i].Key.Code == tea.KeyRight
+		case d.tab == tabBehavior && row == rowYOLO && !d.current.YOLO:
+			actions[i].Default = actions[i].Key.Code == tea.KeyRight
+		default:
+			actions[i].Default = actions[i].Key.Code == 's' && actions[i].Key.Mod == tea.ModCtrl
+		}
+	}
+	return actions
 }

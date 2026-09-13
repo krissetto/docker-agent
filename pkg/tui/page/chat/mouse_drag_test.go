@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -21,8 +23,11 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	t.Parallel()
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	p.ar = animation.NewRuntime()
+	t.Cleanup(p.ar.Stop)
+	p.sidebar = sidebar.New(p.ar, t.Context(), p.sessionState)
 	p.height = 24
-	p.sidebar.Update(&runtime.SubagentTreeEvent{Snapshot: subagent.Snapshot{
+	_, startCmd := p.sidebar.Update(&runtime.SubagentTreeEvent{Snapshot: subagent.Snapshot{
 		Root: "root:sess",
 		Nodes: []subagent.NodeSnapshot{
 			{
@@ -52,8 +57,39 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	click, nodeID := p.sidebar.HandleClickType(coderX, coderY)
 	require.Equal(t, sidebar.ClickSubagent, click)
 	require.Equal(t, "a1b2c", nodeID, "the actual name cell routes to the canonical node ID")
-	p.handleMouseMotion(tea.MouseMotionMsg{X: sidebarX + coderX, Y: coderY})
-	require.Contains(t, ansi.Strip(p.sidebar.View()), "coder (a1b2c)",
+	_, hoverCmd := p.handleMouseMotion(tea.MouseMotionMsg{X: sidebarX + coderX, Y: coderY})
+	tickCmd := tea.Batch(startCmd, hoverCmd)
+	var nextTick func(tea.Cmd) (animation.TickMsg, bool)
+	nextTick = func(cmd tea.Cmd) (animation.TickMsg, bool) {
+		if cmd == nil {
+			return animation.TickMsg{}, false
+		}
+		msg := cmd()
+		if tick, ok := msg.(animation.TickMsg); ok {
+			return tick, true
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, child := range batch {
+				if tick, found := nextTick(child); found {
+					return tick, true
+				}
+			}
+		}
+		return animation.TickMsg{}, false
+	}
+	advance := func(cmd tea.Cmd) tea.Cmd {
+		if tick, ok := nextTick(cmd); ok {
+			if accepted, ok := p.ar.Accept(tick); ok {
+				_, updateCmd := p.Update(accepted)
+				return tea.Batch(updateCmd, p.ar.Continue())
+			}
+		}
+		return nil
+	}
+	for step := 0; step < 30 && !strings.Contains(ansi.Strip(p.sidebar.View()), "(a1b2c)"); step++ {
+		tickCmd = advance(tickCmd)
+	}
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "(a1b2c)",
 		"ordinary motion over the rendered name must establish hover before drag capture")
 
 	// Fill the chat, start a real messages-scrollbar thumb drag, and move it to
@@ -70,9 +106,13 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	p.handleMouseClick(tea.MouseClickMsg{X: messagesScrollbarX, Y: thumbY, Button: tea.MouseLeft})
 	require.True(t, p.messages.IsScrollbarDragging())
 
-	p.handleMouseMotion(tea.MouseMotionMsg{X: messagesScrollbarX, Y: coderY, Button: tea.MouseLeft})
+	_, leaveCmd := p.handleMouseMotion(tea.MouseMotionMsg{X: messagesScrollbarX, Y: coderY, Button: tea.MouseLeft})
+	tickCmd = tea.Batch(tickCmd, leaveCmd)
+	for step := 0; step < 30 && strings.Contains(ansi.Strip(p.sidebar.View()), "(a1b2c)"); step++ {
+		tickCmd = advance(tickCmd)
+	}
 	assert.True(t, p.messages.IsScrollbarDragging(), "captured messages drag must continue")
-	assert.NotContains(t, ansi.Strip(p.sidebar.View()), "coder (a1b2c)",
+	assert.NotContains(t, ansi.Strip(p.sidebar.View()), "(a1b2c)",
 		"chat scrollbar motion must not hover a sidebar row at the same absolute Y")
 }
 
@@ -81,11 +121,11 @@ func TestSidebarScrollbarDragRetainsCaptureOutsideSidebar(t *testing.T) {
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
 	p.height = 12
-	queued := make([]string, 30)
+	queued := make([]sidebar.QueuedMessage, 30)
 	for i := range queued {
-		queued[i] = "queued message"
+		queued[i] = sidebar.QueuedMessage{ID: strconv.Itoa(i), Text: "queued message"}
 	}
-	p.sidebar.SetQueuedMessages(queued...)
+	p.sidebar.SetQueuedMessages(queued)
 	p.SetSize(p.width, p.height)
 	p.sidebar.View()
 

@@ -100,7 +100,7 @@ func TestActualProgramContextUsageLifecycleAndIdleCleanup(t *testing.T) {
 	require.Contains(t, snapshot().contextView, "Context 0%", "projection reset drops stale usage")
 	require.Eventually(t, func() bool { return snapshot().active == 0 }, time.Second, time.Millisecond)
 	settled := snapshot()
-	require.Never(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, time.Millisecond, "settled context has no tick lease")
+	neverInTestLoop(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, "settled context has no tick lease")
 	program.Send(tea.PasteMsg{Content: "immediate idle input"})
 	require.Equal(t, "immediate idle input", snapshot().editor)
 }
@@ -193,7 +193,7 @@ func TestActualProgramContextSurvivesStreamingPartialUsage(t *testing.T) {
 	settled := snapshot()
 	visible(settled)
 	require.Contains(t, settled.contextView, "Context 85%")
-	require.Never(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, time.Millisecond)
+	neverInTestLoop(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, "settled context must not tick")
 }
 
 func TestContextUsagePartialMetadataAndExplicitZero(t *testing.T) {

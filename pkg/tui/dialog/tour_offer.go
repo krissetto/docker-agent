@@ -85,10 +85,23 @@ func (d *tourOfferDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, d.CancelDialogCmd()
 			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				d.BlurActions()
 				return d.Update(action)
 			}
 		}
 	case tea.KeyPressMsg:
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		switch {
 		case key.Matches(msg, d.keyMap.Yes):
 			return d, tourOfferClose(TourOfferAccepted)
@@ -135,7 +148,7 @@ func (d *tourOfferDialog) content() (style lipgloss.Style, width int, header, bo
 	footer = d.RenderActions(contentWidth,
 		Action{Label: "Never", Key: tea.KeyPressMsg{Code: 'd', Text: "d"}},
 		Action{Label: "Not now", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}},
-		Action{Label: "Take the tour", Key: tea.KeyPressMsg{Code: tea.KeyEnter}},
+		Action{Label: "Take the tour", Default: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}},
 	)
 	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, content.Build(), footer
 }

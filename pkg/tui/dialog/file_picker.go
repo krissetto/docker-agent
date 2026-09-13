@@ -211,10 +211,22 @@ func (d *filePickerDialog) loadDirectory() {
 func (d *filePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
 	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end.
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -325,10 +337,14 @@ func (d *filePickerDialog) filterEntries() {
 func (d *filePickerDialog) View() string { return d.renderBody(false) }
 
 func (d *filePickerDialog) renderBody(prepare bool) string {
-	d.textInput.SetStyles(styles.DialogInputStyle)
+	input := d.textInput
+	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
-	d.textInput.SetWidth(inner)
-	header := RenderTitle("Attach File", inner, styles.DialogTitleStyle) + "\n" + styles.MutedStyle.Render(toolcommon.TruncateText(d.currentDir, inner)) + "\n" + d.textInput.View()
+	input.SetWidth(inner)
+	if prepare {
+		d.textInput = input
+	}
+	header := RenderTitle("Attach File", inner, styles.DialogTitleStyle) + "\n" + styles.MutedStyle.Render(toolcommon.TruncateText(d.currentDir, inner)) + "\n" + input.View()
 	var lines []string
 	for i, entry := range d.filtered {
 		lines = append(lines, d.renderEntry(entry, i == d.selected, inner))
@@ -339,7 +355,18 @@ func (d *filePickerDialog) renderBody(prepare bool) string {
 		lines = []string{"No files found"}
 	}
 	row1, row2 := d.filePickerHelpKeysRows(d.regionWidth(inner))
-	footer := d.RenderActionKeys(d.regionWidth(inner), append(row1, row2...)...)
+	actions := actionsForKeys(append(row1, row2...)...)
+	for i := range actions {
+		if actions[i].Key.Code == tea.KeyEnter {
+			// Keep the footer width stable when selection changes from a directory to a file.
+			actions[i].Label = "Attach" + strings.Repeat(" ", len("Open directory")-len("Attach"))
+			actions[i].Disabled = d.err != nil || d.selected < 0 || d.selected >= len(d.filtered)
+			if !actions[i].Disabled && d.filtered[d.selected].isDir {
+				actions[i].Label = "Open directory"
+			}
+		}
+	}
+	footer := d.RenderActions(d.regionWidth(inner), actions...)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }
 

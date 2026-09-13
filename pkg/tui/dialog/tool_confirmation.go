@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"unicode/utf8"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -18,7 +18,6 @@ import (
 	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 const toolConfirmDialogWidthPercent = 70
@@ -42,7 +41,6 @@ type toolConfirmationDialog struct {
 	msg               *runtime.ToolCallConfirmationEvent
 	keyMap            toolconfirm.KeyMap
 	sessionState      ConfirmationSessionState
-	scrollView        messages.Model
 	permissionPattern string // cached permission pattern for this tool call
 }
 
@@ -54,35 +52,44 @@ func (d *toolConfirmationDialog) dialogDimensions() (dialogWidth, contentWidth i
 
 func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	d.BaseDialog.SetSize(width, height)
-	dialogWidth, _ := d.dialogDimensions()
-	bodyWidth := d.BodyContentWidth(dialogWidth)
-	d.scrollView.SetSize(bodyWidth, max(1, height))
-	d.scrollView.SetSize(bodyWidth, max(1, d.scrollView.RenderedContentHeight()))
 	d.prepareLayout()
 	return nil
 }
 
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
-	bindings := toolconfirm.OptionsHelp(d.permissionPattern)
-	actions := make([]Action, 0, len(bindings)/2)
-	for i := 0; i+1 < len(bindings); i += 2 {
-		action, _ := utf8.DecodeRuneInString(bindings[i])
-		actions = append(actions, Action{Label: bindings[i] + " " + bindings[i+1], Key: tea.KeyPressMsg{Code: action, Text: bindings[i]}})
-	}
-	return d.RenderActions(contentWidth, actions...)
+	return d.RenderActions(contentWidth,
+		Action{Label: "No", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
+		Action{Label: "Yes, once", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
+		Action{Label: "Always allow tool", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
+		Action{Label: "Balanced mode", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
+		Action{Label: "Allow all tools", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
+		Action{Label: "Reject with reason", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
+	)
 }
 
-// safetyConventionKeys are the metadata keys the safer_shell builtin
-// uses to surface its verdict to the UI when paired with a
-// `blast_radius` key. The renderer composes a user-facing warning
-// from these instead of showing raw key/value pairs (avoid leaking
-// implementation details into the prompt).
-//
-// The convention only applies when `blast_radius` is also present —
-// `category` and `reason` are deliberately generic key names that a
-// permission_request hook might use for unrelated purposes, so we
-// keep them rendering as plain text when no blast radius indicates
-// a safety verdict is in play.
+func (d *toolConfirmationDialog) policyExplanation() string {
+	action, selected := d.SelectedActionKey()
+	if !selected {
+		return "Reject this tool call without running it."
+	}
+	switch action.Code {
+	case 'Y':
+		return "Allow only this tool call. Future calls still require permission."
+	case 'T':
+		return "Allow this call and future calls matching " + d.permissionPattern + "."
+	case 'B':
+		return "Allow this call and switch this session to Balanced mode: classifier-safe calls run automatically; other calls still require permission."
+	case 'A':
+		return "Allow this call and all future tool calls in this session without confirmation."
+	case 'R':
+		return "Choose or write a rejection reason before rejecting this call. Escape returns here without answering."
+	default:
+		return "Reject this tool call without running it."
+	}
+}
+
+// safetyConventionKeys group a blast-radius assessment into a readable warning.
+// Without blast_radius, generic reason/category fields remain hook annotations.
 var safetyConventionKeys = map[string]struct{}{
 	"blast_radius": {},
 	"category":     {},
@@ -90,8 +97,8 @@ var safetyConventionKeys = map[string]struct{}{
 	"safety_label": {},
 }
 
-// blastRadiusBadge maps the safer_shell builtin's blast_radius
-// vocabulary onto theme colors. Unknown values render unstyled so the
+// blastRadiusBadge maps the assessment's blast_radius vocabulary onto theme colors.
+// Unknown values render unstyled so the
 // renderer never silently drops data it doesn't recognise.
 func blastRadiusBadge(value string) string {
 	style := styles.BaseStyle.Bold(true)
@@ -112,14 +119,19 @@ func blastRadiusBadge(value string) string {
 	return style.Render(value)
 }
 
-// renderSafetyWarning composes the classifier's verdict block from
-// the safer_shell metadata. Safe verdicts render a reassuring
-// heading; destructive / unknown verdicts render a warning. Returns
-// "" when no blast_radius is present.
+// renderSafetyWarning describes the supplied assessment; classification is not authorization.
+// Native tool labeling and hook metadata may contribute these fields.
 func (d *toolConfirmationDialog) renderSafetyWarning(contentWidth int) string {
 	radius, ok := d.msg.Metadata["blast_radius"]
 	if !ok {
-		return ""
+		switch d.msg.Metadata["safety_label"] {
+		case "safe":
+			return styles.DialogContentStyle.Foreground(styles.Success).Width(contentWidth).Render("Safety assessment: recognized read-only.")
+		case "destructive":
+			return styles.DialogContentStyle.Foreground(styles.Warning).Width(contentWidth).Render("Safety assessment: recognized destructive.")
+		default:
+			return ""
+		}
 	}
 
 	var heading string
@@ -152,9 +164,8 @@ func (d *toolConfirmationDialog) renderSafetyWarning(contentWidth int) string {
 // permission_request / preempt-yolo pre_tool_use hook contributions). Returns ""
 // when there is none.
 //
-// Metadata keys the safer_shell builtin uses to express its verdict
-// (see [safetyConventionKeys]) are excluded — they're rendered by
-// [renderSafetyWarning] as a polished warning block instead of as
+// Assessment fields (see [safetyConventionKeys]) are rendered by
+// [renderSafetyWarning] as a readable warning block instead of as
 // raw key/value rows. Anything else renders as plain text so a
 // permission_request hook's freeform annotations still surface.
 func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
@@ -171,6 +182,12 @@ func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
 
 	var lines []string
 	for _, k := range slices.Sorted(maps.Keys(d.msg.Metadata)) {
+		if k == "safety_label" {
+			switch strings.ToLower(strings.TrimSpace(d.msg.Metadata[k])) {
+			case "", "unknown", "safe", "destructive":
+				continue
+			}
+		}
 		if hasBlastRadius {
 			if _, ok := safetyConventionKeys[k]; ok {
 				continue
@@ -192,18 +209,7 @@ func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
 }
 
 // NewToolConfirmationDialog creates a new tool confirmation dialog
-func NewToolConfirmationDialog(ar *animation.Runtime, msg *runtime.ToolCallConfirmationEvent, sessionState ConfirmationSessionState) Dialog {
-	// Create scrollable view with minimal initial size (will be updated in SetSize)
-	scrollView := messages.NewScrollableView(ar, 1, 1, sessionState)
-
-	// Add the tool call message to the view
-	scrollView.AddOrUpdateToolCall(
-		"", // agentName - empty for dialog context
-		msg.ToolCall,
-		msg.ToolDefinition,
-		types.ToolStatusConfirmation,
-	)
-
+func NewToolConfirmationDialog(_ *animation.Runtime, msg *runtime.ToolCallConfirmationEvent, sessionState ConfirmationSessionState) Dialog {
 	// Build and cache the permission pattern for display and use
 	pattern := toolconfirm.BuildPermissionPattern(msg.ToolCall)
 
@@ -211,14 +217,16 @@ func NewToolConfirmationDialog(ar *animation.Runtime, msg *runtime.ToolCallConfi
 		msg:               msg,
 		sessionState:      sessionState,
 		keyMap:            toolconfirm.DefaultKeyMap(),
-		scrollView:        scrollView,
 		permissionPattern: pattern,
 	}
 }
 
 // Init initializes the tool confirmation dialog
-func (d *toolConfirmationDialog) Init() tea.Cmd {
-	return d.scrollView.Init()
+func (d *toolConfirmationDialog) Init() tea.Cmd { return nil }
+
+// InteractionIdentity identifies the runtime decision answered by this dialog.
+func (d *toolConfirmationDialog) InteractionIdentity() (sessionID, requestID string) {
+	return d.msg.SessionID, d.msg.RequestID
 }
 
 func (d *toolConfirmationDialog) response(request runtime.ResumeRequest) tuimessages.InteractionResponseMsg {
@@ -249,7 +257,11 @@ func (d *toolConfirmationDialog) CancelDialogCmd() tea.Cmd {
 
 // executeAction dispatches a confirmation decision.
 func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (layout.Model, tea.Cmd) {
-	if decision != toolconfirm.Reject && !d.claimResponse() {
+	if decision == toolconfirm.Reject {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
+	}
+	if !d.claimResponse() {
 		return d, nil
 	}
 	switch decision {
@@ -258,10 +270,6 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(d.response(toolconfirm.Approve.Resume("", ""))),
 		)
-	case toolconfirm.Reject:
-		return d, core.CmdHandler(OpenDialogMsg{
-			Model: NewToolRejectionReasonDialog(d.msg.SessionID, d.msg.RequestID),
-		})
 	case toolconfirm.ApproveTool:
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
@@ -309,26 +317,31 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
-		if cmd := HandleQuit(msg); cmd != nil {
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown, tea.KeyEnter:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+		if cmd := HandleQuit(msg); cmd != nil || msg.Code == tea.KeyEscape {
 			cmd := d.CancelDialogCmd()
 			return d, cmd
+		}
+
+		if (msg.String() == "r" || msg.String() == "R") && !d.responseSent {
+			d.BlurActions()
+			return d, core.CmdHandler(OpenDialogMsg{Model: NewToolRejectionReasonDialog(d.msg.SessionID, d.msg.RequestID)})
 		}
 
 		if decision, ok := d.keyMap.DecisionFor(msg); ok {
 			return d.executeAction(decision)
 		}
-
-		// Forward scrolling keys to the scroll view
-		if _, isScrollKey := core.GetScrollDirection(msg); isScrollKey {
-			updatedScrollView, cmd := d.scrollView.Update(msg)
-			d.scrollView = updatedScrollView.(messages.Model)
-			return d, cmd
-		}
-
-	case tuimessages.WheelCoalescedMsg:
-		updatedScrollView, cmd := d.scrollView.Update(msg)
-		d.scrollView = updatedScrollView.(messages.Model)
-		return d, cmd
 	}
 
 	return d, nil
@@ -337,7 +350,13 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
 	view := d.View()
 	row, col := d.CenterDialog(view)
-	if action, ok := d.ActionKeyAt(msg.X, msg.Y, NewDialogLayout(view, row, col)); ok {
+	dl := NewDialogLayout(view, row, col)
+	if d.CloseButtonHit(msg, dl) {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
+	}
+	if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		d.BlurActions()
 		return d.Update(action)
 	}
 	return d, nil
@@ -347,15 +366,30 @@ func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, hea
 	dialogWidth, contentWidth := d.dialogDimensions()
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 	header = RenderTitle(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
-	parts := []string{d.scrollView.View()}
+	footer = d.renderOptions(contentWidth)
+	var parts []string
+	if arguments := toolconfirm.Preview(d.msg.ToolCall, d.msg.ToolDefinition, bodyWidth); arguments != "" {
+		parts = append(parts, arguments)
+	}
 	if warning := d.renderSafetyWarning(bodyWidth); warning != "" {
-		parts = append(parts, "", warning)
+		if len(parts) > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, warning)
 	}
 	if metadata := d.renderMetadata(bodyWidth); metadata != "" {
-		parts = append(parts, "", metadata)
+		if len(parts) > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, metadata)
 	}
-	parts = append(parts, "", styles.DialogQuestionStyle.Width(bodyWidth).Render(toolconfirm.Question))
-	return styles.DialogStyle, dialogWidth, header, lipgloss.JoinVertical(lipgloss.Left, parts...), d.renderOptions(contentWidth)
+	if len(parts) > 0 {
+		parts = append(parts, "")
+	}
+	parts = append(parts,
+		styles.DialogQuestionStyle.Width(bodyWidth).Render(toolconfirm.Question),
+		styles.DialogContentStyle.Width(bodyWidth).Render(d.policyExplanation()))
+	return styles.DialogStyle, dialogWidth, header, lipgloss.JoinVertical(lipgloss.Left, parts...), footer
 }
 
 func (d *toolConfirmationDialog) View() string {
@@ -372,14 +406,10 @@ func (d *toolConfirmationDialog) Position() (row, col int) {
 	return d.CenterDialog(d.View())
 }
 
-// DialogClosable reports that this mandatory decision has no generic close chrome.
-func (d *toolConfirmationDialog) DialogClosable() bool { return false }
+// DialogClosable allows explicit dismissal through the correlated rejection path.
+func (d *toolConfirmationDialog) DialogClosable() bool { return true }
 
-// StopAnimations releases subscriptions without changing the pending decision.
-func (d *toolConfirmationDialog) StopAnimations() {
-	if d.scrollView != nil {
-		d.scrollView.StopAnimations()
-	}
-}
+// StopAnimations has no work: proposed-call previews never own execution animations.
+func (d *toolConfirmationDialog) StopAnimations() {}
 
-func (d *toolConfirmationDialog) Cleanup() { d.StopAnimations() }
+func (d *toolConfirmationDialog) Cleanup() {}

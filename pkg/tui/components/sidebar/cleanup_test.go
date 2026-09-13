@@ -28,6 +28,8 @@ func TestCleanSidebarLayoutAndCanonicalRoot(t *testing.T) {
 	m.sessionTitle = "Session title"
 	m.sessionState.SetYoloMode(true)
 	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "provider-one", Model: "Original display"}, {Name: "worker", Provider: "provider-two", Model: "Worker display"}})
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	first := ansi.Strip(m.View())
 	assert.NotContains(t, first, "/private/parent")
 	assert.Contains(t, first, "workspace")
@@ -36,17 +38,20 @@ func TestCleanSidebarLayoutAndCanonicalRoot(t *testing.T) {
 	assert.NotContains(t, first, "Tools")
 	assert.NotContains(t, first, "worker")
 	assert.Contains(t, first, "YOLO")
-	require.Len(t, m.agentClickZones, 1)
+	require.Empty(t, m.agentClickZones)
 
 	m.sessionState.SetCurrentAgentName("worker")
 	m.SetAgentInfo("worker", "fallback/Current display", "", 0, "", 0)
 	// Late static team metadata must not erase the active fallback display.
 	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Model: "Original display"}, {Name: "worker", Provider: "stale", Model: "Stale display"}})
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	second := ansi.Strip(m.View())
 	assert.Contains(t, second, "Current display")
 	assert.Contains(t, second, "fallback")
 	assert.NotContains(t, second, "Stale display")
-	assert.Contains(t, second, "▶ root")
+	assert.NotContains(t, second, "▶ root")
+	assert.NotContains(t, second, "0 total")
 	lines := strings.Split(second, "\n")
 	row := func(text string) int {
 		for i, line := range lines {
@@ -59,13 +64,14 @@ func TestCleanSidebarLayoutAndCanonicalRoot(t *testing.T) {
 	}
 	assert.Equal(t, row("workspace")+1, row("feature/cleanup"))
 	assert.Equal(t, row("Current display")+1, row("fallback"))
-	assert.Less(t, row("Session"), row("Token Usage"))
-	assert.Less(t, row("fallback"), row("▶ root"))
+	assert.Less(t, row("Session title"), row("$0.00"))
+	assert.NotContains(t, second, "root")
 }
 
 func TestCleanSidebarRecursiveIDsMouseAndSmallGeometry(t *testing.T) {
 	t.Parallel()
-	m := newSubagentTestModel(t)
+	m := newHoverSidebar(t)
+	m.subagentSpinner = &fakeSpinner{m.subagentSpinner}
 	m.sessionState.SetCurrentAgentName("root")
 	m.rootSessionID = "sess"
 	const fullID = "worker-node-with-full-identity-[REDACTED]"
@@ -73,7 +79,7 @@ func TestCleanSidebarRecursiveIDsMouseAndSmallGeometry(t *testing.T) {
 		Node:     subagent.Node{ID: "root:sess", Agent: "root", State: subagent.NodeIdle},
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: fullID, Agent: "worker", Name: "Named worker", State: subagent.NodeRunning, CreatedAt: time.Now()}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "nested-full-id", Agent: "reviewer", State: subagent.NodeFailed}}}}},
 	}}})
-	m.SetSize(100, 70)
+	settleTreePresentation(t, m, m.SetSize(100, 70))
 	m.View()
 	var workerY int
 	for y, id := range m.subagentHoverZone {
@@ -82,9 +88,13 @@ func TestCleanSidebarRecursiveIDsMouseAndSmallGeometry(t *testing.T) {
 		}
 	}
 	require.Positive(t, workerY)
-	m.Update(tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft, Y: workerY})
+	_, hoverCmd := m.Update(tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft, Y: workerY})
+	settleSidebarHover(t, m, hoverCmd)
 	assert.Contains(t, ansi.Strip(m.View()), fullID)
-	result, payload := m.HandleClickType(m.layoutCfg.PaddingLeft, workerY)
+	workerLine := strings.Split(ansi.Strip(m.View()), "\n")[workerY]
+	workerX := strings.Index(workerLine, "Named worker")
+	require.GreaterOrEqual(t, workerX, 0)
+	result, payload := m.HandleClickType(workerX, workerY)
 	assert.Equal(t, ClickSubagent, result)
 	assert.Equal(t, fullID, payload)
 	assert.Contains(t, ansi.Strip(m.View()), "failed")
@@ -93,6 +103,7 @@ func TestCleanSidebarRecursiveIDsMouseAndSmallGeometry(t *testing.T) {
 		for _, height := range []int{3, 8, 20} {
 			t.Run(fmt.Sprintf("%dx%d", width, height), func(t *testing.T) {
 				m.SetSize(width, height)
+				m.CancelPresentation() // this matrix checks settled viewport geometry; placement tests cover moving hits
 				view := m.View()
 				require.Len(t, strings.Split(view, "\n"), height)
 				for line := range strings.SplitSeq(view, "\n") {
@@ -113,7 +124,7 @@ func TestCleanSidebarRecursiveIDsMouseAndSmallGeometry(t *testing.T) {
 				m.View()
 				y := workerY - m.scrollview.ScrollOffset()
 				if y >= 0 && y < height {
-					result, payload = m.HandleClickType(m.layoutCfg.PaddingLeft, y)
+					result, payload = m.HandleClickType(m.layoutCfg.PaddingLeft+2, y)
 					assert.Equal(t, ClickSubagent, result)
 					assert.Equal(t, fullID, payload)
 				}
@@ -181,6 +192,8 @@ func TestSidebarWarmCacheThemeColorsAndLayout(t *testing.T) {
 	m.SetSize(45, 60)
 	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "provider", Model: "Display"}})
 	m.sessionTitle = "Title"
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	before := m.View()
 	generation := m.VisualGeneration()
 	theme := *original
@@ -193,7 +206,7 @@ func TestSidebarWarmCacheThemeColorsAndLayout(t *testing.T) {
 	assert.Equal(t, ansi.Strip(before), ansi.Strip(after))
 	assert.NotEqual(t, before, after)
 	assert.Equal(t, after, m.View(), "warm render is stable")
-	for _, needle := range []string{"Display", "provider", "root"} {
+	for _, needle := range []string{"Display", "provider"} {
 		var found bool
 		for line := range strings.SplitSeq(after, "\n") {
 			text := ansi.Strip(line)
@@ -249,7 +262,7 @@ func TestCollapsedBranchStaysDirectlyBelowWorkspace(t *testing.T) {
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	view := ansi.Strip(RenderCollapsedView(vm))
 	lines := strings.Split(view, "\n")
-	require.Len(t, lines, vm.LineCount()-1)
+	require.Len(t, lines, vm.LineCount())
 	for i, line := range lines {
 		if !strings.Contains(line, "workspace") {
 			continue

@@ -48,9 +48,21 @@ func NewEffortPickerDialog(levels []effort.Level, current effort.Level) Dialog {
 func (d *effortPickerDialog) Init() tea.Cmd { return nil }
 
 func (d *effortPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	switch m := msg.(type) {
 	case tea.MouseClickMsg:
 		if m.Button == tea.MouseLeft {
@@ -63,7 +75,7 @@ func (d *effortPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, nil
 			}
 		}
-	case tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+	case tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		if handled, cmd := d.UpdateBodyScroll(msg); handled {
 			return d, cmd
 		}
@@ -132,7 +144,9 @@ func (d *effortPickerDialog) renderBody(prepare bool) string {
 	}
 
 	header := RenderTitle("Select Reasoning Effort", inner, styles.DialogTitleStyle)
-	footer := d.RenderActionKeys(inner, "enter", "Select")
+	actions := actionsForKeys("enter", "Use effort")
+	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.levels)
+	footer := d.RenderActions(inner, actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, lipgloss.JoinVertical(lipgloss.Left, rows...), footer)
 		return ""

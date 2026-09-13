@@ -3,7 +3,9 @@ package sidebar
 import (
 	"fmt"
 	"slices"
+	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -62,64 +64,7 @@ func (m *model) pruneCollapsedBranches() {
 	}
 }
 
-func treeControlReserve(width int, id subagent.NodeID, branch, root bool) int {
-	if width < 4 {
-		return 0
-	}
-	reserve := 0
-	if branch && id != "" {
-		reserve += 2
-	}
-	if root {
-		reserve += 2
-	}
-	if reserve >= width {
-		return 2
-	}
-	return reserve
-}
-
-// decorateTreeRow reserves independent control cells; identity clicks keep the rest.
-func (m *model) decorateTreeRow(line string, row, width int, id subagent.NodeID, branch, root bool) string {
-	if width < 4 {
-		return line
-	}
-	reserve := treeControlReserve(width, id, branch, root)
-	if root && reserve == 2 {
-		branch = false
-	}
-	if reserve == 0 {
-		return line
-	}
-	bodyWidth := max(1, width-reserve)
-	line = padRight(ansi.Truncate(line, bodyWidth, "…"), bodyWidth)
-	hovered := m.hoveredTreeRow == row
-	if branch && id != "" {
-		x := lipgloss.Width(line) + 1
-		glyph := " "
-		if hovered {
-			glyph = "⌄"
-			if m.collapsedBranches[id] {
-				glyph = "›"
-			}
-		}
-		line += " " + styles.MutedStyle.Render(glyph)
-		m.treeControls[row] = append(m.treeControls[row], treeControl{id: id, x: x})
-	}
-	if root {
-		x := lipgloss.Width(line) + 1
-		glyph := " "
-		if hovered {
-			glyph = "−"
-		}
-		line += " " + styles.MutedStyle.Render(glyph)
-		m.treeControls[row] = append(m.treeControls[row], treeControl{x: x, whole: true})
-	}
-	return line
-}
-
-func (m *model) treeSummary(width int) string {
-	total, active, attention := 0, 0, 0
+func (m *model) treeCounts() (total, active, attention int) {
 	add := func(n subagent.Node) {
 		total++
 		if isActiveSubagentState(n.State) {
@@ -129,14 +74,7 @@ func (m *model) treeSummary(width int) string {
 			attention++
 		}
 	}
-	if m.delegationRoot != nil {
-		add(*m.delegationRoot)
-	} else if name := m.delegationRootName(); name != "" {
-		total++
-		if m.workingAgent == name {
-			active++
-		}
-	}
+
 	var walk func([]subagent.NodeSnapshot)
 	walk = func(nodes []subagent.NodeSnapshot) {
 		for _, node := range nodes {
@@ -151,24 +89,50 @@ func (m *model) treeSummary(width int) string {
 			active++
 		}
 	}
-	text := fmt.Sprintf("› %d total · %d active · %d attention", total, active, attention)
-	if lipgloss.Width(text) > width {
-		text = fmt.Sprintf("› %d total %d active %d!", total, active, attention)
+	return total, active, attention
+}
+
+func (m *model) treeSummary(width int) string {
+	total, active, attention := m.treeCounts()
+	if total == 0 || width < 1 {
+		return ""
 	}
-	if lipgloss.Width(text) > width {
-		text = fmt.Sprintf("› %d/%d/%d!", total, active, attention)
+	parts := []string{styles.TabPrimaryStyle.Render(fmt.Sprintf("%d subagents", total))}
+	for i, value := range []int{active, attention} {
+		counter := m.treeCounters[i]
+		alpha := counter.alpha
+		if !counter.running && value > 0 {
+			alpha = 1
+			counter.value = value
+		}
+		if alpha <= 0 || counter.value == 0 {
+			continue
+		}
+		label := "active"
+		if i == 1 {
+			label = "attention"
+		}
+		parts = append(parts, styles.FadeLine(styles.MutedStyle.Render(fmt.Sprintf("%d %s", counter.value, label)), alpha))
 	}
-	if lipgloss.Width(text) > width {
-		text = fmt.Sprintf("%d/%d/%d", total, active, attention)
+	glyph := "⌄"
+	if m.treeCollapsed {
+		glyph = "›"
 	}
-	return styles.MutedStyle.Render(ansi.Truncate(text, width, "…"))
+	if width == 1 {
+		return styles.MutedStyle.Render(glyph)
+	}
+	text := ansi.Truncate(strings.Join(parts, " "), width-2, "…")
+	return text + strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1)) + styles.MutedStyle.Render(glyph)
 }
 
 func (m *model) treeControlAt(x, y int) (treeControl, bool) {
+	if m.placement != nil {
+		return m.placementControlAt(x, y)
+	}
 	if m.layoutDirty {
 		m.View()
 	}
-	if m.mode != ModeVertical || y < 0 || y >= m.height || x < m.layoutCfg.PaddingLeft {
+	if m.mode != ModeVertical || y < 0 || y >= m.viewportHeight() || x < m.layoutCfg.PaddingLeft {
 		return treeControl{}, false
 	}
 	width := m.contentWidth(m.cachedNeedsScrollbar)
@@ -176,10 +140,12 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 	if x >= width {
 		return treeControl{}, false
 	}
-	row := y + m.scrollview.ScrollOffset() - m.treeSectionStart
-	if m.treeCollapsed && row == 0 {
+	contentY := y + m.scrollview.ScrollOffset()
+	row := contentY - m.treeSectionStart
+	if contentY == m.summaryLine && m.hasTreeContent() {
 		return treeControl{whole: true}, true
 	}
+
 	if row != m.hoveredTreeRow {
 		return treeControl{}, false
 	}
@@ -191,18 +157,20 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 	return treeControl{}, false
 }
 
-func (m *model) toggleTreeControl(control treeControl) {
+func (m *model) toggleTreeControl(control treeControl) tea.Cmd {
 	if control.whole {
 		m.treeCollapsed = !m.treeCollapsed
+		m.invalidateCache()
+		return m.ReconcileLayout()
 	} else {
 		if m.collapsedBranches == nil {
 			m.collapsedBranches = make(map[subagent.NodeID]bool)
 		}
 		m.collapsedBranches[control.id] = !m.collapsedBranches[control.id]
 	}
-	m.hoveredSubagent = ""
-	m.hoveredTreeRow = -1
+
 	m.invalidateCache()
+	return m.ReconcileLayout()
 }
 
 func (m *model) updateTreeRowHover(y int) {
@@ -255,9 +223,17 @@ func (m *model) participantLine(name string, width int) string {
 		reading = ""
 		room = max(1, width-2)
 	}
-	line := styles.MutedStyle.Render("  ") + styles.AgentIdentityStyle(name, false).Render(ansi.Truncate(name, room, "…"))
+	line := styles.MutedStyle.Render("  ") + m.hoverText(styles.AgentIdentityStyle(name, false).Render(ansi.Truncate(name, room, "…")), "agent:"+name)
 	if reading != "" {
 		line = padRight(line, width-lipgloss.Width(reading)) + contextGaugeStyle(m.agentContextGaugeLevel(name), styles.MutedStyle).Render(reading)
 	}
 	return ansi.Truncate(line, width, "")
+}
+
+func descendantCount(nodes []subagent.NodeSnapshot) int {
+	count := 0
+	for _, node := range nodes {
+		count += 1 + descendantCount(node.Children)
+	}
+	return count
 }

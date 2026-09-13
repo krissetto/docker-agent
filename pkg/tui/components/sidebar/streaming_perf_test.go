@@ -68,6 +68,8 @@ func buildStreamingSidebar(tb testing.TB, nTodos int) *model {
 	}
 	m.workingAgent = "root"
 	m.spinnerActive = true
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	_ = m.View() // warm cache
 	return m
 }
@@ -86,6 +88,7 @@ func TestAnimationFastPathMatchesFullRebuild(t *testing.T) {
 
 			// Full two-pass rebuild (hard invalidation).
 			m.invalidateCache()
+			m.ReconcileLayout()
 			want := m.View()
 			require.False(t, m.layoutDirty)
 
@@ -93,6 +96,7 @@ func TestAnimationFastPathMatchesFullRebuild(t *testing.T) {
 			// and yield identical output.
 			m.invalidateAnimation()
 			require.False(t, m.layoutDirty, "animation invalidation must not mark layout dirty")
+			m.ReconcileLayout()
 			got := m.View()
 
 			require.Equal(t, want, got)
@@ -105,8 +109,11 @@ func TestAnimationFastPathMatchesFullRebuild(t *testing.T) {
 func TestAnimationFastPathTracksSpinnerFrame(t *testing.T) {
 	t.Parallel()
 	m := buildStreamingSidebar(t, 120)
+	m.titleRegenerating = true // a visible main-spinner consumer, not the excluded current-root row
 
 	m.invalidateCache()
+	m.ReconcileLayout()
+	m.CancelPresentation()
 	first := m.View()
 
 	// Advance the spinner until its frame changes, as the 14 FPS tick does.
@@ -127,6 +134,7 @@ func TestAnimationFastPathTracksSpinnerFrame(t *testing.T) {
 
 	// The animation fast path must reflect the advanced frame, not freeze it.
 	m.invalidateAnimation()
+	m.ReconcileLayout()
 	second := m.View()
 	require.NotEqual(t, first, second, "fast path must re-render the advanced spinner frame")
 }

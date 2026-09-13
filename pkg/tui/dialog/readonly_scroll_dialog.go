@@ -111,12 +111,12 @@ func (d *readOnlyScrollDialog) renderBody(prepare bool) string {
 	dialogWidth, contentWidth := d.dialogWidth()
 	allLines := d.render(max(1, contentWidth), d.maxViewport())
 	headerLines := min(3, len(allLines))
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "esc", "Close")
+	footer := d.RenderActions(contentWidth + d.scrollview.ReservedCols())
 	if prepare {
-		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), "\n"+footer)
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), footer)
 		return ""
 	}
-	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), "\n"+footer)
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), footer)
 }
 
 func (d *readOnlyScrollDialog) SetSize(width, height int) tea.Cmd {

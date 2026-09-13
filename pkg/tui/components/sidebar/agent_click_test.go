@@ -35,6 +35,8 @@ func TestSidebar_HandleClickType_Agent(t *testing.T) {
 	m.width = 40
 	m.height = 50
 
+	m.SetAgentSwitching(true, "agent1", "agent2")
+	t.Cleanup(m.transferAnimation.Stop)
 	// Force a render to populate agentClickZones
 	_ = sb.View()
 
@@ -54,8 +56,8 @@ func TestSidebar_HandleClickType_Agent(t *testing.T) {
 			}
 		}
 	}
-	assert.True(t, foundAgent1, "should be able to click on agent1")
-	assert.False(t, foundAgent2, "unused configured agents are not tree rows")
+	assert.False(t, foundAgent1, "current root is excluded")
+	assert.True(t, foundAgent2, "actual transfer child remains selectable")
 }
 
 // TestSidebar_AgentClickZones_EveryRenderedLineMapped verifies that every
@@ -92,7 +94,7 @@ func TestSidebar_AgentClickZones_EveryRenderedLineMapped(t *testing.T) {
 			counts[owner]++
 		}
 	}
-	assert.Positive(t, counts["agent1"], "agent1 should own rendered lines")
+	assert.Zero(t, counts["agent1"], "current agent is not its own descendant")
 	assert.Zero(t, counts["agent2"], "unused configured agents own no tree rows")
 
 	// The number of click zones equals the number of owned (non-blank) lines:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -128,15 +127,14 @@ func TestCloseRootWithRunningSubagentsRequiresConfirmation(t *testing.T) {
 	require.True(t, ok)
 	_, _ = open.Model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	view := open.Model.View()
-	assert.Contains(t, view, "running subagents")
-	assert.Contains(t, view, "interrupt")
-	assert.Contains(t, view, "current work")
-	assert.Contains(t, view, "close their tabs")
+	assert.Contains(t, view, "Subagents")
+	assert.Contains(t, view, "stay open")
+	assert.NotContains(t, view, "interrupt")
 	assert.NotNil(t, m.supervisor.GetRunner("root"), "root stays open until confirmed")
 	assert.NotNil(t, m.supervisor.GetRunner("other"))
 }
 
-func TestCloseRootWithoutRunningSubagentsClosesImmediately(t *testing.T) {
+func TestCloseRootWithIdleAttachedViewsRequiresConfirmation(t *testing.T) {
 	t.Parallel()
 
 	m := newCloseTabTestModel(t)
@@ -148,13 +146,16 @@ func TestCloseRootWithoutRunningSubagentsClosesImmediately(t *testing.T) {
 	require.NotNil(t, m.supervisor.SwitchTo("other"))
 
 	_, cmd := m.handleCloseTab("root")
+	require.NotNil(t, cmd)
+	assert.NotNil(t, m.supervisor.GetRunner("root"))
+	_, cmd = m.Update(dialog.CloseRootWithSubagentsConfirmedMsg{SessionID: "root"})
 	require.Nil(t, cmd)
 	assert.Nil(t, m.supervisor.GetRunner("root"))
-	assert.Nil(t, m.supervisor.GetRunner("child"), "attached idle subagent tab closes with its root")
+	assert.NotNil(t, m.supervisor.GetRunner("child"), "attached idle view stays open")
 	assert.NotNil(t, m.supervisor.GetRunner("other"))
 }
 
-func TestCloseRootWithRunningSubagentsConfirmedCascadesAttachedTabs(t *testing.T) {
+func TestCloseRootWithRunningSubagentsConfirmedRetainsAttachedTabs(t *testing.T) {
 	t.Parallel()
 
 	m := newCloseTabTestModel(t)
@@ -172,9 +173,11 @@ func TestCloseRootWithRunningSubagentsConfirmedCascadesAttachedTabs(t *testing.T
 	require.Nil(t, cmd)
 
 	assert.Nil(t, m.supervisor.GetRunner("root"))
-	assert.Nil(t, m.supervisor.GetRunner("child"), "confirming root close closes attached subagent tabs")
+	assert.NotNil(t, m.supervisor.GetRunner("child"), "confirming root close retains attached subagent tabs")
 	assert.NotNil(t, m.supervisor.GetRunner("other"))
-	require.Eventually(t, func() bool { return cleanupCalls.Load() == 1 }, time.Second, 10*time.Millisecond)
+	require.Zero(t, cleanupCalls.Load(), "detached owner cleanup is retained for supervisor shutdown")
+	m.supervisor.Shutdown()
+	assert.Equal(t, int32(1), cleanupCalls.Load())
 }
 
 func TestOpenSubagentMarksAttachedLifetime(t *testing.T) {
@@ -196,7 +199,7 @@ func TestCloseAttachedSubagentTabSkipsRunningSubagentConfirmation(t *testing.T) 
 	t.Parallel()
 
 	m := newCloseTabTestModel(t)
-	shared := newCloseTabRuntime("shared", true)
+	shared := newCloseTabRuntime("shared", false)
 	info := runtime.SubagentAttachInfo{NodeID: "node1", ParentSessionID: "root", ParentAgent: "root"}
 	addCloseTabTestSession(t, m, "child", shared, nil, app.WithSubagentAttach(info))
 	addCloseTabTestSession(t, m, "other", newCloseTabRuntime("other", false), nil)
@@ -228,4 +231,37 @@ func TestCloseRootWithSubagentsDialogCancelDoesNotConfirm(t *testing.T) {
 	msgs := collectMsgs(cmd)
 	assert.True(t, hasMsg[dialog.CloseDialogMsg](msgs))
 	assert.False(t, hasMsg[dialog.CloseRootWithSubagentsConfirmedMsg](msgs))
+}
+
+func TestCloseUnrelatedSharedRuntimeTabDoesNotConfirmOrCloseOtherTree(t *testing.T) {
+	t.Parallel()
+	m := newCloseTabTestModel(t)
+	shared := newCloseTabRuntime("shared", false)
+	addCloseTabTestSession(t, m, "unrelated", shared, nil)
+	addCloseTabTestSession(t, m, "root", shared, nil)
+	addCloseTabTestSession(t, m, "child", shared, nil, app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "child-node", ParentSessionID: "root"}))
+	require.NotNil(t, m.supervisor.SwitchTo("root"))
+	_, cmd := m.handleCloseTab("unrelated")
+	require.Nil(t, cmd)
+	assert.Nil(t, m.supervisor.GetRunner("unrelated"))
+	assert.NotNil(t, m.supervisor.GetRunner("root"))
+	assert.NotNil(t, m.supervisor.GetRunner("child"))
+}
+
+func TestRetainedGrandchildCountsWhenIntermediateViewIsClosed(t *testing.T) {
+	t.Parallel()
+	tree := subagent.NewTree()
+	require.NoError(t, tree.AddSubtree([]subagent.Node{
+		{ID: subagent.SessionRootID("root"), SessionID: "root", Agent: "root"},
+		{ID: "child-node", SessionID: "child", Agent: "worker", Parent: subagent.SessionRootID("root")},
+		{ID: "grand-node", SessionID: "grand", Agent: "reviewer", Parent: "child-node"},
+	}))
+	shared := &topologyRuntime{closeTabRuntime: newCloseTabRuntime("shared", false), tree: tree}
+	m := newCloseTabTestModel(t)
+	addCloseTabTestSession(t, m, "root", shared, nil)
+	addCloseTabTestSession(t, m, "grand", shared, nil, app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "grand-node", ParentSessionID: "child"}))
+	require.Equal(t, []string{"grand"}, m.descendantAttachedTabs("root"))
+	_, cmd := m.handleCloseTab("root")
+	require.NotNil(t, cmd, "live attached descendant still prompts with closed intermediate view")
+	require.NotNil(t, m.supervisor.GetRunner("root"))
 }

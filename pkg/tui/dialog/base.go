@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -20,9 +21,8 @@ import (
 
 // Close-button rendering constants.
 const (
-	dialogCloseGlyph   = "✕"
-	dialogCloseInset   = 1
-	confirmEnterSuffix = " ↵"
+	dialogCloseGlyph = "✕"
+	dialogCloseInset = 1
 )
 
 // ConfirmButtonFocus tracks which button is focused in Yes/No confirmation dialogs.
@@ -42,8 +42,6 @@ const (
 	ConfirmKeyCancelled
 	ConfirmKeyFocusToggled
 )
-
-var confirmFocusToggleKeys = key.NewBinding(key.WithKeys("tab", "shift+tab", "left", "right"))
 
 // ConfirmKeyMap defines key bindings for confirmation dialogs (Yes/No).
 type ConfirmKeyMap struct {
@@ -77,12 +75,19 @@ type BaseDialog struct {
 	confirmBtnNoX, confirmBtnNoW          int
 	confirmBtnYesX, confirmBtnYesW        int
 	actionRows                            []dialogActionRow
+	actions                               []Action
+	actionsFocused                        bool
+	focusedAction                         int
+	actionLines                           []int
 	actionScroll                          *scrollview.Model
 	actionScrollActive                    bool
 	actionFooterStart, actionFooterHeight int
 	actionContentX, actionContentWidth    int
 	bodyScroll                            *scrollview.Model
 	bodyX, bodyY, bodyWidth, bodyHeight   int
+	bodyHeaderGap                         int
+	bodyFooterGap                         int
+	bodyPreparationCount                  uint64
 	bodyMaxHeight                         int
 	bodyFillHeight                        bool
 	cardWidth, cardHeight                 int
@@ -136,13 +141,7 @@ func (b *BaseDialog) HandleConfirmKey(msg tea.KeyPressMsg, keyMap ConfirmKeyMap)
 		return ConfirmKeyCancelled
 	case key.Matches(msg, keyMap.Yes):
 		return ConfirmKeyConfirmed
-	case key.Matches(msg, confirmFocusToggleKeys):
-		if b.confirmFocus == ConfirmFocusYes {
-			b.confirmFocus = ConfirmFocusNo
-		} else {
-			b.confirmFocus = ConfirmFocusYes
-		}
-		return ConfirmKeyFocusToggled
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		if b.confirmFocus == ConfirmFocusYes {
 			return ConfirmKeyConfirmed
@@ -163,13 +162,9 @@ func ConfirmAndClose(cmd tea.Cmd) tea.Cmd {
 
 // RenderConfirmButtons renders right-aligned, terminal-cell-addressable action pills.
 func (b *BaseDialog) RenderConfirmButtons(contentWidth int) string {
-	noLabel, yesLabel := "No", "Yes"
-	if b.confirmFocus == ConfirmFocusYes {
-		yesLabel += confirmEnterSuffix
-	} else {
-		noLabel += confirmEnterSuffix
-	}
-	out := b.RenderActions(contentWidth, Action{Label: noLabel, Key: tea.KeyPressMsg{Code: 'n', Text: "n"}}, Action{Label: yesLabel, Key: tea.KeyPressMsg{Code: 'y', Text: "y"}})
+	out := b.RenderActions(contentWidth,
+		Action{Label: "No", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: b.confirmFocus != ConfirmFocusYes, HideShortcut: true},
+		Action{Label: "Yes", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}, Default: b.confirmFocus == ConfirmFocusYes})
 	// Legacy confirmation handlers retain their measured pill columns.
 	for _, row := range b.actionRows {
 		for _, hit := range row.hits {
@@ -197,7 +192,8 @@ func NewDialogLayout(view string, row, col int) DialogLayout {
 
 // CloseButtonHit reports whether a click hit the top-right close control.
 func (b *BaseDialog) CloseButtonHit(msg tea.MouseClickMsg, dl DialogLayout) bool {
-	return msg.Y == dl.Row+styles.DialogStyle.GetBorderTopSize() && msg.X == dl.Col+dl.Width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
+	x, y, ok := closeControlCell(dl.Width, dl.Height)
+	return ok && msg.X == dl.Col+x && msg.Y == dl.Row+y
 }
 
 // SetCloseHover synchronizes concrete chrome with the manager pointer state.
@@ -287,8 +283,8 @@ func (b *BaseDialog) RenderCard(style lipgloss.Style, dialogWidth int, content s
 
 func renderCloseControl(view string, hovered bool) string {
 	lines := strings.Split(view, "\n")
-	line := styles.DialogStyle.GetBorderTopSize()
-	if line < 0 || line >= len(lines) {
+	target, line, ok := closeControlCell(lipgloss.Width(view), len(lines))
+	if !ok {
 		return strings.Join(lines, "\n")
 	}
 	glyphStyle := styles.NoStyle.Foreground(styles.TextSecondary)
@@ -296,7 +292,6 @@ func renderCloseControl(view string, hovered bool) string {
 		glyphStyle = glyphStyle.Foreground(styles.Error).Bold(true)
 	}
 	glyph := glyphStyle.Render(dialogCloseGlyph)
-	target := lipgloss.Width(ansi.Strip(lines[line])) - styles.DialogStyle.GetBorderRightSize() - 1 - dialogCloseInset
 	if idx := visibleColumnByteIndex(lines[line], target); idx >= 0 {
 		_, size := utf8.DecodeRuneInString(lines[line][idx:])
 		lines[line] = lines[line][:idx] + glyph + lines[line][idx+size:]
@@ -546,8 +541,11 @@ func (dc *Content) Build() string {
 
 // Action connects a visible action pill to its existing keyboard path.
 type Action struct {
-	Label string
-	Key   tea.KeyPressMsg
+	Label        string
+	Key          tea.KeyPressMsg
+	Disabled     bool
+	Default      bool
+	HideShortcut bool
 }
 type dialogActionRow struct {
 	text string
@@ -560,6 +558,8 @@ type dialogActionHit struct {
 
 func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
 	b.actionRows = nil
+	b.actions = append(b.actions[:0], actions...)
+	b.actionLines = make([]int, len(actions))
 	width := max(1, contentWidth)
 	button := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
 	var rendered []string
@@ -578,15 +578,42 @@ func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
 		rendered = append(rendered, text)
 		row, hits = "", nil
 	}
-	for _, action := range actions {
-		pill := button.Render(ansi.Truncate(action.Label, max(1, width-2), ""))
+	selected := b.selectedAction(actions)
+	for index, action := range actions {
+		pillStyle := button
+		if action.Disabled {
+			pillStyle = pillStyle.Foreground(styles.TextMuted).Bold(false)
+		}
+		if index == selected {
+			pillStyle = pillStyle.Foreground(styles.SelectedFg).Background(styles.Selected)
+		}
+		label := action.Label
+		shortcut := ""
+		if !action.HideShortcut && (action.Key.Code != tea.KeyEnter || action.Key.Mod != 0) {
+			shortcut = action.Key.Keystroke()
+		}
+		if index == selected {
+			if shortcut != "" {
+				shortcut = "↵ " + shortcut
+			} else {
+				shortcut = "↵"
+			}
+		}
+		labelWidth := max(1, width-2)
+		if shortcut != "" && lipgloss.Width(shortcut)+2 < labelWidth {
+			label = ansi.Truncate(label, labelWidth-lipgloss.Width(shortcut)-1, "") + " " + shortcut
+		}
+		pill := pillStyle.Render(ansi.Truncate(label, labelWidth, ""))
 		if row != "" && lipgloss.Width(row)+1+lipgloss.Width(pill) > width {
 			flush()
 		}
 		if row != "" {
 			row += " "
 		}
-		hits = append(hits, dialogActionHit{x: lipgloss.Width(row), width: lipgloss.Width(pill), key: action.Key})
+		b.actionLines[index] = len(b.actionRows)
+		if !action.Disabled {
+			hits = append(hits, dialogActionHit{x: lipgloss.Width(row), width: lipgloss.Width(pill), key: action.Key})
+		}
 		row += pill
 	}
 	flush()
@@ -595,6 +622,10 @@ func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
 
 // RenderActionKeys reuses family key bindings while omitting redundant navigation hints.
 func (b *BaseDialog) RenderActionKeys(width int, bindings ...string) string {
+	return b.RenderActions(width, actionsForKeys(bindings...)...)
+}
+
+func actionsForKeys(bindings ...string) []Action {
 	var actions []Action
 	for i := 0; i+1 < len(bindings); i += 2 {
 		name, label := bindings[i], bindings[i+1]
@@ -602,7 +633,9 @@ func (b *BaseDialog) RenderActionKeys(width int, bindings ...string) string {
 		case "navigate", "scroll", "up", "down":
 			continue
 		}
-		name = strings.Split(name, "/")[0]
+		if name != "/" {
+			name = strings.Split(name, "/")[0]
+		}
 		k := tea.KeyPressMsg{}
 		switch name {
 		case "enter", "Enter":
@@ -637,9 +670,9 @@ func (b *BaseDialog) RenderActionKeys(width int, bindings ...string) string {
 				k.Text = name
 			}
 		}
-		actions = append(actions, Action{Label: label, Key: k})
+		actions = append(actions, Action{Label: label, Key: k, Default: k.Code == tea.KeyEnter && k.Mod == 0})
 	}
-	return b.RenderActions(width, actions...)
+	return actions
 }
 
 func (b *BaseDialog) ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bool) {
@@ -665,11 +698,17 @@ func (b *BaseDialog) ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bo
 
 // PrepareScrollableBody updates body and footer viewports only at input/size lifecycle boundaries.
 func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int, header, body, footer string) {
+	b.normalizeActionFocus()
+	b.bodyPreparationCount++
 	if b.bodyScroll == nil {
 		b.bodyScroll = b.newScrollview(scrollview.WithKeyMap(&scrollview.ScrollKeyMap{PageUp: key.NewBinding(key.WithKeys("pgup")), PageDown: key.NewBinding(key.WithKeys("pgdown"))}), scrollview.WithReserveScrollbarSpace(true))
 	}
 	style, width, inner, available := b.bodyFrame(style, dialogWidth)
 	headers, footers := bodyChrome(header, footer, available)
+	b.bodyHeaderGap = 0
+	if len(headers) > 0 && headers[len(headers)-1] == "" {
+		b.bodyHeaderGap = 1
+	}
 	b.actionScrollActive = len(footers) > max(1, available-1)
 	if b.actionScrollActive {
 		if b.actionScroll == nil {
@@ -677,25 +716,32 @@ func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int
 		}
 		b.actionScroll.SetSize(inner+2, max(1, available-1))
 		b.actionScroll.SetContent(footers, len(footers))
+		if b.actionsFocused && b.focusedAction < len(b.actionLines) {
+			b.actionScroll.EnsureLineVisible(b.actionLines[b.focusedAction])
+		}
 	}
 	footerHeight := len(footers)
 	if b.actionScrollActive {
 		footerHeight = b.actionScroll.VisibleHeight()
 	}
 	lines := wrapBodyLines(body, max(1, inner-b.bodyScroll.ReservedCols()))
-	viewport := max(1, available-len(headers)-footerHeight)
+	b.bodyFooterGap = 0
+	if footerHeight > 0 && !b.actionScrollActive && len(headers)+footerHeight+2 <= available {
+		b.bodyFooterGap = 1
+	}
+	viewport := max(1, available-len(headers)-footerHeight-b.bodyFooterGap)
 	if !b.bodyFillHeight {
 		viewport = min(viewport, max(1, len(lines)))
 	}
 	b.bodyScroll.SetSize(inner, viewport)
 	b.bodyScroll.SetContent(lines, len(lines))
-	total := len(headers) + viewport + footerHeight + style.GetVerticalFrameSize()
+	total := len(headers) + viewport + b.bodyFooterGap + footerHeight + style.GetVerticalFrameSize()
 	row, col := CenterPosition(b.width, b.height, width, min(b.height, total))
 	b.bodyX, b.bodyY = col+style.GetBorderLeftSize()+style.GetPaddingLeft(), row+style.GetBorderTopSize()+style.GetPaddingTop()+len(headers)
 	b.bodyWidth, b.bodyHeight = inner, viewport
 	b.bodyScroll.SetPosition(b.bodyX, b.bodyY)
 	if b.actionScrollActive {
-		b.actionScroll.SetPosition(b.bodyX, b.bodyY+viewport)
+		b.actionScroll.SetPosition(b.bodyX, b.bodyY+viewport+b.bodyFooterGap)
 	}
 }
 
@@ -714,6 +760,9 @@ func (b *BaseDialog) RenderScrollableBody(style lipgloss.Style, dialogWidth int,
 		footers = strings.Split(b.actionScroll.ViewWithRestyledLines(footers[start:]), "\n")
 	}
 	parts := append(headers, out)
+	if b.bodyFooterGap > 0 {
+		parts = append(parts, "")
+	}
 	parts = append(parts, footers...)
 	return b.RenderCard(style, width, strings.Join(parts, "\n"))
 }
@@ -736,7 +785,7 @@ func (b *BaseDialog) bodyFrame(style lipgloss.Style, dialogWidth int) (lipgloss.
 func bodyChrome(header, footer string, available int) ([]string, []string) {
 	var headers, footers []string
 	if header != "" {
-		headers = strings.Split(header, "\n")
+		headers = strings.Split(strings.TrimRight(header, "\n"), "\n")
 	}
 	if footer != "" {
 		footers = strings.Split(footer, "\n")
@@ -746,6 +795,9 @@ func bodyChrome(header, footer string, available int) ([]string, []string) {
 	}
 	if len(headers)+len(footers)+1 > available {
 		headers = nil
+	}
+	if len(headers) > 0 && len(headers)+len(footers)+2 <= available {
+		headers = append(headers, "")
 	}
 	return headers, footers
 }
@@ -768,11 +820,11 @@ func (b *BaseDialog) UpdateActionScroll(msg tea.Msg) (bool, tea.Cmd) {
 	}
 	switch m := msg.(type) {
 	case tea.MouseWheelMsg:
-		if m.Y < b.bodyY+b.bodyHeight || m.Y >= b.bodyY+b.bodyHeight+b.actionScroll.VisibleHeight() {
+		if m.Y < b.bodyY+b.bodyHeight+b.bodyFooterGap || m.Y >= b.bodyY+b.bodyHeight+b.bodyFooterGap+b.actionScroll.VisibleHeight() {
 			return false, nil
 		}
 	case messages.WheelCoalescedMsg:
-		if m.Y < b.bodyY+b.bodyHeight || m.Y >= b.bodyY+b.bodyHeight+b.actionScroll.VisibleHeight() {
+		if m.Y < b.bodyY+b.bodyHeight+b.bodyFooterGap || m.Y >= b.bodyY+b.bodyHeight+b.bodyFooterGap+b.actionScroll.VisibleHeight() {
 			return false, nil
 		}
 	}
@@ -813,9 +865,152 @@ func (b *BaseDialog) BodyContentWidth(dialogWidth int) int {
 
 func preparesDialogBody(msg tea.Msg) bool {
 	switch msg.(type) {
-	case tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+	case animation.TickMsg, tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		return false
 	default:
 		return true
 	}
+}
+
+// ActionsFocused reports whether arrows and Enter belong to the action section.
+func (b *BaseDialog) ActionsFocused() bool { return b.actionsFocused }
+
+// HandleActionKey is called at the content section's Tab boundary, or while actions are focused.
+// A handled result with a zero key only changes focus; a nonzero key follows the existing action route.
+func (b *BaseDialog) HandleActionKey(msg tea.KeyPressMsg) (action tea.KeyPressMsg, handled bool) {
+	b.normalizeActionFocus()
+	if msg.Code == tea.KeyTab {
+		if b.actionsFocused {
+			b.actionsFocused = false
+			b.MarkVisualDirty()
+			return tea.KeyPressMsg{}, true
+		}
+		if b.FocusActions(msg.Mod&tea.ModShift != 0) {
+			return tea.KeyPressMsg{}, true
+		}
+		return tea.KeyPressMsg{}, false
+	}
+	if !b.actionsFocused {
+		return tea.KeyPressMsg{}, false
+	}
+	switch msg.Code {
+	case tea.KeyLeft, tea.KeyUp, tea.KeyRight, tea.KeyDown:
+		delta := 1
+		if msg.Code == tea.KeyLeft || msg.Code == tea.KeyUp {
+			delta = -1
+		}
+		for step := 1; step <= len(b.actions); step++ {
+			i := (b.focusedAction + delta*step + len(b.actions)) % len(b.actions)
+			if !b.actions[i].Disabled {
+				b.focusedAction = i
+				b.MarkVisualDirty()
+				b.revealAction()
+				break
+			}
+		}
+		return tea.KeyPressMsg{}, true
+	case tea.KeyEnter:
+		if b.focusedAction >= 0 && b.focusedAction < len(b.actions) && !b.actions[b.focusedAction].Disabled {
+			k := b.actions[b.focusedAction].Key
+			b.actionsFocused = false
+			b.MarkVisualDirty()
+			return k, true
+		}
+		return tea.KeyPressMsg{}, true
+	}
+	return tea.KeyPressMsg{}, false
+}
+
+func (b *BaseDialog) normalizeActionFocus() {
+	if !b.actionsFocused {
+		return
+	}
+	if b.focusedAction >= 0 && b.focusedAction < len(b.actions) && !b.actions[b.focusedAction].Disabled {
+		return
+	}
+	for i, a := range b.actions {
+		if !a.Disabled {
+			b.focusedAction = i
+			return
+		}
+	}
+	b.actionsFocused = false
+}
+
+func (b *BaseDialog) revealAction() {
+	if b.actionScrollActive && b.actionScroll != nil && b.focusedAction < len(b.actionLines) {
+		b.actionScroll.EnsureLineVisible(b.actionLines[b.focusedAction])
+	}
+}
+
+// FocusActions enters the first or last enabled action from a content boundary.
+func (b *BaseDialog) FocusActions(last bool) bool {
+	start, delta := 0, 1
+	if last {
+		start, delta = len(b.actions)-1, -1
+	}
+	for i := start; i >= 0 && i < len(b.actions); i += delta {
+		if b.actions[i].Disabled {
+			continue
+		}
+		b.actionsFocused = true
+		b.focusedAction = i
+		b.MarkVisualDirty()
+		b.revealAction()
+		return true
+	}
+	return false
+}
+
+// BlurActions restores keyboard ownership to dialog content.
+func (b *BaseDialog) BlurActions() {
+	if b.actionsFocused {
+		b.actionsFocused = false
+		b.MarkVisualDirty()
+	}
+}
+
+func closeControlCell(width, height int) (x, y int, ok bool) {
+	if width < 3 || height < 2 {
+		return 0, 0, false
+	}
+	return max(1, width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset), styles.DialogStyle.GetBorderTopSize(), true
+}
+
+func (b *BaseDialog) selectedAction(actions []Action) int {
+	if b.actionsFocused && b.focusedAction >= 0 && b.focusedAction < len(actions) && !actions[b.focusedAction].Disabled {
+		return b.focusedAction
+	}
+	if !b.actionsFocused {
+		for i, a := range actions {
+			if a.Default && !a.Disabled {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// FocusDefaultAction promotes the explicit content default into keyboard action focus.
+func (b *BaseDialog) FocusDefaultAction() bool {
+	for i, a := range b.actions {
+		if !a.Default || a.Disabled {
+			continue
+		}
+		b.actionsFocused = true
+		b.focusedAction = i
+		b.MarkVisualDirty()
+		b.revealAction()
+		return true
+	}
+	return false
+}
+
+// SelectedActionKey returns the enabled focused or default action without changing focus.
+func (b *BaseDialog) SelectedActionKey() (tea.KeyPressMsg, bool) {
+	index := b.selectedAction(b.actions)
+	if index < 0 {
+		return tea.KeyPressMsg{}, false
+	}
+	return b.actions[index].Key, true
 }

@@ -884,3 +884,43 @@ func TestWarmDialogCachesFollowFullThemeGeneration(t *testing.T) {
 	require.Equal(t, lipgloss.Height(before), lipgloss.Height(after))
 	require.Equal(t, after, d.View(), "unchanged warm layout is stable")
 }
+
+func TestCostCacheHitRateUpToTwoDecimalPrecision(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                 string
+		cached, input, write int64
+		want                 string
+	}{
+		{name: "near full", cached: 9996, input: 4, want: "99.96%"},
+		{name: "two decimals", cached: 9967, input: 33, want: "99.67%"},
+		{name: "trailing zero", cached: 995, input: 5, want: "99.5%"},
+		{name: "exact full", cached: 10000, want: "100%"},
+		{name: "zero hits", input: 10000, want: "0%"},
+		{name: "zero candidates", want: ""},
+		{name: "write only", write: 10000, want: ""},
+		{name: "writes excluded", cached: 9996, input: 4, write: 9000, want: "99.96%"},
+		{name: "honest rounding", cached: 99999, input: 1, want: "100%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := session.New()
+			sess.AddMessage(&session.Message{AgentName: "root", Message: chat.Message{Role: chat.MessageRoleAssistant, Content: "answer", Usage: &chat.Usage{CachedInputTokens: tc.cached, InputTokens: tc.input, CacheWriteTokens: tc.write}}})
+			d := NewCostDialog(sess).(*costDialog)
+			data := d.gatherCostData()
+			got := ""
+			for _, stat := range data.totalStats() {
+				if stat.label == "cache hit rate:" {
+					got = stat.value
+				}
+			}
+			require.Equal(t, tc.want, got)
+			for _, size := range [][2]int{{16, 8}, {40, 12}} {
+				d.SetSize(size[0], size[1])
+				view := d.View()
+				require.LessOrEqual(t, lipgloss.Width(view), size[0])
+				require.LessOrEqual(t, lipgloss.Height(view), size[1])
+			}
+		})
+	}
+}

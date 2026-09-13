@@ -21,8 +21,8 @@ func TestIdentityOnlyNameUsesAccentAndHover(t *testing.T) {
 		label := Label(ref, width)
 		hover := Hover(label, 0, width, ref)
 		require.Equal(t, ansi.Strip(label), ansi.Strip(hover))
-		assert.Contains(t, label, ansi.SetHyperlink(Link))
-		assert.Contains(t, hover, ansi.SetHyperlink(Link))
+		assert.Contains(t, label, nameLink)
+		assert.Contains(t, hover, nameLink)
 		for x := range ansi.StringWidth(label) {
 			wantNormal, wantHover := color.RGBAModel.Convert(styles.MutedStyle.GetForeground()), color.RGBAModel.Convert(styles.MutedStyle.GetForeground())
 			if x < nameWidth {
@@ -109,4 +109,69 @@ func foregroundAt(line string, col int) color.Color {
 		return nil
 	}
 	return color.RGBAModel.Convert(fg)
+}
+
+func TestHoverProgressRebasesNameOnlyAcrossWarmThemes(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "complete-canonical-node-id", Name: "director 界", Agent: "director", DisplayID: "complete-canonical-node-id"}
+	for _, themeRef := range []string{"default", "default-light", "nord"} {
+		theme, err := styles.LoadTheme(themeRef)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		for _, line := range []string{Label(ref, 80), strings.Split(Border(styles.UserMessageStyle.Width(80).Render("body"), ref, 80, styles.UserMessageStyle), "\n")[0]} {
+			require.Equal(t, line, HoverProgress(line, 0, ansi.StringWidth(line), ref, 0))
+			got := HoverProgress(line, 0, ansi.StringWidth(line), ref, .5)
+			assert.Equal(t, ansi.Strip(line), ansi.Strip(got))
+			assert.Equal(t, ansi.StringWidth(line), ansi.StringWidth(got))
+			nameAt := strings.Index(ansi.Strip(line), ref.Name)
+			require.GreaterOrEqual(t, nameAt, 0)
+			start := ansi.StringWidth(ansi.Strip(line)[:nameAt])
+			want := styles.Brighten(styles.AgentIdentityStyle(ref.Agent, false).GetForeground(), .125)
+			assert.Equal(t, color.RGBAModel.Convert(want), foregroundAt(got, start))
+			suffixAt := start + ansi.StringWidth(ref.Name)
+			assert.Equal(t, foregroundAt(line, suffixAt), foregroundAt(got, suffixAt))
+			assert.Contains(t, got, ansi.SetHyperlink(Link))
+			assert.Contains(t, ansi.Strip(got), ref.DisplayID)
+		}
+	}
+}
+
+func TestWrappedSuffixStaysNeutralWhenAgentAndMutedColorsMatch(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	theme := styles.DefaultTheme()
+	theme.Colors.Accent = "#808080"
+	theme.Colors.TextMuted = "#808080"
+	styles.ApplyTheme(theme)
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "full-canonical-node-id", Name: "X", Agent: "unregistered-collision-agent", DisplayID: "1234567890-full-neutral-id"}
+	require.Equal(t, styles.AgentIdentityStyle(ref.Agent, false).GetForeground(), styles.MutedStyle.GetForeground())
+	wrapped := Wrap("", ref, "", 8)
+	suffixRows := 0
+	for line := range strings.SplitSeq(wrapped, "\n") {
+		got := HoverProgress(line, 0, ansi.StringWidth(line), ref, 1)
+		assert.Equal(t, ansi.Strip(line), ansi.Strip(got))
+		if strings.Contains(line, nameLink) {
+			continue
+		}
+		suffixRows++
+		assert.Equal(t, line, got, "suffix-only row has no name metadata and must remain byte-identical")
+	}
+	require.Positive(t, suffixRows)
+	label := Label(ref, 80)
+	got := Hover(label, 0, ansi.StringWidth(label), ref)
+	for x := ansi.StringWidth(ref.Name); x < ansi.StringWidth(label); x++ {
+		assert.Equal(t, foregroundAt(label, x), foregroundAt(got, x), "neutral ID cell %d", x)
+	}
+}
+
+func TestNameMetadataDoesNotSupplyForegroundToUncoloredWrappedCells(t *testing.T) {
+	t.Parallel()
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, Name: "worker", Agent: "worker", ID: "full-id"}
+	line := nameLink + styles.AgentIdentityStyle(ref.Agent, false).Render("worker") + " " + ansi.ResetHyperlink()
+	got := HoverProgress(line, 0, ansi.StringWidth(line), ref, .5)
+	require.Equal(t, ansi.Strip(line), ansi.Strip(got))
+	last := ansi.StringWidth(line) - 1
+	require.Nil(t, foregroundAt(line, last))
+	assert.Nil(t, foregroundAt(got, last), "metadata cannot fabricate a foreground on reset/uncolored cells")
 }

@@ -10,8 +10,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// CloseRootWithSubagentsConfirmedMsg is sent when the user confirms closing a
-// root tab that owns running subagents.
+// CloseRootWithSubagentsConfirmedMsg closes the requested tab without stopping
+// its subagents or closing their open tabs.
 type CloseRootWithSubagentsConfirmedMsg struct {
 	SessionID string
 }
@@ -46,8 +46,8 @@ type closeRootWithSubagentsDialog struct {
 	keyMap    closeRootWithSubagentsKeyMap
 }
 
-// NewCloseRootWithSubagentsDialog creates a confirmation dialog for closing a
-// root session that owns running subagents.
+// NewCloseRootWithSubagentsDialog confirms closing a tab while its subagents
+// and their open tabs remain available.
 func NewCloseRootWithSubagentsDialog(sessionID string) Dialog {
 	return &closeRootWithSubagentsDialog{
 		sessionID: sessionID,
@@ -85,11 +85,24 @@ func (d *closeRootWithSubagentsDialog) Update(msg tea.Msg) (layout.Model, tea.Cm
 				return d, cmd
 			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				d.BlurActions()
 				return d.Update(action)
 			}
 		}
 
 	case tea.KeyPressMsg:
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		if cmd := HandleQuit(msg); cmd != nil {
 			cmd := d.CancelDialogCmd()
 			return d, cmd
@@ -119,8 +132,8 @@ func (d *closeRootWithSubagentsDialog) content() (style lipgloss.Style, width in
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	header = RenderTitle("Close session", contentWidth, styles.DialogTitleStyle)
-	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("This session has running subagents. Closing it will interrupt their current work and close their tabs. Continue?")
+	header = RenderTitle("Close tab", contentWidth, styles.DialogTitleStyle)
+	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("Close this tab? Subagents keep running and their open tabs stay open.")
 	footer = d.RenderConfirmButtons(contentWidth)
 	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer
 }

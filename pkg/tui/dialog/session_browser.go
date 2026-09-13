@@ -224,10 +224,22 @@ func (d *sessionBrowserDialog) Init() tea.Cmd {
 }
 
 func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
 	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -513,7 +525,7 @@ func (d *sessionBrowserDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle(fmt.Sprintf("Sessions (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n\n" + input.View() + "\n" + RenderSeparator(inner)
+	header := RenderTitle(fmt.Sprintf("Sessions (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + RenderSeparator(inner)
 	lines := make([]string, 0, len(d.rows))
 	for _, row := range d.rows {
 		if row.header != "" {
@@ -532,7 +544,14 @@ func (d *sessionBrowserDialog) renderBody(prepare bool) string {
 	if d.workspace.enabled() {
 		bindings = append(bindings, "ctrl+g", "Workspace")
 	}
-	footer := d.RenderActionKeys(inner+d.scrollview.ReservedCols(), bindings...)
+	actions := actionsForKeys(bindings...)
+	for i := range actions {
+		switch actions[i].Key.Code {
+		case 's', 'y', 'd', tea.KeyEnter:
+			actions[i].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
+		}
+	}
+	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

@@ -1,8 +1,10 @@
 package dialog
 
 import (
+	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -271,7 +273,9 @@ func TestToolConfirmationManagerCompactBoundsAcrossOpenFrames(t *testing.T) {
 
 	targetWidth := lipgloss.Width(dialog.View())
 	targetHeight := lipgloss.Height(dialog.View())
-	require.Equal(t, 9, targetHeight, "compact header, body, actions and frame are measured once")
+	require.Equal(t, 15, targetHeight, "static preview, policy explanation, six responsive actions and shared gaps fit the measured card")
+	require.LessOrEqual(t, targetWidth, viewportWidth)
+	require.LessOrEqual(t, targetHeight, viewportHeight)
 	assertManagerFrameBounds(t, mgr, targetWidth, 1)
 
 	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration/2))
@@ -398,7 +402,7 @@ func TestSharedDialogLifecycleFixtures(t *testing.T) {
 				assert.Equal(t, int32(0), runtime.ActiveCount(), "completed lifecycle is idle")
 
 				if fixture.name == "tool-call confirmation" {
-					assert.False(t, dialogClosable(dialog), "tool confirmation remains a mandatory in-dialog decision")
+					assert.True(t, dialogClosable(dialog), "close chrome follows the correlated safe-reject route")
 					assert.Nil(t, dialog.(OutsideClickDismisser).OutsideClickDismissCmd())
 				}
 			})
@@ -432,4 +436,136 @@ func interpolateDialogBound(from, to int, progress float64) int {
 		return int(value + 0.5)
 	}
 	return -int(-value + 0.5)
+}
+
+func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
+	r := newDialogRuntime()
+	small := strings.Join([]string{"TOP─────────", "TITLE       ", "row one     ", "BOTTOM──────"}, "\n")
+	large := strings.Join([]string{"TOP─────────", "TITLE       ", "row one     ", "row two     ", "row three   ", "row four    ", "row five    ", "row six     ", "row seven   ", "row eight   ", "row nine    ", "BOTTOM──────"}, "\n")
+	d := &lifecycleDialog{view: small}
+	a, tickCmd := newAnimatedDialog(r, d, 80, 30)
+	require.Less(t, a.opacity(), 1.0, "initial opening retains its fade")
+	a.tick("open", 80, 30)
+	advance := func(duration time.Duration) {
+		start := r.Now()
+		for r.Now()-start < duration {
+			acceptedDialogTick(r, tickCmd)
+			a.tick("frame", 80, 30)
+			tickCmd = r.Continue()
+		}
+	}
+	advance(dialogOpenDuration)
+	require.InDelta(t, 1.0, a.opacity(), 0)
+	d.view = large
+	tickCmd = a.retarget("grow", 80, 30)
+	require.NotNil(t, tickCmd)
+	require.True(t, a.resizing)
+	grown := []int{a.renderHeight}
+	for range 4 {
+		advance(2 * animation.TickRate)
+		grown = append(grown, a.renderHeight)
+		require.InDelta(t, 1.0, a.opacity(), 0)
+		view := strings.Split(a.view(), "\n")
+		require.True(t, strings.HasPrefix(view[0], "TOP"))
+		require.True(t, strings.HasPrefix(view[len(view)-1], "BOTTOM"))
+	}
+	for a.anim.Running() {
+		advance(animation.TickRate)
+	}
+	require.Equal(t, 12, a.renderHeight)
+	d.view = small
+	tickCmd = a.retarget("shrink", 80, 30)
+	require.NotNil(t, tickCmd)
+	shrunk := []int{a.renderHeight}
+	for range 4 {
+		advance(2 * animation.TickRate)
+		shrunk = append(shrunk, a.renderHeight)
+		require.InDelta(t, 1.0, a.opacity(), 0)
+		view := strings.Split(a.view(), "\n")
+		require.True(t, strings.HasPrefix(view[0], "TOP"))
+		require.True(t, strings.HasPrefix(view[len(view)-1], "BOTTOM"))
+	}
+	for i := range grown {
+		require.InDelta(t, 12-4, grown[i]-4+shrunk[i]-4, 1, "matched elapsed grow/shrink use equal linear progress")
+	}
+	for a.anim.Running() {
+		advance(animation.TickRate)
+	}
+	require.Equal(t, 4, a.renderHeight)
+	tickCmd = a.startClose(false)
+	require.NotNil(t, tickCmd)
+	require.False(t, a.resizing)
+	advance(animation.TickRate)
+	require.Less(t, a.opacity(), 1.0, "closing alone adds the fade")
+	for a.anim.Running() {
+		advance(animation.TickRate)
+	}
+	require.Zero(t, r.ActiveCount())
+}
+
+func TestResizeReversalSamplesCurrentBoundsWithoutReopeningFade(t *testing.T) {
+	r := newDialogRuntime()
+	d := &lifecycleDialog{view: strings.Repeat("wide row\n", 3) + "bottom"}
+	a, tickCmd := newAnimatedDialog(r, d, 40, 20)
+	for a.anim.Running() {
+		acceptedDialogTick(r, tickCmd)
+		a.tick("open", 40, 20)
+		tickCmd = r.Continue()
+	}
+	d.view = strings.Repeat("wide row\n", 15) + "bottom"
+	tickCmd = a.retarget("grow", 40, 20)
+	for range 3 {
+		acceptedDialogTick(r, tickCmd)
+		a.tick("grow", 40, 20)
+		tickCmd = r.Continue()
+	}
+	before := a.renderHeight
+	d.view = "wide row\nbottom"
+	a.retarget("reverse", 40, 20)
+	require.Equal(t, before, a.fromHeight)
+	require.Equal(t, before, a.renderHeight)
+	require.InDelta(t, 1.0, a.fromAlpha, 0)
+	require.InDelta(t, 1.0, a.targetAlpha, 0)
+	require.Equal(t, int32(1), r.ActiveCount())
+	a.cancel()
+	require.Zero(t, r.ActiveCount())
+}
+
+func TestResizeCompositionStaysBoundedAndSuppressesTransientActionHits(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(60, 20)
+	d := NewSnapshotsDialog([]int{1}).(*snapshotsDialog)
+	_, openCmd := mgr.handleOpen(OpenDialogMsg{Model: d})
+	require.NotNil(t, openCmd)
+	tickCmd := r.EnsureRunning()
+	for mgr.stack[0].anim.Running() {
+		tick := acceptedDialogTick(r, tickCmd)
+		mgr.handleTick(tick)
+		tickCmd = r.Continue()
+	}
+	d.fileCounts = make([]int, 30)
+	_, updateCmd := mgr.Update(tea.WindowSizeMsg{Width: 16, Height: 8})
+	require.NotNil(t, updateCmd)
+	entry := &mgr.stack[0]
+	require.True(t, entry.resizing)
+	require.True(t, mgr.pointerSuppressed())
+	row, col := d.Position()
+	dl := NewDialogLayout(d.View(), row, col)
+	for y := row; y < row+dl.Height; y++ {
+		for x := col; x < col+dl.Width; x++ {
+			_, cmd := mgr.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y})
+			require.Nil(t, cmd, "resize frames cannot activate clipped or offscreen actions")
+		}
+	}
+	frame := mgr.View()
+	require.LessOrEqual(t, lipgloss.Width(frame), 16)
+	require.LessOrEqual(t, lipgloss.Height(frame), 8)
+	bounds := entry.renderHeight
+	alpha := entry.opacity()
+	mgr.Update(messages.ThemeChangedMsg{})
+	require.Equal(t, bounds, entry.renderHeight)
+	require.InDelta(t, alpha, entry.opacity(), 0, "theme refresh does not restart opening fade")
+	mgr.Cleanup()
+	require.Zero(t, r.ActiveCount())
 }

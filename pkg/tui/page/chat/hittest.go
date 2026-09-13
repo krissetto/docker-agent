@@ -15,6 +15,10 @@ const (
 	TargetSidebarStar
 	TargetSidebarTitle
 	TargetSidebarWorkingDir
+	TargetSidebarOpenWorkingDir
+	TargetSidebarModel
+	TargetSidebarQueuedMessage
+	TargetSidebarRemoveQueuedMessage
 	TargetSidebarAgent
 	TargetSidebarUsageContext
 	TargetSidebarUsage
@@ -33,6 +37,7 @@ type HitTest struct {
 	// SubagentID is the subagent node id when At() returns
 	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
 	// when it returns TargetSidebarParent.
+	QueueTurnID     string
 	SubagentID      string
 	ParentSessionID string
 }
@@ -118,8 +123,18 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarStar
 	case sidebar.ClickTitle:
 		return TargetSidebarTitle
+	case sidebar.ClickOpenWorkingDir:
+		return TargetSidebarOpenWorkingDir
 	case sidebar.ClickWorkingDir:
 		return TargetSidebarWorkingDir
+	case sidebar.ClickModel:
+		return TargetSidebarModel
+	case sidebar.ClickQueuedMessage:
+		h.QueueTurnID = agentName
+		return TargetSidebarQueuedMessage
+	case sidebar.ClickRemoveQueuedMessage:
+		h.QueueTurnID = agentName
+		return TargetSidebarRemoveQueuedMessage
 	case sidebar.ClickAgent:
 		h.AgentName = agentName
 		return TargetSidebarAgent

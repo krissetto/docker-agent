@@ -1,11 +1,13 @@
 package sidebar
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -26,15 +28,32 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	ref := lifecycle.ResolveInputReference(&subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: node}}}, "", node.SessionID, "stale")
 	m := newSubagentTestModel(t)
 	m.hoveredSubagent = node.ID
+	m.branchSpans = map[subagent.NodeID]branchSpans{node.ID: {idValue: 1, idTarget: 1}}
+	m.hoverValues = map[string]hoverValue{"node:" + string(node.ID): {value: 1, target: 1}}
 	sidebar := m.subagentLine(node, "", 80)
-	assert.Contains(t, ansi.Strip(sidebar), ref.Label())
-	assert.Contains(t, sidebar, styles.AgentIdentityStyle(node.Agent, true).Render(node.DisplayName()))
+	assert.Contains(t, ansi.Strip(sidebar), node.DisplayName()+" ✓ ("+ref.DisplayID+")", "sidebar state glyph precedes neutral canonical ID")
+	assert.Contains(t, sidebar, neutralSpan(" ("+ref.DisplayID+")", 1, ansi.StringWidth(" ("+ref.DisplayID+")")), "ID retains neutral foreground")
+	assert.Contains(t, sidebar, styles.HoverText(styles.AgentIdentityStyle(node.Agent, false).Render(node.DisplayName()), 1, styles.TextPrimary))
 	assert.Equal(t, styles.AgentAccentStyleFor(node.Agent).Render("name"), styles.AgentIdentityStyle(node.Agent, false).Render("name"))
 	assert.Equal(t, styles.AgentAccentStyleFor(node.Agent).Foreground(styles.Brighten(styles.AgentAccentStyleFor(node.Agent).GetForeground(), 0.25)).Render("name"), styles.AgentIdentityStyle(node.Agent, true).Render("name"))
 	label := agentidentity.Label(ref, 80)
 	name := styles.AgentIdentityStyle(node.Agent, false).Render(node.DisplayName())
 	suffix := styles.MutedStyle.Render(" (" + ref.DisplayID + ")")
-	assert.Equal(t, ansi.SetHyperlink(agentidentity.Link)+name+suffix+ansi.ResetHyperlink(), label)
+	assert.Equal(t, ref.Label(), ansi.Strip(label))
+	linked := identityLinkCells(label)
+	require.Len(t, linked, ansi.StringWidth(ref.Label()))
+	for _, url := range linked {
+		assert.Equal(t, agentidentity.Link, url, "name and neutral ID share the full clickable identity range")
+	}
+	cells := sidebarCells(label)
+	nameCells := ansi.StringWidth(node.DisplayName())
+	for i, cell := range cells {
+		want := styles.MutedStyle.GetForeground()
+		if i < nameCells {
+			want = styles.AgentIdentityStyle(node.Agent, false).GetForeground()
+		}
+		assert.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cell.fg), "name and ID keep independent semantic colors")
+	}
 	input := &types.Message{Type: types.MessageTypeAgentInput, Content: "literal **body**", InputReference: ref}
 	border := message.New(animation.NewRuntime(), input, nil).Render(80)
 	assert.Contains(t, border, ansi.SetHyperlink(agentidentity.Link))
@@ -52,4 +71,27 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
 	assert.Equal(t, "┃ "+ref.Label(), strings.TrimSpace(strings.Split(ansi.Strip(border), "\n")[0]))
 	assert.NotContains(t, ansi.Strip(border), "━", "identity header has no top rule")
+}
+
+func identityLinkCells(line string) []string {
+	parser := ansi.GetParser()
+	defer ansi.PutParser(parser)
+	var state byte
+	var active string
+	var cells []string
+	for line != "" {
+		seq, width, n, next := ansi.DecodeSequence(line, state, parser)
+		if n == 0 {
+			break
+		}
+		if payload, ok := strings.CutPrefix(seq, "\x1b]8;"); ok {
+			payload = strings.TrimSuffix(strings.TrimSuffix(payload, "\a"), "\x1b\\")
+			_, active, _ = strings.Cut(payload, ";")
+		}
+		for range width {
+			cells = append(cells, active)
+		}
+		state, line = next, line[n:]
+	}
+	return cells
 }

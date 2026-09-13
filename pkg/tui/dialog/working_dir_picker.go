@@ -321,10 +321,25 @@ func (d *workingDirPickerDialog) Init() tea.Cmd {
 }
 
 func (d *workingDirPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
 	activeScroll := d.activeScrollview()
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		boundary := k.Code == tea.KeyTab && ((k.Mod&tea.ModShift == 0 && d.section == sectionPinned) || (k.Mod&tea.ModShift != 0 && d.section == sectionBrowse))
+		if d.ActionsFocused() || boundary {
+			if action, handled := d.HandleActionKey(k); handled {
+				if action.Code == 0 {
+					return d, nil
+				}
+				msg = action
+			}
+		}
+	}
+
 	if handled, cmd := activeScroll.Update(msg); handled {
 		return d, cmd
 	}
@@ -636,7 +651,7 @@ func (d *workingDirPickerDialog) tabClickTarget(x, y int) int {
 	const rowsBeforeTabs = 2 // title(1) + titleGap(1)
 	tabY := dialogRow + dirPickerContentOffsetY + rowsBeforeTabs
 	if d.bodyScroll != nil {
-		tabY = d.bodyY - 1
+		tabY = d.bodyY - 1 - d.bodyHeaderGap
 		if d.section == sectionBrowse {
 			tabY--
 		}
@@ -738,12 +753,16 @@ func (d *workingDirPickerDialog) dialogSize() (dialogWidth, maxHeight, contentWi
 func (d *workingDirPickerDialog) View() string { return d.renderBody(false) }
 
 func (d *workingDirPickerDialog) renderBody(prepare bool) string {
-	d.textInput.SetStyles(styles.DialogInputStyle)
+	input := d.textInput
+	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
-	d.textInput.SetWidth(inner)
+	input.SetWidth(inner)
+	if prepare {
+		d.textInput = input
+	}
 	header := RenderTitle("Select Working Directory", inner, styles.DialogTitleStyle) + "\n" + d.renderTabs(inner)
 	if d.section == sectionBrowse {
-		header += "\n" + d.textInput.View()
+		header += "\n" + input.View()
 	}
 	state := d.activeSection()
 	lines := make([]string, 0, len(state.entries))
@@ -765,7 +784,17 @@ func (d *workingDirPickerDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{"No directories found"}
 	}
-	footer := d.RenderActionKeys(inner+d.bodyScroll.ReservedCols(), d.helpKeys()...)
+	actions := actionsForKeys(d.helpKeys()...)
+	for i := range actions {
+		if actions[i].Key.Code == tea.KeyEnter {
+			actions[i].Disabled = *state.selected < 0 || *state.selected >= len(state.entries)
+			actions[i].Label = "Use directory"
+			if !actions[i].Disabled && d.section == sectionBrowse && state.entries[*state.selected].kind != entryUseThisDir {
+				actions[i].Label = "Open directory"
+			}
+		}
+	}
+	footer := d.RenderActions(inner+d.bodyScroll.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""
@@ -775,7 +804,7 @@ func (d *workingDirPickerDialog) renderBody(prepare bool) string {
 
 // helpKeys returns the key/label pairs displayed at the bottom of the dialog.
 func (d *workingDirPickerDialog) helpKeys() []string {
-	keys := []string{"↑/↓", "navigate", "tab/shift+tab", "section", "enter", "select"}
+	keys := []string{"enter", "select"}
 	if label := d.pinHelpLabel(); label != "" {
 		keys = append(keys, "ctrl+p", label)
 	}

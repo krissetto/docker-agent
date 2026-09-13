@@ -134,7 +134,7 @@ func TestHandleRoutedMsg_TransferOnHiddenTabArmsTimersAndStaysLocal(t *testing.T
 		return newRealChatPage(t, sess, routingID)
 	})
 
-	const transferBoxMarker = "─ Transfer "
+	const transferBoxMarker = "root ●──► scout"
 	_, cmd := m.Update(messages.RoutedMsg{
 		SessionID: backgroundID,
 		Inner:     runtime.AgentSwitching(true, "root", "scout"),
@@ -145,4 +145,29 @@ func TestHandleRoutedMsg_TransferOnHiddenTabArmsTimersAndStaysLocal(t *testing.T
 		"the hop's box shows on its owning tab")
 	assert.NotContains(t, ansi.Strip(m.chatPages[activeID].View()), transferBoxMarker,
 		"the active tab shows nothing for another tab's hop")
+}
+
+func TestHiddenSidebarUpdatesNeverAcquireFinitePresentationLease(t *testing.T) {
+	ar := animation.NewRuntime()
+	t.Cleanup(ar.Stop)
+	m, activeID, backgroundID := newRoutedTestModel(t, func(sess *session.Session, routingID string) chat.Page {
+		page := chat.New(ar, t.Context(), app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{})), service.NewSessionState(sess))
+		page.SetRoutingID(routingID)
+		page.SetSize(140, 40)
+		return page
+	})
+	m.ar = ar
+	activeBefore := m.ar.ActiveCount()
+	_, cmd := m.Update(messages.RoutedMsg{SessionID: backgroundID, Inner: runtime.PendingUserMessageAccepted(backgroundID, "hidden-accepted-turn", "Hidden pending content", nil, 1)})
+	require.Equal(t, activeID, m.supervisor.ActiveID())
+	require.Equal(t, activeBefore, m.ar.ActiveCount(), "hidden queue/layout admission cannot acquire a discarded tick command")
+	require.NotNil(t, m.chatPages[backgroundID])
+	page, ok := m.chatPages[backgroundID].(interface{ SidebarView() string })
+	require.True(t, ok)
+	require.Contains(t, ansi.Strip(page.SidebarView()), "Hidden pending content", "hidden presentation snaps to its current canonical target")
+	require.Empty(t, collectMsgs(cmd))
+	_, cmd = m.Update(messages.RoutedMsg{SessionID: backgroundID, Inner: runtime.PendingUserMessageCanceled(backgroundID, "hidden-accepted-turn", 1)})
+	require.Equal(t, activeBefore, m.ar.ActiveCount())
+	require.NotContains(t, ansi.Strip(page.SidebarView()), "Hidden pending content")
+	require.Empty(t, collectMsgs(cmd))
 }

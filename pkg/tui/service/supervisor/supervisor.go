@@ -69,12 +69,13 @@ type SessionSpawner func(ctx context.Context, workingDir string) (SpawnedSession
 
 // Supervisor manages agent sessions.
 type Supervisor struct {
-	mu       sync.RWMutex
-	runners  map[string]*SessionTab
-	order    []string // Maintains tab order
-	activeID string
-	spawner  SessionSpawner
-	program  *tea.Program
+	mu              sync.RWMutex
+	runners         map[string]*SessionTab
+	order           []string // Maintains tab order
+	retiredCleanups []func()
+	activeID        string
+	spawner         SessionSpawner
+	program         *tea.Program
 
 	// Tab updates are coalesced behind one serialized sender. Runtime tree
 	// snapshots can fan the same invalidation out through several attached Apps;
@@ -779,6 +780,16 @@ func (s *Supervisor) Spawner() SessionSpawner {
 	return s.spawner
 }
 
+// RetainCleanupUntilShutdown keeps an owned runtime alive after its tab detaches.
+func (s *Supervisor) RetainCleanupUntilShutdown(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runner := s.runners[sessionID]; runner != nil && runner.cleanup != nil {
+		s.retiredCleanups = append(s.retiredCleanups, runner.cleanup)
+		runner.cleanup = nil
+	}
+}
+
 // CloseSession closes a session and removes it from the supervisor.
 func (s *Supervisor) CloseSession(sessionID string) string {
 	s.mu.Lock()
@@ -869,7 +880,8 @@ func (s *Supervisor) Shutdown() {
 	s.mu.Lock()
 
 	// Cancel all contexts first, then collect cleanup functions.
-	var cleanups []func()
+	cleanups := s.retiredCleanups
+	s.retiredCleanups = nil
 	var apps []*app.App
 	for _, runner := range s.runners {
 		if runner.App != nil {

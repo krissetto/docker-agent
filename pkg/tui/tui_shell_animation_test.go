@@ -212,7 +212,7 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 	require.Greater(t, height, 3, "narrow width must remeasure wrapped content before layout")
 	require.Equal(t, regionEditor, root.hitTestRegion(root.editorTop()))
 	require.Equal(t, regionContextUsage, root.hitTestRegion(root.editorTop()+height))
-	require.Equal(t, regionOutside, root.hitTestRegion(root.editorTop()+height+1))
+	require.Equal(t, regionMessageBar, root.hitTestRegion(root.editorTop()+height+1))
 	require.Equal(t, regionOutside, root.hitTestRegion(root.editorTop()+height+2))
 	require.Equal(t, strings.Repeat("wrapped draft ", 9), root.editor.Value())
 	for _, width := range []int{120, 83, 40} {
@@ -417,7 +417,7 @@ func TestActualProgramEditorDirectResizeAndPostSendCollapse(t *testing.T) {
 	require.Equal(t, 1, sent.editorTarget)
 	require.Greater(t, sent.editorHeight, 1, "send must not snap the displayed editor to one line")
 	require.True(t, sent.heightMoving)
-	require.Never(t, func() bool { return snapshot().editorHeight != sent.editorHeight }, 250*time.Millisecond, time.Millisecond, "post-send collapse holds before its animation")
+	neverInTestLoop(t, func() bool { return snapshot().editorHeight != sent.editorHeight }, 250*time.Millisecond, "post-send collapse holds before its animation")
 	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight < sent.editorHeight && s.editorHeight > 1 }, time.Second, time.Millisecond)
 	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight == 1 && !s.heightMoving }, 2*time.Second, time.Millisecond)
 	// The fake runtime leaves a pending-response spinner. Its 100ms frames
@@ -443,7 +443,7 @@ func TestActualProgramEditorDirectResizeAndPostSendCollapse(t *testing.T) {
 		t.Fatal("cancelled awaiting terminal flush")
 	}
 	writes := len(writer.snapshot())
-	require.Never(t, func() bool { return len(writer.snapshot()) != writes || snapshot().ticks != settled.ticks }, 80*time.Millisecond, time.Millisecond)
+	neverInTestLoop(t, func() bool { return len(writer.snapshot()) != writes || snapshot().ticks != settled.ticks }, 80*time.Millisecond, "settled editor must not write or tick")
 	program.Send(tea.PasteMsg{Content: "first-idle-input"})
 	require.Equal(t, "first-idle-input", snapshot().editor, "first idle input is applied in its event, without a frame lease")
 	program.Send(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})

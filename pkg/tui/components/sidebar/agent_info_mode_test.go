@@ -275,7 +275,7 @@ func TestCompactClickZonesEveryLine(t *testing.T) {
 		}
 	}
 	assert.Zero(t, clicks["root"], "the active agent does not replace the canonical root")
-	assert.Equal(t, 1, clicks["first"], "the initial canonical root owns one row")
+	assert.Zero(t, clicks["first"], "configured agents are not descendant rows")
 }
 
 // TestSetAgentInfoMode_LiveSwitch verifies switching modes invalidates the

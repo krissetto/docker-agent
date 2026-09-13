@@ -53,6 +53,11 @@ func TestSameSubagentNodesIncludesDisplayNameAndCreatedAt(t *testing.T) {
 	assert.False(t, sameSubagentNodes(left, right))
 	right[0].Node.CreatedAt = base
 	assert.True(t, sameSubagentNodes(left, right))
+	right[0].Node.NeedsAttention = true
+	assert.False(t, sameSubagentNodes(left, right), "attention-only snapshots are authoritative changes")
+	right[0].Node.NeedsAttention = false
+	right[0].Node.SessionID = "different-session"
+	assert.False(t, sameSubagentNodes(left, right), "session ownership cannot retain stale identity attribution")
 }
 
 func TestSubagentsInfo_RendersRunningSubagents(t *testing.T) {
@@ -66,7 +71,7 @@ func TestSubagentsInfo_RendersRunningSubagents(t *testing.T) {
 	assert.Contains(t, out, "coder")
 	assert.Contains(t, out, "reviewer")
 	// The synthetic session root is not shown; its subagents are the top level.
-	assert.Contains(t, out, "root")
+	assert.NotContains(t, out, "root")
 	// Right-aligned status column shows the node state.
 	assert.Contains(t, out, "running")
 	assert.Contains(t, out, "completed")
@@ -82,7 +87,8 @@ func TestSubagentsInfo_EmptyWhenNoSubagents(t *testing.T) {
 	m.SetSubagentTree(subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{
 		Node: subagent.Node{ID: "root:sess", Agent: "root", State: subagent.NodeRunning},
 	}}})
-	assert.Contains(t, m.subagentsInfo(40), "root")
+	assert.NotContains(t, m.subagentsInfo(40), "root")
+	assert.Empty(t, m.subagentsInfo(40))
 }
 
 func TestSubagentsInfo_InRenderSections(t *testing.T) {
@@ -141,10 +147,11 @@ func TestSubagentsInfo_HoverShowsTimeAgoAndID(t *testing.T) {
 	m.SetSubagentTree(subagentSnapshot())
 
 	m.hoveredSubagent = "a1b2c"
+	m.branchSpans = map[subagent.NodeID]branchSpans{"a1b2c": {idValue: 1, idTarget: 1}}
 	out := ansi.Strip(m.subagentsInfo(40))
-	assert.Contains(t, out, "coder (a1b2c)", "hovered row shows node id next to the agent name")
+	assert.Contains(t, out, "(a1b2c)", "hovered row shows node id next to the agent name")
 	assert.Contains(t, out, "10m ago", "hovered row shows spawn time instead of state")
-	assert.Contains(t, out, "running", "canonical root keeps its own state")
+	assert.NotContains(t, out, "running", "current root is excluded and hovered child shows time instead")
 	assert.Contains(t, out, "reviewer ✓", "non-hovered rows show the glyph after the name")
 	assert.NotContains(t, out, "completed ✓", "glyph no longer lives in the status column")
 	assert.NotContains(t, out, "reviewer (d4e5f)", "non-hovered rows do not show ids")
@@ -157,9 +164,11 @@ func TestSubagentHoverZonesAndClear(t *testing.T) {
 	m := newSubagentTestModel(t)
 	m.SetSize(40, 100)
 	m.SetSubagentTree(subagentSnapshot())
-	m.renderSections(35)
+	m.ReconcileLayout()
+	m.CancelPresentation()
+	m.View()
 
-	require.Len(t, m.subagentHoverZone, 3)
+	require.Len(t, m.subagentHoverZone, 2)
 
 	// Hovering a mapped line selects its node; a non-mapped line clears it.
 	var line int
@@ -194,7 +203,7 @@ func TestSubagentSpinnerLifecycle(t *testing.T) {
 		},
 	}}}
 	m.SetSubagentTree(done)
-	assert.True(t, m.subagentSpinnerOn, "running canonical root retains the shared spinner")
+	assert.False(t, m.subagentSpinnerOn, "current root is not rendered in its own descendant tree")
 	done.Nodes[0].Node.State = subagent.NodeIdle
 	m.SetSubagentTree(done)
 	assert.False(t, m.subagentSpinnerOn, "spinner stops when root and children are idle or terminal")
@@ -255,7 +264,7 @@ func TestLoadFromSessionRestoresSubagentTree(t *testing.T) {
 	// idle); the sidebar renders them as-is.
 	assert.Contains(t, out, "idle")
 	assert.Contains(t, out, "stopped")
-	assert.True(t, m.subagentSpinnerOn, "the canonical root is running even when its children are idle")
+	assert.False(t, m.subagentSpinnerOn, "only actual running descendants require tree spinner")
 }
 
 func TestLoadFromSessionClearsStaleSubagents(t *testing.T) {
@@ -364,7 +373,7 @@ func TestSubagentContextRootsViewAtNode(t *testing.T) {
 
 	out := m.subagentsInfo(40)
 	assert.Contains(t, out, "tester", "the attached subagent's own children render")
-	assert.Contains(t, out, "coder", "the attached subagent is the canonical root of its view")
+	assert.NotContains(t, out, "coder", "attached current agent is excluded from its own children")
 }
 
 // The parent line renders for attached tabs and resolves clicks to the parent
@@ -376,7 +385,7 @@ func TestSidebarSubagentClickZones(t *testing.T) {
 	m.SetSize(40, 50)
 	m.mode = ModeVertical
 	m.rootSessionID = "sess"
-	m.SetSubagentContext("", "root", "parent-sess")
+	m.SetSubagentContext("root:sess", "root", "parent-sess")
 	m.SetSubagentTree(subagentSnapshot())
 
 	view := m.View()
@@ -407,14 +416,16 @@ func TestSidebarSubagentClickZones(t *testing.T) {
 	// The parent line lives inside the Subagents section, separated from the
 	// children tree (newest sibling first) by exactly one blank line.
 	assert.Equal(t, -1, headerY, "the tree has no section heading")
-	assert.Equal(t, parentY+3, reviewerY, "parent spacer and canonical root precede children")
-	assert.Empty(t, strings.TrimSpace(ansi.Strip(viewLines[parentY+1])), "spacer line is visually empty")
+	assert.Equal(t, parentY+4, reviewerY, "parent gap, recap and expanded gap precede children")
+	assert.Empty(t, strings.TrimSpace(ansi.Strip(viewLines[parentY+1])))
+	assert.Contains(t, ansi.Strip(viewLines[parentY+2]), "2 subagents")
+	assert.Empty(t, strings.TrimSpace(ansi.Strip(viewLines[parentY+3])))
 
 	result, payload := m.HandleClickType(m.layoutCfg.PaddingLeft, parentY)
 	assert.Equal(t, ClickSubagentParent, result)
 	assert.Equal(t, "parent-sess", payload)
 
-	result, payload = m.HandleClickType(m.layoutCfg.PaddingLeft, coderY)
+	result, payload = m.HandleClickType(m.layoutCfg.PaddingLeft+2, coderY)
 	assert.Equal(t, ClickSubagent, result)
 	assert.Equal(t, "a1b2c", payload)
 }
@@ -464,18 +475,18 @@ func TestSubagentsInfoRendersBranchGuides(t *testing.T) {
 	assert.Contains(t, find("planner"), "planner")
 	assert.NotContains(t, find("planner"), "planner ○")
 	assert.Contains(t, find("planner"), "idle", "state text remains right-aligned")
-	assert.Contains(t, find("coder"), "  ├ coder", "child branch starts under the parent name")
+	assert.Contains(t, find("coder"), "├ coder", "child branch starts under the parent name")
 	assert.NotContains(t, find("coder"), "coder ○")
 	assert.Contains(t, find("coder"), "idle", "child status remains right-aligned")
-	assert.Contains(t, find("tester"), "  │ └ tester", "nested child branch starts under its parent name")
+	assert.Contains(t, find("tester"), "│ └ tester", "nested child branch starts under its parent name")
 	assert.Contains(t, find("reviewer"), "└ reviewer", "last sibling gets an elbow")
 	assert.NotContains(t, find("reviewer"), "reviewer ○")
 
-	assert.True(t, strings.HasPrefix(find("planner"), "└ planner"),
+	assert.True(t, strings.HasPrefix(find("planner"), "planner"),
 		"top-level rows start with the agent name: %q", find("planner"))
-	assert.True(t, strings.HasPrefix(find("reviewer"), "  └ reviewer"),
+	assert.True(t, strings.HasPrefix(find("reviewer"), "└ reviewer"),
 		"guides start under the parent name: %q", find("reviewer"))
-	assert.True(t, strings.HasPrefix(find("tester"), "  │ └ tester"),
+	assert.True(t, strings.HasPrefix(find("tester"), "│ └ tester"),
 		"rails inherit the parent-name origin: %q", find("tester"))
 }
 
@@ -537,6 +548,7 @@ func TestRenderSections_AnimationFramesServeStaticSectionsFromCache(t *testing.T
 		}
 	}
 	m.subagentNodes = kept
+	m.invalidateAnimation()
 	assert.NotContains(t, strings.Join(m.renderSections(40), "\n"), "reviewer",
 		"subagents section must re-render on animation frames")
 

@@ -117,8 +117,8 @@ func TestSidebar_HandleClickType(t *testing.T) {
 	assert.Equal(t, ClickTitle, result, "click on pencil icon area should return ClickTitle")
 
 	// Click elsewhere (wrong y)
-	result, _ = sb.HandleClickType(10, 0)
-	assert.Equal(t, ClickNone, result, "click elsewhere should return ClickNone")
+	result, _ = sb.HandleClickType(10, m.height-1)
+	assert.Equal(t, ClickNone, result, "unused viewport row should return ClickNone")
 }
 
 func TestSidebar_TitleRegenerating(t *testing.T) {
@@ -277,9 +277,9 @@ func TestSidebar_HandleClickType_WorkingDir_Vertical(t *testing.T) {
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 
-	// In vertical mode, working dir is at verticalStarY + titleLineCount + 1 (empty separator)
+	sb.View()
 	titleLines := m.titleLineCount()
-	wdY := verticalStarY + titleLines + 1
+	wdY := m.workingDirRow
 
 	// Click on the working directory line
 	result, _ := sb.HandleClickType(paddingLeft+3, wdY)
@@ -291,7 +291,7 @@ func TestSidebar_HandleClickType_WorkingDir_Vertical(t *testing.T) {
 
 	// Click on the empty separator line should return ClickNone
 	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY+titleLines)
-	assert.Equal(t, ClickNone, result, "click on separator line should return ClickNone")
+	assert.Equal(t, ClickNone, result, "deliberate title-directory breathing row is not actionable")
 }
 
 func TestSidebar_HandleClickType_WorkingDir_Collapsed(t *testing.T) {
@@ -341,11 +341,17 @@ func TestSidebar_HandleClickType_HiddenPath_Vertical(t *testing.T) {
 	m.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
 
 	paddingLeft := m.layoutCfg.PaddingLeft
-	wdY := verticalStarY + m.titleLineCount() + 1
-
-	// The line where the path used to be must not keep a copyable hit target.
-	result, _ := sb.HandleClickType(paddingLeft+3, wdY)
-	assert.Equal(t, ClickNone, result, "a hidden path must not be clickable")
+	view := sb.View()
+	assert.NotContains(t, view, "myapp")
+	assert.Equal(t, -1, m.workingDirRow, "hidden directory has no owned row")
+	for y := range m.height {
+		result, _ := sb.HandleClickType(paddingLeft+3, y)
+		assert.NotEqual(t, ClickWorkingDir, result, "no viewport row retains the hidden directory action")
+	}
+	result, _ := sb.HandleClickType(paddingLeft, m.usageReadingLine)
+	assert.Equal(t, ClickUsageContext, result, "usage takes its actual row after hidden-directory reflow")
+	result, _ = sb.HandleClickType(paddingLeft+m.usageContextSegWidth, m.usageReadingLine)
+	assert.Equal(t, ClickUsage, result, "the cost segment remains independently actionable")
 
 	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY)
 	assert.Equal(t, ClickTitle, result, "the title stays clickable")

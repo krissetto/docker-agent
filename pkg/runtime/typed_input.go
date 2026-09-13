@@ -48,6 +48,8 @@ func inputEventMetadata(event Event, msg QueuedMessage) Event {
 	switch event := event.(type) {
 	case *PendingUserMessageAcceptedEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+	case *PendingUserMessageEditedEvent:
+		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
 	case *PendingUserMessagePromotedEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
 	case *PendingUserMessageCanceledEvent:

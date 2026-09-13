@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -22,6 +23,24 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/workspacemedia"
 )
+
+// Default logger writes can outlive the test that started a session driver.
+type runtimeTestLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *runtimeTestLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *runtimeTestLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // newMediaTestRuntime builds the minimal LocalRuntime materialization needs:
 // a session store (for parent-chain WorkingDir lookup and the generated-media
@@ -246,7 +265,7 @@ func TestMaterializeGeneratedMedia_NoWorkspaceRoot(t *testing.T) {
 	r, store, dataDir := newMediaTestRuntime(t)
 	sess := &session.Session{ID: "sess-no-root"}
 
-	var logBuf bytes.Buffer
+	var logBuf runtimeTestLogBuffer
 	prevLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prevLogger) })
@@ -395,7 +414,7 @@ func TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons(t *testing.T) {
 			r, _, dataDir := newMediaTestRuntime(t)
 			sess, root := workspaceSession(t, "sess-classified-"+tc.name)
 
-			var logBuf bytes.Buffer
+			var logBuf runtimeTestLogBuffer
 			prevLogger := slog.Default()
 			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			t.Cleanup(func() { slog.SetDefault(prevLogger) })

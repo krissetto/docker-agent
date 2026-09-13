@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -13,7 +14,9 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -84,7 +87,7 @@ func TestRootResizePointerSameRowKeepsCacheAndCompletionAnchor(t *testing.T) {
 	_, _ = root.Update(completion.OpenMsg{Items: []completion.Item{{Label: "completion-anchor", Value: "completion-anchor"}}})
 	_, _ = root.Update(tea.MouseClickMsg{X: 40, Y: root.contentHeight, Button: tea.MouseLeft})
 	for _, lines := range []int{7, 8, 6, 9} {
-		y := root.height - lines - styles.EditorStyle.GetVerticalFrameSize() - root.tabBar.Height() - root.editor.BannerHeight() - 1
+		y := root.height - lines - styles.EditorStyle.GetVerticalFrameSize() - root.tabBar.Height() - root.editor.BannerHeight() - 1 - root.messageBarHeight()
 		motion := tea.MouseMotionMsg{X: 40, Y: y, Button: tea.MouseLeft}
 		_, _ = root.Update(messages.PointerUpdateMsg{X: 40, Y: y, Motion: &motion})
 		require.Equal(t, lines-1, root.editorHeight)
@@ -103,17 +106,47 @@ func TestRootResizePointerSameRowKeepsCacheAndCompletionAnchor(t *testing.T) {
 	require.False(t, root.editorHeightMotion.Running())
 }
 
+func prepareRootImmediateChrome(root *appModel) {
+	root.ar.Stop()
+	root.ar = animation.NewRuntimeWithScheduler(&rootImmediateScheduler{now: time.Unix(1, 0)})
+	root.dialogMgr = dialog.New(root.ar)
+	root.tabBar = tabbar.New(root.ar, 0)
+	root.tabBar.SetWidth(tabFrameWidth(root.width))
+	root.tabBar.SetTabs(root.tabInfos, 0)
+	root.viewCacheValid = false
+}
+
+func settleRootChrome(t *testing.T, root *appModel, cmd tea.Cmd) {
+	t.Helper()
+	pending := collectMsgs(cmd)
+	for step := 0; step < 40 && root.ar.ActiveCount() > 0; step++ {
+		var next []tea.Msg
+		for _, msg := range pending {
+			if _, ok := msg.(animation.TickMsg); ok {
+				_, cmd := root.Update(msg)
+				next = append(next, collectMsgs(cmd)...)
+			}
+		}
+		pending = next
+	}
+	require.Zero(t, root.ar.ActiveCount(), "original chrome command chain must settle")
+}
+
 func TestRootSingleTabPlusHoverLeaveAndOutsideRelease(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
+	prepareRootImmediateChrome(root)
 	plain := ansi.Strip(root.tabBar.View())
 	index := strings.LastIndex(plain, "+")
 	require.GreaterOrEqual(t, index, 0)
 	x, y := ansi.StringWidth(plain[:index])+tabFrameOrigin(), root.contentHeight+1
 	idle := root.View().Content
-	_, _ = root.Update(tea.MouseMotionMsg{X: x, Y: y})
+	_, hoverCmd := root.Update(tea.MouseMotionMsg{X: x, Y: y})
+	require.Equal(t, idle, root.View().Content, "hover starts at currentcolor")
+	settleRootChrome(t, root, hoverCmd)
 	hovered := root.View().Content
 	require.NotEqual(t, idle, hovered, "root forwards plus hover in tab-local cells")
-	_, _ = root.Update(tea.MouseMotionMsg{X: x, Y: y - 2})
+	_, leaveCmd := root.Update(tea.MouseMotionMsg{X: x, Y: y - 2})
+	settleRootChrome(t, root, leaveCmd)
 	require.Equal(t, idle, root.View().Content, "leave clears plus hover")
 	_, cmd := root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.Contains(t, collectMsgs(cmd), tea.Msg(messages.SpawnSessionMsg{}))
@@ -128,20 +161,36 @@ func TestRootSingleTabPlusHoverLeaveAndOutsideRelease(t *testing.T) {
 
 func TestRootBackgroundDialogTabPlusHoverLeavesAfterRelease(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
-	_, _ = root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil), OriginatingEvent: "background-tab-hover"})
+	prepareRootImmediateChrome(root)
+	_, openCmd := root.Update(dialog.OpenDialogMsg{Model: dialog.NewHelpDialog(nil), OriginatingEvent: "background-tab-hover"})
+	settleRootChrome(t, root, openCmd)
 	require.True(t, root.dialogMgr.TopIsBackground())
 	idle := root.tabBar.View()
 	plain := ansi.Strip(idle)
 	index := strings.LastIndex(plain, "+")
 	require.GreaterOrEqual(t, index, 0)
 	x, y := ansi.StringWidth(plain[:index])+tabFrameOrigin(), root.contentHeight+1
-	_, _ = root.Update(tea.MouseMotionMsg{X: x, Y: y})
+	_, hoverCmd := root.Update(tea.MouseMotionMsg{X: x, Y: y})
+	settleRootChrome(t, root, hoverCmd)
 	require.NotEqual(t, idle, root.tabBar.View(), "background dialog permits tab hover")
-	_, _ = root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	_, clickCmd := root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	_, _ = root.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.False(t, root.tabBar.HasPointerCapture())
 	_, _ = root.Update(tea.MouseMotionMsg{X: x, Y: y - 2})
-	require.Equal(t, idle, root.tabBar.View(), "leave clears tab hover without capture behind a background dialog")
+	require.NotEqual(t, idle, root.tabBar.View(), "release and leave do not snap the accepted pulse")
+	pending := collectMsgs(clickCmd)
+	for step := 0; step < 30 && root.tabBar.IsAnimating(); step++ {
+		var next []tea.Msg
+		for _, msg := range pending {
+			if _, ok := msg.(animation.TickMsg); ok {
+				_, cmd := root.Update(msg)
+				next = append(next, collectMsgs(cmd)...)
+			}
+		}
+		pending = next
+	}
+	require.False(t, root.tabBar.IsAnimating())
+	require.Equal(t, idle, root.tabBar.View(), "finite feedback settles outside behind a background dialog")
 }
 
 func TestRootTinyTabAllocationDoesNotUseFallbackWidth(t *testing.T) {

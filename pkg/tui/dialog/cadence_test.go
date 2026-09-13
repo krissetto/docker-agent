@@ -190,3 +190,69 @@ func TestSettingsUnchangedMotionDoesNotMeasureRenderOrLease(t *testing.T) {
 	mgr.Cleanup()
 	assert.Zero(t, r.ActiveCount())
 }
+
+func TestSharedTicksKeepPreparedTargetLayoutWarm(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(40, 12)
+	d := &measuredSettingsDialog{settingsDialog: NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)}
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	mgr.View()
+	mgr.takeTopVisualDirty()
+	mgr.TakeVisualDirty()
+	entry := &mgr.stack[0]
+	views, measurements := d.views, entry.boundsMeasurementCount
+	targetHeight := entry.targetHeight
+	generation := d.bodyScroll.VisualGeneration()
+	preparations := d.bodyPreparationCount
+	gutter := d.bodyScroll.ReservedCols()
+	x, y, w, h := d.BodyScrollBounds()
+	tickCmd := r.EnsureRunning()
+	for entry.anim.Running() {
+		tick := acceptedDialogTick(r, tickCmd)
+		mgr.handleTick(tick)
+		tickCmd = r.Continue()
+		mgr.View()
+		require.Equal(t, views, d.views, "outer transition clips prepared content without full dialog render")
+		require.Equal(t, measurements, entry.boundsMeasurementCount)
+		require.Equal(t, targetHeight, entry.targetHeight)
+		require.Equal(t, generation, d.bodyScroll.VisualGeneration(), "shared ticks never resize/repopulate body")
+		require.Equal(t, preparations, d.bodyPreparationCount, "shared ticks never prepare/reflow unchanged target content")
+		require.Equal(t, gutter, d.bodyScroll.ReservedCols())
+		nextX, nextY, nextW, nextH := d.BodyScrollBounds()
+		require.Equal(t, []int{x, y, w, h}, []int{nextX, nextY, nextW, nextH})
+	}
+	require.Nil(t, tickCmd)
+	require.Zero(t, r.ActiveCount())
+	mgr.Cleanup()
+}
+
+type tickDirtyDialog struct {
+	lifecycleDialog
+
+	frame int
+}
+
+func (d *tickDirtyDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if tick, ok := msg.(animation.TickMsg); ok {
+		d.frame++
+		d.view = fmt.Sprintf("frame %d", d.frame)
+		tick.MarkDirty()
+	}
+	return d, nil
+}
+
+func TestSharedTickChildDirtyMarkerRefreshesCachedContent(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(40, 12)
+	d := &tickDirtyDialog{lifecycleDialog: lifecycleDialog{view: "frame 0"}}
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	tickCmd := r.EnsureRunning()
+	tick := acceptedDialogTick(r, tickCmd)
+	mgr.handleTick(tick)
+	require.True(t, tick.Dirty())
+	require.Equal(t, "frame 1", mgr.stack[0].intrinsicView(), "child dirty output must update even while outer transition also needs paint")
+	mgr.Cleanup()
+	require.Zero(t, r.ActiveCount())
+}

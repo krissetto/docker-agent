@@ -81,10 +81,14 @@ func TestSettingsDialogTabSwitching(t *testing.T) {
 	assert.Equal(t, tabNotifications, d.tab)
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabAppearance, d.tab, "tab wraps around")
+	assert.Equal(t, tabNotifications, d.tab, "content stays on its last section while actions are focused")
+	require.True(t, d.ActionsFocused())
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	assert.Equal(t, tabNotifications, d.tab, "shift+tab cycles backwards")
+	assert.Equal(t, tabNotifications, d.tab, "shift+tab returns from actions to the previous content section")
+	require.False(t, d.ActionsFocused())
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	assert.Equal(t, tabBehavior, d.tab, "content shift+tab cycles backward")
 }
 
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
@@ -604,4 +608,42 @@ func TestSettingsSmallViewportSelectionAndApplyMouseAction(t *testing.T) {
 	msgs := collectMsgs(cmd)
 	require.NotEmpty(t, msgs)
 	assert.IsType(t, CloseDialogMsg{}, msgs[0])
+}
+
+func TestSettingsActionsMatchSelectedControl(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	labels := func() []string {
+		var labels []string
+		for _, a := range d.actions() {
+			labels = append(labels, a.Label)
+		}
+		return labels
+	}
+	require.Contains(t, labels(), "Choose theme")
+	require.NotContains(t, labels(), "Decrease", "theme has no previous-value operation")
+	d.selected[tabAppearance] = rowRenderImages
+	require.Contains(t, labels(), "Toggle")
+	require.NotContains(t, labels(), "Decrease")
+	d.selected[tabAppearance] = rowPosition
+	require.Contains(t, labels(), "Previous")
+	require.Contains(t, labels(), "Next")
+	d.tab = tabBehavior
+	d.selected[d.tab] = rowTabTitleLength
+	d.current.TabTitleMaxLength = 5
+	for _, a := range d.actions() {
+		if a.Label == "Decrease" {
+			require.True(t, a.Disabled)
+		}
+		if a.Label == "Increase" {
+			require.False(t, a.Disabled)
+		}
+	}
+	d.tab = tabNotifications
+	d.selected[d.tab] = rowSoundThreshold
+	d.current.Sound = false
+	require.NotContains(t, labels(), "Decrease")
+	require.NotContains(t, labels(), "Increase")
+	before := d.current
+	d.changeValue(1)
+	require.Equal(t, before, d.current, "disabled selection cannot mutate settings")
 }

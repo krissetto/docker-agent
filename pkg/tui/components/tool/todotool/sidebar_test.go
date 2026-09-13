@@ -4,11 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func todoResult(descriptions ...string) *tools.ToolCallResult {
@@ -86,4 +88,30 @@ func TestRenderCacheBounded(t *testing.T) {
 		_ = c.Render()
 	}
 	assert.LessOrEqual(t, len(c.renderCache), renderCacheCap)
+}
+
+func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	c := NewSidebarComponent()
+	c.SetSize(40)
+	require.NoError(t, c.SetTodos(todoResult("alpha task")))
+	body := c.RenderBody()
+	assert.Equal(t, "◯ alpha task", strings.TrimSpace(ansi.Strip(body)))
+	assert.NotContains(t, body, "TO-DO")
+	assert.Contains(t, c.Render(), "TO-DO")
+	assert.Equal(t, body, c.RenderBody())
+	c.SetSize(8)
+	assert.Greater(t, len(strings.Split(c.RenderBody(), "\n")), 1)
+	c.SetSize(40)
+	theme := *original
+	theme.Colors.TextPrimary = "#abcdef"
+	styles.ApplyTheme(&theme)
+	c.InvalidateCache()
+	after := c.RenderBody()
+	assert.Equal(t, ansi.Strip(body), ansi.Strip(after))
+	assert.NotEqual(t, body, after)
+	require.NoError(t, c.SetTodos(todoResult("beta task")))
+	assert.Contains(t, c.RenderBody(), "beta")
+	assert.NotContains(t, c.RenderBody(), "alpha")
 }

@@ -89,7 +89,6 @@ func confirmationFormFamilies(t *testing.T) map[string]func() Dialog {
 	t.Helper()
 	return map[string]func() Dialog{
 		"exit":           NewExitConfirmationDialog,
-		"interrupt":      NewInterruptConfirmationDialog,
 		"close-root":     func() Dialog { return NewCloseRootWithSubagentsDialog("root") },
 		"max-iterations": func() Dialog { return NewMaxIterationsDialog(10, "session", "request") },
 		"oauth":          func() Dialog { return NewOAuthAuthorizationDialog("https://example.test/auth", ElicitationRef{}) },
@@ -297,9 +296,8 @@ func TestConfirmationProseWrapsAtBodyWidthOnce(t *testing.T) {
 		factory func() Dialog
 		prose   string
 	}{
-		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }, "This session has running subagents. Closing it will interrupt their current work and close their tabs. Continue?"},
+		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }, "Close this tab? Subagents keep running and their open tabs stay open."},
 		{"exit", NewExitConfirmationDialog, "Do you want to exit?"},
-		{"interrupt", NewInterruptConfirmationDialog, "Stop the current response?"},
 		{"max", func() Dialog { return NewMaxIterationsDialog(10, "session", "request") }, "The agent may be stuck in a loop. This can happen with smaller or less capable models."},
 		{"oauth", func() Dialog { return NewOAuthAuthorizationDialog("server", ElicitationRef{}) }, "This server requires OAuth authentication to access its tools. Your browser will open automatically to complete the authorization process."},
 		{"url", func() Dialog {
@@ -364,4 +362,236 @@ func TestFormViewsPreservePreparedInteractionState(t *testing.T) {
 			assert.Equal(t, before, tc.state(), "rendering must not change prepared focus, geometry, scroll generation, or registrations")
 		})
 	}
+}
+
+func TestMCPExecuteAvailabilityMatchesRequiredFields(t *testing.T) {
+	d := NewMCPPromptInputDialog("required", mcptools.PromptInfo{Arguments: []mcptools.PromptArgument{{Name: "name", Required: true}}}).(*MCPPromptInputDialog)
+	d.SetSize(70, 20)
+	x, y := familyActionCell(t, d, "Execute")
+	_, cmd := d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	assert.Nil(t, cmd, "required empty input disables Execute")
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.Nil(t, cmd, "keyboard obeys the same required-input guard")
+	_, _ = d.Update(tea.PasteMsg{Content: "value"})
+	x, y = familyActionCell(t, d, "Execute")
+	_, cmd = d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	response, ok := findMsg[messages.MCPPromptMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.Equal(t, "value", response.Arguments["name"])
+}
+
+func TestMultiChoiceDisabledPrimaryAndAbsentSecondaryFocus(t *testing.T) {
+	d := NewMultiChoiceDialog(MultiChoiceConfig{Title: "Choose", Options: []MultiChoiceOption{{ID: "one", Label: "One", Value: "value"}}}).(*multiChoiceDialog)
+	d.SetSize(70, 20)
+	x, y := familyActionCell(t, d, "Continue")
+	_, cmd := d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	assert.Nil(t, cmd, "Continue cannot submit without a selection")
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.False(t, d.isSecondaryDefault(), "Tab cannot focus an absent secondary action")
+	assert.NotContains(t, ansi.Strip(d.View()), "Skip")
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.Equal(t, "one", result.Result.OptionID)
+	assert.Equal(t, "value", result.Result.Value)
+}
+
+func TestElicitationSubmitRemainsAvailableForValidation(t *testing.T) {
+	d := NewElicitationDialog("Question", map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}, "required": []any{"name"}}, nil, ElicitationRef{}).(*ElicitationDialog)
+	d.SetSize(70, 20)
+	x, y := familyActionCell(t, d, "Submit")
+	_, cmd := d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	assert.Nil(t, cmd)
+	assert.NotEmpty(t, d.fieldErrors, "Submit performs useful validation even when the form is incomplete")
+	assert.False(t, d.responseSent, "validation must not answer the runtime waiter")
+}
+
+func TestOwnedFamiliesTitleBodyGapDoesNotEnterScrollableContent(t *testing.T) {
+	for name, factory := range confirmationFormFamilies(t) {
+		t.Run(name, func(t *testing.T) {
+			d := factory()
+			d.SetSize(100, 40)
+			view := d.View()
+			row, col := d.Position()
+			body := d.(interface {
+				BodyScrollBounds() (int, int, int, int)
+				BodyScrollOffset() int
+			})
+			x, y, width, height := body.BodyScrollBounds()
+			require.Positive(t, height)
+			require.Positive(t, y-row)
+			lines := strings.Split(ansi.Strip(view), "\n")
+			gap := strings.TrimSpace(ansi.Cut(lines[y-row-1], x-col, x-col+max(1, width-2)))
+			assert.Empty(t, gap, "shared title gap is outside the body's first row")
+			assert.Zero(t, body.BodyScrollOffset())
+			if cleanup, ok := d.(interface{ Cleanup() }); ok {
+				cleanup.Cleanup()
+			}
+		})
+	}
+}
+
+func TestFormActionBoundariesDoNotStealInputKeys(t *testing.T) {
+	mcp := NewMCPPromptInputDialog("fields", mcptools.PromptInfo{Arguments: []mcptools.PromptArgument{{Name: "first"}, {Name: "second"}}}).(*MCPPromptInputDialog)
+	mcp.SetSize(70, 20)
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
+	assert.Equal(t, "ba", mcp.inputs[0].Value())
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.Equal(t, 1, mcp.currentInput)
+	assert.False(t, mcp.ActionsFocused())
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.True(t, mcp.ActionsFocused())
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	assert.Empty(t, mcp.inputs[1].Value(), "action focus does not type into blurred fields")
+	_, _ = mcp.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	assert.False(t, mcp.ActionsFocused())
+	assert.Equal(t, 1, mcp.currentInput)
+	assert.True(t, mcp.inputs[1].Focused())
+
+	form := NewElicitationDialog("Question", nil, nil, ElicitationRef{SessionID: "session", RequestID: "request"}).(*ElicitationDialog)
+	form.SetSize(70, 20)
+	_, _ = form.Update(tea.PasteMsg{Content: "answer"})
+	_, _ = form.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.True(t, form.ActionsFocused())
+	_, _ = form.Update(tea.PasteMsg{Content: "ignored"})
+	assert.Equal(t, "answer", form.responseInput.Value())
+	_, cmd := form.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	response := findElicitationResponse(t, cmd)
+	assert.Equal(t, "request", response.Response.InteractionID)
+	assert.Equal(t, map[string]any{"response": "answer"}, response.Response.Elicitation.Content)
+}
+
+func TestDecisionActionFocusRoutesOriginalKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		factory func() Dialog
+		want    any
+	}{
+		{"exit", NewExitConfirmationDialog, ExitConfirmedMsg{}},
+		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }, CloseRootWithSubagentsConfirmedMsg{SessionID: "root"}},
+		{"tour", func() Dialog { return NewTourOfferDialog(false) }, TourOfferResultMsg{Choice: TourOfferAccepted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.factory()
+			d.SetSize(80, 24)
+			_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			assert.Contains(t, collectMsgs(cmd), tc.want)
+		})
+	}
+	ref := ElicitationRef{SessionID: "session", RequestID: "request", ElicitationID: "elicitation"}
+	for _, factory := range []func() Dialog{
+		func() Dialog { return NewOAuthAuthorizationDialog("server", ref) },
+		func() Dialog { return NewURLElicitationDialog(t.Context(), "Question", "", ref) },
+	} {
+		d := factory()
+		d.SetSize(80, 24)
+		_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		response := findElicitationResponse(t, cmd)
+		assert.Equal(t, "session", response.SessionID)
+		assert.Equal(t, "request", response.Response.InteractionID)
+		assert.Equal(t, tools.ElicitationActionAccept, response.Response.Elicitation.Action)
+	}
+}
+
+func TestRuntimeDecisionEscapeAndCloseRejectExactlyOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		factory func() Dialog
+		kind    runtime.InteractionKind
+	}{
+		{"max", func() Dialog { return NewMaxIterationsDialog(10, "session", "request") }, runtime.InteractionMaxIterations},
+		{"tool", func() Dialog {
+			return NewToolConfirmationDialog(animation.NewRuntime(), &runtime.ToolCallConfirmationEvent{SessionID: "session", RequestID: "request"}, &service.SessionState{})
+		}, runtime.InteractionConfirmation},
+	} {
+		for _, path := range []string{"escape", "close"} {
+			t.Run(tc.name+"/"+path, func(t *testing.T) {
+				d := tc.factory()
+				d.SetSize(80, 24)
+				outside := d.(interface{ OutsideClickDismissCmd() tea.Cmd })
+				assert.Nil(t, outside.OutsideClickDismissCmd(), "outside clicks cannot answer a runtime decision")
+				var cmd tea.Cmd
+				if path == "escape" {
+					_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+				} else {
+					view := d.View()
+					row, col := d.Position()
+					dl := NewDialogLayout(view, row, col)
+					chrome := d.(interface {
+						CloseButtonHit(msg tea.MouseClickMsg, dl DialogLayout) bool
+					})
+					found := false
+					for y := row; y < row+lipgloss.Height(view) && !found; y++ {
+						for x := col; x < col+lipgloss.Width(view); x++ {
+							click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+							if chrome.CloseButtonHit(click, dl) {
+								_, cmd = d.Update(click)
+								found = true
+								break
+							}
+						}
+					}
+					require.True(t, found)
+				}
+				response, ok := findMsg[messages.InteractionResponseMsg](collectMsgs(cmd))
+				require.True(t, ok)
+				assert.Equal(t, "session", response.SessionID)
+				assert.Equal(t, "request", response.Response.InteractionID)
+				assert.Equal(t, tc.kind, response.Response.Kind)
+				assert.Equal(t, runtime.ResumeReject(""), response.Response.Resume)
+				_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+				assert.Nil(t, cmd)
+			})
+		}
+	}
+}
+
+func TestConfirmationSelectionEnterHintTracksArrowAndResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		factory func() Dialog
+		yes     any
+	}{
+		{"exit", NewExitConfirmationDialog, ExitConfirmedMsg{}},
+		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }, CloseRootWithSubagentsConfirmedMsg{SessionID: "root"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.factory()
+			d.SetSize(100, 30)
+			initial := ansi.Strip(d.View())
+			assert.Equal(t, 1, strings.Count(initial, "↵"))
+			assert.Contains(t, initial, "No ↵")
+			assert.NotContains(t, initial, "No ↵ n")
+			_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+			after := ansi.Strip(d.View())
+			assert.Equal(t, 1, strings.Count(after, "↵"))
+			assert.NotContains(t, after, "No ↵")
+			assert.NotEqual(t, initial, after)
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			assert.Contains(t, collectMsgs(cmd), tc.yes)
+		})
+	}
+}
+
+func TestFormDefaultEnterMarkerMovesOnlyWithActionFocus(t *testing.T) {
+	d := NewMultiChoiceDialog(MultiChoiceConfig{Title: "Choose", Options: []MultiChoiceOption{{ID: "one", Label: "One", Value: "value"}}, AllowSecondary: true}).(*multiChoiceDialog)
+	d.SetSize(100, 30)
+	_, _ = d.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
+	initial := ansi.Strip(d.View())
+	assert.Equal(t, 1, strings.Count(initial, "↵"))
+	assert.NotContains(t, initial, "Skip ↵")
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	focused := ansi.Strip(d.View())
+	assert.Equal(t, 1, strings.Count(focused, "↵"))
+	assert.Contains(t, focused, "Skip")
+	assert.NotEqual(t, initial, focused)
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.True(t, result.Result.IsSkipped)
 }

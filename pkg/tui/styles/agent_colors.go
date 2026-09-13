@@ -2,7 +2,10 @@ package styles
 
 import (
 	"image/color"
+	"maps"
+	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"charm.land/lipgloss/v2"
 )
@@ -39,23 +42,35 @@ var agentRegistry struct {
 	accentStyles []lipgloss.Style
 }
 
+var agentColorGeneration atomic.Uint64
+
+// AgentColorGeneration identifies effective roster or generated identity-color changes.
+func AgentColorGeneration() uint64 { return agentColorGeneration.Load() }
+
 // SetAgentOrder updates the agent name → index mapping and rebuilds the style cache.
 // Call this when the team info changes (e.g., on TeamInfoEvent).
 func SetAgentOrder(agentNames []string) {
 	agentRegistry.Lock()
 	defer agentRegistry.Unlock()
 
-	agentRegistry.indices = make(map[string]int, len(agentNames))
+	indices := make(map[string]int, len(agentNames))
 	for i, name := range agentNames {
-		agentRegistry.indices[name] = i
+		indices[name] = i
 	}
-
-	rebuildAgentColorCache()
+	if maps.Equal(indices, agentRegistry.indices) {
+		return
+	}
+	agentRegistry.indices = indices
+	if !rebuildAgentColorCache() {
+		agentColorGeneration.Add(1)
+	}
 }
 
 // rebuildAgentColorCache precomputes badge and accent styles from the current theme's hues.
 // Must be called with agentRegistry.Lock held.
-func rebuildAgentColorCache() {
+func rebuildAgentColorCache() bool {
+	oldBadges, oldAccents := agentRegistry.badgeStyles, agentRegistry.accentStyles
+	oldFallback, oldFallbackAccent := fallbackBadgeStyle, fallbackAccentStyle
 	theme := CurrentTheme()
 	fallbackAccentStyle = BaseStyle.Foreground(Accent)
 	fallbackBadgeColors = AgentBadgeColors{Fg: EnsureContrast(Background, Accent), Bg: Accent}
@@ -98,6 +113,11 @@ func rebuildAgentColorCache() {
 	for i, c := range accentColors {
 		agentRegistry.accentStyles[i] = BaseStyle.Foreground(c)
 	}
+	changed := !reflect.DeepEqual(oldBadges, agentRegistry.badgeStyles) || !reflect.DeepEqual(oldAccents, agentRegistry.accentStyles) || !reflect.DeepEqual(oldFallback, fallbackBadgeStyle) || !reflect.DeepEqual(oldFallbackAccent, fallbackAccentStyle)
+	if changed {
+		agentColorGeneration.Add(1)
+	}
+	return changed
 }
 
 // InvalidateAgentColorCache rebuilds the cached agent styles.

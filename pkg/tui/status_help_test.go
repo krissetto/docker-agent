@@ -72,7 +72,14 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 			require.False(t, key.Matches(msg, hint), "shortcut deliberately absent from primary footer")
 		}
 		_, cmd := m.Update(msg)
-		require.Contains(t, collectMsgs(cmd), tc.want, "shortcut %s still dispatches", msg.String())
+		if tc.code == 'w' {
+			open, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+			require.True(t, ok, "sole-tab close uses shared exit confirmation")
+			require.IsType(t, dialog.NewExitConfirmationDialog(), open.Model)
+			require.Equal(t, 1, m.supervisor.Count(), "close key never detaches the sole tab before confirmation")
+		} else {
+			require.Contains(t, collectMsgs(cmd), tc.want, "shortcut %s still dispatches", msg.String())
+		}
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
 	_, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
@@ -125,5 +132,5 @@ func TestRootSingleTabNewTabPlacementAndDispatch(t *testing.T) {
 	_, opened := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
 	require.True(t, opened, "plus dispatches the existing new-session directory picker")
 	_, cmd = m.Update(tea.MouseClickMsg{X: x, Y: m.height - 1, Button: tea.MouseLeft})
-	require.Nil(t, cmd, "context strip has no obsolete footer button hit region")
+	require.Nil(t, cmd, "version strip has no obsolete footer button hit region")
 }

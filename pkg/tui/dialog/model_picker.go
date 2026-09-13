@@ -143,10 +143,22 @@ func (d *modelPickerDialog) setQuery(query string) {
 }
 
 func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -358,10 +370,14 @@ func (d *modelPickerDialog) filterModels() {
 func (d *modelPickerDialog) View() string { return d.renderBody(false) }
 
 func (d *modelPickerDialog) renderBody(prepare bool) string {
-	d.textInput.SetStyles(styles.DialogInputStyle)
+	input := d.textInput
+	input.SetStyles(styles.DialogInputStyle)
 	width, _, inner := d.dialogSize()
-	d.textInput.SetWidth(inner)
-	header := RenderTitle("Select Model", inner, styles.DialogTitleStyle) + "\n" + d.textInput.View() + "\n" + d.renderColumnHeader(inner)
+	input.SetWidth(inner)
+	if prepare {
+		d.textInput = input
+	}
+	header := RenderTitle("Select Model", inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + d.renderColumnHeader(inner)
 	if d.errMsg != "" {
 		header += "\n" + styles.ErrorStyle.Render(d.errMsg)
 	}
@@ -371,7 +387,10 @@ func (d *modelPickerDialog) renderBody(prepare bool) string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, strings.Split(d.renderDetails(inner), "\n")...)
-	footer := d.RenderActionKeys(d.regionWidth(inner), "enter", "Select", d.refresh.Help().Key, d.refresh.Help().Desc)
+	actions := actionsForKeys("enter", "Use model")
+	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
+	actions = append(actions, actionsForKeys(d.refresh.Help().Key, "Refresh")...)
+	footer := d.RenderActions(d.regionWidth(inner), actions...)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }
 

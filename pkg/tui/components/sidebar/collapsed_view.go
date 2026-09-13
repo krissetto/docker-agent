@@ -15,6 +15,8 @@ type CollapsedViewModel struct {
 	WorkingIndicator string
 	WorkingDir       string
 	Branch           string
+	Yolo             string
+	ModelInfo        string
 	UsageSummary     string
 	// InfoLine is the compact agents/tools/todos summary shown when the
 	// sidebar renders as a horizontal band.
@@ -28,8 +30,7 @@ type CollapsedViewModel struct {
 
 // LineCount returns the number of lines needed to render this layout.
 func (vm CollapsedViewModel) LineCount() int {
-	lines := 1 // divider
-	lines += vm.titleSectionLines()
+	lines := vm.titleSectionLines()
 
 	// Path + usage metadata row. The two share one line only when both are
 	// present and fit; a missing part (e.g. hidden session path or hidden
@@ -47,6 +48,10 @@ func (vm CollapsedViewModel) LineCount() int {
 	}
 
 	lines += linesNeededOptional(vm.Branch, vm.ContentWidth)
+	lines += linesNeededOptional(vm.Yolo, vm.ContentWidth)
+	if vm.ModelInfo != "" {
+		lines += len(strings.Split(vm.ModelInfo, "\n"))
+	}
 
 	if vm.InfoLine != "" {
 		lines += linesNeeded(lipgloss.Width(vm.InfoLine), vm.ContentWidth)
@@ -107,15 +112,22 @@ func RenderCollapsedView(vm CollapsedViewModel) string {
 				lines = append(lines, vm.Branch)
 			}
 		}
+
 		if vm.UsageSummary != "" {
 			lines = append(lines, vm.UsageSummary)
 		}
 	}
 
+	if vm.ModelInfo != "" {
+		lines = append(lines, vm.ModelInfo)
+	}
 	if vm.InfoLine != "" {
 		lines = append(lines, vm.InfoLine)
 	}
 
+	if vm.Yolo != "" {
+		lines = append(lines, strings.Repeat(" ", max(0, vm.ContentWidth-lipgloss.Width(vm.Yolo)))+vm.Yolo)
+	}
 	return strings.Join(lines, "\n")
 }
 

@@ -182,13 +182,14 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
 	d := newBackgroundAgentTUI(t, 120, 40)
 
-	// Before any task runs, the canonical tree contains only the root.
-	d.WaitFor(tuitest.ContainsAll("root", "Context 0%", "Token Usage"))
+	// Before any task runs, the current agent has no descendant rows.
+	d.WaitFor(tuitest.ContainsAll("fake-root", "Context 0%", "$0.00"))
 	frame := d.Frame()
 	require.NotContains(t, frame, "worker")
 	require.NotContains(t, frame, "Agents ─")
 	require.NotContains(t, frame, "Tools ─")
 	require.NotContains(t, frame, "45%")
+	require.NotContains(t, frame, "0 total")
 
 	d.Type("Please dispatch the worker.").
 		Enter().

@@ -126,7 +126,7 @@ func TestModelPickerRefreshShortcut(t *testing.T) {
 	msg := cmd()
 	assert.Equal(t, messages.RefreshModelPickerMsg{}, msg)
 	assert.Empty(t, d.textInput.Value())
-	assert.Contains(t, d.View(), "refresh")
+	assert.Contains(t, d.View(), "Refresh")
 }
 
 func TestModelPickerRTypesIntoSearch(t *testing.T) {
@@ -669,4 +669,23 @@ func TestModelPickerDetailsPanelMissingInfo(t *testing.T) {
 
 	view := d.View()
 	assert.Contains(t, view, "unavailable", "details panel should indicate missing catalog info")
+}
+
+func TestModelPickerActionFocusRoutesRefreshAndReturnsInputArrows(t *testing.T) {
+	d := NewModelPickerDialog([]runtime.ModelChoice{{Name: "model", Ref: "provider/model"}}).(*modelPickerDialog)
+	d.SetSize(100, 30)
+	d.View()
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.True(t, d.ActionsFocused())
+	selected := d.selected
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	require.Equal(t, selected, d.selected, "action arrows cannot move content selection")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	require.IsType(t, messages.RefreshModelPickerMsg{}, cmd())
+	require.False(t, d.ActionsFocused())
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	require.True(t, d.ActionsFocused())
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.False(t, d.ActionsFocused())
 }

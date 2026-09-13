@@ -150,3 +150,49 @@ func TestManagerClosePlanDetail(t *testing.T) {
 		}), "the buried detail stays open")
 	})
 }
+
+func TestCloseDialogByModelPreservesUnrelatedTop(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(80, 24)
+	editor := &lifecycleDialog{view: "editor"}
+	top := &lifecycleDialog{view: "top"}
+	mgr.handleOpen(OpenDialogMsg{Model: editor})
+	settleTestDialog(mgr)
+	mgr.handleOpen(OpenDialogMsg{Model: top})
+	settleTestDialog(mgr)
+	mgr.stack[1].offsetX = 3
+	mgr.stack[1].offsetY = 2
+	mgr.drag = dragState{active: true, startX: 4, startY: 5}
+	_, cmd := mgr.Update(CloseDialogByModelMsg{Model: editor})
+	require.Nil(t, cmd)
+	require.Len(t, mgr.stack, 1)
+	require.Same(t, top, mgr.TopDialog())
+	require.Equal(t, 1, editor.cleaned)
+	require.Zero(t, top.cleaned)
+	require.Equal(t, 3, mgr.stack[0].offsetX)
+	require.Equal(t, 2, mgr.stack[0].offsetY)
+	require.True(t, mgr.drag.active)
+	mgr.Update(CloseDialogByModelMsg{Model: editor})
+	require.Len(t, mgr.stack, 1)
+	require.Equal(t, 1, editor.cleaned)
+	mgr.Cleanup()
+	require.Zero(t, r.ActiveCount())
+}
+
+func TestCloseDialogByModelTopUsesExistingCloseLifecycle(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(80, 24)
+	target := &lifecycleDialog{view: "target"}
+	mgr.handleOpen(OpenDialogMsg{Model: target})
+	mgr.handleTick(advanceDialog(r, r.EnsureRunning(), dialogOpenDuration))
+	_, cmd := mgr.Update(CloseDialogByModelMsg{Model: target})
+	require.NotNil(t, cmd)
+	require.True(t, mgr.Closing())
+	require.Zero(t, target.cleaned)
+	mgr.handleTick(advanceDialog(r, cmd, dialogOpenDuration+dialogCloseDuration))
+	require.Empty(t, mgr.stack)
+	require.Equal(t, 1, target.cleaned)
+	require.Zero(t, r.ActiveCount())
+}

@@ -122,6 +122,9 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
+		if d.ActionsFocused() {
+			return d, nil
+		}
 		// Forward paste to current text input
 		if d.currentInput < len(d.inputs) {
 			var cmd tea.Cmd
@@ -138,6 +141,30 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
+		backward := msg.String() == "shift+tab"
+		boundary := (msg.String() == "tab" && d.currentInput >= len(d.inputs)-1) || (backward && d.currentInput == 0)
+		if d.ActionsFocused() || boundary {
+			wasFocused := d.ActionsFocused()
+			if action, handled := d.HandleActionKey(msg); handled {
+				if d.ActionsFocused() {
+					for i := range d.inputs {
+						d.inputs[i].Blur()
+					}
+				} else if wasFocused && len(d.inputs) > 0 {
+					if backward {
+						d.currentInput = len(d.inputs) - 1
+					} else {
+						d.currentInput = 0
+					}
+					d.inputs[d.currentInput].Focus()
+					d.ensureInputVisible()
+				}
+				if action.Code == 0 {
+					return d, nil
+				}
+				msg = action
+			}
+		}
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
@@ -171,16 +198,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				arguments[d.arguments[i].Name] = strings.TrimSpace(input.Value())
 			}
 
-			// Check if all required fields are filled
-			allFilled := true
-			for i, arg := range d.arguments {
-				if arg.Required && strings.TrimSpace(d.inputs[i].Value()) == "" {
-					allFilled = false
-					break
-				}
-			}
-
-			if allFilled {
+			if d.canExecute() {
 				if !d.claimResponse() {
 					return d, nil
 				}
@@ -197,7 +215,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 		default:
 			// Update the current input
-			if d.currentInput < len(d.inputs) {
+			if !d.ActionsFocused() && d.currentInput < len(d.inputs) {
 				var cmd tea.Cmd
 				d.inputs[d.currentInput], cmd = d.inputs[d.currentInput].Update(msg)
 				d.ensureInputVisible()
@@ -244,7 +262,7 @@ func (d *MCPPromptInputDialog) content() (width int, header, body, footer string
 	dialogWidth, contentWidth := d.mcpPromptDialogDimensions()
 	body, _, _ = d.buildBody(d.BodyContentWidth(dialogWidth))
 	header = RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
-	footer = d.RenderActions(contentWidth, Action{Label: "Execute", Key: tea.KeyPressMsg{Code: tea.KeyEnter}})
+	footer = d.RenderActions(contentWidth, Action{Label: "Execute", Default: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}, Disabled: !d.canExecute()})
 	return dialogWidth, header, body, footer
 }
 
@@ -275,6 +293,7 @@ func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.M
 		return d, cmd
 	}
 	if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		d.BlurActions()
 		return d.Update(action)
 	}
 	_, _, bodyWidth, bodyHeight := d.BodyScrollBounds()
@@ -286,6 +305,7 @@ func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.M
 		if line < start || line >= start+d.fieldHeights[i] {
 			continue
 		}
+		d.BlurActions()
 		d.inputs[d.currentInput].Blur()
 		d.currentInput = i
 		cmd := d.inputs[i].Focus()
@@ -323,4 +343,16 @@ func (d *MCPPromptInputDialog) prepareLayout() {
 		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
 	}
 	d.bodyCol, d.bodyRow, _, _ = d.BodyScrollBounds()
+}
+
+func (d *MCPPromptInputDialog) canExecute() bool {
+	if d.responseSent {
+		return false
+	}
+	for i, arg := range d.arguments {
+		if arg.Required && strings.TrimSpace(d.inputs[i].Value()) == "" {
+			return false
+		}
+	}
+	return true
 }

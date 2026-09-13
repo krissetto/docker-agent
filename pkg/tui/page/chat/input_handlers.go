@@ -3,6 +3,7 @@ package chat
 import (
 	"errors"
 	"log/slog"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -53,8 +54,8 @@ func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		}
 		// Otherwise cancel the stream (only if something is running)
 		if p.working || p.msgCancel != nil {
-			cmd := p.handleInterrupt()
-			return p, cmd
+			// Response cancellation confirmation belongs to the application shell.
+			return p, nil
 		}
 		// Forward to messages for other uses (e.g., clear selection)
 		model, cmd := p.messages.Update(msg)
@@ -102,7 +103,7 @@ func copyWorkingDirToClipboard(wd string) tea.Cmd {
 			return nil
 		},
 		tea.SetClipboard(wd),
-		notification.SuccessCmd("Working directory copied to clipboard."),
+		notification.SuccessCmd("Working directory copied to clipboard: "+wd),
 	)
 }
 
@@ -110,6 +111,16 @@ func copyWorkingDirToClipboard(wd string) tea.Cmd {
 func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
 	hit := NewHitTest(p)
 	target := hit.At(msg.X, msg.Y)
+	sessionID := ""
+	if p.app != nil && p.app.Session() != nil {
+		sessionID = p.app.Session().ID
+	}
+	now := time.Now()
+	doubleClick := sessionID != "" && msg.Button == tea.MouseLeft && p.lastSidebarClick.sessionID == sessionID && p.lastSidebarClick.target == target && p.lastSidebarClick.turnID == hit.QueueTurnID && now.Sub(p.lastSidebarClick.at) < styles.DoubleClickThreshold
+	p.lastSidebarClick = sidebarClick{}
+	if msg.Button == tea.MouseLeft && (target == TargetSidebarTitle || target == TargetSidebarQueuedMessage) && !doubleClick {
+		p.lastSidebarClick = sidebarClick{sessionID: sessionID, target: target, turnID: hit.QueueTurnID, at: now}
+	}
 
 	switch target {
 	case TargetSidebarToggle:
@@ -140,16 +151,53 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 	case TargetSidebarTitle:
 		// Double-click on title to edit
 		if msg.Button == tea.MouseLeft {
-			if p.sidebar.HandleTitleClick() {
+			if doubleClick {
 				p.sidebar.BeginTitleEdit()
-				return p, core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelSidebarTitle})
+				return p, tea.Batch(core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: sessionID}), core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelSidebarTitle}))
 			}
-			return p, nil
+			return p, core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: sessionID, Text: "Double-click to rename the session"})
+		}
+
+	case TargetSidebarOpenWorkingDir:
+		if msg.Button == tea.MouseLeft {
+			return p, core.CmdHandler(msgtypes.OpenWorkingDirMsg{Path: p.sidebar.WorkingDirectory()})
 		}
 
 	case TargetSidebarWorkingDir:
 		if msg.Button == tea.MouseLeft {
 			return p, copyWorkingDirToClipboard(p.sidebar.WorkingDirectory())
+		}
+
+	case TargetSidebarModel:
+		if msg.Button == tea.MouseLeft {
+			return p, core.CmdHandler(msgtypes.OpenModelPickerMsg{})
+		}
+
+	case TargetSidebarQueuedMessage:
+		if msg.Button == tea.MouseLeft {
+			if doubleClick {
+				for _, queued := range p.messageQueue {
+					if queued.turnID == hit.QueueTurnID {
+						return p, tea.Batch(core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: sessionID}), core.CmdHandler(msgtypes.OpenPendingEditMsg{SessionID: sessionID, TurnID: queued.turnID, Content: queued.content}))
+					}
+				}
+				return p, nil
+			}
+			return p, core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: sessionID, Text: "Double-click to edit queued message"})
+		}
+	case TargetSidebarRemoveQueuedMessage:
+		if msg.Button == tea.MouseLeft {
+			application, turnID, ctx := p.app, hit.QueueTurnID, p.ctx()
+			return p, func() tea.Msg {
+				removed, err := application.CancelPendingMessage(ctx, turnID)
+				if err != nil {
+					return notification.ShowMsg{Text: "Failed to remove queued message: " + err.Error(), Type: notification.TypeError}
+				}
+				if !removed {
+					return notification.ShowMsg{Text: "Queued message is no longer pending", Type: notification.TypeInfo}
+				}
+				return nil
+			}
 		}
 
 	case TargetSidebarAgent:
@@ -172,14 +220,14 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			// Navigating to another tab: this sidebar gets no further mouse
 			// events, so drop the hover highlight now or the row stays lit
 			// until the user returns AND moves the mouse over the sidebar.
-			p.sidebar.ClearSubagentHover()
-			return p, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID})
+			hoverCmd := p.sidebar.ClearSubagentHover()
+			return p, tea.Batch(hoverCmd, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID}))
 		}
 
 	case TargetSidebarParent:
 		if msg.Button == tea.MouseLeft {
-			p.sidebar.ClearSubagentHover()
-			return p, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: hit.ParentSessionID})
+			hoverCmd := p.sidebar.ClearSubagentHover()
+			return p, tea.Batch(hoverCmd, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: hit.ParentSessionID}))
 		}
 
 	case TargetMessages:
@@ -255,7 +303,7 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 		p.sidebar = sidebarModel.(sidebar.Model)
 		cmds = append(cmds, sidebarCmd)
 		if p.messages.IsScrollbarDragging() {
-			p.sidebar.ClearSubagentHover()
+			cmds = append(cmds, p.sidebar.ClearSubagentHover())
 		}
 		return p, tea.Batch(cmds...)
 	}
@@ -266,7 +314,7 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 	if p.messages.IsSelecting() {
 		model, cmd := p.messages.Update(msg)
 		p.messages = model.(messages.Model)
-		return p, cmd
+		return p, tea.Batch(cmd, p.sidebar.ClearSubagentHover())
 	}
 
 	cmd := p.routeMouseEvent(msg, msg.Y)

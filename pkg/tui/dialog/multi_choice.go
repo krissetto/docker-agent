@@ -170,6 +170,9 @@ func (d *multiChoiceDialog) hasSelection() bool {
 // isSecondaryDefault returns true if secondary button should be the default action.
 // This takes into account the natural default (based on selection) and the tabOverride.
 func (d *multiChoiceDialog) isSecondaryDefault() bool {
+	if !d.config.AllowSecondary {
+		return false
+	}
 	naturalDefault := !d.hasSelection() // Secondary is natural default when nothing selected
 	if d.tabOverride {
 		return !naturalDefault // Invert when tab override is active
@@ -266,6 +269,9 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
+		if d.ActionsFocused() {
+			return d, nil
+		}
 		// Forward paste to custom text input if custom is selected or allowed
 		if d.selected == selectionCustom {
 			var cmd tea.Cmd
@@ -304,6 +310,40 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // handleKeyPress handles key presses.
 func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	if d.ActionsFocused() {
+		wasFocused := d.ActionsFocused()
+		if action, handled := d.HandleActionKey(msg); handled {
+			if wasFocused && !d.ActionsFocused() && action.Code == 0 {
+				if msg.String() == "shift+tab" && d.config.AllowCustom {
+					d.selected = selectionCustom
+				} else if len(d.config.Options) > 0 {
+					d.selected = 0
+				}
+				d.updateFocus()
+			}
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+	if msg.String() == "tab" || msg.String() == "shift+tab" {
+		backward := msg.String() == "shift+tab"
+		atStart := d.selected == selectionNone || d.selected == 0 || (len(d.config.Options) == 0 && d.selected == selectionCustom)
+		atEnd := d.selected == selectionCustom || (!d.config.AllowCustom && int(d.selected) == len(d.config.Options)-1) || (len(d.config.Options) == 0 && !d.config.AllowCustom)
+		switch {
+		case (backward && atStart) || (!backward && atEnd):
+			if d.FocusActions(backward) {
+				d.customInput.Blur()
+			}
+		case backward:
+			d.selectPrevious()
+		default:
+			d.selectNext()
+		}
+		return d, nil
+	}
+
 	keyStr := msg.String()
 	if keyStr == "ctrl+enter" {
 		return d.submitPrimary()
@@ -313,7 +353,7 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 	}
 
 	// If custom is selected, forward most keys to the text input (including numbers)
-	if d.selected == selectionCustom {
+	if d.selected == selectionCustom && !d.ActionsFocused() {
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
 			cmd := d.sendResult(MultiChoiceResult{IsCancelled: true})
@@ -325,9 +365,6 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 			return d, nil
 		case key.Matches(msg, d.keyMap.Down):
 			d.selectNext()
-			return d, nil
-		case key.Matches(msg, d.keyMap.Tab):
-			d.tabOverride = !d.tabOverride
 			return d, nil
 		default:
 			// Forward to text input (including number keys)
@@ -376,13 +413,9 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 		d.selectNext()
 		return d, nil
 
-	case key.Matches(msg, d.keyMap.Tab):
-		d.tabOverride = !d.tabOverride
-		return d, nil
-
 	default:
 		// If custom is allowed and user types, auto-select custom
-		if d.config.AllowCustom {
+		if d.config.AllowCustom && !d.ActionsFocused() {
 			if len(keyStr) == 1 || keyStr == "backspace" || keyStr == "delete" {
 				d.selected = selectionCustom
 				d.customInput.Focus()
@@ -525,6 +558,7 @@ func (d *multiChoiceDialog) handleMouseClick(x, y int) (layout.Model, tea.Cmd) {
 		return d, cmd
 	}
 	if action, ok := d.ActionKeyAt(x, y, dl); ok {
+		d.BlurActions()
 		return d.Update(action)
 	}
 	bodyX, bodyY, width, height := d.BodyScrollBounds()
@@ -536,6 +570,7 @@ func (d *multiChoiceDialog) handleMouseClick(x, y int) (layout.Model, tea.Cmd) {
 		if line < area.startRow || line > area.endRow {
 			continue
 		}
+		d.BlurActions()
 		if area.selection == selectionCustom {
 			d.selected = selectionCustom
 			cmd := d.customInput.Focus()
@@ -739,16 +774,13 @@ func truncateWithEllipsisEnd(text string, maxWidth int) string {
 // renderHelpAndButtons renders only actionable controls, aligned to the right.
 func (d *multiChoiceDialog) renderHelpAndButtons(contentWidth int) string {
 	var actions []Action
-	secondaryLabel, primaryLabel := d.config.SecondaryLabel, d.config.PrimaryLabel
-	if d.config.AllowSecondary && (!d.hasSelection() || d.isSecondaryDefault()) {
-		secondaryLabel += " ↵"
-	} else if d.hasSelection() {
-		primaryLabel += " ↵"
-	}
+	secondaryDefault := d.config.AllowSecondary && (!d.hasSelection() || d.isSecondaryDefault())
 	if d.config.AllowSecondary {
-		actions = append(actions, Action{Label: secondaryLabel, Key: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}})
+		actions = append(actions, Action{Label: d.config.SecondaryLabel, Key: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}, Disabled: d.responseSent, Default: secondaryDefault})
 	}
-	actions = append(actions, Action{Label: primaryLabel, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}})
+	if d.hasSelection() || !d.config.AllowSecondary {
+		actions = append(actions, Action{Label: d.config.PrimaryLabel, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: !d.hasSelection() || d.responseSent, Default: d.hasSelection() && !secondaryDefault})
+	}
 	return d.RenderActions(contentWidth, actions...)
 }
 

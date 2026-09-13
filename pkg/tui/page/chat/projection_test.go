@@ -143,3 +143,15 @@ func TestDirectTypedInputMode(t *testing.T) {
 		})
 	}
 }
+
+func TestPendingEditChangesPayloadInPlaceWithoutAdmissionOrPromotion(t *testing.T) {
+	p := newTestChatPage(t)
+	p.messageQueue = []queuedMessage{{turnID: "first", content: "unchanged"}, {turnID: "second", content: "old full payload"}, {turnID: "third", content: "unchanged tail"}}
+	before := p.messages.MessageTypeCount(types.MessageTypeUser)
+	handled, _ := p.handleRuntimeEvent(runtime.PendingUserMessageEdited(p.app.Session().ID, "second", "new\nfull payload", nil, 2))
+	assert.True(t, handled)
+	assert.Equal(t, []queuedMessage{{turnID: "first", content: "unchanged"}, {turnID: "second", content: "new\nfull payload"}, {turnID: "third", content: "unchanged tail"}}, p.messageQueue)
+	assert.Equal(t, before, p.messages.MessageTypeCount(types.MessageTypeUser), "editing accepted input does not append a transcript turn")
+	p.handleRuntimeEvent(runtime.PendingUserMessageEdited(p.app.Session().ID, "already-consumed", "late payload", nil, 0))
+	assert.Len(t, p.messageQueue, 3, "late edit event cannot recreate consumed input")
+}

@@ -97,11 +97,24 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return d, d.rejectCmd()
 			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				d.BlurActions()
 				return d.Update(action)
 			}
 		}
 
 	case tea.KeyPressMsg:
+		if !d.ActionsFocused() {
+			switch msg.Code {
+			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
+				d.FocusDefaultAction()
+			}
+		}
+		if action, handled := d.HandleActionKey(msg); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, d.CancelDialogCmd()
 		}
@@ -183,8 +196,8 @@ func wrapDisplayText(text string, maxWidth int) string {
 	return strings.Join(lines, "\n")
 }
 
-// DialogClosable keeps this mandatory decision free of dismiss chrome.
-func (d *maxIterationsDialog) DialogClosable() bool { return false }
+// DialogClosable allows explicit dismissal through the correlated rejection path.
+func (d *maxIterationsDialog) DialogClosable() bool { return true }
 
 func (d *maxIterationsDialog) SetSize(width, height int) tea.Cmd {
 	cmd := d.BaseDialog.SetSize(width, height)

@@ -88,6 +88,16 @@ func New(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style) Spinner {
 	return NewWithAnimation(ar, mode, dotsStyle, animation.Chat)
 }
 
+// NewWithStyleProvider binds a semantic role independently of coincident theme colors.
+func NewWithStyleProvider(ar *animation.Runtime, mode Mode, style func() lipgloss.Style) Spinner {
+	if style == nil {
+		panic("spinner: nil style provider")
+	}
+	s := NewWithAnimation(ar, mode, style(), animation.Chat).(*spinner)
+	s.themeStyle = style
+	return s
+}
+
 // NewWithFrames creates a spinner that animates using the provided frame set.
 // If frames is empty, animation.Chat is used.
 func NewWithFrames(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style, frames animation.Frames) Spinner {
@@ -140,7 +150,9 @@ func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style
 
 func (s *spinner) Reset() Spinner {
 	s.ensureTheme()
-	return NewWithAnimation(s.ar, s.mode, s.dotsStyle, s.spinnerAnim)
+	reset := NewWithAnimation(s.ar, s.mode, s.dotsStyle, s.spinnerAnim).(*spinner)
+	reset.themeStyle = s.themeStyle
+	return reset
 }
 
 // SetMessage replaces the current spinner text.

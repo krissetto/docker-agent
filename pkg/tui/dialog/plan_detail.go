@@ -98,9 +98,21 @@ func (d *planDetailDialog) Init() tea.Cmd {
 }
 
 func (d *planDetailDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
+		d.BlurActions()
+	}
 	if preparesDialogBody(msg) {
 		defer d.renderBody(true)
 	}
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
+
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -245,7 +257,7 @@ func (d *planDetailDialog) renderContent(contentWidth int) []string {
 func (d *planDetailDialog) helpKeys() []string {
 	keys := []string{"↑/↓", "scroll", "r", "refresh", "x", "export"}
 	keys = append(keys, "s", "status", "e", "edit", "d", "delete")
-	return append(keys, "esc", "close")
+	return keys
 }
 
 // viewport computes the number of scrollable content lines that fit.
@@ -259,7 +271,14 @@ func (d *planDetailDialog) View() string { return d.renderBody(false) }
 
 func (d *planDetailDialog) renderBody(prepare bool) string {
 	width, _, inner := d.dialogSize()
-	footer := d.RenderActionKeys(inner+d.scrollview.ReservedCols(), d.helpKeys()...)
+	actions := actionsForKeys(d.helpKeys()...)
+	for i := range actions {
+		switch actions[i].Key.Code {
+		case 's', 'e', 'd':
+			actions[i].Disabled = d.plan.Version == nil
+		}
+	}
+	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(d.headerLines(inner), "\n"), strings.Join(d.renderContent(inner), "\n"), footer)
 		return ""

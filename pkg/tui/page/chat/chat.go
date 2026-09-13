@@ -17,6 +17,8 @@ import (
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/commands"
@@ -25,11 +27,11 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
-	"github.com/docker/docker-agent/pkg/tui/dialog"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
+	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
 const (
@@ -103,15 +105,9 @@ func (l sidebarLayout) isInBand(y int) bool {
 	return y >= l.bandY() && y < l.bandY()+l.sidebarHeight
 }
 
-// bandContentY converts a screen Y coordinate to a Y coordinate relative to
-// the band content. A bottom band renders its divider on the first line, so
-// the content starts one line lower.
+// bandContentY converts a screen Y coordinate to a band-local content row.
 func (l sidebarLayout) bandContentY(y int) int {
-	contentY := y - l.bandY()
-	if l.bandAtBottom {
-		contentY--
-	}
-	return contentY
+	return y - l.bandY()
 }
 
 // showToggle returns true if a toggle glyph should be shown.
@@ -186,8 +182,19 @@ type Page interface {
 }
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }
+
+// SidebarView exposes the existing presentation surface to its shell compositor.
+func (p *chatPage) SidebarView() string { return p.sidebar.View() }
+
 func (p *chatPage) SidebarVisualGeneration() uint64 {
 	return p.sidebar.VisualGeneration()
+}
+
+type sidebarClick struct {
+	sessionID string
+	target    MouseTarget
+	turnID    string
+	at        time.Time
 }
 
 type queuedMessage struct {
@@ -208,6 +215,8 @@ type chatPage struct {
 	subagents *subagentindex.Index
 
 	sessionState *service.SessionState
+
+	lastSidebarClick sidebarClick
 
 	// State
 	working        bool
@@ -270,11 +279,6 @@ type chatPage struct {
 
 	// interruptMode controls how Esc interrupts a running stream.
 	interruptMode msgtypes.InterruptMode
-	// lastInterruptTime tracks when the last Esc was pressed for double-tap mode.
-	lastInterruptTime time.Time
-	// waitingForDoubleTap indicates the user pressed Esc once and is waiting
-	// for a second press to confirm the interrupt.
-	waitingForDoubleTap bool
 
 	ctx func() context.Context
 
@@ -515,12 +519,7 @@ func (p *chatPage) Init() tea.Cmd {
 	// Load state from existing session (for session restore and branching)
 	if sess := p.app.Session(); sess != nil {
 		p.inputReplay.Reset(sess)
-		p.sidebar.LoadFromSession(sess)
-		// Seed the subagent id → name index from the persisted swarm so restored
-		// subagent tool calls are attributed by name, not just id.
-		if snap := sess.GetSubagentTree(); snap != nil {
-			p.subagents.Reset(*snap)
-		}
+		cmds = append(cmds, p.hydrateSidebarSession(sess))
 		if len(sess.Messages) > 0 {
 			restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(sess)
 			cmds = append(cmds, p.messages.LoadFromSession(sess, restoredMedia))
@@ -538,13 +537,52 @@ func (p *chatPage) Init() tea.Cmd {
 		// path (here and in the tab bar).
 		// The tree snapshot is synchronous and authoritative, so it also closes
 		// the race where the running tree event predates tab attachment.
-		if info := p.app.AttachedSubagent(); info != nil {
-			p.sidebar.SetSubagentContext(info.NodeID, info.ParentAgent, info.ParentSessionID)
+		if p.app.AttachedSubagent() != nil {
 			p.snapshotEnd = p.messages.LoadedItemCount()
 		}
 	}
 
 	return tea.Batch(cmds...)
+}
+
+// hydrateSidebarSession uses only topology belonging to this exact session/root.
+func (p *chatPage) hydrateSidebarSession(sess *session.Session) tea.Cmd {
+	if sess == nil {
+		return nil
+	}
+	rootID := subagent.SessionRootID(sess.ID)
+	if info := p.app.AttachedSubagent(); info != nil {
+		p.sidebar.SetSubagentContext(info.NodeID, info.ParentAgent, info.ParentSessionID)
+		rootID = info.NodeID
+	} else {
+		p.sidebar.SetSubagentContext("", "", "")
+	}
+	snapshot := sess.GetSubagentTree()
+	if snapshot == nil {
+		if current := p.app.Session(); current != nil && current.ID == sess.ID {
+			snapshot = current.GetSubagentTree()
+		}
+	}
+	if provider, ok := p.app.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil && rootID != "" {
+		live := provider.SubagentTree().Snapshot()
+		if _, found := subagentview.Find(live.Nodes, rootID); found {
+			snapshot = &live
+		}
+	}
+	hydrated := sess.Clone()
+	hydrated.SetSubagentTree(nil)
+	if snapshot != nil && rootID != "" {
+		if _, found := subagentview.Find(snapshot.Nodes, rootID); found {
+			hydrated.SetSubagentTree(snapshot)
+		}
+	}
+	p.sidebar.LoadFromSession(hydrated)
+	p.subagents.Clear()
+	if tree := hydrated.GetSubagentTree(); tree != nil {
+		p.subagents.Reset(*tree)
+		return p.forwardToSidebar(runtime.SubagentTree(*tree))
+	}
+	return nil
 }
 
 func WatchGitBranch(page Page) tea.Cmd {
@@ -554,8 +592,46 @@ func WatchGitBranch(page Page) tea.Cmd {
 	return nil
 }
 
+// ClearSidebarHover fades occluded pointer targets while the page remains visible.
+func ClearSidebarHover(page Page) tea.Cmd {
+	if p, ok := page.(*chatPage); ok {
+		p.lastSidebarClick = sidebarClick{}
+		return p.sidebar.ClearSubagentHover()
+	}
+	return nil
+}
+
+// SetSidebarPresentationActive prevents hidden updates from acquiring finite animation leases.
+func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
+	if p, ok := page.(*chatPage); ok {
+		if !active {
+			p.lastSidebarClick = sidebarClick{}
+		}
+		if owner, ok := p.sidebar.(interface{ SetPresentationActive(active bool) tea.Cmd }); ok {
+			return owner.SetPresentationActive(active)
+		}
+	}
+	if !active {
+		CancelSidebarPresentation(page)
+	}
+	return nil
+}
+
+// CancelSidebarPresentation releases finite presentation animations when a page is hidden.
+func CancelSidebarPresentation(page Page) {
+	if p, ok := page.(*chatPage); ok {
+		switch presentation := p.sidebar.(type) {
+		case interface{ CancelPresentation() }:
+			presentation.CancelPresentation()
+		case interface{ CancelHover() }:
+			presentation.CancelHover()
+		}
+	}
+}
+
 func Cleanup(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		animation.StopView(p.sidebar)
 		p.cancel()
 		p.subagents.Clear()
 	}
@@ -572,7 +648,14 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if relayout := p.relayoutIfNeeded(); relayout != nil {
 		cmd = tea.Batch(cmd, relayout)
 	}
-	return model, cmd
+	return model, tea.Batch(cmd, p.reconcileSidebarLayout())
+}
+
+func (p *chatPage) reconcileSidebarLayout() tea.Cmd {
+	if owner, ok := p.sidebar.(interface{ ReconcileLayout() tea.Cmd }); ok {
+		return owner.ReconcileLayout()
+	}
+	return nil
 }
 
 // relayoutIfNeeded reapplies the current geometry when the computed layout no
@@ -699,10 +782,6 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 		return p, tea.Batch(cmds...)
 
-	case dialog.InterruptConfirmedMsg:
-		cmd := p.cancelStream(true)
-		return p, cmd
-
 	default:
 		// Try to handle as a runtime event
 		if handled, cmd := p.handleRuntimeEvent(msg); handled {
@@ -757,7 +836,6 @@ func (p *chatPage) pendingSpinnerContext() (sender, label string) {
 }
 
 // renderCollapsedSidebar renders the sidebar in collapsed/band mode.
-// A top band carries its divider on the last line; a bottom band on the first.
 func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 	// Guard against unset/invalid layout (can happen before WindowSizeMsg is received).
 	width := max(0, sl.innerWidth)
@@ -777,26 +855,15 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		sidebarLines[0] = padded + toggleGlyph
 	}
 
-	divider := styles.FadingStyle.Render(strings.Repeat("─", width))
-	switch {
-	case sl.bandAtBottom:
-		sidebarLines = append([]string{divider}, sidebarLines...)
-		if len(sidebarLines) > height {
-			sidebarLines = sidebarLines[:height]
-		}
-	case len(sidebarLines) >= height:
-		sidebarLines[height-1] = divider
-	default:
-		sidebarLines = append(sidebarLines, divider)
+	if len(sidebarLines) > height {
+		sidebarLines = sidebarLines[:height]
 	}
-
-	sidebarWithDivider := strings.Join(sidebarLines, "\n")
 
 	return lipgloss.NewStyle().
 		Width(width).
 		Height(height).
 		Align(lipgloss.Left, lipgloss.Top).
-		Render(sidebarWithDivider)
+		Render(strings.Join(sidebarLines, "\n"))
 }
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {
@@ -937,7 +1004,7 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 		)
 	}
 
-	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight))
+	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight), p.reconcileSidebarLayout())
 
 	return tea.Batch(cmds...)
 }
@@ -962,12 +1029,23 @@ func (p *chatPage) Help() help.KeyMap {
 	return core.NewSimpleHelp(p.Bindings())
 }
 
-// cancelStream sends the canonical turn cancellation command, then detaches
-// local rendering. Detaching never controls session execution.
+// CancelResponse uses the existing canonical cancellation path after root confirmation.
+func CancelResponse(page Page) (tea.Cmd, bool) {
+	p, ok := page.(*chatPage)
+	if !ok || p.app == nil || p.app.CancelRun() == runtime.CancelNotActive {
+		return nil, false
+	}
+	return p.finishCancelStream(true), true
+}
+
 func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
 	if p.app == nil || p.app.CancelRun() == runtime.CancelNotActive {
 		return nil
 	}
+	return p.finishCancelStream(showCancelMessage)
+}
+
+func (p *chatPage) finishCancelStream(showCancelMessage bool) tea.Cmd {
 	if p.msgCancel != nil {
 		p.msgCancel()
 		p.msgCancel = nil
@@ -975,7 +1053,6 @@ func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
 
 	p.streamCancelled = true
 	p.lifecycle.Streams = nil
-	p.waitingForDoubleTap = false
 	p.setPendingResponse(false)
 	// Send StreamCancelledMsg to all components to handle cleanup
 	return tea.Batch(
@@ -986,32 +1063,6 @@ func (p *chatPage) cancelStream(showCancelMessage bool) tea.Cmd {
 
 func isBangCommand(content string) bool {
 	return strings.HasPrefix(content, "!")
-}
-
-// handleInterrupt processes an Esc key press during a running stream.
-// The behavior depends on interruptMode:
-//   - "always": opens a confirmation dialog
-//   - "double-tap": requires two Esc presses within 500ms
-//   - "none": cancels immediately
-func (p *chatPage) handleInterrupt() tea.Cmd {
-	switch p.interruptMode {
-	case "double-tap":
-		now := time.Now()
-		if !p.lastInterruptTime.IsZero() && now.Sub(p.lastInterruptTime) <= time.Second {
-			p.lastInterruptTime = time.Time{}
-			p.waitingForDoubleTap = false
-			return p.cancelStream(true)
-		}
-		p.lastInterruptTime = now
-		p.waitingForDoubleTap = true
-		return nil
-	case "none":
-		return p.cancelStream(true)
-	default:
-		return func() tea.Msg {
-			return dialog.OpenDialogMsg{Model: dialog.NewInterruptConfirmationDialog()}
-		}
-	}
 }
 
 func (p *chatPage) parseImmediateCommand(content string) tea.Cmd {
@@ -1306,18 +1357,13 @@ func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 	return p, notification.WarningCmd("Accepted messages cannot be cleared")
 }
 
-// syncQueueToSidebar updates the sidebar with truncated previews of queued messages.
-func (p *chatPage) syncQueueToSidebar() {
-	previews := make([]string, len(p.messageQueue))
-	for i, qm := range p.messageQueue {
-		// Take first line and limit length for preview
-		content := strings.TrimSpace(qm.content)
-		if idx := strings.IndexAny(content, "\n\r"); idx != -1 {
-			content = content[:idx]
-		}
-		previews[i] = content
+// syncQueueToSidebar preserves canonical identity and full content for bounded rendering.
+func (p *chatPage) syncQueueToSidebar() tea.Cmd {
+	queuedPreviews := make([]sidebar.QueuedMessage, len(p.messageQueue))
+	for i, queued := range p.messageQueue {
+		queuedPreviews[i] = sidebar.QueuedMessage{ID: queued.turnID, Text: queued.content}
 	}
-	p.sidebar.SetQueuedMessages(previews...)
+	return p.sidebar.SetQueuedMessages(queuedPreviews)
 }
 
 // processMessage handles already-resolved bypass/bang compatibility input.
@@ -1524,9 +1570,9 @@ func (p *chatPage) routedTimerCmd(timer sidebar.TransferTimer) tea.Cmd {
 	})
 }
 
-func (p *chatPage) PointerTargetsMessages(x, _ int) bool {
+func (p *chatPage) PointerTargetsMessages(x, y int) bool {
 	sl := p.computeSidebarLayout()
-	return sl.mode != sidebarVertical || p.sidebar.IsCollapsed() || !sl.isInSidebar(x-styles.AppPadding)
+	return !sl.isInBand(y) && (sl.mode != sidebarVertical || p.sidebar.IsCollapsed() || !sl.isInSidebar(x-styles.AppPadding))
 }
 
 // handleSidebarClickType checks what was clicked in the sidebar area.
@@ -1551,33 +1597,33 @@ func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string
 func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 	sl := p.computeSidebarLayout()
 
-	if sl.mode == sidebarVertical && !p.sidebar.IsCollapsed() {
-		var x int
-		switch m := msg.(type) {
-		case tea.MouseClickMsg:
-			x = m.X
-		case tea.MouseMotionMsg:
-			x = m.X
-		case tea.MouseReleaseMsg:
-			x = m.X
-		}
-
-		adjustedX := x - styles.AppPadding
-		if sl.isInSidebar(adjustedX) {
-			model, cmd := p.sidebar.Update(msg)
-			p.sidebar = model.(sidebar.Model)
-			return cmd
-		}
+	var x, y int
+	switch m := msg.(type) {
+	case tea.MouseClickMsg:
+		x, y = m.X, m.Y
+	case tea.MouseMotionMsg:
+		x, y = m.X, m.Y
+	case tea.MouseReleaseMsg:
+		x, y = m.X, m.Y
+	}
+	adjustedX := x - styles.AppPadding
+	inSidebar := sl.mode == sidebarVertical && !p.sidebar.IsCollapsed() && sl.isInSidebar(adjustedX)
+	inBand := !p.hideSidebar && !p.leanMode && sl.isInBand(y) && adjustedX >= 0 && adjustedX < sl.innerWidth
+	if inSidebar || inBand {
+		model, cmd := p.sidebar.Update(msg)
+		p.sidebar = model.(sidebar.Model)
+		return cmd
 	}
 
-	// Motion left the sidebar: drop any hovered subagent row.
+	// Motion left the sidebar: preserve the finite hover-exit command.
+	var hoverCmd tea.Cmd
 	if _, ok := msg.(tea.MouseMotionMsg); ok {
-		p.sidebar.ClearSubagentHover()
+		hoverCmd = p.sidebar.ClearSubagentHover()
 	}
 
 	model, cmd := p.messages.Update(msg)
 	p.messages = model.(messages.Model)
-	return cmd
+	return tea.Batch(hoverCmd, cmd)
 }
 
 // IsWorking returns whether the agent is currently working

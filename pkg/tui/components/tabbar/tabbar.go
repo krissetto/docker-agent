@@ -51,6 +51,8 @@ const (
 	reorderAnimDuration = 330 * time.Millisecond
 
 	dragReflowAnimDuration = 200 * time.Millisecond
+	plusFeedbackDuration   = 280 * time.Millisecond
+	plusHoverDuration      = 150 * time.Millisecond
 )
 
 // clickZone records where a clickable element is on the tab bar.
@@ -199,6 +201,10 @@ type TabBar struct {
 	scrollSeq     int  // monotonic counter to match scroll delay messages to tab changes
 	scrollPending bool // true while waiting for the scroll delay to fire
 
+	plusHoverAnim animation.Transition
+	plusHoverFrom float64
+	plusHoverTo   float64
+	plusAnim      animation.Transition
 	reorderAnim   animation.Transition
 	reorderOffset map[string]int
 	settleAnim    animation.Transition
@@ -225,13 +231,14 @@ type TabBar struct {
 	dragSeq int // monotonic counter incremented on each mouse-down
 
 	// View cache: avoids re-rendering the tab bar every frame when nothing changed.
-	cachedView      string
-	cachedRender    renderedTabbar
-	themeGeneration uint64
-	viewDirty       bool
-	visualDirty     bool
-	lastOverlayX    int
-	hadOverlay      bool
+	cachedView           string
+	cachedRender         renderedTabbar
+	themeGeneration      uint64
+	agentColorGeneration uint64
+	viewDirty            bool
+	visualDirty          bool
+	lastOverlayX         int
+	hadOverlay           bool
 
 	visualGeneration uint64
 }
@@ -283,6 +290,8 @@ func New(ar *animation.Runtime, maxTitleLen int) *TabBar {
 		reorderAnim:    ar.Transition(),
 		settleAnim:     ar.Transition(),
 		dragAnim:       ar.Transition(),
+		plusAnim:       ar.Transition(),
+		plusHoverAnim:  ar.Transition(),
 		keyMap:         DefaultKeyMap(),
 		maxTitleLen:    maxTitleLen,
 		lastEnsuredIdx: noTab,
@@ -317,7 +326,7 @@ func (t *TabBar) SetWidth(width int) tea.Cmd {
 	}
 	t.reconcileScroll()
 	cmd := t.retargetSettlingDrop()
-	if t.IsAnimating() {
+	if t.hasTabMotion() {
 		return tea.Batch(cmd, t.ar.EnsureRunning())
 	}
 	return tea.Batch(cmd, t.syncIndicatorSub())
@@ -342,7 +351,7 @@ func (t *TabBar) SetMaxTitleLength(n int) (cmd tea.Cmd) {
 		t.reconcileScroll()
 		cmd = t.retargetSettlingDrop()
 	}
-	if t.IsAnimating() {
+	if t.hasTabMotion() {
 		return tea.Batch(cmd, t.ar.EnsureRunning())
 	}
 	return tea.Batch(cmd, t.syncIndicatorSub())
@@ -403,7 +412,7 @@ func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
 	if cmd := t.syncIndicatorSub(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	if t.IsAnimating() {
+	if t.hasTabMotion() {
 		cmds = append(cmds, t.ar.EnsureRunning())
 	}
 	return tea.Batch(cmds...)
@@ -446,9 +455,18 @@ func (t *TabBar) Tick() tea.Cmd {
 	if t.Height() == 0 {
 		return nil
 	}
-	animated := t.hasAnimatedIndicator() || t.scrollAnim.Running() || t.reorderAnim.Running() || t.settleAnim.Running() || t.dragAnim.Running() || t.settlingDrop != nil
+	animated := t.plusHoverAnim.Running() || t.plusAnim.Running() || t.hasAnimatedIndicator() || t.scrollAnim.Running() || t.reorderAnim.Running() || t.settleAnim.Running() || t.dragAnim.Running() || t.settlingDrop != nil
 	previousView, hadPreviousView := t.cachedView, t.cachedView != ""
 	previousOverlayX, hadOverlay := t.lastOverlayX, t.hadOverlay
+	if t.plusHoverAnim.Running() {
+		t.plusHoverAnim.Tick()
+	}
+	if t.plusAnim.Running() {
+		t.plusAnim.Tick()
+		if !t.plusAnim.Running() {
+			t.plusPressed = false
+		}
+	}
 	if t.scrollAnim.Running() {
 		t.scrollAnim.Tick()
 		t.scrollOffset = t.scrollAnim.Lerp(t.scrollFrom, t.scrollTo)
@@ -509,6 +527,9 @@ func (t *TabBar) StopAnimations() {
 	t.reorderAnim.Cancel()
 	t.settleAnim.Cancel()
 	t.dragAnim.Cancel()
+	t.plusAnim.Cancel()
+	t.plusHoverAnim.Cancel()
+	t.plusHoverFrom, t.plusHoverTo = 0, 0
 	t.indicatorSub.Stop()
 	t.scrollPending = false
 	t.scrollSeq++
@@ -533,8 +554,12 @@ func (t *TabBar) Height() int {
 	return tabBarHeight
 }
 
-// IsAnimating returns true when a scroll transition is in progress.
+// IsAnimating reports finite tab motion or new-tab click feedback.
 func (t *TabBar) IsAnimating() bool {
+	return t.plusHoverAnim.Running() || t.plusAnim.Running() || t.hasTabMotion()
+}
+
+func (t *TabBar) hasTabMotion() bool {
 	return t.scrollAnim.Running() || t.reorderAnim.Running() || t.settleAnim.Running() || t.dragAnim.Running()
 }
 
@@ -554,7 +579,7 @@ func (t *TabBar) HasFloatingOverlay() bool {
 }
 
 // VisualGeneration changes only when rendered tab geometry or drag styling changes.
-func (t *TabBar) VisualGeneration() uint64 { return t.visualGeneration }
+func (t *TabBar) VisualGeneration() uint64 { return t.visualGeneration + styles.AgentColorGeneration() }
 
 // Bindings returns consolidated key bindings for the help bar.
 func (t *TabBar) Bindings() []key.Binding {
@@ -589,7 +614,7 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		}
 		t.visualGeneration++
 		t.reconcileScroll()
-		if t.IsAnimating() {
+		if t.hasTabMotion() {
 			cmd = tea.Batch(cmd, t.ar.EnsureRunning())
 		} else {
 			cmd = tea.Batch(cmd, t.syncIndicatorSub())
@@ -668,10 +693,14 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		}
 		t.installGeometry()
 		if msg.Button == tea.MouseLeft {
-			t.plusHovered = t.plusAt(msg.X, msg.Y)
+			hoverCmd := t.setPlusHovered(t.plusAt(msg.X, msg.Y))
 			t.plusPressed = t.plusHovered
 			t.viewDirty = true
-			return t.handleLeftClickDown(msg.X)
+			if t.plusHovered {
+				t.visualDirty = true
+				return tea.Batch(hoverCmd, t.plusAnim.Start(plusFeedbackDuration, animation.EaseOutCubic), t.handleLeftClickDown(msg.X))
+			}
+			return tea.Batch(hoverCmd, t.handleLeftClickDown(msg.X))
 		}
 		if t.IsDragging() {
 			return t.handleMouseRelease(t.drag.cursorX)
@@ -682,6 +711,9 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		return nil
 
 	case tea.BlurMsg:
+		t.plusHoverAnim.Cancel()
+		t.plusHoverFrom, t.plusHoverTo = 0, 0
+		t.plusAnim.Cancel()
 		t.plusHovered, t.plusPressed = false, false
 		if t.drag.active {
 			return t.handleMouseRelease(t.drag.cursorX)
@@ -709,17 +741,42 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 			return nil
 		}
 		t.installGeometry()
-		t.plusHovered = t.plusAt(msg.X, msg.Y)
+		hoverCmd := t.setPlusHovered(t.plusAt(msg.X, msg.Y))
 		t.viewDirty = true
-		return t.handleMouseMotion(msg.X)
+		return tea.Batch(hoverCmd, t.handleMouseMotion(msg.X))
 
 	case tea.MouseReleaseMsg:
 		t.plusPressed = false
-		t.plusHovered = t.plusAt(msg.X, msg.Y)
-		return t.handleMouseRelease(msg.X)
+		hoverCmd := t.setPlusHovered(t.plusAt(msg.X, msg.Y))
+		return tea.Batch(hoverCmd, t.handleMouseRelease(msg.X))
 	}
 
 	return nil
+}
+
+func (t *TabBar) hoverFraction() float64 {
+	if t.plusHoverAnim.Running() {
+		return t.plusHoverFrom + (t.plusHoverTo-t.plusHoverFrom)*t.plusHoverAnim.Value()
+	}
+	return t.plusHoverTo
+}
+
+func (t *TabBar) setPlusHovered(hovered bool) tea.Cmd {
+	if t.plusHovered == hovered {
+		return nil
+	}
+	t.plusHoverFrom = t.hoverFraction()
+	t.plusHovered = hovered
+	t.plusHoverTo = 0
+	if hovered {
+		t.plusHoverTo = 1
+	}
+	t.viewDirty = true
+	if t.plusHoverFrom == t.plusHoverTo {
+		t.plusHoverAnim.Cancel()
+		return nil
+	}
+	return t.plusHoverAnim.Start(plusHoverDuration, animation.EaseOutCubic)
 }
 
 func (t *TabBar) plusAt(x, y int) bool {
@@ -784,7 +841,7 @@ func (t *TabBar) handleMouseMotion(x int) tea.Cmd {
 func (t *TabBar) handleMouseRelease(x int) (cmd tea.Cmd) {
 	defer t.recordVisualState()
 	defer func() {
-		if t.IsAnimating() {
+		if t.hasTabMotion() {
 			cmd = tea.Batch(cmd, t.ar.EnsureRunning())
 		}
 	}()
@@ -1115,13 +1172,14 @@ type renderedTabbar struct {
 func (t *TabBar) View() string { return t.rendered().view }
 
 func (t *TabBar) rendered() renderedTabbar {
-	if !t.viewDirty && !t.drag.active && t.cachedView != "" && t.themeGeneration == styles.ThemeGeneration() {
+	if !t.viewDirty && !t.drag.active && t.cachedView != "" && t.themeGeneration == styles.ThemeGeneration() && t.agentColorGeneration == styles.AgentColorGeneration() {
 		return t.cachedRender
 	}
 	t.cachedRender = t.render()
 	t.cachedView = t.cachedRender.view
 	t.viewDirty = false
 	t.themeGeneration = styles.ThemeGeneration()
+	t.agentColorGeneration = styles.AgentColorGeneration()
 	return t.cachedRender
 }
 
@@ -1173,11 +1231,16 @@ func (t *TabBar) render() renderedTabbar {
 	chromeFg := styles.MutedContrastFg(styles.Background)
 	chromeBg := lipgloss.NewStyle().Background(styles.Background)
 	plusStyle := chromeBg.Foreground(chromeFg)
-	if t.plusPressed && t.plusHovered {
-		plusStyle = plusStyle.Background(styles.TabDragBg).Foreground(styles.TabDragFg).Bold(true).Underline(true)
-	} else if t.plusHovered {
-		plusStyle = plusStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg).Bold(true)
+	plusBg, plusFg := styles.Background, chromeFg
+	hoverStrength := 0.3 * t.hoverFraction()
+	plusBg = blendColors(plusBg, styles.TabHoverBg, hoverStrength)
+	plusFg = blendColors(plusFg, styles.TabHoverFg, hoverStrength)
+	if t.plusAnim.Running() {
+		strength := 0.7 * (1 - t.plusAnim.Value())
+		plusBg = blendColors(plusBg, styles.TabDragBg, strength)
+		plusFg = blendColors(plusFg, styles.TabDragFg, strength)
 	}
+	plusStyle = plusStyle.Background(plusBg).Foreground(plusFg)
 	arrowStyle := chromeBg.Foreground(chromeFg)
 	attnArrowStyle := chromeBg.Foreground(styles.EnsureContrast(styles.Warning, styles.Background)).Bold(true)
 

@@ -4,9 +4,6 @@ import "github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 
 // Layout constants for sidebar elements.
 const (
-	// treePrefixWidth is the width of tree-structure prefixes like "├ " and "└ ".
-	treePrefixWidth = 2
-
 	// agentMarkerWidth is the fixed width of an agent line's leading marker cell
 	// (the ▶ current-agent / spinner glyph plus a trailing space). Non-current
 	// agents pad this column so their names stay aligned.
@@ -26,15 +23,14 @@ const (
 	starClickWidth = 2
 
 	// verticalStarY is the Y position of the star in vertical mode.
-	// Line 0: tab title, Line 1: TabStyle top padding, Line 2: star + title.
-	verticalStarY = 2
+	// The continuous pane begins with the title itself.
+	verticalStarY = 0
 
 	// minGap is the minimum gap between elements when laying out side-by-side.
 	minGap = 2
 
-	// defaultSectionGap is the default number of blank lines between sidebar
-	// sections in vertical mode (the "normal" section spacing).
-	defaultSectionGap = 2
+	// defaultSectionGap keeps the legacy setter compatible with a continuous pane.
+	defaultSectionGap = 0
 
 	// DefaultWidth is the default sidebar width in vertical mode.
 	DefaultWidth = 40
