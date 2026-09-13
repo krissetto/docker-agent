@@ -25,6 +25,17 @@ func motionTabs(n, active int) []messages.TabInfo {
 	return tabs
 }
 
+func boundForSession(t *testing.T, tb *TabBar, sessionID string) tabBound {
+	t.Helper()
+	for _, bound := range tb.dragBounds {
+		if bound.sessionID == sessionID {
+			return bound
+		}
+	}
+	require.FailNow(t, "visible session bound missing", sessionID)
+	return tabBound{}
+}
+
 func commandMessages(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
 		return nil
@@ -59,17 +70,16 @@ func advanceTabRuntime(t *testing.T, runtime *animation.Runtime, tb *TabBar, tar
 	}
 }
 
-func TestViewAndHeightHideAtMostOneTab(t *testing.T) {
+func TestViewAndHeightKeepNewTabAvailable(t *testing.T) {
 	for _, count := range []int{0, 1} {
 		tb := New(newMotionRuntime(), 8)
 		tb.SetWidth(80)
 		tb.SetTabs(motionTabs(2, 0), 0)
 		require.NotEmpty(t, tb.View())
 		tb.SetTabs(motionTabs(count, 0), 0)
-		assert.Zero(t, tb.Height())
-		assert.Empty(t, tb.View())
-		assert.Empty(t, tb.zones)
-		assert.Empty(t, tb.dragBounds)
+		assert.Equal(t, 1, tb.Height())
+		assert.Contains(t, ansi.Strip(tb.View()), "+")
+		assert.NotEmpty(t, tb.zones)
 	}
 }
 
@@ -105,7 +115,7 @@ func TestHoldActivatesFloatingDragAndMidpointReflow(t *testing.T) {
 	assert.Equal(t, 6, layer.Y)
 	assert.Contains(t, layer.Content, "DRAGME")
 
-	right := tb.dragBounds[2]
+	right := boundForSession(t, tb, "c")
 	tb.handleMouseMotion((right.start+right.end)/2 + tb.drag.grabOffset + 1)
 	assert.Greater(t, tb.drag.dropIdx, tb.drag.dragIdx)
 	assert.NotZero(t, tb.dragOffsetTo["c"], "crossed bystander should reflow")
@@ -225,8 +235,12 @@ func TestActiveDragReleaseOutsideStillUsesLastInsertionTarget(t *testing.T) {
 	tb.Update(tea.MouseClickMsg{X: grabX, Button: tea.MouseLeft})
 	tb.Update(DragHoldMsg{seq: tb.drag.seq})
 	require.True(t, tb.drag.active)
+	require.Len(t, tb.dragBounds, 2, "hold update installs only the two in-strip targets before View")
+	for _, bound := range tb.dragBounds {
+		assert.NotEqual(t, tabs[0].SessionID, bound.sessionID, "floating source is not an in-strip target")
+	}
 
-	last := tb.dragBounds[2]
+	last := boundForSession(t, tb, tabs[2].SessionID)
 	outsideX := tb.width + last.end
 	tb.Update(tea.MouseMotionMsg{X: outsideX})
 	msgs := commandMessages(tb.Update(tea.MouseReleaseMsg{X: outsideX, Button: tea.MouseLeft}))
@@ -371,6 +385,8 @@ func TestRenderedGeometryClipsUnicodeAndControlsHits(t *testing.T) {
 	tb.SetWidth(FixedTabWidth(6) + plusButtonWidth + scrollArrowWidth)
 	tb.SetTabs(tabs, 0)
 	tb.scrollOffset = 3
+	tb.InvalidateCache()
+	tb.installGeometry()
 	tb.View()
 	require.NotEmpty(t, tb.dragBounds)
 	for _, b := range tb.dragBounds {
@@ -392,13 +408,13 @@ func TestDirectionalReflowRetargetsFromCurrentRenderedX(t *testing.T) {
 	src := tb.dragBounds[2]
 	tb.drag = dragState{active: true, dragIdx: 2, dropIdx: 2, cursorX: src.start + 1, grabOffset: 1}
 	tb.updateDragReflow()
-	right := tb.dragBounds[3]
+	right := boundForSession(t, tb, "d")
 	tb.handleMouseMotion((right.start+right.end)/2 + tb.drag.grabOffset)
 	advanceTabRuntime(t, runtime, tb, runtime.Now()+animation.TickRate)
 	current := tb.dragPreviewOffset("d")
 	require.NotZero(t, current)
 
-	left := tb.dragBounds[1]
+	left := boundForSession(t, tb, "b")
 	tb.handleMouseMotion((left.start+left.end)/2 + tb.drag.grabOffset - 1)
 	assert.Equal(t, current, tb.dragOffsetFrom["d"], "reversal must retarget from current rendered X")
 	assert.Zero(t, tb.dragOffsetTo["d"])
@@ -530,6 +546,8 @@ func TestSeededDragStateMachineContinuity(t *testing.T) {
 				tb.SetWidth(22 + rng.Intn(70))
 				tb.SetTabs(tabs, 0)
 				tb.scrollOffset = rng.Intn(10)
+				tb.InvalidateCache()
+				tb.installGeometry()
 				tb.View()
 				srcIdx := rng.Intn(n)
 				var src tabBound
@@ -614,7 +632,7 @@ func TestPressHoldMotionReleasePublishesEveryLiveOverlayFrameThenQuiesces(t *tes
 	tb.Update(DragHoldMsg{seq: tb.drag.seq})
 	require.True(t, tb.TakeVisualDirty(), "drag activation must publish the floating layer")
 
-	target := tb.dragBounds[2]
+	target := boundForSession(t, tb, "c")
 	x = (target.start+target.end)/2 + tb.drag.grabOffset + 1
 	tb.Update(tea.MouseMotionMsg{X: x})
 	require.True(t, tb.TakeVisualDirty(), "lossless mouse motion must publish its live position")

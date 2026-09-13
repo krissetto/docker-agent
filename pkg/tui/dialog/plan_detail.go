@@ -58,8 +58,9 @@ type planDetailDialog struct {
 	now func() time.Time
 
 	// Markdown render cache, invalidated on data refresh or width change.
-	contentLines []string
-	renderedFor  int
+	contentLines  []string
+	renderedFor   int
+	renderedTheme uint64
 }
 
 var (
@@ -76,6 +77,7 @@ func NewPlanDetailDialog(p plans.Plan) Dialog {
 		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 		scrollview.WithReserveScrollbarSpace(true),
 	)
+	base.bodyScroll = scrollviewView
 	return &planDetailDialog{
 		BaseDialog: base,
 		plan:       p,
@@ -96,6 +98,9 @@ func (d *planDetailDialog) Init() tea.Cmd {
 }
 
 func (d *planDetailDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -207,7 +212,7 @@ func (d *planDetailDialog) updatedLabel() string {
 
 // renderContent returns the markdown-rendered plan body, cached per width.
 func (d *planDetailDialog) renderContent(contentWidth int) []string {
-	if d.contentLines != nil && d.renderedFor == contentWidth {
+	if d.contentLines != nil && d.renderedFor == contentWidth && d.renderedTheme == styles.ThemeGeneration() {
 		return d.contentLines
 	}
 
@@ -233,6 +238,7 @@ func (d *planDetailDialog) renderContent(contentWidth int) []string {
 
 	d.contentLines = lines
 	d.renderedFor = contentWidth
+	d.renderedTheme = styles.ThemeGeneration()
 	return lines
 }
 
@@ -249,37 +255,21 @@ func (d *planDetailDialog) viewport(headerCount int) int {
 	return max(1, maxHeight-headerCount-2-planDetailChrome)
 }
 
-func (d *planDetailDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
+func (d *planDetailDialog) View() string { return d.renderBody(false) }
 
-	header := d.headerLines(contentWidth)
-	contentLines := d.renderContent(contentWidth)
-	viewport := d.viewport(len(header))
-
-	d.scrollview.SetSize(regionWidth, viewport)
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+planDetailChrome/2+len(header))
-	d.scrollview.SetContent(contentLines, len(contentLines))
-
-	scrollOut := d.scrollview.View()
-	scrollLines := strings.Split(scrollOut, "\n")
-	for len(scrollLines) < viewport {
-		scrollLines = append(scrollLines, "")
+func (d *planDetailDialog) renderBody(prepare bool) string {
+	width, _, inner := d.dialogSize()
+	footer := d.RenderActionKeys(inner+d.scrollview.ReservedCols(), d.helpKeys()...)
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(d.headerLines(inner), "\n"), strings.Join(d.renderContent(inner), "\n"), footer)
+		return ""
 	}
-	scrollLines = scrollLines[:viewport]
-
-	parts := make([]string, 0, len(header)+viewport+2)
-	parts = append(parts, header...)
-	parts = append(parts, scrollLines...)
-	parts = append(parts, "", RenderHelpKeys(regionWidth, d.helpKeys()...))
-
-	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(d.headerLines(inner), "\n"), strings.Join(d.renderContent(inner), "\n"), footer)
 }
 
 // SetSize sets the dialog dimensions and configures the scrollview region.
 func (d *planDetailDialog) SetSize(width, height int) tea.Cmd {
+	defer d.renderBody(true)
 	cmd := d.BaseDialog.SetSize(width, height)
 	_, _, contentWidth := d.dialogSize()
 	regionWidth := contentWidth + d.scrollview.ReservedCols()
@@ -288,6 +278,9 @@ func (d *planDetailDialog) SetSize(width, height int) tea.Cmd {
 }
 
 func (d *planDetailDialog) Position() (row, col int) {
+	if d.cardWidth > 0 {
+		return CenterPosition(d.Width(), d.Height(), d.cardWidth, d.cardHeight)
+	}
 	dialogWidth, maxHeight, _ := d.dialogSize()
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
 }

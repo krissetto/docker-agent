@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -57,9 +57,6 @@ const (
 	// pickerHorizontalChrome is the horizontal chrome of styles.DialogStyle
 	// (border 1 + padding 2 on each side = 6 cells).
 	pickerHorizontalChrome = 6
-	// pickerContentStartX is the X offset from the dialog's left edge to the
-	// first column of content (border + horizontal padding).
-	pickerContentStartX = 3
 )
 
 // pickerLayout describes the dimensions and chrome offsets of a picker
@@ -118,6 +115,7 @@ func newPickerCore(layout pickerLayout, placeholder string) pickerCore {
 
 	base := BaseDialog{}
 	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	base.bodyScroll = scrollviewView
 	return pickerCore{
 		BaseDialog:     base,
 		textInput:      ti,
@@ -149,6 +147,9 @@ func (p *pickerCore) regionWidth(contentWidth int) int {
 
 // Position returns the centred (row, col) of the dialog on screen.
 func (p *pickerCore) Position() (row, col int) {
+	if p.cardWidth > 0 {
+		return CenterPosition(p.Width(), p.Height(), p.cardWidth, p.cardHeight)
+	}
 	dialogWidth, maxHeight, _ := p.dialogSize()
 	listHeight := p.visibleListHeight(max(1, maxHeight-p.layout.ListOverhead))
 	contentHeight := min(maxHeight, p.layout.ListOverhead+listHeight)
@@ -170,13 +171,6 @@ func (p *pickerCore) visibleListHeight(maxListHeight int) int {
 		return p.listHeight(maxListHeight)
 	}
 	return maxListHeight
-}
-
-// updateScrollviewPosition repositions the scrollview for accurate mouse
-// hit-testing. Concrete dialogs call this from their View() method.
-func (p *pickerCore) updateScrollviewPosition() {
-	dialogRow, dialogCol := p.Position()
-	p.scrollview.SetPosition(dialogCol+pickerContentStartX, dialogRow+p.layout.ListStartOffset)
 }
 
 // -----------------------------------------------------------------------------
@@ -208,6 +202,9 @@ func (p *pickerCore) updateInput(msg tea.Msg, filter func()) tea.Cmd {
 // Both flags are false for non-list, non-left, or out-of-range clicks.
 func (p *pickerCore) handleListClick(msg tea.MouseClickMsg, lineToItem func(int) int) (doubleClicked, changed bool) {
 	if msg.Button != tea.MouseLeft {
+		return false, false
+	}
+	if p.bodyScroll == p.scrollview && (msg.X < p.bodyX || msg.X >= p.bodyX+p.bodyWidth-p.scrollview.ReservedCols()) {
 		return false, false
 	}
 	idx := p.mouseListIndex(msg.Y, lineToItem)
@@ -247,6 +244,9 @@ func (p *pickerCore) navigate(delta, num int, lineForSelected func() int) bool {
 func (p *pickerCore) mouseListIndex(y int, lineToItem func(line int) int) int {
 	dialogRow, _ := p.Position()
 	listStartY := dialogRow + p.layout.ListStartOffset
+	if p.bodyScroll == p.scrollview {
+		listStartY = p.bodyY
+	}
 	visLines := p.scrollview.VisibleHeight()
 	if y < listStartY || y >= listStartY+visLines {
 		return -1
@@ -275,29 +275,6 @@ func (p *pickerCore) recordClick(idx int) bool {
 // -----------------------------------------------------------------------------
 // Empty / error placeholder rendering
 // -----------------------------------------------------------------------------
-
-// renderEmptyState fills the scrollview with a centred italic placeholder.
-func (p *pickerCore) renderEmptyState(message string, contentWidth int) string {
-	style := styles.DialogContentStyle.Italic(true).Align(lipgloss.Center).Width(contentWidth)
-	return p.renderPlaceholder(style.Render(message))
-}
-
-// renderErrorState fills the scrollview with a centred error message.
-func (p *pickerCore) renderErrorState(message string, contentWidth int) string {
-	style := styles.ErrorStyle.Align(lipgloss.Center).Width(contentWidth)
-	return p.renderPlaceholder(style.Render(message))
-}
-
-// renderPlaceholder fills the visible scrollview area with a single rendered
-// line plus blank padding so the dialog keeps a stable height.
-func (p *pickerCore) renderPlaceholder(rendered string) string {
-	visLines := p.scrollview.VisibleHeight()
-	lines := []string{"", rendered}
-	for len(lines) < visLines {
-		lines = append(lines, "")
-	}
-	return p.scrollview.ViewWithLines(lines)
-}
 
 // -----------------------------------------------------------------------------
 // Sort comparator shared by sectioned pickers
@@ -403,4 +380,15 @@ func (g *groupedList) LineForItem(item int) int {
 		return 0
 	}
 	return g.itemToLine[item]
+}
+
+func (p *pickerCore) renderPicker(prepare bool, width int, header string, lines []string, footer string) string {
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], p.BodyContentWidth(width), "")
+	}
+	if prepare {
+		p.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+		return ""
+	}
+	return p.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 }

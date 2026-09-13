@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -159,6 +160,7 @@ func NewPlanBrowserDialog(result plans.ListResult) Dialog {
 
 	base := BaseDialog{}
 	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	base.bodyScroll = scrollviewView
 	d := &planBrowserDialog{
 		BaseDialog:     base,
 		filterInput:    ti,
@@ -247,6 +249,9 @@ func (d *planBrowserDialog) ensureSelectedVisible() {
 }
 
 func (d *planBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -407,7 +412,9 @@ func (d *planBrowserDialog) statusCmd() tea.Cmd {
 	if !ok {
 		return cmd
 	}
-	return core.CmdHandler(OpenDialogMsg{Model: newPlanStatusDialog(p.Name, p.Status, *p.Version)})
+	child := newPlanStatusDialog(p.Name, p.Status, *p.Version)
+	child.SetSize(d.Width(), d.Height())
+	return core.CmdHandler(OpenDialogMsg{Model: child})
 }
 
 func (d *planBrowserDialog) deleteCmd() tea.Cmd {
@@ -415,7 +422,9 @@ func (d *planBrowserDialog) deleteCmd() tea.Cmd {
 	if !ok {
 		return cmd
 	}
-	return core.CmdHandler(OpenDialogMsg{Model: newPlanDeleteConfirmDialog(p.Name, *p.Version)})
+	child := newPlanDeleteConfirmDialog(p.Name, *p.Version)
+	child.SetSize(d.Width(), d.Height())
+	return core.CmdHandler(OpenDialogMsg{Model: child})
 }
 
 func (d *planBrowserDialog) editCmd() tea.Cmd {
@@ -440,6 +449,9 @@ func (d *planBrowserDialog) mouseYToPlanIndex(y int) int {
 	dialogRow, _ := d.Position()
 	visLines := d.scrollview.VisibleHeight()
 	listStartY := dialogRow + planBrowserListStartY
+	if d.bodyScroll == d.scrollview {
+		listStartY = d.bodyY
+	}
 
 	if y < listStartY || y >= listStartY+visLines {
 		return -1
@@ -454,76 +466,40 @@ func (d *planBrowserDialog) mouseYToPlanIndex(y int) int {
 func (d *planBrowserDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
 	dialogWidth = d.ComputeDialogWidth(85, 60, 120)
 	maxHeight = min(d.Height()*70/100, 30)
-	contentWidth = dialogWidth - 6 - d.scrollview.ReservedCols()
+	contentWidth = max(1, dialogWidth-6-d.scrollview.ReservedCols())
 	return dialogWidth, maxHeight, contentWidth
 }
 
-func (d *planBrowserDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
-	d.filterInput.SetWidth(contentWidth)
+func (d *planBrowserDialog) View() string { return d.renderBody(false) }
 
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	visibleLines := d.scrollview.VisibleHeight()
-
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+planBrowserListStartY)
-
-	total := len(d.filtered)
-	d.scrollview.SetContent(nil, total)
-	d.scrollview.SetScrollOffset(d.scrollview.ScrollOffset())
-
-	var scrollableContent string
-	if total == 0 {
+func (d *planBrowserDialog) renderBody(prepare bool) string {
+	d.filterInput.SetStyles(styles.DialogInputStyle)
+	width, _, inner := d.dialogSize()
+	d.filterInput.SetWidth(inner)
+	header := RenderTitle(fmt.Sprintf("Plans (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + d.filterInput.View()
+	lines := make([]string, 0, len(d.filtered))
+	for i, p := range d.filtered {
+		lines = append(lines, d.renderPlan(p, i == d.selected, inner))
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], inner, "")
+	}
+	if len(lines) == 0 {
 		message := "No plans yet — press n to create a shared plan"
 		if strings.TrimSpace(d.filterInput.Value()) != "" {
 			message = "No plans match the filter"
 		}
-		emptyLines := []string{"", styles.DialogContentStyle.
-			Italic(true).Align(lipgloss.Center).Width(contentWidth).
-			Render(message)}
-		for len(emptyLines) < visibleLines {
-			emptyLines = append(emptyLines, "")
-		}
-		scrollableContent = d.scrollview.ViewWithLines(emptyLines)
-	} else {
-		offset := d.scrollview.ScrollOffset()
-		end := min(offset+visibleLines, total)
-		windowLines := make([]string, 0, end-offset)
-		for i := offset; i < end; i++ {
-			windowLines = append(windowLines, d.renderPlan(d.filtered[i], i == d.selected, contentWidth))
-		}
-		scrollableContent = d.scrollview.ViewWithLines(windowLines)
+		lines = []string{message}
 	}
-
-	var countLabel string
-	if len(d.filtered) == len(d.all) {
-		countLabel = strconv.Itoa(len(d.all))
-	} else {
-		countLabel = fmt.Sprintf("%d/%d", len(d.filtered), len(d.all))
+	if len(d.warnings) > 0 {
+		header += "\n" + d.footerLine(inner)
 	}
-	title := fmt.Sprintf("Plans (%s)", countLabel)
-
-	filterView := d.filterInput.View()
-	if !d.filtering && strings.TrimSpace(d.filterInput.Value()) == "" {
-		filterView = styles.MutedStyle.Render("Press / to filter")
+	footer := d.RenderActionKeys(inner+d.scrollview.ReservedCols(), "enter", "Detail", "/", "Filter", "r", "Refresh", "n", "New", "e", "Edit", "s", "Status", "x", "Export", "d", "Delete")
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+		return ""
 	}
-
-	footer := d.footerLine(contentWidth)
-
-	content := NewContent(regionWidth).
-		AddTitle(title).
-		AddSpace().
-		AddContent(filterView).
-		AddSeparator().
-		AddContent(scrollableContent).
-		AddSeparator().
-		AddContent(footer).
-		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "detail", "/", "filter", "r", "refresh", "esc", "close").
-		AddHelpKeys("n", "new", "e", "edit", "s", "status", "x", "export", "d", "delete").
-		Build()
-
-	return styles.DialogStyle.Width(dialogWidth).Render(content)
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 }
 
 // footerLine shows load warnings when present, otherwise the identity of the
@@ -543,7 +519,9 @@ func (d *planBrowserDialog) footerLine(contentWidth int) string {
 
 // SetSize sets the dialog dimensions and configures the scrollview region.
 func (d *planBrowserDialog) SetSize(width, height int) tea.Cmd {
+	defer d.renderBody(true)
 	cmd := d.BaseDialog.SetSize(width, height)
+	d.bodyMaxHeight = min(height*70/100, 30)
 	_, maxHeight, contentWidth := d.dialogSize()
 	regionWidth := contentWidth + d.scrollview.ReservedCols()
 	visibleLines := max(1, maxHeight-planBrowserListOverhead)
@@ -626,6 +604,9 @@ func planTimeAgo(now, t time.Time) string {
 }
 
 func (d *planBrowserDialog) Position() (row, col int) {
+	if d.cardWidth > 0 {
+		return CenterPosition(d.Width(), d.Height(), d.cardWidth, d.cardHeight)
+	}
 	dialogWidth, maxHeight, _ := d.dialogSize()
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
 }
@@ -666,6 +647,12 @@ func (d *planStatusDialog) Init() tea.Cmd {
 }
 
 func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -705,21 +692,20 @@ func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-func (d *planStatusDialog) View() string {
+func (d *planStatusDialog) View() string { return d.renderBody(false) }
+func (d *planStatusDialog) renderBody(prepare bool) string {
+	d.input.SetStyles(styles.DialogInputStyle)
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	d.input.SetWidth(contentWidth)
 
-	content := NewContent(contentWidth).
-		AddTitle(fmt.Sprintf("Set status: %s (v%d)", d.name, d.version)).
-		AddSeparator().
-		AddSpace().
-		AddContent(d.input.View()).
-		AddSpace().
-		AddHelpKeys("enter", "apply", "esc", "cancel").
-		Build()
-
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+	header := RenderTitle(fmt.Sprintf("Set status: %s (v%d)", d.name, d.version), contentWidth, styles.DialogTitleStyle)
+	footer := d.RenderActionKeys(contentWidth, "esc", "Cancel", "enter", "Apply")
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+		return ""
+	}
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
 }
 
 func (d *planStatusDialog) Position() (row, col int) {
@@ -760,52 +746,45 @@ func (d *planDeleteConfirmDialog) Init() tea.Cmd {
 }
 
 func (d *planDeleteConfirmDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
-
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-		if key.Matches(msg, d.escape) {
-			return d, core.CmdHandler(CloseDialogMsg{})
-		}
-		if model, cmd, handled := HandleConfirmKeys(msg, d.keyMap,
-			func() (layout.Model, tea.Cmd) {
-				return d, tea.Sequence(
-					core.CmdHandler(CloseDialogMsg{}),
-					core.CmdHandler(messages.DeletePlanMsg{
-						Ref:             plans.SharedRef(d.name),
-						ExpectedVersion: d.version,
-					}),
-				)
-			},
-			func() (layout.Model, tea.Cmd) {
-				return d, core.CmdHandler(CloseDialogMsg{})
-			},
-		); handled {
-			return model, cmd
+		switch d.HandleConfirmKey(msg, d.keyMap) {
+		case ConfirmKeyCancelled:
+			return d, closeDialogCmd()
+		case ConfirmKeyConfirmed:
+			if d.claimResponse() {
+				return d, ConfirmAndClose(core.CmdHandler(messages.DeletePlanMsg{Ref: plans.SharedRef(d.name), ExpectedVersion: d.version}))
+			}
 		}
 	}
 	return d, nil
 }
 
-func (d *planDeleteConfirmDialog) View() string {
+func (d *planDeleteConfirmDialog) View() string { return d.renderBody(false) }
+func (d *planDeleteConfirmDialog) renderBody(prepare bool) string {
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 
-	content := NewContent(contentWidth).
-		AddTitle("Delete plan").
-		AddSeparator().
-		AddSpace().
-		AddQuestion(fmt.Sprintf("Delete shared plan %q at version %d? This cannot be undone.", d.name, d.version)).
-		AddSpace().
-		AddHelpKeys("Y", "delete", "N/esc", "cancel").
-		Build()
-
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+	header := RenderTitle("Delete plan", contentWidth, styles.DialogTitleStyle)
+	body := fmt.Sprintf("Delete shared plan %q at version %d? This cannot be undone.", d.name, d.version)
+	footer := d.RenderConfirmButtons(contentWidth)
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, body, footer)
+		return ""
+	}
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, body, footer)
 }
 
 func (d *planDeleteConfirmDialog) Position() (row, col int) {
@@ -844,6 +823,12 @@ func (d *planNameDialog) Init() tea.Cmd {
 }
 
 func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -879,23 +864,40 @@ func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-func (d *planNameDialog) View() string {
+func (d *planNameDialog) View() string { return d.renderBody(false) }
+func (d *planNameDialog) renderBody(prepare bool) string {
+	d.input.SetStyles(styles.DialogInputStyle)
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	d.input.SetWidth(contentWidth)
 
-	content := NewContent(contentWidth).
-		AddTitle("New shared plan").
-		AddSeparator().
-		AddSpace().
-		AddContent(d.input.View()).
-		AddSpace().
-		AddHelpKeys("enter", "open editor", "esc", "cancel").
-		Build()
-
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+	header := RenderTitle("New shared plan", contentWidth, styles.DialogTitleStyle)
+	footer := d.RenderActionKeys(contentWidth, "esc", "Cancel", "enter", "Open editor")
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
+		return ""
+	}
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, header, d.input.View(), footer)
 }
 
 func (d *planNameDialog) Position() (row, col int) {
 	return d.CenterDialog(d.View())
+}
+
+func (d *planStatusDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
+}
+
+func (d *planNameDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
+}
+
+func (d *planDeleteConfirmDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

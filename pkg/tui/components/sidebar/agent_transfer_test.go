@@ -217,6 +217,38 @@ func TestTransferPanelNotClickable(t *testing.T) {
 	}
 	assert.True(t, clicked["Scout"], "the source's own lines stay clickable")
 	assert.True(t, clicked["Coder"], "the destination's own lines stay clickable")
+	for _, name := range []string{"Scout", "Coder"} {
+		var row int
+		found := false
+		for y, owner := range m.agentClickZones {
+			if owner == name {
+				row, found = y, true
+				break
+			}
+		}
+		require.True(t, found, "live transfer participant has a tree row")
+		assert.Contains(t, ansi.Strip(m.cachedLines[row]), name)
+		m.SetSize(40, 8)
+		m.View()
+		for y, owner := range m.agentClickZones {
+			if owner == name {
+				row = y
+				break
+			}
+		}
+		m.scrollview.SetScrollOffset(row)
+		m.View()
+		result, payload := m.HandleClickType(x, row-m.scrollview.ScrollOffset())
+		assert.Equal(t, ClickAgent, result, "scrolled transfer participant remains selectable")
+		assert.Equal(t, name, payload)
+	}
+	m.clearTransferPresentation()
+	m.invalidateCache()
+	m.View()
+	for _, name := range m.agentClickZones {
+		assert.NotEqual(t, "Scout", name, "ended transfers leave no stale participant hit targets")
+		assert.NotEqual(t, "Coder", name, "ended transfers leave no stale participant hit targets")
+	}
 }
 
 // TestTransferPanelAtMinWidth verifies that at the narrowest expanded sidebar

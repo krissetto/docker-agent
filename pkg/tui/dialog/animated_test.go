@@ -271,7 +271,7 @@ func TestToolConfirmationManagerCompactBoundsAcrossOpenFrames(t *testing.T) {
 
 	targetWidth := lipgloss.Width(dialog.View())
 	targetHeight := lipgloss.Height(dialog.View())
-	require.Equal(t, 12, targetHeight)
+	require.Equal(t, 9, targetHeight, "compact header, body, actions and frame are measured once")
 	assertManagerFrameBounds(t, mgr, targetWidth, 1)
 
 	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration/2))

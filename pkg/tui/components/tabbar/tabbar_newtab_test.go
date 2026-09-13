@@ -32,19 +32,15 @@ func TestVisibleTabbarNewTabButtonSpawnsOnLeftClick(t *testing.T) {
 }
 
 func TestHiddenTabbarNewTabButtonRejectsStaleClicks(t *testing.T) {
-	for _, single := range []bool{false, true} {
+	for _, count := range []int{1, 3} {
 		tb := New(newMotionRuntime(), 8)
 		tb.SetWidth(80)
-		tb.SetTabs(motionTabs(3, 0), 0)
+		tb.SetTabs(motionTabs(count, 0), 0)
 		plain := ansi.Strip(tb.View())
 		plus := strings.Index(plain, "+")
 		require.GreaterOrEqual(t, plus, 0, "visible strip retains its new-tab button")
 		x := ansi.StringWidth(plain[:plus])
-		if single {
-			tb.SetTabs(motionTabs(1, 0), 0)
-		} else {
-			tb.SetVisible(false)
-		}
+		tb.SetVisible(false)
 		require.Zero(t, tb.Height())
 		require.Empty(t, commandMessages(tb.Update(tea.MouseClickMsg{X: x, Button: tea.MouseLeft})))
 		require.Empty(t, tb.View())

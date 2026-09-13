@@ -5,7 +5,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -42,7 +41,6 @@ func TestWatchCurrentTheme_NoWatcherIsNoop(t *testing.T) {
 
 func TestApplyThemeChanged_RetargetsWatcher(t *testing.T) {
 	m, _ := newTestModel(t)
-	m.statusBar = statusbar.New(m)
 	fw := &fakeThemeWatcher{}
 	m.themeWatcher = fw
 

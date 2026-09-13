@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -176,24 +175,20 @@ func newBackgroundAgentTUI(t *testing.T, width, height int) *tuitest.Driver {
 // TestBackgroundAgent_PerAgentContextInSidebar drives the full journey: the
 // worker's usage (450 of 1000 tokens) can only reach the TUI through the
 // runtime's out-of-band background-event forwarding, so the 45% appearing on
-// the worker's roster line proves the whole chain — tool call, detached
+// the worker's compact tree row proves the whole chain — tool call, detached
 // sub-session, OnBackgroundEvent, app event stream, sidebar accounting.
-// The root's own line independently settles at 10% (its final turn consumed
+// Session Token Usage independently settles at 10% (the root's final turn consumed
 // 100 of 1000 tokens).
 func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
 	d := newBackgroundAgentTUI(t, 120, 40)
 
-	// The empty editor has its own context strip; agent rows have no usage yet.
-	d.WaitFor(tuitest.ContainsAll("root", "worker", "Context 0%"))
+	// Before any task runs, the canonical tree contains only the root.
+	d.WaitFor(tuitest.ContainsAll("root", "Context 0%", "Token Usage"))
 	frame := d.Frame()
-	agentsStart := strings.Index(frame, "Agents ─")
-	require.NotEqual(t, -1, agentsStart)
-	toolsStart := strings.Index(frame[agentsStart:], "Tools ─")
-	require.NotEqual(t, -1, toolsStart)
-	agentRoster := frame[agentsStart : agentsStart+toolsStart]
-	require.Contains(t, agentRoster, "root")
-	require.Contains(t, agentRoster, "worker")
-	require.NotContains(t, agentRoster, "%", "initial agent roster must not fabricate context usage")
+	require.NotContains(t, frame, "worker")
+	require.NotContains(t, frame, "Agents ─")
+	require.NotContains(t, frame, "Tools ─")
+	require.NotContains(t, frame, "45%")
 
 	d.Type("Please dispatch the worker.").
 		Enter().
@@ -203,8 +198,8 @@ func TestBackgroundAgent_PerAgentContextInSidebar(t *testing.T) {
 }
 
 // TestBackgroundAgent_InspectorShowsWorkerContext opens the worker's Agent
-// Inspector (right-click on its roster line) after the background task
-// completed and checks the exact per-agent context line.
+// Inspector by right-clicking its compact tree row after the background task
+// completes, then checks the exact per-agent context line.
 func TestBackgroundAgent_InspectorShowsWorkerContext(t *testing.T) {
 	d := newBackgroundAgentTUI(t, 120, 40)
 
@@ -213,9 +208,8 @@ func TestBackgroundAgent_InspectorShowsWorkerContext(t *testing.T) {
 		WaitFor(tuitest.Contains("Dispatched the worker.")).
 		WaitFor(tuitest.Contains("45%"))
 
-	// "45%" renders only on the worker's roster line, so its coordinates are
-	// a reliable right-click target for that agent (either of the entry's two
-	// lines opens the inspector).
+	// "45%" renders only on the worker's compact tree row, so its coordinates
+	// are a reliable right-click target for the existing agent inspector.
 	x, y := d.MustFindText("45%")
 	d.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight}).
 		Send(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseRight}).

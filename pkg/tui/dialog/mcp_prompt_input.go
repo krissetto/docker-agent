@@ -19,12 +19,16 @@ import (
 type MCPPromptInputDialog struct {
 	BaseDialog
 
-	promptName   string
-	promptInfo   mcptools.PromptInfo
-	inputs       []textinput.Model
-	arguments    []mcptools.PromptArgument
-	currentInput int
-	keyMap       mcpPromptInputKeyMap
+	promptName       string
+	promptInfo       mcptools.PromptInfo
+	inputs           []textinput.Model
+	arguments        []mcptools.PromptArgument
+	currentInput     int
+	keyMap           mcpPromptInputKeyMap
+	fieldStarts      []int
+	fieldHeights     []int
+	bodyRow, bodyCol int
+	reanchorFocus    bool
 }
 
 // mcpPromptInputKeyMap defines key bindings for the MCP prompt input dialog
@@ -100,7 +104,17 @@ func (d *MCPPromptInputDialog) Init() tea.Cmd {
 
 // Update handles messages for the MCP prompt input dialog
 func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+
 	var cmds []tea.Cmd
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+		if handled, cmd := d.UpdateBodyScroll(msg); handled {
+			return d, cmd
+		}
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -112,6 +126,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if d.currentInput < len(d.inputs) {
 			var cmd tea.Cmd
 			d.inputs[d.currentInput], cmd = d.inputs[d.currentInput].Update(msg)
+			d.ensureInputVisible()
 			cmds = append(cmds, cmd)
 		}
 		return d, tea.Batch(cmds...)
@@ -136,6 +151,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				d.inputs[d.currentInput].Blur()
 				d.currentInput--
 				d.inputs[d.currentInput].Focus()
+				d.ensureInputVisible()
 			}
 			return d, nil
 
@@ -144,6 +160,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				d.inputs[d.currentInput].Blur()
 				d.currentInput++
 				d.inputs[d.currentInput].Focus()
+				d.ensureInputVisible()
 			}
 			return d, nil
 
@@ -164,6 +181,9 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 
 			if allFilled {
+				if !d.claimResponse() {
+					return d, nil
+				}
 				cmds = append(cmds,
 					core.CmdHandler(CloseDialogMsg{}),
 					core.CmdHandler(messages.MCPPromptMsg{
@@ -180,6 +200,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if d.currentInput < len(d.inputs) {
 				var cmd tea.Cmd
 				d.inputs[d.currentInput], cmd = d.inputs[d.currentInput].Update(msg)
+				d.ensureInputVisible()
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -188,115 +209,118 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, tea.Batch(cmds...)
 }
 
-// View renders the MCP prompt input dialog
-func (d *MCPPromptInputDialog) View() string {
-	dialogWidth, contentWidth := d.mcpPromptDialogDimensions()
-
-	title := RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
-
-	description := ""
+func (d *MCPPromptInputDialog) buildBody(innerWidth int) (body string, fieldStarts, fieldHeights []int) {
+	var parts []string
 	if d.promptInfo.Description != "" {
-		description = styles.DialogContentStyle.
-			Width(contentWidth).
-			Render(d.promptInfo.Description)
+		parts = append(parts, styles.DialogContentStyle.Width(innerWidth).Render(d.promptInfo.Description), "")
 	}
-
-	separator := RenderSeparator(contentWidth)
-
-	var inputsList []string
-
-	if len(d.inputs) == 0 {
-		inputsList = append(inputsList, styles.DialogContentStyle.
-			Italic(true).
-			Align(lipgloss.Center).
-			Width(contentWidth).
-			Render("No required parameters"))
-	} else {
-		for i, input := range d.inputs {
-			arg := d.arguments[i]
-
-			label := arg.Name
-			if arg.Required {
-				label += " *"
-			}
-
-			labelStyle := styles.DialogContentStyle
-			if i == d.currentInput {
-				labelStyle = labelStyle.Bold(true)
-			}
-
-			inputsList = append(inputsList, labelStyle.Render(label))
-			input.SetWidth(contentWidth)
-			inputsList = append(inputsList, input.View())
-
-			if i < len(d.inputs)-1 {
-				inputsList = append(inputsList, "")
-			}
+	fieldStarts = make([]int, len(d.inputs))
+	fieldHeights = make([]int, len(d.inputs))
+	line := 0
+	for _, part := range parts {
+		line += lipgloss.Height(part)
+	}
+	for i := range d.inputs {
+		label := d.arguments[i].Name
+		if d.arguments[i].Required {
+			label += " *"
 		}
+		labelView := styles.DialogContentStyle.Bold(i == d.currentInput).Width(innerWidth).Render(label)
+		input := d.inputs[i]
+		input.SetStyles(styles.DialogInputStyle)
+		input.SetWidth(max(1, innerWidth-lipgloss.Width(input.Prompt)))
+		fieldStarts[i] = line
+		fieldHeights[i] = lipgloss.Height(labelView) + 1
+		parts = append(parts, labelView, input.View(), "")
+		line += fieldHeights[i] + 1
 	}
-
-	help := RenderHelpKeys(contentWidth, "↑/↓", "navigate", "enter", "execute")
-
-	parts := []string{title}
-	if description != "" {
-		parts = append(parts, "", description)
+	if len(d.inputs) == 0 {
+		parts = append(parts, styles.DialogContentStyle.Width(innerWidth).Render("No required parameters"))
 	}
-	parts = append(parts, separator)
-	parts = append(parts, inputsList...)
-	parts = append(parts, "", help)
-
-	return styles.DialogStyle.
-		Width(dialogWidth).
-		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	return lipgloss.JoinVertical(lipgloss.Left, parts...), fieldStarts, fieldHeights
 }
 
-// mcpPromptDialogDimensions returns the dialog width and content width.
+func (d *MCPPromptInputDialog) content() (width int, header, body, footer string) {
+	dialogWidth, contentWidth := d.mcpPromptDialogDimensions()
+	body, _, _ = d.buildBody(d.BodyContentWidth(dialogWidth))
+	header = RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
+	footer = d.RenderActions(contentWidth, Action{Label: "Execute", Key: tea.KeyPressMsg{Code: tea.KeyEnter}})
+	return dialogWidth, header, body, footer
+}
+
+func (d *MCPPromptInputDialog) View() string {
+	width, header, body, footer := d.content()
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, body, footer)
+}
+
 func (d *MCPPromptInputDialog) mcpPromptDialogDimensions() (dialogWidth, contentWidth int) {
-	dialogWidth = max(min(d.Width()*80/100, 120), 60)
-	contentWidth = dialogWidth - styles.DialogStyle.GetHorizontalFrameSize()
+	dialogWidth = d.ComputeDialogWidth(80, 60, 120)
+	contentWidth = max(1, dialogWidth-styles.DialogStyle.GetHorizontalFrameSize())
 	return dialogWidth, contentWidth
 }
 
-// handleMouseClick handles mouse clicks to focus input fields.
+func (d *MCPPromptInputDialog) ensureInputVisible() {
+	if d.currentInput < len(d.fieldStarts) {
+		start := d.fieldStarts[d.currentInput]
+		d.EnsureBodyLineVisible(start + d.fieldHeights[d.currentInput] - 1)
+	}
+}
+
 func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
-	if len(d.inputs) == 0 {
+	view := d.View()
+	row, col := d.CenterDialog(view)
+	dl := NewDialogLayout(view, row, col)
+	if d.CloseButtonHit(msg, dl) {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
+	}
+	if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		return d.Update(action)
+	}
+	_, _, bodyWidth, bodyHeight := d.BodyScrollBounds()
+	if msg.X < d.bodyCol || msg.X >= d.bodyCol+max(1, bodyWidth-2) || msg.Y < d.bodyRow || msg.Y >= d.bodyRow+bodyHeight {
 		return d, nil
 	}
-
-	dialogRow, _ := d.Position()
-	_, contentWidth := d.mcpPromptDialogDimensions()
-
-	// Compute the Y offset where fields start by measuring the rendered header.
-	var headerParts []string
-	headerParts = append(headerParts, RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle))
-	if d.promptInfo.Description != "" {
-		headerParts = append(headerParts, "", styles.DialogContentStyle.Width(contentWidth).Render(d.promptInfo.Description))
-	}
-	headerParts = append(headerParts, RenderSeparator(contentWidth))
-	y := ContentStartRow(dialogRow, lipgloss.JoinVertical(lipgloss.Left, headerParts...))
-
-	clickY := msg.Y
-	for i := range d.inputs {
-		// Click on label or input line focuses the field
-		if clickY == y || clickY == y+1 {
-			d.inputs[d.currentInput].Blur()
-			d.currentInput = i
-			d.inputs[d.currentInput].Focus()
-			return d, nil
+	line := msg.Y - d.bodyRow + d.BodyScrollOffset()
+	for i, start := range d.fieldStarts {
+		if line < start || line >= start+d.fieldHeights[i] {
+			continue
 		}
-		y += 2 // label + input
-
-		if i < len(d.inputs)-1 {
-			y++ // space between fields
+		d.inputs[d.currentInput].Blur()
+		d.currentInput = i
+		cmd := d.inputs[i].Focus()
+		if line == start+d.fieldHeights[i]-1 {
+			SetTextInputCursorAtCell(&d.inputs[i], msg.X-d.bodyCol-lipgloss.Width(d.inputs[i].Prompt))
 		}
+		return d, cmd
 	}
-
 	return d, nil
 }
 
-// Position calculates the position to center the dialog
 func (d *MCPPromptInputDialog) Position() (row, col int) {
-	dialogWidth := max(min(d.Width()*80/100, 120), 60)
-	dialogHeight := 15 + len(d.inputs)*3 // Approximate height
-	return CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
+	return d.CenterDialog(d.View())
+}
+
+func (d *MCPPromptInputDialog) SetSize(width, height int) tea.Cmd {
+	d.reanchorFocus = d.Width() > 0 && (width != d.Width() || height != d.Height())
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
+}
+
+func (d *MCPPromptInputDialog) prepareLayout() {
+	dialogWidth, _ := d.mcpPromptDialogDimensions()
+	width := d.BodyContentWidth(dialogWidth)
+	for i := range d.inputs {
+		d.inputs[i].SetWidth(max(1, width-lipgloss.Width(d.inputs[i].Prompt)))
+	}
+	_, d.fieldStarts, d.fieldHeights = d.buildBody(width)
+	frameWidth, header, body, footer := d.content()
+	d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	if d.reanchorFocus {
+		d.reanchorFocus = false
+		d.ensureInputVisible()
+		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	}
+	d.bodyCol, d.bodyRow, _, _ = d.BodyScrollBounds()
 }

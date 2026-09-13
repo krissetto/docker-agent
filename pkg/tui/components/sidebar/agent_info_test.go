@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func TestSetAgentInfo_UpdatesProviderAndModel(t *testing.T) {
@@ -64,7 +65,7 @@ func TestSetAgentInfo_UpdatesProviderAndModel(t *testing.T) {
 			name:            "model without slash keeps only model",
 			agentName:       "root",
 			modelID:         "gpt-4o",
-			wantProvider:    "original", // Provider should not be modified
+			wantProvider:    "", // Unqualified models carry no provider
 			wantModel:       "gpt-4o",
 			initialProvider: "original",
 			initialModel:    "old-model",
@@ -195,4 +196,16 @@ func TestSetAgentInfo_CompactionAttribution(t *testing.T) {
 	m.SetAgentInfo("root", "anthropic/claude", "desc", 128_000, "", 0)
 	assert.Empty(t, m.agentCompactionModel)
 	assert.Zero(t, m.agentPrimaryLimit)
+}
+
+func TestSetAgentInfoHarnessClearsPreviousProvider(t *testing.T) {
+	t.Parallel()
+	m := newVisibilityTestSidebar(t).model
+	m.SetAgentInfo("root", "openai/Remote display", "", 0, "", 0)
+	assert.Contains(t, m.activeModelInfo(60), "openai")
+	m.SetAgentInfo("root", "harness", "", 0, "", 0)
+	assert.Empty(t, m.availableAgents[0].Provider)
+	assert.Equal(t, "harness", m.availableAgents[0].Model)
+	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "stale", Model: "Remote display"}})
+	assert.Equal(t, styles.TabPrimaryStyle.Render("harness"), m.activeModelInfo(60), "late team metadata cannot restore a provider for an unqualified active model")
 }

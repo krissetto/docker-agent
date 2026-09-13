@@ -212,8 +212,8 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 	require.Greater(t, height, 3, "narrow width must remeasure wrapped content before layout")
 	require.Equal(t, regionEditor, root.hitTestRegion(root.editorTop()))
 	require.Equal(t, regionContextUsage, root.hitTestRegion(root.editorTop()+height))
-	require.Equal(t, regionFooterGap, root.hitTestRegion(root.editorTop()+height+1))
-	require.Equal(t, regionStatusBar, root.hitTestRegion(root.editorTop()+height+2))
+	require.Equal(t, regionOutside, root.hitTestRegion(root.editorTop()+height+1))
+	require.Equal(t, regionOutside, root.hitTestRegion(root.editorTop()+height+2))
 	require.Equal(t, strings.Repeat("wrapped draft ", 9), root.editor.Value())
 	for _, width := range []int{120, 83, 40} {
 		_, _ = root.Update(tea.WindowSizeMsg{Width: width, Height: 30})
@@ -340,7 +340,7 @@ func TestActualProgramTabbarDragDropSettlesAndRejectsHiddenHold(t *testing.T) {
 	program.Send(messages.TabsUpdatedMsg{Tabs: []messages.TabInfo{{SessionID: "profile", Title: "profile", IsActive: true}}, ActiveIdx: 0})
 	require.Eventually(t, func() bool { return snapshot().holdMessages > holds }, time.Second, time.Millisecond)
 	hidden := snapshot()
-	require.Zero(t, hidden.tabHeight)
+	require.Positive(t, hidden.tabHeight, "one session remains visible")
 	require.False(t, hidden.overlay)
 	require.Zero(t, hidden.active)
 	require.Eventually(t, func() bool { return snapshot().delayMessages > 0 }, time.Second, time.Millisecond, "SetTabs scroll-delay commands must reach root")
@@ -362,7 +362,7 @@ func assertAnimationCadence(t *testing.T, label string, times []time.Time) {
 	require.Greater(t, hz, 25.0, "%s must exceed the former 14Hz ceiling", label)
 }
 
-func TestActualProgramEditorAnimatedResizeAndPostSendCollapse(t *testing.T) {
+func TestActualProgramEditorDirectResizeAndPostSendCollapse(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	writer := &cacheProgramWriter{}
 	coalescer := tuiinput.NewMouseCoalescer()
@@ -388,23 +388,20 @@ func TestActualProgramEditorAnimatedResizeAndPostSendCollapse(t *testing.T) {
 	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 10, Button: tea.MouseLeft})
 	require.Eventually(t, func() bool {
 		s := snapshot()
-		return s.resizeDragging && s.heightMoving && s.editorHeight > initial.editorHeight && s.editorHeight < s.editorTarget
-	}, time.Second, time.Millisecond, "coalesced motion animates before release")
+		return s.resizeDragging && !s.heightMoving && s.editorHeight > initial.editorHeight && s.editorHeight == s.editorTarget
+	}, time.Second, time.Millisecond, "each accepted coalesced motion allocates directly")
+	first := snapshot()
+	require.Equal(t, initial.ticks, first.ticks, "manual motion needs no animation frame lease")
 	program.Send(tea.MouseMotionMsg{X: 40, Y: initial.tabY - 11, Button: tea.MouseLeft})
 	// Release flushes the pending coalesced motion before ending the gesture.
-	program.Send(tea.MouseReleaseMsg{X: 40, Y: initial.tabY - 10, Button: tea.MouseLeft})
-	released := snapshot()
-	require.False(t, released.resizeDragging)
-	require.True(t, released.heightMoving)
-	require.Greater(t, released.editorTarget, initial.editorHeight)
-	require.Eventually(t, func() bool {
-		s := snapshot()
-		return s.editorHeight > initial.editorHeight && s.editorHeight < s.editorTarget
-	}, time.Second, time.Millisecond)
-	require.Eventually(t, func() bool { s := snapshot(); return !s.heightMoving && s.active == 0 }, time.Second, time.Millisecond)
+	program.Send(tea.MouseReleaseMsg{X: 40, Y: initial.tabY - 11, Button: tea.MouseLeft})
 	expanded := snapshot()
+	require.False(t, expanded.resizeDragging)
+	require.False(t, expanded.heightMoving)
+	require.Equal(t, first.editorHeight+1, expanded.editorHeight, "release applies the final accepted pointer without chasing")
 	require.Equal(t, expanded.editorTarget, expanded.editorHeight, "empty input honors manual resize")
-	assertAnimationCadence(t, "editor drag", expanded.tickTimes)
+	require.Zero(t, expanded.active)
+	require.Equal(t, initial.ticks, expanded.ticks)
 	// Automatic content growth remains immediate. Sending clears the manual
 	// request and animates back to the automatic one-line empty-input target.
 	for i, line := range []string{"first", "second", "third", "fourth", "fifth", "sixth"} {
@@ -425,6 +422,7 @@ func TestActualProgramEditorAnimatedResizeAndPostSendCollapse(t *testing.T) {
 	require.Eventually(t, func() bool { s := snapshot(); return s.editorHeight == 1 && !s.heightMoving }, 2*time.Second, time.Millisecond)
 	// The fake runtime leaves a pending-response spinner. Its 100ms frames
 	// must not cause whole-root composition on every shared 60Hz tick.
+	assertAnimationCadence(t, "automatic editor collapse", snapshot().tickTimes)
 	busy := snapshot()
 	select {
 	case <-time.After(400 * time.Millisecond):

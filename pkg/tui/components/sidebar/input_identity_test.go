@@ -50,5 +50,6 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.Contains(t, ansi.Strip(view.View()), ref.Label())
 	assert.Contains(t, view.View(), label, "tool uses canonical name color and neutral ID despite display alias")
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
-	assert.Contains(t, strings.Split(ansi.Strip(border), "\n")[0], "━ "+ref.Label())
+	assert.Equal(t, "┃ "+ref.Label(), strings.TrimSpace(strings.Split(ansi.Strip(border), "\n")[0]))
+	assert.NotContains(t, ansi.Strip(border), "━", "identity header has no top rule")
 }

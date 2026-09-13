@@ -1,9 +1,12 @@
 package dialog
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,7 +70,7 @@ func TestTourOfferDialog_View(t *testing.T) {
 
 	view := d.View()
 	assert.Contains(t, view, "Welcome to docker agent")
-	assert.Contains(t, view, "take the tour")
+	assert.Contains(t, view, "Take the tour")
 	assert.NotContains(t, view, "usage data")
 
 	withNotice := NewTourOfferDialog(true)
@@ -80,4 +83,30 @@ func TestIsCommandPalette(t *testing.T) {
 
 	assert.True(t, IsCommandPalette(NewCommandPaletteDialog(nil)))
 	assert.False(t, IsCommandPalette(NewTourOfferDialog(false)))
+}
+
+func TestTourOfferDialogBodyUsesReservedScrollbarWidth(t *testing.T) {
+	t.Parallel()
+	for _, notice := range []bool{false, true} {
+		d := NewTourOfferDialog(notice).(*tourOfferDialog)
+		d.SetSize(120, 40)
+		view := d.View()
+		bodyX, bodyY, bodyWidth, bodyHeight := d.BodyScrollBounds()
+		row, col := d.Position()
+		lines := strings.Split(ansi.Strip(view), "\n")
+		var bodyLines []string
+		for _, line := range lines[bodyY-row : bodyY-row+bodyHeight] {
+			bodyLines = append(bodyLines, ansi.Cut(line, bodyX-col, bodyX-col+max(1, bodyWidth-2)))
+		}
+		body := strings.Join(bodyLines, "\n")
+		for line := range strings.SplitSeq(body, "\n") {
+			assert.NotEqual(t, "s-", strings.Trim(line, " │"), "reserved scrollbar columns must not hard-wrap the already wrapped prose")
+		}
+		assert.Contains(t, strings.Join(strings.Fields(body), " "), "First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes.")
+		if notice {
+			assert.Contains(t, strings.Join(strings.Fields(body), " "), "Anonymous usage data helps improve docker agent. Opt out with TELEMETRY_ENABLED=false.")
+		}
+		assert.LessOrEqual(t, lipgloss.Height(view), 40)
+		assert.LessOrEqual(t, lipgloss.Width(view), 120)
+	}
 }

@@ -274,8 +274,8 @@ func TestCompactClickZonesEveryLine(t *testing.T) {
 			clicks[name]++
 		}
 	}
-	assert.Equal(t, 2, clicks["root"], "both compact lines of the current agent are clickable")
-	assert.Equal(t, 2, clicks["first"], "both compact lines of the other agent are clickable")
+	assert.Zero(t, clicks["root"], "the active agent does not replace the canonical root")
+	assert.Equal(t, 1, clicks["first"], "the initial canonical root owns one row")
 }
 
 // TestSetAgentInfoMode_LiveSwitch verifies switching modes invalidates the

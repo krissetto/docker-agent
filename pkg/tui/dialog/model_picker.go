@@ -143,6 +143,9 @@ func (d *modelPickerDialog) setQuery(query string) {
 }
 
 func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
@@ -352,71 +355,24 @@ func (d *modelPickerDialog) filterModels() {
 	}
 }
 
-func (d *modelPickerDialog) View() string {
-	start := time.Now()
-	dialogWidth, _, contentWidth := d.dialogSize()
-	d.textInput.SetWidth(contentWidth)
+func (d *modelPickerDialog) View() string { return d.renderBody(false) }
 
-	buildListStart := time.Now()
-	gl := d.buildList(contentWidth)
-	buildListDuration := time.Since(buildListStart)
-	d.updateScrollviewPosition()
-	setContentStart := time.Now()
-	d.scrollview.SetContent(gl.Lines(), len(gl.Lines()))
-	setContentDuration := time.Since(setContentStart)
-
-	var scrollableContent string
-	scrollviewStart := time.Now()
-	if len(d.filtered) == 0 {
-		scrollableContent = d.renderEmptyState("No models found", contentWidth)
-	} else {
-		scrollableContent = d.scrollview.View()
-	}
-	scrollviewDuration := time.Since(scrollviewStart)
-
-	contentBuilder := NewContent(d.regionWidth(contentWidth)).
-		AddTitle("Select Model").
-		AddSpace().
-		AddContent(d.textInput.View())
-
+func (d *modelPickerDialog) renderBody(prepare bool) string {
+	d.textInput.SetStyles(styles.DialogInputStyle)
+	width, _, inner := d.dialogSize()
+	d.textInput.SetWidth(inner)
+	header := RenderTitle("Select Model", inner, styles.DialogTitleStyle) + "\n" + d.textInput.View() + "\n" + d.renderColumnHeader(inner)
 	if d.errMsg != "" {
-		contentBuilder.AddContent(styles.ErrorStyle.Render("⚠ " + d.errMsg))
+		header += "\n" + styles.ErrorStyle.Render(d.errMsg)
 	}
-
-	detailsStart := time.Now()
-	details := d.renderDetails(contentWidth)
-	detailsDuration := time.Since(detailsStart)
-	contentBuildStart := time.Now()
-	content := contentBuilder.
-		AddSeparator().
-		AddContent(d.renderColumnHeader(contentWidth)).
-		AddContent(scrollableContent).
-		AddSeparator().
-		AddContent(details).
-		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", d.refresh.Help().Key, d.refresh.Help().Desc).
-		Build()
-	contentBuildDuration := time.Since(contentBuildStart)
-
-	renderStart := time.Now()
-	view := styles.DialogStyle.Width(dialogWidth).Render(content)
-	renderDuration := time.Since(renderStart)
-	if duration := time.Since(start); duration > modelPickerSlowRenderThreshold {
-		slog.Debug("Model picker render slow",
-			"duration", duration,
-			"build_list_duration", buildListDuration,
-			"set_content_duration", setContentDuration,
-			"scrollview_duration", scrollviewDuration,
-			"details_duration", detailsDuration,
-			"content_build_duration", contentBuildDuration,
-			"render_duration", renderDuration,
-			"models", len(d.models),
-			"filtered", len(d.filtered),
-			"lines", len(gl.Lines()),
-			"visible_lines", d.scrollview.VisibleHeight(),
-		)
+	lines := d.buildList(inner).Lines()
+	if len(lines) == 0 {
+		lines = []string{"No models found"}
 	}
-	return view
+	lines = append(lines, "")
+	lines = append(lines, strings.Split(d.renderDetails(inner), "\n")...)
+	footer := d.RenderActionKeys(d.regionWidth(inner), "enter", "Select", d.refresh.Help().Key, d.refresh.Help().Desc)
+	return d.renderPicker(prepare, width, header, lines, footer)
 }
 
 // pickerRowPalette is the set of styles used to render one row of the
@@ -720,4 +676,10 @@ func joinOrDash(parts []string) string {
 		return "—"
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (d *modelPickerDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.pickerCore.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

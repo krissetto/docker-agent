@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -22,21 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-// Layout constants for tool confirmation dialog.
-const (
-	toolConfirmDialogWidthPercent  = 70 // Dialog width as percentage of screen
-	toolConfirmDialogHeightPercent = 80 // Max dialog height as percentage of screen
-	toolConfirmMinContentRows      = 1  // Keep an empty/degenerate tool card visible
-	toolConfirmEmptyLinesBefore    = 2  // Empty lines before question
-	toolConfirmEmptyLinesAfter     = 1  // Empty lines after question
-
-	// toolConfirmMinOptionWidth is the narrowest width the option block
-	// can be laid out or rendered at: one action key, the key/label gap,
-	// and the "…" a fully truncated label collapses to. Anything narrower
-	// wraps a minimal segment across physical lines, breaking the
-	// one-line-per-row contract click hit-testing relies on.
-	toolConfirmMinOptionWidth = 3
-)
+const toolConfirmDialogWidthPercent = 70
 
 // ConfirmationSessionState is the session-state surface the confirmation
 // dialog needs: the message list's surface for rendering the tool call, plus
@@ -61,155 +46,30 @@ type toolConfirmationDialog struct {
 	permissionPattern string // cached permission pattern for this tool call
 }
 
-// dialogDimensions returns computed dialog width and content width.
-// contentWidth never drops below toolConfirmMinOptionWidth: the outer
-// dialog style re-wraps its content at contentWidth, so shrinking
-// further would split even a minimal option row across physical lines
-// and misalign click hit-testing. An extremely narrow terminal clips
-// the dialog instead, which is the lesser evil. SetSize, View, Position
-// and handleMouseClick all derive from this one clamped layout.
 func (d *toolConfirmationDialog) dialogDimensions() (dialogWidth, contentWidth int) {
-	frameWidth := styles.DialogStyle.GetHorizontalFrameSize()
-	dialogWidth = max(d.Width()*toolConfirmDialogWidthPercent/100, toolConfirmMinOptionWidth+frameWidth)
-	contentWidth = dialogWidth - frameWidth
+	dialogWidth = d.ComputeDialogWidth(toolConfirmDialogWidthPercent, 36, 120)
+	contentWidth = max(1, dialogWidth-styles.DialogStyle.GetHorizontalFrameSize())
 	return dialogWidth, contentWidth
 }
 
-// SetSize implements [Dialog].
 func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	d.BaseDialog.SetSize(width, height)
-
-	// Calculate dialog dimensions using helper
-	_, contentWidth := d.dialogDimensions()
-	maxDialogHeight := height * toolConfirmDialogHeightPercent / 100
-
-	// Measure fixed UI elements using the same rendering as View()
-	titleStyle := styles.DialogTitleStyle.Width(contentWidth)
-	title := titleStyle.Render(toolconfirm.Title)
-	titleHeight := lipgloss.Height(title)
-
-	separator := d.renderSeparator(contentWidth)
-	separatorHeight := lipgloss.Height(separator)
-
-	question := styles.DialogQuestionStyle.Width(contentWidth).Render(toolconfirm.Question)
-	questionHeight := lipgloss.Height(question)
-
-	options := d.renderOptions(contentWidth)
-	optionsHeight := lipgloss.Height(options)
-
-	// The safety-warning + metadata sections each contribute their own
-	// height plus a leading blank line (matching how View() spaces them).
-	var safetyHeight int
-	if warning := d.renderSafetyWarning(contentWidth); warning != "" {
-		safetyHeight = lipgloss.Height(warning) + 1
-	}
-	var metadataHeight int
-	if metadata := d.renderMetadata(contentWidth); metadata != "" {
-		metadataHeight = lipgloss.Height(metadata) + 1
-	}
-
-	frameHeight := styles.DialogStyle.GetVerticalFrameSize()
-	fixedContentHeight := titleHeight + separatorHeight + toolConfirmEmptyLinesBefore + questionHeight + toolConfirmEmptyLinesAfter + optionsHeight + safetyHeight + metadataHeight
-
-	// Size the tool card from its decoded, width-aware rendered rows. The
-	// available viewport is only an upper bound; assigning it directly makes a
-	// one-command confirmation inherit 80% of the terminal height.
-	maxToolRows := max(0, maxDialogHeight-frameHeight-fixedContentHeight)
-	d.scrollView.SetSize(contentWidth, maxToolRows)
-	contentRows := d.scrollView.RenderedContentHeight()
-	visibleRows := min(max(contentRows, toolConfirmMinContentRows), maxToolRows)
-	d.scrollView.SetSize(contentWidth, visibleRows)
-
+	dialogWidth, _ := d.dialogDimensions()
+	bodyWidth := d.BodyContentWidth(dialogWidth)
+	d.scrollView.SetSize(bodyWidth, max(1, height))
+	d.scrollView.SetSize(bodyWidth, max(1, d.scrollView.RenderedContentHeight()))
+	d.prepareLayout()
 	return nil
 }
 
-// renderSeparator renders the separator line consistently.
-func (d *toolConfirmationDialog) renderSeparator(contentWidth int) string {
-	return RenderSeparator(contentWidth)
-}
-
-// renderOptions renders the Y/N/T/B/A decision block: the option
-// segments laid out by optionRows, one centered help-keys line per row.
-// The width shares optionRows' clamp so a laid-out row never wraps
-// inside RenderHelpKeys.
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
-	contentWidth = max(contentWidth, toolConfirmMinOptionWidth)
-	rows := d.optionRows(contentWidth)
-	lines := make([]string, len(rows))
-	for i, row := range rows {
-		bindings := make([]string, 0, len(row)*2)
-		for _, seg := range row {
-			bindings = append(bindings, seg.action, seg.label)
-		}
-		lines[i] = RenderHelpKeys(contentWidth, bindings...)
+	bindings := toolconfirm.OptionsHelp(d.permissionPattern)
+	actions := make([]Action, 0, len(bindings)/2)
+	for i := 0; i+1 < len(bindings); i += 2 {
+		action, _ := utf8.DecodeRuneInString(bindings[i])
+		actions = append(actions, Action{Label: bindings[i] + " " + bindings[i+1], Key: tea.KeyPressMsg{Code: action, Text: bindings[i]}})
 	}
-	return strings.Join(lines, "\n")
-}
-
-// optionRows lays out the decision segments for the current permission
-// pattern. renderOptions and handleMouseClick both derive from this one
-// layout, so what the user sees and what a click hits cannot drift apart.
-// The width is clamped so a minimal "<key> …" segment always fits on one
-// row, no matter how narrow the caller's width is.
-func (d *toolConfirmationDialog) optionRows(contentWidth int) [][]optionSegment {
-	return layoutOptionRows(max(contentWidth, toolConfirmMinOptionWidth), toolconfirm.OptionsHelp(d.permissionPattern))
-}
-
-// optionSegment is one clickable "<key> <label>" unit of the decision
-// block. startX/endX are terminal cell offsets of the segment within its
-// row's visible text (centering padding excluded), endX exclusive.
-type optionSegment struct {
-	action string // action key, dispatched via toolconfirm.DecisionForAction
-	label  string // displayed label; truncated when the segment alone exceeds contentWidth
-	startX int
-	endX   int
-}
-
-// layoutOptionRows greedily packs "<key> <label>" segments into rows at
-// most contentWidth cells wide, breaking only at the two-space segment
-// separators so no segment ever splits across rows. A segment too wide
-// even for a row of its own gets its displayed label truncated with an
-// ellipsis — the action key stays visible and the underlying permission
-// pattern is unaffected. All widths are terminal cell widths, not byte
-// lengths (labels and the ellipsis can hold multi-byte runes). Callers
-// clamp contentWidth to toolConfirmMinOptionWidth or more, so even a
-// fully truncated "<key> …" segment fits its row.
-func layoutOptionRows(contentWidth int, bindings []string) [][]optionSegment {
-	if len(bindings) == 0 || len(bindings)%2 != 0 {
-		return nil
-	}
-	var rows [][]optionSegment
-	var row []optionSegment
-	rowWidth := 0
-	for i := 0; i < len(bindings); i += 2 {
-		action, label := bindings[i], bindings[i+1]
-		keyWidth := ansi.StringWidth(action)
-		if keyWidth+1+ansi.StringWidth(label) > contentWidth {
-			label = ansi.Truncate(label, max(contentWidth-keyWidth-1, 1), "…")
-		}
-		segWidth := keyWidth + 1 + ansi.StringWidth(label)
-		if len(row) > 0 && rowWidth+2+segWidth > contentWidth {
-			rows = append(rows, row)
-			row, rowWidth = nil, 0
-		}
-		startX := 0
-		if len(row) > 0 {
-			startX = rowWidth + 2
-		}
-		row = append(row, optionSegment{action: action, label: label, startX: startX, endX: startX + segWidth})
-		rowWidth = startX + segWidth
-	}
-	return append(rows, row)
-}
-
-// optionRowText is the plain text of one laid-out row — exactly what
-// helpKeysLine renders for its bindings, without styling.
-func optionRowText(row []optionSegment) string {
-	parts := make([]string, len(row))
-	for i, seg := range row {
-		parts[i] = seg.action + " " + seg.label
-	}
-	return strings.Join(parts, "  ")
+	return d.RenderActions(contentWidth, actions...)
 }
 
 // safetyConventionKeys are the metadata keys the safer_shell builtin
@@ -430,6 +290,13 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 
 // Update handles messages for the tool confirmation dialog
 func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -467,107 +334,42 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-// handleMouseClick handles mouse clicks on the action buttons (Y/N/T/B/A).
 func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
-	dialogRow, dialogCol := d.Position()
-	renderedDialog := d.View()
-	dialogHeight := lipgloss.Height(renderedDialog)
-
-	// The option rows are the last content lines inside the dialog: View
-	// appends renderOptions last, one physical line per laid-out row.
-	_, contentWidth := d.dialogDimensions()
-	rows := d.optionRows(contentWidth)
-	rowIdx := msg.Y - ContentEndRow(dialogRow, dialogHeight) + len(rows) - 1
-	if rowIdx < 0 || rowIdx >= len(rows) {
-		return d, nil
+	view := d.View()
+	row, col := d.CenterDialog(view)
+	if action, ok := d.ActionKeyAt(msg.X, msg.Y, NewDialogLayout(view, row, col)); ok {
+		return d.Update(action)
 	}
-	row := rows[rowIdx]
-
-	// Hit-test against the line the user actually saw: take the clicked
-	// row from the rendered dialog and locate the row's text inside it.
-	// Reconstructing the left offset from frame sizes plus the centering
-	// padding is fragile — any extra inset between the frame and the
-	// help line shifts every click. The matched byte position is turned
-	// into a cell offset (the border rune is multi-byte, and labels can
-	// be too), because mouse coordinates are terminal cells.
-	renderedLines := strings.Split(ansi.Strip(renderedDialog), "\n")
-	lineIdx := msg.Y - dialogRow
-	if lineIdx < 0 || lineIdx >= len(renderedLines) {
-		return d, nil
-	}
-	line := renderedLines[lineIdx]
-	byteStart := strings.Index(line, optionRowText(row))
-	if byteStart < 0 {
-		return d, nil
-	}
-	relX := msg.X - dialogCol - ansi.StringWidth(line[:byteStart])
-
-	// Map the click onto its segment and dispatch the segment's action
-	// key — never a character parsed out of the label (labels can contain
-	// uppercase letters; the always-allow label echoes the command
-	// pattern). Separator gaps are dead zones: attributing them to either
-	// neighbour would fire some action on a near-miss, and no attribution
-	// is uniformly the safer one (left makes the Y/N gap approve, right
-	// makes the B/A gap go autonomous).
-	for _, seg := range row {
-		if relX >= seg.startX && relX < seg.endX {
-			if decision, ok := toolconfirm.DecisionForAction(seg.action); ok {
-				return d.executeAction(decision)
-			}
-			return d, nil
-		}
-	}
-
 	return d, nil
 }
 
-// View renders the tool confirmation dialog
-func (d *toolConfirmationDialog) View() string {
+func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth, contentWidth := d.dialogDimensions()
-
-	dialogStyle := styles.DialogStyle.Width(dialogWidth)
-
-	titleStyle := styles.DialogTitleStyle.Width(contentWidth)
-	title := titleStyle.Render(toolconfirm.Title)
-
-	// Separator
-	separator := d.renderSeparator(contentWidth)
-
-	// Get scrollable tool call view
-	argumentsSection := d.scrollView.View()
-
-	// Combine all parts with proper spacing
-	parts := []string{title, separator}
-
-	if argumentsSection != "" {
-		parts = append(parts, "", argumentsSection)
-	}
-
-	if warning := d.renderSafetyWarning(contentWidth); warning != "" {
+	bodyWidth := d.BodyContentWidth(dialogWidth)
+	header = RenderTitle(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
+	parts := []string{d.scrollView.View()}
+	if warning := d.renderSafetyWarning(bodyWidth); warning != "" {
 		parts = append(parts, "", warning)
 	}
-
-	if metadata := d.renderMetadata(contentWidth); metadata != "" {
+	if metadata := d.renderMetadata(bodyWidth); metadata != "" {
 		parts = append(parts, "", metadata)
 	}
-
-	// Confirmation prompt
-	question := styles.DialogQuestionStyle.Width(contentWidth).Render(toolconfirm.Question)
-	options := d.renderOptions(contentWidth)
-
-	parts = append(parts, "", question, "", options)
-
-	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
-
-	return dialogStyle.Render(content)
+	parts = append(parts, "", styles.DialogQuestionStyle.Width(bodyWidth).Render(toolconfirm.Question))
+	return styles.DialogStyle, dialogWidth, header, lipgloss.JoinVertical(lipgloss.Left, parts...), d.renderOptions(contentWidth)
 }
 
-// Position calculates the position to center the dialog
+func (d *toolConfirmationDialog) View() string {
+	style, width, header, body, footer := d.content()
+	return d.RenderScrollableBody(style, width, header, body, footer)
+}
+
+func (d *toolConfirmationDialog) prepareLayout() {
+	style, width, header, body, footer := d.content()
+	d.PrepareScrollableBody(style, width, header, body, footer)
+}
+
 func (d *toolConfirmationDialog) Position() (row, col int) {
-	dialogWidth, _ := d.dialogDimensions()
-	renderedDialog := d.View()
-	dialogHeight := lipgloss.Height(renderedDialog)
-	return CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
+	return d.CenterDialog(d.View())
 }
 
 // DialogClosable reports that this mandatory decision has no generic close chrome.

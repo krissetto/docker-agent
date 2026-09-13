@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -60,6 +61,14 @@ func (d *URLElicitationDialog) OutsideClickDismissCmd() tea.Cmd {
 }
 
 func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -91,14 +100,9 @@ func (d *URLElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if d.CloseButtonHit(msg, NewDialogLayout(view, row, col)) {
 			return d, d.respond(tools.ElicitationActionCancel)
 		}
-		if d.url != "" {
-			cmd := d.openURLInBrowser()
-			return d, cmd
+		if action, ok := d.ActionKeyAt(msg.X, msg.Y, NewDialogLayout(view, row, col)); ok {
+			return d.Update(action)
 		}
-	case tea.MouseMotionMsg:
-		view := d.View()
-		row, col := d.CenterDialog(view)
-		d.HandleMouseMotion(msg.X, msg.Y, NewDialogLayout(view, row, col))
 	}
 	return d, nil
 }
@@ -126,28 +130,47 @@ func (d *URLElicitationDialog) Position() (row, col int) {
 	return d.CenterDialog(d.View())
 }
 
-func (d *URLElicitationDialog) View() string {
+func (d *URLElicitationDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth := d.ComputeDialogWidth(70, 50, 90)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
+	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	content := NewContent(contentWidth)
-	content.AddTitle("MCP Server Request")
-	content.AddSeparator()
+	content := NewContent(bodyWidth)
+	header = RenderTitle("MCP Server Request", contentWidth, styles.DialogTitleStyle)
 
 	// Message from server
-	content.AddContent(styles.DialogContentStyle.Width(contentWidth).Render(d.message))
+	content.AddContent(styles.DialogContentStyle.Width(bodyWidth).Render(d.message))
 	content.AddSpace()
 
 	// URL to visit
 	if d.url != "" {
 		content.AddContent(styles.DialogContentStyle.Foreground(styles.TextMuted).Render("Please visit:"))
-		content.AddContent(styles.InfoStyle.Width(contentWidth).Render(d.url))
+		content.AddContent(styles.InfoStyle.Width(bodyWidth).Render(d.url))
 		content.AddSpace()
 	}
 
-	content.AddHelp("Press Y when you have completed the action, or N to decline.")
-	content.AddSpace()
-	content.AddHelpKeys("Y", "confirm", "N", "decline", "o", "open")
+	content.AddContent(styles.DialogContentStyle.Width(bodyWidth).Render("Confirm when you have completed the action."))
+	actions := []Action{{Label: "Decline", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}}}
+	if d.url != "" {
+		actions = append(actions, Action{Label: "Open", Key: tea.KeyPressMsg{Code: 'o', Text: "o"}})
+	}
+	actions = append(actions, Action{Label: "Confirm", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}})
+	footer = d.RenderActions(contentWidth, actions...)
+	return styles.DialogStyle, dialogWidth, header, content.Build(), footer
+}
 
-	return d.RenderCard(styles.DialogStyle, dialogWidth, content.Build())
+func (d *URLElicitationDialog) View() string {
+	style, width, header, body, footer := d.content()
+	return d.RenderScrollableBody(style, width, header, body, footer)
+}
+
+func (d *URLElicitationDialog) prepareLayout() {
+	style, width, header, body, footer := d.content()
+	d.PrepareScrollableBody(style, width, header, body, footer)
+}
+
+func (d *URLElicitationDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
 }

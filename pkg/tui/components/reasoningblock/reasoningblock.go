@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -36,33 +35,6 @@ const (
 	// fadeSteps is the number of discrete quantized fade levels.
 	fadeSteps = 20
 )
-
-// fadeStyles is a pre-computed table of lipgloss styles for discrete fade levels.
-// Index 0 = no fade (normal), index fadeSteps = fully faded.
-var (
-	fadeStyles     [fadeSteps + 1]lipgloss.Style
-	fadeStylesOnce sync.Once
-)
-
-func initFadeStyles() {
-	for i := range fadeSteps + 1 {
-		progress := float64(i) / float64(fadeSteps)
-		startR, startG, startB := 128, 128, 128
-		endR, endG, endB := 48, 48, 56
-		r := int(float64(startR) + progress*float64(endR-startR))
-		g := int(float64(startG) + progress*float64(endG-startG))
-		b := int(float64(startB) + progress*float64(endB-startB))
-		c := lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
-		fadeStyles[i] = lipgloss.NewStyle().Foreground(c)
-	}
-}
-
-// fadeStyleForProgress returns the pre-computed style for the given fade progress.
-func fadeStyleForProgress(progress float64) lipgloss.Style {
-	fadeStylesOnce.Do(initFadeStyles)
-	idx := min(max(int(progress*fadeSteps), 0), fadeSteps)
-	return fadeStyles[idx]
-}
 
 // defaultNow is the time function used to get the current time. Each Model
 // captures it into its own field at construction so tests can override the
@@ -96,6 +68,7 @@ type contentItem struct {
 // renderCache holds cached markdown rendering results to avoid re-rendering on every View() call.
 // Invalidated when reasoning content or width changes.
 type renderCache struct {
+	themeGeneration  uint64
 	width            int      // width used for rendering
 	reasoningVersion int      // version of reasoning content when cached
 	lines            []string // all rendered lines (ANSI stripped)
@@ -108,24 +81,48 @@ type expandedToolView interface {
 
 // Model represents a collapsible reasoning + tool calls block.
 type Model struct {
-	ar               *animation.Runtime
-	id               string
-	agentName        string
-	showAgentBadge   bool          // render the agent badge above the header
-	contentItems     []contentItem // Ordered sequence of reasoning and tool calls
-	toolEntries      []toolEntry   // All tool entries (referenced by contentItems)
-	expanded         bool
-	selected         bool
-	width            int
-	height           int
-	sessionState     service.SessionStateReader
-	subagents        *subagentindex.Index
-	reasoningVersion int                    // increments when reasoning content changes
-	cache            *renderCache           // cached rendering results
-	animationSub     animation.Subscription // whether we're registered with animation coordinator
+	fadeStyles          []lipgloss.Style
+	fadeStylesValid     bool
+	fadeThemeGeneration uint64
+	ar                  *animation.Runtime
+	id                  string
+	agentName           string
+	showAgentBadge      bool          // render the agent badge above the header
+	contentItems        []contentItem // Ordered sequence of reasoning and tool calls
+	toolEntries         []toolEntry   // All tool entries (referenced by contentItems)
+	expanded            bool
+	selected            bool
+	width               int
+	height              int
+	sessionState        service.SessionStateReader
+	subagents           *subagentindex.Index
+	reasoningVersion    int                    // increments when reasoning content changes
+	cache               *renderCache           // cached rendering results
+	animationSub        animation.Subscription // whether we're registered with animation coordinator
 	// now returns the current time. Defaults to time.Now; tests override it
 	// per-instance for deterministic fade/grace-period behaviour.
 	now func() time.Time
+}
+
+// fadeStyleForProgress caches the small fade palette per block and theme.
+func (m *Model) fadeStyleForProgress(progress float64) lipgloss.Style {
+	generation := styles.ThemeGeneration()
+	if !m.fadeStylesValid || m.fadeThemeGeneration != generation {
+		startR, startG, startB, _ := styles.MutedStyle.GetForeground().RGBA()
+		endR, endG, endB, _ := lipgloss.Color(styles.CurrentTheme().Colors.Background).RGBA()
+		if m.fadeStyles == nil {
+			m.fadeStyles = make([]lipgloss.Style, fadeSteps+1)
+		}
+		for i := range fadeSteps + 1 {
+			p := float64(i) / float64(fadeSteps)
+			r := int(float64(startR>>8)*(1-p) + float64(endR>>8)*p)
+			g := int(float64(startG>>8)*(1-p) + float64(endG>>8)*p)
+			b := int(float64(startB>>8)*(1-p) + float64(endB>>8)*p)
+			m.fadeStyles[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b)))
+		}
+		m.fadeThemeGeneration, m.fadeStylesValid = generation, true
+	}
+	return m.fadeStyles[min(max(int(progress*fadeSteps), 0), fadeSteps)]
 }
 
 // New creates a new reasoning block.
@@ -562,6 +559,9 @@ func (m *Model) agentBadgePrefix() string {
 func (m *Model) SetSize(width, height int) tea.Cmd {
 	if m.width != width {
 		m.cache = nil // invalidate cache on width change
+		for i := range m.toolEntries {
+			m.toolEntries[i].strippedCollapsed = ""
+		}
 	}
 	m.width = width
 	m.height = height
@@ -578,7 +578,7 @@ func (m *Model) ensureCache() *renderCache {
 	contentWidth := m.contentWidth()
 
 	// Return existing cache if still valid
-	if m.cache != nil && m.cache.width == contentWidth && m.cache.reasoningVersion == m.reasoningVersion {
+	if m.cache != nil && m.cache.width == contentWidth && m.cache.themeGeneration == styles.ThemeGeneration() && m.cache.reasoningVersion == m.reasoningVersion {
 		return m.cache
 	}
 
@@ -596,6 +596,7 @@ func (m *Model) ensureCache() *renderCache {
 	}
 
 	m.cache = &renderCache{
+		themeGeneration:  styles.ThemeGeneration(),
 		width:            contentWidth,
 		reasoningVersion: m.reasoningVersion,
 		lines:            lines,
@@ -698,7 +699,7 @@ func (m *Model) renderCollapsed() string {
 				if stripped == "" {
 					stripped = ansi.Strip(toolView)
 				}
-				toolView = fadeStyleForProgress(entry.fadeProgress).Render(stripped)
+				toolView = m.fadeStyleForProgress(entry.fadeProgress).Render(stripped)
 			}
 			parts = append(parts, toolView)
 		}

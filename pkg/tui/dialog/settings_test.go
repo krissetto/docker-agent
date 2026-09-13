@@ -572,3 +572,36 @@ func TestRenderLayoutPreviewPositions(t *testing.T) {
 	narrow := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{SidebarPosition: messages.SidebarTop}, previewMinWidth))
 	assert.Contains(t, narrow, "session")
 }
+
+func TestSettingsSmallViewportSelectionAndApplyMouseAction(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.SetSize(40, 12)
+	d.View()
+	for range appearanceRowCount {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		d.View()
+	}
+	require.Equal(t, rowShowBanner, d.selected[d.tab])
+	height := d.bodyHeight
+	line := d.rowLines[rowShowBanner] - d.BodyScrollOffset()
+	require.GreaterOrEqual(t, line, 0)
+	require.Less(t, line, height, "last selected setting is visible, not clipped")
+	footerKey := tea.KeyPressMsg{}
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	for y := row; y < row+dl.Height; y++ {
+		for x := col; x < col+dl.Width; x++ {
+			if k, hit := d.ActionKeyAt(x, y, dl); hit && k.String() == "ctrl+s" {
+				footerKey = k
+			}
+		}
+	}
+	require.Equal(t, "ctrl+s", footerKey.String(), "Apply must not invoke Enter's theme selection behavior")
+	d.selected[d.tab] = rowTheme
+	_, cmd := d.Update(footerKey)
+	require.NotNil(t, cmd)
+	msgs := collectMsgs(cmd)
+	require.NotEmpty(t, msgs)
+	assert.IsType(t, CloseDialogMsg{}, msgs[0])
+}

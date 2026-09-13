@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -201,4 +202,158 @@ func TestPickerSizeNeverExceedsRoot(t *testing.T) {
 	assert.LessOrEqual(t, w, 120)
 	assert.LessOrEqual(t, h, 40)
 	assert.Greater(t, c, 1)
+}
+
+func TestWrappedConfirmPillsRemainCellAddressable(t *testing.T) {
+	for _, size := range [][2]int{{16, 8}, {20, 6}, {40, 12}} {
+		b := BaseDialog{}
+		b.SetSize(size[0], size[1])
+		width := b.ComputeDialogWidth(100, 16, 40)
+		footer := b.RenderConfirmButtons(b.ContentWidth(width, 2))
+		b.PrepareScrollableBody(styles.DialogStyle, width, "Confirm", "Long confirmation body that must remain scrollable.", footer)
+		view := b.RenderScrollableBody(styles.DialogStyle, width, "Confirm", "Long confirmation body that must remain scrollable.", footer)
+		row, col := b.CenterDialog(view)
+		dl := NewDialogLayout(view, row, col)
+		for _, want := range []rune{'n', 'y'} {
+			found := false
+			for y := row; y < row+dl.Height; y++ {
+				for x := col; x < col+dl.Width; x++ {
+					if k, ok := b.ActionKeyAt(x, y, dl); ok && k.Code == want {
+						found = true
+					}
+				}
+			}
+			require.True(t, found, "%dx%d: action %c must have visible clickable cells\n%s", size[0], size[1], want, ansi.Strip(view))
+		}
+	}
+}
+
+func TestTinyFooterScrollKeepsEveryActionReachable(t *testing.T) {
+	b := BaseDialog{}
+	b.SetSize(20, 6)
+	actions := []Action{{Label: "First action", Key: tea.KeyPressMsg{Code: 'a'}}, {Label: "Second action", Key: tea.KeyPressMsg{Code: 'b'}}, {Label: "Third action", Key: tea.KeyPressMsg{Code: 'c'}}, {Label: "Fourth action", Key: tea.KeyPressMsg{Code: 'd'}}, {Label: "Fifth action", Key: tea.KeyPressMsg{Code: 'e'}}}
+	footer := b.RenderActions(b.ContentWidth(20, 2), actions...)
+	seen := map[rune]bool{}
+	for range 5 {
+		b.PrepareScrollableBody(styles.DialogStyle, 20, "Title", "body", footer)
+		view := b.RenderScrollableBody(styles.DialogStyle, 20, "Title", "body", footer)
+		require.True(t, b.actionScrollActive)
+		row, col := b.CenterDialog(view)
+		dl := NewDialogLayout(view, row, col)
+		for y := row; y < row+dl.Height; y++ {
+			for x := col; x < col+dl.Width; x++ {
+				if k, ok := b.ActionKeyAt(x, y, dl); ok {
+					seen[k.Code] = true
+				}
+			}
+		}
+		b.actionScroll.ScrollBy(1)
+	}
+	for _, action := range actions {
+		require.True(t, seen[action.Key.Code], "action %s must remain scroll-reachable", action.Label)
+	}
+}
+
+func TestBodyViewportDoesNotStealFormNavigationOrWrapPadding(t *testing.T) {
+	b := BaseDialog{}
+	b.SetSize(40, 12)
+	body := "First field" + strings.Repeat(" ", 30) + "\nSecond field"
+	b.PrepareScrollableBody(styles.DialogStyle, 40, "Title", body, b.RenderActionKeys(34, "enter", "Save"))
+	b.RenderScrollableBody(styles.DialogStyle, 40, "Title", body, b.RenderActionKeys(34, "enter", "Save"))
+	require.Equal(t, 2, b.bodyScroll.MaxScrollOffset()+b.bodyScroll.VisibleHeight())
+	for _, k := range []tea.KeyPressMsg{{Code: 'j', Text: "j"}, {Code: 'k', Text: "k"}, {Code: tea.KeyUp}, {Code: tea.KeyDown}, {Code: tea.KeyHome}, {Code: tea.KeyEnd}} {
+		handled, _ := b.UpdateBodyScroll(k)
+		require.False(t, handled, "form owns %s", k.String())
+	}
+}
+
+func TestBodyTextCannotActivateScrolledOutAction(t *testing.T) {
+	b := BaseDialog{}
+	b.SetSize(20, 6)
+	footer := b.RenderActions(14,
+		Action{Label: "Allow once", Key: tea.KeyPressMsg{Code: 'a'}},
+		Action{Label: "Always allow", Key: tea.KeyPressMsg{Code: 'b'}},
+		Action{Label: "Reject action", Key: tea.KeyPressMsg{Code: 'c'}},
+		Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: 'd'}})
+	b.PrepareScrollableBody(styles.DialogStyle, 20, "Title", "Allow once", footer)
+	b.RenderScrollableBody(styles.DialogStyle, 20, "Title", "Allow once", footer)
+	require.True(t, b.actionScrollActive)
+	b.actionScroll.ScrollToBottom()
+	b.PrepareScrollableBody(styles.DialogStyle, 20, "Title", "Allow once", footer)
+	view := b.RenderScrollableBody(styles.DialogStyle, 20, "Title", "Allow once", footer)
+	row, col := b.CenterDialog(view)
+	dl := NewDialogLayout(view, row, col)
+	x, y, w, h := b.BodyScrollBounds()
+	require.Positive(t, h)
+	for cell := x; cell < x+w; cell++ {
+		_, hit := b.ActionKeyAt(cell, y, dl)
+		require.False(t, hit, "body text is never an action even when the pill is offscreen")
+	}
+}
+
+func TestPartialActionCannotAuthorizeBorderOrOutsideCells(t *testing.T) {
+	for _, inner := range []int{1, 2} {
+		b := BaseDialog{}
+		b.SetSize(inner+2, 8)
+		style := styles.DialogStyle.Padding(0)
+		footer := b.RenderActions(inner, Action{Label: "Allow", Key: tea.KeyPressMsg{Code: 'a'}})
+		b.PrepareScrollableBody(style, inner+2, "", "body", footer)
+		view := b.RenderScrollableBody(style, inner+2, "", "body", footer)
+		row, col := b.CenterDialog(view)
+		dl := NewDialogLayout(view, row, col)
+		for y := row; y < row+dl.Height; y++ {
+			for _, x := range []int{col - 1, col, col + dl.Width - 1, col + dl.Width} {
+				_, hit := b.ActionKeyAt(x, y, dl)
+				require.False(t, hit, "borders/outside never authorize: inner=%d x=%d y=%d", inner, x, y)
+			}
+		}
+	}
+}
+
+func TestDraggedCoalescedWheelRoutesToVisibleFooter(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(30, 10)
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	settleTestDialog(mgr)
+	// Use a tiny card in a taller root so its footer overflows and the entry can move.
+	d.SetSize(20, 6)
+	mgr.stack[0].invalidateView()
+	view := d.View()
+	mgr.stack[0].renderWidth, mgr.stack[0].renderHeight = lipgloss.Width(view), lipgloss.Height(view)
+	mgr.stack[0].offsetY = 2
+	require.True(t, d.actionScrollActive)
+	_, bodyY, _, bodyHeight := d.BodyScrollBounds()
+	before := d.actionScroll.ScrollOffset()
+	_, cmd := mgr.Update(messages.WheelCoalescedMsg{Delta: 1, X: 4, Y: bodyY + bodyHeight + 2})
+	require.Nil(t, cmd)
+	require.Greater(t, d.actionScroll.ScrollOffset(), before)
+	bodyBefore := d.BodyScrollOffset()
+	_, cmd = mgr.Update(messages.WheelCoalescedMsg{Delta: 1, X: 4, Y: bodyY + 2})
+	require.Nil(t, cmd)
+	require.Greater(t, d.BodyScrollOffset(), bodyBefore)
+	mgr.Cleanup()
+}
+
+func TestActionModifierKeysPreserveSemanticKeystroke(t *testing.T) {
+	b := BaseDialog{}
+	b.SetSize(60, 12)
+	footer := b.RenderActionKeys(40, "ctrl+s", "Apply", "alt+h", "Hidden")
+	b.PrepareScrollableBody(styles.DialogStyle, 46, "Title", "body", footer)
+	view := b.RenderScrollableBody(styles.DialogStyle, 46, "Title", "body", footer)
+	row, col := b.CenterDialog(view)
+	dl := NewDialogLayout(view, row, col)
+	seen := map[string]bool{}
+	for y := row; y < row+dl.Height; y++ {
+		for x := col; x < col+dl.Width; x++ {
+			if k, hit := b.ActionKeyAt(x, y, dl); hit {
+				seen[k.String()] = true
+			}
+		}
+	}
+	require.True(t, seen["ctrl+s"])
+	require.True(t, seen["alt+h"])
+	require.False(t, seen["s"])
+	require.False(t, seen["h"])
 }

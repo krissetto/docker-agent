@@ -922,9 +922,12 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if override.Placeholder != "" {
 		result.Placeholder = override.Placeholder
 	}
-	if override.EditorBg != "" {
+	switch {
+	case override.EditorBg != "":
 		result.EditorBg = override.EditorBg
-	} else if override.TabBg != "" {
+	case override.Background != "":
+		result.EditorBg = raisedEditorBackground(override.Background)
+	case override.TabBg != "":
 		// Legacy themes used tab_bg for the editor before editor_bg existed.
 		result.EditorBg = override.TabBg
 	}
@@ -1175,7 +1178,7 @@ func ApplyTheme(theme *Theme) {
 	TabBg = lipgloss.Color(c.TabBg)
 	TabPrimaryFg = lipgloss.Color(c.TextMuted)
 	TabAccentFg = lipgloss.Color(c.Highlight)
-	TabActiveBg = lipgloss.Color(c.TabActiveBg)
+	TabActiveBg = lipgloss.Color(c.EditorBg)
 	TabActiveFg = lipgloss.Color(c.TabActiveFg)
 	TabInactiveFg = lipgloss.Color(c.TabInactiveFg)
 	TabBorder = lipgloss.Color(c.TabBorder)
@@ -1214,6 +1217,7 @@ func ApplyTheme(theme *Theme) {
 
 // rebuildStyles rebuilds all derived lipgloss.Style variables from the current color values.
 func rebuildStyles() {
+	YoloIndicatorStyle = NoStyle.Foreground(Warning).Bold(true)
 	// Base styles
 	BaseStyle = NoStyle.Foreground(TextPrimary)
 	AppStyle = BaseStyle.Padding(0, AppPadding, 0, AppPadding)

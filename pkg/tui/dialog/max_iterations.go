@@ -77,6 +77,14 @@ func (d *maxIterationsDialog) rejectCmd() tea.Cmd {
 
 // Update handles messages for the max iterations confirmation dialog
 func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -88,22 +96,10 @@ func (d *maxIterationsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if d.CloseButtonHit(msg, dl) {
 				return d, d.rejectCmd()
 			}
-			if cmd := d.HandleConfirmButtonsClick(msg, dl, styles.DialogWarningStyle, d.approveCmd()); cmd != nil {
-				// No normally only closes; this dialog must preserve its existing reject response.
-				contentLeft := dl.Col + styles.DialogWarningStyle.GetBorderLeftSize() + styles.DialogWarningStyle.GetPaddingLeft()
-				if msg.X >= contentLeft+d.confirmBtnNoX && msg.X < contentLeft+d.confirmBtnNoX+d.confirmBtnNoW {
-					return d, d.rejectCmd()
-				}
-				if !d.claimResponse() {
-					return d, nil
-				}
-				return d, cmd
+			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				return d.Update(action)
 			}
 		}
-
-	case tea.MouseMotionMsg:
-		d.HandleMouseMotion(msg.X, msg.Y, d.layout())
-		return d, nil
 
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
@@ -131,27 +127,31 @@ func (d *maxIterationsDialog) Position() (row, col int) {
 }
 
 // View renders the max iterations confirmation dialog
-func (d *maxIterationsDialog) View() string {
+func (d *maxIterationsDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth := d.ComputeDialogWidth(maxIterDialogWidthPercent, maxIterDialogMinWidth, maxIterDialogMaxWidth)
 	contentWidth := dialogWidth - styles.DialogWarningStyle.GetHorizontalFrameSize()
+	bodyWidth := d.BodyContentWidth(dialogWidth)
 
 	infoText := fmt.Sprintf("Max Iterations: %d", d.maxIterations)
 	messageText := "The agent may be stuck in a loop. This can happen with smaller or less capable models."
 	questionText := "Do you want to continue for 10 more iterations?"
 
-	content := NewContent(contentWidth).
-		AddTitle("Maximum Iterations Reached").
-		AddSeparator().
-		AddContent(styles.DialogContentStyle.Render(wrapDisplayText(infoText, contentWidth))).
-		AddSpace().
-		AddContent(styles.DialogContentStyle.Render(wrapDisplayText(messageText, contentWidth))).
-		AddSpace().
-		AddContent(styles.DialogQuestionStyle.Width(contentWidth).Render(wrapDisplayText(questionText, contentWidth))).
-		AddSpace().
-		AddContent(d.RenderConfirmButtons(contentWidth)).
-		Build()
+	header = RenderTitle("Maximum Iterations Reached", contentWidth, styles.DialogTitleStyle)
+	body = NewContent(bodyWidth).
+		AddContent(styles.DialogContentStyle.Render(wrapDisplayText(infoText, bodyWidth))).
+		AddSpace().AddContent(styles.DialogContentStyle.Render(wrapDisplayText(messageText, bodyWidth))).
+		AddSpace().AddQuestion(questionText).Build()
+	return styles.DialogWarningStyle, dialogWidth, header, body, d.RenderConfirmButtons(contentWidth)
+}
 
-	return d.RenderCard(styles.DialogWarningStyle, dialogWidth, content)
+func (d *maxIterationsDialog) View() string {
+	style, width, header, body, footer := d.content()
+	return d.RenderScrollableBody(style, width, header, body, footer)
+}
+
+func (d *maxIterationsDialog) prepareLayout() {
+	style, width, header, body, footer := d.content()
+	d.PrepareScrollableBody(style, width, header, body, footer)
 }
 
 // wrapDisplayText wraps text based on display cell width.
@@ -185,3 +185,9 @@ func wrapDisplayText(text string, maxWidth int) string {
 
 // DialogClosable keeps this mandatory decision free of dismiss chrome.
 func (d *maxIterationsDialog) DialogClosable() bool { return false }
+
+func (d *maxIterationsDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
+}

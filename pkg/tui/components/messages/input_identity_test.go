@@ -70,7 +70,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						}
 						require.GreaterOrEqual(t, labelLine, 0)
 						if origin == session.InputOriginAgent {
-							assert.Contains(t, ansi.Strip(lines[labelLine]), "━", "identity is embedded in a USER-style border")
+							assert.NotContains(t, ansi.Strip(lines[labelLine]), "━", "identity keeps the ordinary USER left border without a top rule")
 						}
 						for x := col; x < col+ansi.StringWidth("Worker 界 (a1b2c)"); x++ {
 							id, ok := m.SubagentNodeAt(7+x, 3+labelLine)

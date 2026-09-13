@@ -466,3 +466,21 @@ func deriveEmphasisBg(hex string) color.Color {
 	nr, ng, nb := hslToRGB(h, s, l)
 	return lipgloss.Color(RGBToHex(nr, ng, nb))
 }
+
+// raisedEditorBackground keeps partial/registered themes on their own palette.
+func raisedEditorBackground(background string) string {
+	r, g, b, ok := parseHexRGB(background)
+	if !ok {
+		index, err := strconv.Atoi(background)
+		if err != nil || index < 0 || index > 255 {
+			return background
+		}
+		r, g, b = ColorToRGB(lipgloss.Color(background))
+	}
+	target := 1.0
+	if relativeLuminance(r, g, b) > 0.5 {
+		target = 0
+	}
+	const lift = 0.05
+	return RGBToHex(r+(target-r)*lift, g+(target-g)*lift, b+(target-b)*lift)
+}

@@ -66,6 +66,8 @@ const (
 // TabInfo contains display information for a session tab.
 type TabInfo struct {
 	SessionID      string      // Unique session identifier
+	AgentName      string      // Current active agent name for this session
+	AgentNodeID    string      // Full canonical node identity for the current agent
 	Title          string      // Display title
 	IsActive       bool        // Whether this is the currently active tab
 	IsRunning      bool        // Whether the canonical session is starting or running

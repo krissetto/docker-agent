@@ -202,6 +202,7 @@ var (
 	MutedStyle          = BaseStyle.Foreground(TextMutedGray)
 	SecondaryStyle      = BaseStyle.Foreground(TextSecondary)
 	BoldStyle           = BaseStyle.Bold(true)
+	YoloIndicatorStyle  = NoStyle.Foreground(Warning).Bold(true)
 	FadingStyle         = NoStyle.Foreground(FadedGray) // Very dim for fade-out animations (rebuilt by ApplyTheme)
 )
 

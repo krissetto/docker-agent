@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,7 +11,6 @@ import (
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -29,21 +27,31 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 			want := strings.Split(user.Render(width), "\n")
 			require.Equal(t, want[1:], got[1:], "agent body and ANSI background must exactly match USER: mode=%q width=%d", mode, width)
 			assert.Equal(t, width, ansi.StringWidth(got[0]))
-			border := lipgloss.NewStyle().
-				Foreground(styles.UserMessageStyle.GetBorderLeftForeground()).
-				Background(styles.UserMessageStyle.GetBorderLeftBackground()).Render("┏")
-			assert.True(t, strings.HasPrefix(got[0], border), "top corner must use the USER left-border color")
-			if width >= 4 {
-				rule := lipgloss.NewStyle().
-					Foreground(styles.UserMessageStyle.GetBorderLeftForeground()).
-					Background(styles.UserMessageStyle.GetBackground()).Render("━ ")
-				rulePrefix := strings.TrimSuffix(rule, "\x1b[m")
-				rulePrefix = strings.TrimSuffix(rulePrefix, "\x1b[0m")
-				assert.True(t, strings.HasPrefix(strings.TrimPrefix(got[0], border), rulePrefix), "top rule must use the USER border color and body background")
-			}
+			assert.Equal(t, firstCellANSI(want[0]), firstCellANSI(got[0]), "ordinary USER left border glyph and ANSI style are unchanged")
+			assert.NotContains(t, ansi.Strip(got[0]), "━", "identity row must not add a horizontal rule")
+			assert.NotContains(t, ansi.Strip(got[0]), "┏")
 			view.SetHovered(true)
 			assert.Equal(t, len(got), view.Height(width), "hover cannot change geometry")
 			view.SetHovered(false)
 		}
 	}
+}
+
+// Cutting a cell also retains subsequent zero-width escapes; stop at its glyph.
+func firstCellANSI(line string) string {
+	p := ansi.GetParser()
+	defer ansi.PutParser(p)
+	var state byte
+	for offset := 0; offset < len(line); {
+		_, width, n, next := ansi.DecodeSequence(line[offset:], state, p)
+		if n == 0 {
+			break
+		}
+		offset += n
+		if width > 0 {
+			return line[:offset]
+		}
+		state = next
+	}
+	return line
 }

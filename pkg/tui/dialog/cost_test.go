@@ -863,3 +863,24 @@ func TestCostDialogRefreshesOnLiveSessionUpdates(t *testing.T) {
 	view = dialog.View()
 	assert.Contains(t, view, "#2")
 }
+
+func TestWarmDialogCachesFollowFullThemeGeneration(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	d := NewCostDialog(session.New()).(*costDialog)
+	d.SetSize(100, 40)
+	before := d.View()
+	oldKey := d.cachedKey
+	theme := *original
+	theme.Colors = original.Colors
+	theme.Colors.TextPrimary = "#19abce"
+	theme.Colors.BackgroundAlt = "#392b1a"
+	theme.Colors.CardBg = "#102030"
+	styles.ApplyTheme(&theme)
+	after := d.View()
+	require.NotEqual(t, oldKey.themeGeneration, d.cachedKey.themeGeneration)
+	require.NotEqual(t, before, after, "warm ANSI cell colors must refresh, not just text")
+	require.Equal(t, lipgloss.Width(before), lipgloss.Width(after))
+	require.Equal(t, lipgloss.Height(before), lipgloss.Height(after))
+	require.Equal(t, after, d.View(), "unchanged warm layout is stable")
+}

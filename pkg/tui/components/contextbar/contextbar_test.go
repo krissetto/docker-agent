@@ -155,3 +155,30 @@ func TestContextTrackUsesEditorSurfaceNotTabSurface(t *testing.T) {
 	require.Equal(t, 40, ansi.StringWidth(view))
 	require.Contains(t, view, " Context 1%")
 }
+
+func TestWarmThemeSwitchPreservesHalfCellTrackAndLabelCutout(t *testing.T) { //nolint:paralleltest // theme globals
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	m := New(animation.NewRuntime())
+	m.SetWidth(48)
+	for _, usage := range []int64{0, 1, 50, 95, 100} {
+		m.SetContextUsageDirect(usage, 100)
+		before := ansi.Strip(m.View())
+		for _, ref := range []string{"default-light", "nord", "default"} {
+			theme, err := styles.LoadTheme(ref)
+			require.NoError(t, err)
+			styles.ApplyTheme(theme)
+			warm := m.View()
+			fresh := New(animation.NewRuntime())
+			fresh.SetWidth(48)
+			fresh.SetContextUsageDirect(usage, 100)
+			assert.Equal(t, fresh.View(), warm)
+			assert.Equal(t, before, ansi.Strip(warm))
+			assert.Equal(t, 48, lipgloss.Width(warm))
+			assert.Contains(t, warm, lipgloss.NewStyle().Foreground(styles.TextMuted).Render(fmt.Sprintf(" Context %d%%", usage)))
+			if usage == 0 {
+				assert.Contains(t, warm, lipgloss.NewStyle().Background(styles.EditorBg).Foreground(styles.Background).Render(strings.Repeat(blockFill, 37)))
+			}
+		}
+	}
+}

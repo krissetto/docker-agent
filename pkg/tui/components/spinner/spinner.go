@@ -2,6 +2,7 @@ package spinner
 
 import (
 	"math/rand/v2"
+	"reflect"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -31,6 +32,8 @@ type spinner struct {
 	ar                  *animation.Runtime
 	animSub             animation.Subscription // manages animation tick subscription
 	dotsStyle           lipgloss.Style
+	themeStyle          func() lipgloss.Style
+	themeGeneration     uint64
 	spinnerAnim         animation.Spinner
 	spinnerFrames       animation.Frames
 	styledSpinnerFrames []string // pre-rendered spinner frames
@@ -111,7 +114,16 @@ func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style
 		styledFrames[i] = dotsStyle.Render(char)
 	}
 
+	var themeStyle func() lipgloss.Style
+	switch {
+	case reflect.DeepEqual(dotsStyle, styles.SpinnerDotsAccentStyle):
+		themeStyle = func() lipgloss.Style { return styles.SpinnerDotsAccentStyle }
+	case reflect.DeepEqual(dotsStyle, styles.SpinnerDotsHighlightStyle):
+		themeStyle = func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle }
+	}
 	return &spinner{
+		themeStyle:          themeStyle,
+		themeGeneration:     styles.ThemeGeneration(),
 		ar:                  ar,
 		animSub:             ar.Subscribe(),
 		dotsStyle:           dotsStyle,
@@ -127,6 +139,7 @@ func NewWithAnimation(ar *animation.Runtime, mode Mode, dotsStyle lipgloss.Style
 }
 
 func (s *spinner) Reset() Spinner {
+	s.ensureTheme()
 	return NewWithAnimation(s.ar, s.mode, s.dotsStyle, s.spinnerAnim)
 }
 
@@ -158,6 +171,7 @@ func (s *spinner) advanceLightStep() {
 }
 
 func (s *spinner) Update(message tea.Msg) (layout.Model, tea.Cmd) {
+	s.ensureTheme()
 	if tick, ok := message.(animation.TickMsg); ok {
 		before, after := tick.ElapsedBounds()
 		if s.spinnerAnim.FrameIndexAt(before) != s.spinnerAnim.FrameIndexAt(after) {
@@ -191,6 +205,7 @@ func (s *spinner) RawFrame() string {
 }
 
 func (s *spinner) View() string {
+	s.ensureTheme()
 	frame := s.spinnerAnim.FrameIndexAt(s.ar.Now())
 	spinner := s.styledSpinnerFrames[frame]
 	if s.mode == ModeSpinnerOnly {
@@ -213,15 +228,27 @@ func (s *spinner) Stop() {
 	s.animSub.Stop()
 }
 
-// lightStyles maps distance from light position to style (0=brightest, 1=bright, 2=dim, 3+=dimmest).
-var lightStyles = []lipgloss.Style{
-	styles.SpinnerTextBrightestStyle,
-	styles.SpinnerTextBrightStyle,
-	styles.SpinnerTextDimStyle,
-	styles.SpinnerTextDimmestStyle,
+func (s *spinner) ensureTheme() {
+	generation := styles.ThemeGeneration()
+	if s.themeGeneration == generation {
+		return
+	}
+	s.themeGeneration = generation
+	if s.themeStyle != nil {
+		s.dotsStyle = s.themeStyle()
+		for i, char := range s.spinnerFrames {
+			s.styledSpinnerFrames[i] = s.dotsStyle.Render(char)
+		}
+	}
 }
 
 func (s *spinner) renderMessage() string {
+	lightStyles := [...]lipgloss.Style{
+		styles.SpinnerTextBrightestStyle,
+		styles.SpinnerTextBrightStyle,
+		styles.SpinnerTextDimStyle,
+		styles.SpinnerTextDimmestStyle,
+	}
 	var out strings.Builder
 	for i, char := range s.currentMessage {
 		dist := min(max(i-s.lightPosition, s.lightPosition-i), len(lightStyles)-1)

@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -883,7 +884,7 @@ func clickBodyLine(t *testing.T, d *ElicitationDialog, line int) {
 	relY := line - d.scrollview.ScrollOffset()
 	require.GreaterOrEqual(t, relY, 0, "line %d must be inside the viewport", line)
 	require.Less(t, relY, d.scrollview.VisibleHeight(), "line %d must be inside the viewport", line)
-	_, _ = d.Update(tea.MouseClickMsg{X: 3, Y: d.scrollableRow + relY, Button: tea.MouseLeft})
+	_, _ = d.Update(tea.MouseClickMsg{X: d.scrollableCol + 1, Y: d.scrollableRow + relY, Button: tea.MouseLeft})
 }
 
 // assertBodyTextFits asserts that no body line carries visible text wider
@@ -1052,4 +1053,48 @@ func TestElicitationDialog_ExplicitNewlinesShiftRows(t *testing.T) {
 	// The label's second row must not toggle anything.
 	clickBodyLine(t, dialog, start+1)
 	assert.False(t, dialog.boolValues[0])
+}
+
+func TestFormTextCursorClickPreservesHorizontalViewport(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		width       int
+	}{
+		{"repeated-ascii", strings.Repeat("a", 60), 9},
+		{"cjk", strings.Repeat("界語", 20), 10},
+		{"combining", strings.Repeat("e\u0301", 30), 10},
+		{"mixed", "abcdef界語e\u0301" + strings.Repeat("文字xy", 12), 13},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := textinput.New()
+			input.Prompt = ""
+			input.SetWidth(tc.width)
+			input.SetValue(tc.value)
+			input.CursorEnd()
+			input.Focus()
+			// Move within an already-scrolled viewport: position alone cannot recover its offset.
+			input.SetCursor(max(0, input.Position()-2))
+			before := ansi.Strip(input.View())
+			stylesBefore := input.Styles()
+			probe := input
+			SetTextInputCursorAtCell(&probe, 0)
+			offset := probe.Position()
+			require.Positive(t, offset, "long input must remain scrolled, not jump to absolute start")
+			visible := []rune(input.Value())[offset:]
+			require.True(t, strings.HasPrefix(before, string(visible[:min(2, len(visible))])), "inferred offset must match the actual rendered prefix")
+			g := uniseg.NewGraphemes(string(visible))
+			require.True(t, g.Next())
+			firstWidth, firstRunes := g.Width(), len(g.Runes())
+			if firstWidth > 1 {
+				probe = input
+				SetTextInputCursorAtCell(&probe, 1)
+				assert.Equal(t, offset, probe.Position(), "both cells of a wide glyph target its start")
+			}
+			probe = input
+			SetTextInputCursorAtCell(&probe, firstWidth)
+			assert.Equal(t, offset+firstRunes, probe.Position(), "combining marks stay with their grapheme")
+			assert.Equal(t, before, ansi.Strip(input.View()), "probing a copy leaves the input viewport intact")
+			assert.Equal(t, stylesBefore, input.Styles(), "probing never replaces actual styles")
+		})
+	}
 }

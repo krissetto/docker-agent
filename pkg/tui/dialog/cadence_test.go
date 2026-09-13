@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
@@ -152,4 +153,40 @@ func TestIdenticalDialogUpdateIsMeasuredButNotRetargeted(t *testing.T) {
 	assert.False(t, entry.lastBoundsEvent.Retargeted)
 	assert.False(t, entry.anim.Running(), "identical bounds are deduplicated")
 	assert.Equal(t, lipgloss.Height(entry.dialog.View()), entry.targetHeight)
+}
+
+type measuredSettingsDialog struct {
+	*settingsDialog
+
+	views int
+}
+
+func (d *measuredSettingsDialog) View() string { d.views++; return d.settingsDialog.View() }
+func (d *measuredSettingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	_, cmd := d.settingsDialog.Update(msg)
+	return d, cmd
+}
+
+func TestSettingsUnchangedMotionDoesNotMeasureRenderOrLease(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := New(r).(*manager)
+	mgr.SetSize(100, 40)
+	d := &measuredSettingsDialog{settingsDialog: NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)}
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	settleTestDialog(mgr)
+	mgr.View()
+	mgr.takeTopVisualDirty()
+	mgr.TakeVisualDirty()
+	measurements, views := mgr.stack[0].boundsMeasurementCount, d.views
+	active := r.ActiveCount()
+	for range 200 {
+		_, cmd := mgr.Update(tea.MouseMotionMsg{X: 0, Y: 0})
+		require.Nil(t, cmd)
+		require.False(t, mgr.TakeVisualDirty())
+	}
+	assert.Equal(t, measurements, mgr.stack[0].boundsMeasurementCount)
+	assert.Equal(t, views, d.views)
+	assert.Equal(t, active, r.ActiveCount())
+	mgr.Cleanup()
+	assert.Zero(t, r.ActiveCount())
 }

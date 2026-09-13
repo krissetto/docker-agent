@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/fsx"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
@@ -51,10 +52,20 @@ type dirEntry struct {
 
 // truncatePath shortens a path to fit within maxLen, prefixing with "…" when truncated.
 func truncatePath(path string, maxLen int) string {
-	if len(path) <= maxLen {
+	if maxLen <= 0 {
+		return ""
+	}
+	if lipgloss.Width(path) <= maxLen {
 		return path
 	}
-	return "…" + path[len(path)-(maxLen-1):]
+	if maxLen == 1 {
+		return "…"
+	}
+	runes := []rune(path)
+	for len(runes) > 0 && lipgloss.Width(string(runes)) > maxLen-1 {
+		runes = runes[1:]
+	}
+	return "…" + string(runes)
 }
 
 const (
@@ -205,6 +216,7 @@ func NewWorkingDirPickerDialog(ctx context.Context, recentDirs, favoriteDirs []s
 		browseScroll: browseScrollView,
 	}
 
+	d.bodyScroll = d.activeScrollview()
 	d.rebuildPinnedEntries()
 	d.rebuildRecentEntries()
 	d.loadBrowseDirectory()
@@ -309,6 +321,9 @@ func (d *workingDirPickerDialog) Init() tea.Cmd {
 }
 
 func (d *workingDirPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	activeScroll := d.activeScrollview()
 	if handled, cmd := activeScroll.Update(msg); handled {
 		return d, cmd
@@ -611,6 +626,7 @@ func (d *workingDirPickerDialog) isStarClick(x, entryIdx int) bool {
 
 func (d *workingDirPickerDialog) setSection(s dirSection) {
 	d.section = s
+	d.bodyScroll = d.activeScrollview()
 	d.updateSectionFocus()
 }
 
@@ -619,6 +635,12 @@ func (d *workingDirPickerDialog) tabClickTarget(x, y int) int {
 	dialogRow, dialogCol := d.Position()
 	const rowsBeforeTabs = 2 // title(1) + titleGap(1)
 	tabY := dialogRow + dirPickerContentOffsetY + rowsBeforeTabs
+	if d.bodyScroll != nil {
+		tabY = d.bodyY - 1
+		if d.section == sectionBrowse {
+			tabY--
+		}
+	}
 	if y != tabY {
 		return -1
 	}
@@ -643,6 +665,10 @@ func (d *workingDirPickerDialog) mouseYToEntryIndex(y int) int {
 
 	listStartY := dialogRow + d.listStartOffset()
 	listEndY := listStartY + maxHeight - d.sectionOverhead()
+	if d.bodyScroll != nil {
+		listStartY = d.bodyY
+		listEndY = listStartY + d.bodyHeight
+	}
 
 	if y < listStartY || y >= listEndY {
 		return -1
@@ -703,45 +729,48 @@ func (d *workingDirPickerDialog) filterBrowseEntries() {
 }
 
 func (d *workingDirPickerDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
-	dialogWidth = max(min(d.Width()*dirPickerWidthPercent/100, dirPickerMaxWidth), dirPickerMinWidth)
+	dialogWidth = d.ComputeDialogWidth(dirPickerWidthPercent, dirPickerMinWidth, dirPickerMaxWidth)
 	maxHeight = min(d.Height()*dirPickerHeightPercent/100, dirPickerMaxHeight)
-	contentWidth = dialogWidth - dirPickerHorizChrome - d.pinnedScroll.ReservedCols()
+	contentWidth = max(1, dialogWidth-dirPickerHorizChrome-d.pinnedScroll.ReservedCols())
 	return dialogWidth, maxHeight, contentWidth
 }
 
-func (d *workingDirPickerDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
-	d.textInput.SetWidth(contentWidth)
-	regionWidth := contentWidth + d.pinnedScroll.ReservedCols()
+func (d *workingDirPickerDialog) View() string { return d.renderBody(false) }
 
-	builder := NewContent(regionWidth).
-		AddTitle("New Session: Select Working Directory").
-		AddSpace().
-		AddContent(d.renderTabs(regionWidth)).
-		AddSpace()
-
+func (d *workingDirPickerDialog) renderBody(prepare bool) string {
+	d.textInput.SetStyles(styles.DialogInputStyle)
+	width, _, inner := d.dialogSize()
+	d.textInput.SetWidth(inner)
+	header := RenderTitle("Select Working Directory", inner, styles.DialogTitleStyle) + "\n" + d.renderTabs(inner)
 	if d.section == sectionBrowse {
-		builder.AddContent(d.textInput.View()).AddSpace()
+		header += "\n" + d.textInput.View()
 	}
-
-	builder.
-		AddContent(d.renderActiveList(contentWidth)).
-		AddSpace().
-		AddHelpKeys(d.helpKeys()...)
-
-	return styles.DialogStyle.Width(dialogWidth).Render(builder.Build())
-}
-
-// renderActiveList renders the list area for the currently active section.
-func (d *workingDirPickerDialog) renderActiveList(contentWidth int) string {
-	switch d.section {
-	case sectionPinned:
-		return d.renderPinnedList(contentWidth)
-	case sectionRecent:
-		return d.renderRecentList(contentWidth)
-	default:
-		return d.renderBrowseList(contentWidth)
+	state := d.activeSection()
+	lines := make([]string, 0, len(state.entries))
+	for i, entry := range state.entries {
+		var line string
+		switch d.section {
+		case sectionPinned:
+			line = d.renderPinnedEntry(entry, i == *state.selected, inner)
+		case sectionRecent:
+			line = d.renderRecentEntry(entry, i == *state.selected, inner)
+		default:
+			line = d.renderBrowseEntry(entry, i == *state.selected, inner)
+		}
+		lines = append(lines, line)
 	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], inner, "")
+	}
+	if len(lines) == 0 {
+		lines = []string{"No directories found"}
+	}
+	footer := d.RenderActionKeys(inner+d.bodyScroll.ReservedCols(), d.helpKeys()...)
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+		return ""
+	}
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 }
 
 // helpKeys returns the key/label pairs displayed at the bottom of the dialog.
@@ -824,49 +853,6 @@ func (d *workingDirPickerDialog) renderTabs(width int) string {
 	return styles.BaseStyle.Width(width).Align(lipgloss.Center).Render(line)
 }
 
-func (d *workingDirPickerDialog) renderPinnedList(contentWidth int) string {
-	lines := make([]string, 0, len(d.pinnedEntries))
-	for i, entry := range d.pinnedEntries {
-		lines = append(lines, d.renderPinnedEntry(entry, i == d.pinnedSelected, contentWidth))
-	}
-	d.placeScrollview(d.pinnedScroll, dirPickerListStartSimple)
-	d.pinnedScroll.SetContent(lines, len(lines))
-
-	if len(d.pinnedEntries) == 0 {
-		return d.renderListPlaceholder(d.pinnedScroll, []string{
-			"",
-			centeredItalic("No pinned directories", contentWidth),
-			"",
-			centeredMuted("Use ctrl+p in Browse to pin directories", contentWidth),
-		})
-	}
-	return d.pinnedScroll.View()
-}
-
-func (d *workingDirPickerDialog) renderBrowseList(contentWidth int) string {
-	lines := make([]string, 0, len(d.browseFiltered))
-	for i, entry := range d.browseFiltered {
-		lines = append(lines, d.renderBrowseEntry(entry, i == d.browseSelected, contentWidth))
-	}
-	d.placeScrollview(d.browseScroll, dirPickerListStartBrowse)
-	d.browseScroll.SetContent(lines, len(lines))
-
-	switch {
-	case d.browseErr != nil:
-		return d.renderListPlaceholder(d.browseScroll, []string{
-			"",
-			centeredError(d.browseErr.Error(), contentWidth),
-		})
-	case len(d.browseFiltered) == 0:
-		return d.renderListPlaceholder(d.browseScroll, []string{
-			"",
-			centeredItalic("No directories found", contentWidth),
-		})
-	default:
-		return d.browseScroll.View()
-	}
-}
-
 func (d *workingDirPickerDialog) renderPinnedEntry(entry dirEntry, selected bool, maxWidth int) string {
 	nameStyle := styles.PaletteUnselectedActionStyle
 	if selected {
@@ -904,7 +890,7 @@ func (d *workingDirPickerDialog) renderBrowseEntry(entry dirEntry, selected bool
 		prefix := styles.StarIndicator(d.favoriteSet[entry.path])
 		icon := "📁 "
 		name := entry.name
-		nameLimit := availableWidth - dirPickerFolderIconWidth
+		nameLimit := max(1, availableWidth-dirPickerFolderIconWidth)
 		if r := []rune(name); len(r) > nameLimit {
 			name = string(r[:nameLimit-1]) + "…"
 		}
@@ -912,58 +898,6 @@ func (d *workingDirPickerDialog) renderBrowseEntry(entry dirEntry, selected bool
 	}
 
 	return ""
-}
-
-func (d *workingDirPickerDialog) renderRecentList(contentWidth int) string {
-	lines := make([]string, 0, len(d.recentEntries))
-	for i, entry := range d.recentEntries {
-		lines = append(lines, d.renderRecentEntry(entry, i == d.recentSelected, contentWidth))
-	}
-	d.placeScrollview(d.recentScroll, dirPickerListStartSimple)
-	d.recentScroll.SetContent(lines, len(lines))
-
-	if len(d.recentEntries) == 0 {
-		return d.renderListPlaceholder(d.recentScroll, []string{
-			"",
-			centeredItalic("No recent directories", contentWidth),
-		})
-	}
-	return d.recentScroll.View()
-}
-
-// placeScrollview anchors sv to the dialog's content rectangle for accurate
-// mouse hit-testing. listStartY is the Y offset from the dialog's top to
-// the first row of the list area.
-func (d *workingDirPickerDialog) placeScrollview(sv *scrollview.Model, listStartY int) {
-	dialogRow, dialogCol := d.Position()
-	sv.SetPosition(dialogCol+dirPickerContentOffsetX, dialogRow+listStartY)
-}
-
-// renderListPlaceholder fills sv's visible area with the supplied lines plus
-// blank padding so the dialog doesn't shrink while a list is empty.
-func (d *workingDirPickerDialog) renderListPlaceholder(sv *scrollview.Model, lines []string) string {
-	visLines := sv.VisibleHeight()
-	out := make([]string, 0, max(visLines, len(lines)))
-	out = append(out, lines...)
-	for len(out) < visLines {
-		out = append(out, "")
-	}
-	return sv.ViewWithLines(out)
-}
-
-// centeredItalic formats msg as a centred italic placeholder of the given width.
-func centeredItalic(msg string, width int) string {
-	return styles.DialogContentStyle.Italic(true).Align(lipgloss.Center).Width(width).Render(msg)
-}
-
-// centeredMuted formats msg as a centred muted placeholder of the given width.
-func centeredMuted(msg string, width int) string {
-	return styles.MutedStyle.Align(lipgloss.Center).Width(width).Render(msg)
-}
-
-// centeredError formats msg as a centred error placeholder of the given width.
-func centeredError(msg string, width int) string {
-	return styles.ErrorStyle.Align(lipgloss.Center).Width(width).Render(msg)
 }
 
 func (d *workingDirPickerDialog) renderRecentEntry(entry dirEntry, selected bool, maxWidth int) string {
@@ -1004,6 +938,7 @@ func (d *workingDirPickerDialog) pageSize() int {
 
 // SetSize sets the dialog dimensions and configures both scrollview regions.
 func (d *workingDirPickerDialog) SetSize(width, height int) tea.Cmd {
+	defer d.renderBody(true)
 	cmd := d.BaseDialog.SetSize(width, height)
 	_, maxHeight, contentWidth := d.dialogSize()
 	regionWidth := contentWidth + d.pinnedScroll.ReservedCols()
@@ -1019,6 +954,9 @@ func (d *workingDirPickerDialog) SetSize(width, height int) tea.Cmd {
 }
 
 func (d *workingDirPickerDialog) Position() (row, col int) {
+	if d.cardWidth > 0 {
+		return CenterPosition(d.Width(), d.Height(), d.cardWidth, d.cardHeight)
+	}
 	dialogWidth, maxHeight, _ := d.dialogSize()
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
 }

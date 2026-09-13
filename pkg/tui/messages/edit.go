@@ -15,10 +15,6 @@ type BranchFromEditMsg struct {
 	Attachments      []Attachment
 }
 
-// InvalidateStatusBarMsg signals that the statusbar cache should be invalidated.
-// This is emitted when bindings change (e.g., entering/exiting inline edit mode).
-type InvalidateStatusBarMsg struct{}
-
 // RetryMsg requests re-running the agent turn after an error, resuming the
 // conversation from where it left off without adding a new user message.
 type RetryMsg struct{}

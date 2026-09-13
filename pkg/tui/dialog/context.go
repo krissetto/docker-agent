@@ -58,6 +58,7 @@ func NewContextDialog(breakdown *runtime.ContextBreakdown, liveSessions ...runti
 	}
 	base := BaseDialog{}
 	view := base.newScrollview(scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()), scrollview.WithReserveScrollbarSpace(true))
+	base.bodyScroll = view
 	d := &contextDialog{
 		BaseDialog:   base,
 		breakdown:    breakdown,
@@ -106,6 +107,22 @@ func (d *contextDialog) selectedAttachedIndex() (int, bool) {
 func (d *contextDialog) Init() tea.Cmd { return nil }
 
 func (d *contextDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
+	if m, ok := msg.(tea.MouseClickMsg); ok && m.Button == tea.MouseLeft {
+		x, y, w, h := d.BodyScrollBounds()
+		if m.X >= x && m.X < x+w && m.Y >= y && m.Y < y+h {
+			line := m.Y - y + d.BodyScrollOffset()
+			for i, at := range d.rowLines {
+				if line == at {
+					d.selected = i
+					return d, nil
+				}
+			}
+		}
+	}
+
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		if cmd, handled := d.handleKey(keyMsg); handled {
 			return d, cmd
@@ -200,15 +217,16 @@ func (d *contextDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) 
 	return dialogWidth, maxHeight, contentWidth
 }
 
-func (d *contextDialog) Position() (row, col int) {
-	dialogWidth, maxHeight, _ := d.dialogSize()
-	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
-}
+func (d *contextDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
 
-func (d *contextDialog) View() string {
-	dialogWidth, maxHeight, contentWidth := d.dialogSize()
-	content := d.renderContent(contentWidth, maxHeight)
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+func (d *contextDialog) View() string { return d.renderBody(false) }
+func (d *contextDialog) renderBody(prepare bool) string {
+	_, maxHeight, contentWidth := d.dialogSize()
+	if prepare {
+		d.prepareContent(contentWidth, maxHeight)
+		return ""
+	}
+	return d.renderContent(contentWidth, maxHeight)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +350,16 @@ func categoryColors() []color.Color {
 }
 
 func (d *contextDialog) renderContent(contentWidth, maxHeight int) string {
+	local := *d
+	local.rowLines = nil
+	return local.renderContextContent(contentWidth, maxHeight, false)
+}
+
+func (d *contextDialog) prepareContent(contentWidth, maxHeight int) {
+	d.renderContextContent(contentWidth, maxHeight, true)
+}
+
+func (d *contextDialog) renderContextContent(contentWidth, maxHeight int, prepare bool) string {
 	b := d.breakdown
 	rows := contextRows(b)
 	scale := scaleTokens(b)
@@ -373,6 +401,12 @@ func (d *contextDialog) renderContent(contentWidth, maxHeight int) string {
 		lines = append(lines, wrapMutedLines(contextDropNote, contentWidth)...)
 	}
 
+	if prepare {
+		width, _, _ := d.dialogSize()
+		footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), d.helpKeys()...)
+		d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(lines[:contextHeaderLines], "\n"), strings.Join(lines[contextHeaderLines:], "\n"), footer)
+		return ""
+	}
 	return d.applyScrolling(lines, contentWidth, maxHeight)
 }
 
@@ -686,28 +720,10 @@ func renderContextRow(row *contextRow, scale int64, labelWidth int, markerCol co
 	return line
 }
 
-func (d *contextDialog) applyScrolling(allLines []string, contentWidth, maxHeight int) string {
-	const footerLines = 2 // space + help
-
-	// The header entry's rendered height varies (an extra warning line when
-	// the compaction model caps the limit), so the fixed block's total row
-	// count is measured from it rather than assumed to be one row per entry.
-	headerRows := lipgloss.Height(allLines[0]) + (contextHeaderLines - 1)
-
-	visibleLines := max(1, maxHeight-headerRows-footerLines-4)
-	contentLines := allLines[contextHeaderLines:]
-
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	d.scrollview.SetSize(regionWidth, visibleLines)
-
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+headerRows)
-	d.scrollview.SetContent(contentLines, len(contentLines))
-
-	parts := make([]string, 0, contextHeaderLines+3)
-	parts = append(parts, allLines[:contextHeaderLines]...)
-	parts = append(parts, d.scrollview.View(), "", RenderHelpKeys(regionWidth, d.helpKeys()...))
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+func (d *contextDialog) applyScrolling(allLines []string, contentWidth, _ int) string {
+	width, _, _ := d.dialogSize()
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), d.helpKeys()...)
+	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:contextHeaderLines], "\n"), strings.Join(allLines[contextHeaderLines:], "\n"), footer)
 }
 
 // helpKeys returns the footer bindings; the selection pair appears while
@@ -801,4 +817,10 @@ func plainLiveSessionLine(row *runtime.LiveSession) string {
 		line += " (current)"
 	}
 	return line
+}
+
+func (d *contextDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

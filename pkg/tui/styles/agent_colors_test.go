@@ -390,3 +390,20 @@ func TestAgentColorAuditReport(t *testing.T) {
 		})
 	}
 }
+
+func TestUnknownAgentStylesFollowWarmThemeSwitch(t *testing.T) { //nolint:paralleltest // theme globals
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	for _, ref := range []string{"default", "default-light", "nord", "default"} {
+		theme, err := LoadTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+		name := "unknown-agent-outside-roster"
+		assert.Equal(t, Accent, AgentIdentityStyle(name, false).GetForeground())
+		colors := AgentBadgeColorsFor(name)
+		assert.Equal(t, Accent, colors.Bg)
+		assert.Equal(t, colors.Bg, AgentBadgeStyleFor(name).GetBackground())
+		assert.Equal(t, colors.Fg, AgentBadgeStyleFor(name).GetForeground())
+		assert.GreaterOrEqual(t, contrastRatio(colors.Fg, colors.Bg), 4.5)
+	}
+}

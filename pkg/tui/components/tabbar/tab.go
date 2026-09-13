@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -102,12 +103,20 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	if info.NeedsAttention || info.Activity != messages.TabActivityNone || info.IsRunning {
 		titleBudget--
 	}
+	initial := ""
+	for _, r := range strings.TrimSpace(info.AgentName) {
+		initial = string(unicode.ToUpper(r))
+		break
+	}
+	if initial != "" {
+		titleBudget = max(0, titleBudget-lipgloss.Width(initial)-3)
+	}
 	title = ansi.Truncate(title, titleBudget, "…")
 
 	// Pick colors based on focus state.
 	var bgColor, fgColor, barColor color.Color
 	if info.IsActive {
-		bgColor = styles.TabActiveBg
+		bgColor = styles.EditorBg
 		fgColor = styles.TabActiveFg
 		barColor = styles.TabBorder // bright accent for focused tab
 	} else {
@@ -183,6 +192,15 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 			markerFg = blendColors(markerFg, bgColor, dragBystanderDimAmount)
 		}
 		content += lipgloss.NewStyle().Foreground(markerFg).Background(bgColor).Render(attachedIndicator)
+	}
+	if initial != "" {
+		pillBg := styles.AgentIdentityStyle(info.AgentName, false).GetForeground()
+		pillFg := styles.EnsureContrast(styles.Background, pillBg)
+		if role == dragRoleBystander {
+			pillBg = blendColors(pillBg, bgColor, dragBystanderDimAmount)
+			pillFg = blendColors(pillFg, bgColor, dragBystanderDimAmount)
+		}
+		content += lipgloss.NewStyle().Foreground(pillFg).Background(pillBg).Bold(true).Render(" "+initial+" ") + pad.Render(" ")
 	}
 	content += titleSt.Render(title) + pad.Render(strings.Repeat(" ", max(0, titleBudget-lipgloss.Width(title))))
 

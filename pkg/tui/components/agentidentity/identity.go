@@ -15,6 +15,9 @@ const Link = "docker-agent:identity"
 
 func Label(ref lifecycle.InputReference, width int) string {
 	text := ansi.Truncate(ref.Label(), max(width, 0), "…")
+	if text == "" {
+		return ""
+	}
 	if ref.Kind == lifecycle.InputReferenceUnknown {
 		return styles.MutedStyle.Render(text)
 	}
@@ -38,24 +41,19 @@ func Hover(line string, startCol, endCol int, ref lifecycle.InputReference) stri
 	return ansi.Cut(line, 0, startCol) + strings.ReplaceAll(segment, normal, bright) + ansi.Cut(line, endCol, ansi.StringWidth(line))
 }
 
-// Border replaces the top padding row with an identity embedded in the border.
+// Border insets an identity in the ordinary USER padding row without a top rule.
 func Border(rendered string, ref lifecycle.InputReference, width int, messageStyle lipgloss.Style) string {
 	lines := strings.Split(rendered, "\n")
 	if len(lines) == 0 || width < 1 {
 		return rendered
 	}
-	rule := lipgloss.NewStyle().
-		Foreground(messageStyle.GetBorderLeftForeground()).
-		Background(messageStyle.GetBackground())
-	corner := lipgloss.NewStyle().
-		Foreground(messageStyle.GetBorderLeftForeground()).
-		Background(messageStyle.GetBorderLeftBackground()).Render("┏")
-	if width < 4 {
-		lines[0] = corner + rule.Render(strings.Repeat("━", width-1))
-		return strings.Join(lines, "\n")
-	}
-	label := Label(ref, width-4)
-	lines[0] = corner + styles.RenderComposite(rule, "━ "+label+" "+strings.Repeat("━", max(width-4-ansi.StringWidth(label), 0)))
+	leftWidth := min(width, messageStyle.GetBorderLeftSize())
+	left := ansi.Cut(lines[0], 0, leftWidth)
+	innerWidth := max(0, width-leftWidth)
+	inset := min(messageStyle.GetPaddingLeft(), innerWidth)
+	label := Label(ref, max(0, innerWidth-inset-messageStyle.GetPaddingRight()))
+	surface := lipgloss.NewStyle().Foreground(messageStyle.GetForeground()).Background(messageStyle.GetBackground())
+	lines[0] = left + styles.RenderComposite(surface, strings.Repeat(" ", inset)+label+strings.Repeat(" ", max(0, innerWidth-inset-ansi.StringWidth(label))))
 	return strings.Join(lines, "\n")
 }
 

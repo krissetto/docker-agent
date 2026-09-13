@@ -302,36 +302,30 @@ func TestAgentInfoModeMapsValues(t *testing.T) {
 		"unknown values map to compact")
 }
 
-// TestSetLayoutSettingsForwardsInfoModeToSidebar verifies the info mode
-// reaches the sidebar's roster renderer and can be switched live: the
-// detailed cards carry the labeled effort metric — "Eff high" in the compact
-// vocabulary the cards adapt to at the default sidebar width — while the
-// compact roster shows only the gauge badge, never the label.
-func TestSetLayoutSettingsForwardsInfoModeToSidebar(t *testing.T) {
+// Persisted roster preferences must not resurrect removed agent cards.
+func TestLayoutRosterPreferencesPreserveActiveModelAndTreeGeometry(t *testing.T) {
 	t.Parallel()
 
 	p := newLayoutTestPage(t, msgtypes.SidebarRight)
 	p.sessionState.SetCurrentAgentName("root")
 	p.sidebar.SetTeamInfo([]runtime.AgentDetails{
 		{Name: "root", Provider: "openai", Model: "gpt-4", Thinking: "high"},
+		{Name: "idle", Provider: "openai", Model: "gpt-4o"},
 	})
 	p.SetSize(160, 40)
-
-	require.NotContains(t, ansi.Strip(p.View()), "Eff high",
-		"the default layout renders the compact roster")
-
-	p.SetLayoutSettings(msgtypes.LayoutSettings{SidebarInfoMode: msgtypes.InfoModeDetailed})
-	assert.Contains(t, ansi.Strip(p.View()), "Eff high",
-		"detailed mode renders the labeled agent cards")
-
-	p.SetLayoutSettings(msgtypes.LayoutSettings{})
-	assert.NotContains(t, ansi.Strip(p.View()), "Eff high",
-		"switching back live restores the compact roster")
+	for _, settings := range []msgtypes.LayoutSettings{
+		{},
+		{SidebarInfoMode: msgtypes.InfoModeDetailed},
+		{ActiveAgentsOnly: true},
+		{},
+	} {
+		p.SetLayoutSettings(settings)
+		assertActiveSidebarLayout(t, p)
+		assert.Equal(t, settings, p.layoutSettings)
+	}
 }
 
-// TestWithLayoutSettingsAppliesInfoMode verifies the initial page option
-// forwards the persisted info mode to the sidebar.
-func TestWithLayoutSettingsAppliesInfoMode(t *testing.T) {
+func TestWithLayoutSettingsPreservesActiveModelAndTreeGeometry(t *testing.T) {
 	t.Parallel()
 
 	sessionState := &service.SessionState{}
@@ -341,41 +335,39 @@ func TestWithLayoutSettingsAppliesInfoMode(t *testing.T) {
 		messages:     messages.New(animation.NewRuntime(), sessionState),
 		sessionState: sessionState,
 	}
-	WithLayoutSettings(msgtypes.LayoutSettings{SidebarInfoMode: msgtypes.InfoModeDetailed})(p)
+	settings := msgtypes.LayoutSettings{SidebarInfoMode: msgtypes.InfoModeDetailed, ActiveAgentsOnly: true}
+	WithLayoutSettings(settings)(p)
 	p.sidebar.SetTeamInfo([]runtime.AgentDetails{
 		{Name: "root", Provider: "openai", Model: "gpt-4", Thinking: "high"},
-	})
-	p.SetSize(160, 40)
-
-	assert.Contains(t, ansi.Strip(p.View()), "Eff high",
-		"the initial layout option applies the detailed mode")
-}
-
-// TestSetLayoutSettingsForwardsActiveAgentsOnlyToSidebar verifies the agent
-// filter reaches the sidebar's roster and can be switched live: an agent
-// without session participation disappears while the filter is on and
-// returns when it is turned off.
-func TestSetLayoutSettingsForwardsActiveAgentsOnlyToSidebar(t *testing.T) {
-	t.Parallel()
-
-	p := newLayoutTestPage(t, msgtypes.SidebarRight)
-	p.sessionState.SetCurrentAgentName("root")
-	p.sidebar.SetTeamInfo([]runtime.AgentDetails{
-		{Name: "root", Provider: "openai", Model: "gpt-4"},
 		{Name: "idle", Provider: "openai", Model: "gpt-4o"},
 	})
 	p.SetSize(160, 40)
 
-	require.Contains(t, ansi.Strip(p.View()), "idle",
-		"the default layout renders the whole team")
+	assert.Equal(t, settings, p.layoutSettings)
+	assertActiveSidebarLayout(t, p)
+}
 
-	p.SetLayoutSettings(msgtypes.LayoutSettings{ActiveAgentsOnly: true})
-	assert.NotContains(t, ansi.Strip(p.View()), "idle",
-		"the filter hides agents without session participation")
-
-	p.SetLayoutSettings(msgtypes.LayoutSettings{})
-	assert.Contains(t, ansi.Strip(p.View()), "idle",
-		"switching the filter off live restores the whole team")
+func assertActiveSidebarLayout(t *testing.T, p *chatPage) {
+	t.Helper()
+	view := p.View()
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, "gpt-4")
+	assert.Contains(t, plain, "openai")
+	assert.Contains(t, plain, "root")
+	assert.NotContains(t, plain, "Eff high")
+	assert.NotContains(t, plain, "idle")
+	assert.NotContains(t, plain, "gpt-4o")
+	assert.Equal(t, p.height, lipgloss.Height(view))
+	for line := range strings.SplitSeq(view, "\n") {
+		assert.Equal(t, p.width, ansi.StringWidth(line))
+	}
+	sl := p.computeSidebarLayout()
+	sized, ok := p.messages.(interface{ GetSize() (int, int) })
+	require.True(t, ok)
+	width, height := sized.GetSize()
+	assert.Equal(t, sl.chatWidth, width)
+	assert.Equal(t, sl.chatHeight, height)
+	assert.Equal(t, sl, p.appliedLayout)
 }
 
 func TestSetLayoutSettingsBeforeSizingReturnsNil(t *testing.T) {

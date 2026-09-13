@@ -69,6 +69,9 @@ func IsCommandPalette(d Dialog) bool {
 func (d *commandPaletteDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
@@ -264,32 +267,19 @@ func (d *commandPaletteDialog) targetListHeight(maxListHeight int) int {
 }
 
 // View renders the command palette dialog.
-func (d *commandPaletteDialog) View() string {
-	dialogWidth, maxHeight, contentWidth := d.dialogSize()
-	d.textInput.SetWidth(contentWidth)
-	maxListHeight := max(1, maxHeight-d.layout.ListOverhead)
-	d.scrollview.SetSize(d.regionWidth(contentWidth), d.visibleListHeight(maxListHeight))
+func (d *commandPaletteDialog) View() string { return d.renderBody(false) }
 
-	gl := d.buildList(contentWidth)
-	d.updateScrollviewPosition()
-	d.scrollview.SetContent(gl.Lines(), len(gl.Lines()))
-
-	scrollableContent := d.scrollview.View()
-	if len(d.filtered) == 0 {
-		scrollableContent = d.renderEmptyState("No commands found", contentWidth)
+func (d *commandPaletteDialog) renderBody(prepare bool) string {
+	d.textInput.SetStyles(styles.DialogInputStyle)
+	width, _, inner := d.dialogSize()
+	d.textInput.SetWidth(inner)
+	header := RenderTitle("Commands", inner, styles.DialogTitleStyle) + "\n" + d.textInput.View() + "\n" + RenderSeparator(inner)
+	lines := d.buildList(inner).Lines()
+	if len(lines) == 0 {
+		lines = []string{"No results found"}
 	}
-
-	content := NewContent(d.regionWidth(contentWidth)).
-		AddTitle("Commands").
-		AddSpace().
-		AddContent(d.textInput.View()).
-		AddSeparator().
-		AddContent(scrollableContent).
-		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "execute").
-		Build()
-
-	return styles.DialogStyle.Width(dialogWidth).MaxHeight(max(1, d.Height())).Render(content)
+	footer := d.RenderActionKeys(d.regionWidth(inner), "enter", "Select")
+	return d.renderPicker(prepare, width, header, lines, footer)
 }
 
 // renderCommand renders a single command line in the list.
@@ -317,4 +307,10 @@ func (d *commandPaletteDialog) renderCommand(cmd commands.Item, selected bool, c
 		return content
 	}
 	return content + descStyle.Render(separator+toolcommon.TruncateText(cmd.Description, availableWidth))
+}
+
+func (d *commandPaletteDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.pickerCore.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

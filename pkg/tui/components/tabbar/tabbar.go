@@ -20,7 +20,7 @@ import (
 const (
 	// tabBarHeight is the number of terminal rows the tab bar occupies.
 	tabBarHeight = 1
-	// fallbackWidth is used when the terminal width is unknown or zero.
+	// fallbackWidth is used until the caller allocates a width.
 	fallbackWidth = 200
 	// scrollArrowWidth is the visual width of a scroll indicator.
 	scrollArrowWidth = 2
@@ -161,6 +161,8 @@ type TabBar struct {
 	activeIdx         int
 	width             int
 	hidden            bool
+	plusHovered       bool
+	plusPressed       bool
 	animationsStopped bool
 	keyMap            KeyMap
 
@@ -223,11 +225,13 @@ type TabBar struct {
 	dragSeq int // monotonic counter incremented on each mouse-down
 
 	// View cache: avoids re-rendering the tab bar every frame when nothing changed.
-	cachedView   string
-	viewDirty    bool
-	visualDirty  bool
-	lastOverlayX int
-	hadOverlay   bool
+	cachedView      string
+	cachedRender    renderedTabbar
+	themeGeneration uint64
+	viewDirty       bool
+	visualDirty     bool
+	lastOverlayX    int
+	hadOverlay      bool
 
 	visualGeneration uint64
 }
@@ -271,8 +275,9 @@ func New(ar *animation.Runtime, maxTitleLen int) *TabBar {
 	if maxTitleLen <= 0 {
 		maxTitleLen = defaultMaxTitleLen
 	}
-	return &TabBar{
+	t := &TabBar{
 		ar:             ar,
+		width:          fallbackWidth,
 		indicatorSub:   ar.Subscribe(),
 		scrollAnim:     ar.Transition(),
 		reorderAnim:    ar.Transition(),
@@ -284,10 +289,13 @@ func New(ar *animation.Runtime, maxTitleLen int) *TabBar {
 		drag:           dragState{dropIdx: noTab},
 		viewDirty:      true,
 	}
+	t.installGeometry()
+	return t
 }
 
 // SetWidth sets the available width for the tab bar.
 func (t *TabBar) SetWidth(width int) tea.Cmd {
+	width = max(0, width)
 	defer t.recordVisualState()
 	if width != t.width {
 		t.visualGeneration++
@@ -297,6 +305,11 @@ func (t *TabBar) SetWidth(width int) tea.Cmd {
 		}
 		t.captureSettlingPosition()
 		t.width = width
+		if width == 0 {
+			t.StopAnimations()
+		} else if !t.hidden {
+			t.animationsStopped = false
+		}
 		t.zones = nil
 		t.dragBounds = nil
 		t.lastEnsuredIdx = noTab
@@ -375,7 +388,7 @@ func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
 	}
 	t.tabs = append([]messages.TabInfo(nil), tabs...)
 	t.activeIdx = activeIdx
-	if t.Height() == 0 {
+	if t.Height() == 0 || t.width == 0 {
 		t.StopAnimations()
 		t.scrollOffset = 0
 		return nil
@@ -503,6 +516,7 @@ func (t *TabBar) StopAnimations() {
 	t.zones = nil
 	t.dragBounds = nil
 	t.drag = dragState{dropIdx: noTab}
+	t.plusHovered, t.plusPressed = false, false
 	t.reorderOffset = nil
 	t.dragOffsetFrom = nil
 	t.dragOffsetTo = nil
@@ -513,7 +527,7 @@ func (t *TabBar) StopAnimations() {
 
 // Height returns the height of the tab bar.
 func (t *TabBar) Height() int {
-	if t.hidden || len(t.tabs) <= 1 {
+	if t.hidden {
 		return 0
 	}
 	return tabBarHeight
@@ -524,8 +538,10 @@ func (t *TabBar) IsAnimating() bool {
 	return t.scrollAnim.Running() || t.reorderAnim.Running() || t.settleAnim.Running() || t.dragAnim.Running()
 }
 
-// IsDragging returns true when a tab drag is in progress or pending
-// (mouse is down on a tab but hasn't moved past the threshold yet).
+// HasPointerCapture keeps releases routed here after the pointer leaves the strip.
+func (t *TabBar) HasPointerCapture() bool { return t.IsDragging() || t.plusPressed }
+
+// IsDragging returns true when a tab drag is in progress or pending.
 func (t *TabBar) IsDragging() bool {
 	return t.drag.active || t.drag.pending
 }
@@ -556,6 +572,16 @@ func (t *TabBar) Bindings() []key.Binding {
 
 // Update handles messages and returns commands.
 func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
+	if motion, ok := msg.(tea.MouseMotionMsg); ok {
+		if t.Height() == 0 {
+			return nil
+		}
+		t.installGeometry()
+		hovered := t.plusAt(motion.X, motion.Y)
+		if hovered == t.plusHovered && (!t.IsDragging() || motion.X == t.drag.cursorX) {
+			return nil
+		}
+	}
 	defer t.recordVisualState()
 	defer func() {
 		if _, keypress := msg.(tea.KeyPressMsg); keypress {
@@ -637,13 +663,14 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		return t.startScrollAnimation()
 
 	case tea.MouseClickMsg:
-		if t.Height() == 0 {
+		if t.Height() == 0 || msg.Y != 0 {
 			return nil
 		}
-		if t.viewDirty {
-			t.View()
-		}
+		t.installGeometry()
 		if msg.Button == tea.MouseLeft {
+			t.plusHovered = t.plusAt(msg.X, msg.Y)
+			t.plusPressed = t.plusHovered
+			t.viewDirty = true
 			return t.handleLeftClickDown(msg.X)
 		}
 		if t.IsDragging() {
@@ -652,9 +679,10 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		if msg.Button == tea.MouseMiddle {
 			return t.handleMiddleClick(msg.X)
 		}
-		return t.handleClick(msg.X)
+		return nil
 
 	case tea.BlurMsg:
+		t.plusHovered, t.plusPressed = false, false
 		if t.drag.active {
 			return t.handleMouseRelease(t.drag.cursorX)
 		}
@@ -680,13 +708,30 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		if t.Height() == 0 {
 			return nil
 		}
+		t.installGeometry()
+		t.plusHovered = t.plusAt(msg.X, msg.Y)
+		t.viewDirty = true
 		return t.handleMouseMotion(msg.X)
 
 	case tea.MouseReleaseMsg:
+		t.plusPressed = false
+		t.plusHovered = t.plusAt(msg.X, msg.Y)
 		return t.handleMouseRelease(msg.X)
 	}
 
 	return nil
+}
+
+func (t *TabBar) plusAt(x, y int) bool {
+	if y != 0 || t.Height() == 0 {
+		return false
+	}
+	for _, z := range t.zones {
+		if z.isPlus && x >= z.startX && x < z.endX {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *TabBar) TakeVisualDirty() bool {
@@ -827,10 +872,10 @@ func (t *TabBar) previewTabs() []messages.TabInfo {
 }
 
 func (t *TabBar) currentTabViewMetrics() (viewStart, viewWidth, cursor int) {
-	fullWidth := t.width
-	if fullWidth <= 0 {
-		fullWidth = fallbackWidth
+	if t.width == 0 {
+		return 0, 0, 0
 	}
+	fullWidth := t.width
 	selectorW := 0
 	rightControlsWidth := plusButtonWidth + selectorW
 	layouts := t.computeLayouts()
@@ -1060,27 +1105,38 @@ func (t *TabBar) handleClick(x int) tea.Cmd {
 	return nil
 }
 
-// View renders the tab bar and memoizes only rendered output and click geometry.
-func (t *TabBar) View() string {
-	if t.Height() == 0 {
-		t.zones = nil
-		t.dragBounds = nil
-		t.cachedView = "" //rubocop:disable Lint/TUIViewPurity // hidden render-cache entry
-		return ""
-	}
-	if !t.viewDirty && !t.drag.active && t.cachedView != "" {
-		return t.cachedView
-	}
-	defer func() { t.viewDirty = false }() //rubocop:disable Lint/TUIViewPurity // rendered-output cache is now current
+type renderedTabbar struct {
+	view       string
+	zones      []clickZone
+	dragBounds []tabBound
+}
 
-	if t.zones != nil {
-		t.zones = t.zones[:0]
-	}
+// View reads rendered output; pointer geometry is installed by state updates.
+func (t *TabBar) View() string { return t.rendered().view }
 
+func (t *TabBar) rendered() renderedTabbar {
+	if !t.viewDirty && !t.drag.active && t.cachedView != "" && t.themeGeneration == styles.ThemeGeneration() {
+		return t.cachedRender
+	}
+	t.cachedRender = t.render()
+	t.cachedView = t.cachedRender.view
+	t.viewDirty = false
+	t.themeGeneration = styles.ThemeGeneration()
+	return t.cachedRender
+}
+
+func (t *TabBar) installGeometry() {
+	result := t.rendered()
+	t.zones = result.zones
+	t.dragBounds = result.dragBounds
+}
+
+func (t *TabBar) render() renderedTabbar {
+	var result renderedTabbar
+	if t.Height() == 0 || t.width == 0 {
+		return result
+	}
 	fullWidth := t.width
-	if fullWidth <= 0 {
-		fullWidth = fallbackWidth
-	}
 
 	selectorW := 0
 
@@ -1102,7 +1158,7 @@ func (t *TabBar) View() string {
 	scrollOffset := max(0, min(t.scrollOffset, maxScroll))
 
 	showLeftArrow := needsScroll && scrollOffset > 0
-	showRightArrow := needsScroll && scrollOffset < maxScroll
+	showRightArrow := needsScroll && scrollOffset < maxScroll && fullWidth >= plusButtonWidth+scrollArrowWidth
 
 	tabViewStart := scrollOffset
 	tabViewWidth := max(0, availWidth)
@@ -1117,6 +1173,11 @@ func (t *TabBar) View() string {
 	chromeFg := styles.MutedContrastFg(styles.Background)
 	chromeBg := lipgloss.NewStyle().Background(styles.Background)
 	plusStyle := chromeBg.Foreground(chromeFg)
+	if t.plusPressed && t.plusHovered {
+		plusStyle = plusStyle.Background(styles.TabDragBg).Foreground(styles.TabDragFg).Bold(true).Underline(true)
+	} else if t.plusHovered {
+		plusStyle = plusStyle.Background(styles.TabHoverBg).Foreground(styles.TabHoverFg).Bold(true)
+	}
 	arrowStyle := chromeBg.Foreground(chromeFg)
 	attnArrowStyle := chromeBg.Foreground(styles.EnsureContrast(styles.Warning, styles.Background)).Bold(true)
 
@@ -1129,12 +1190,8 @@ func (t *TabBar) View() string {
 			style = attnArrowStyle
 		}
 		line += style.Render(scrollLeftText)
-		t.zones = append(t.zones, clickZone{startX: cursor, endX: cursor + scrollArrowWidth, tabIdx: noTab, isScrollLeft: true})
+		result.zones = append(result.zones, clickZone{startX: cursor, endX: cursor + scrollArrowWidth, tabIdx: noTab, isScrollLeft: true})
 		cursor += scrollArrowWidth
-	}
-
-	if t.dragBounds != nil {
-		t.dragBounds = t.dragBounds[:0]
 	}
 
 	tabLayers := []layerInfo{{Content: spacer(tabViewWidth), X: 0, Y: 0}}
@@ -1164,31 +1221,31 @@ func (t *TabBar) View() string {
 			clipStart := max(cursor, overlayX)
 			clipEnd := min(cursor+tabViewWidth, overlayX+lay.tab.Width())
 			if clipEnd > clipStart {
-				t.dragBounds = append(t.dragBounds, tabBound{start: clipStart, end: clipEnd, tabIdx: i, sessionID: t.tabs[i].SessionID})
+				result.dragBounds = append(result.dragBounds, tabBound{start: clipStart, end: clipEnd, tabIdx: i, sessionID: t.tabs[i].SessionID})
 				mainEnd := min(clipEnd, overlayX+lay.tab.MainZoneEnd())
 				if mainEnd > clipStart {
-					t.zones = append(t.zones, clickZone{startX: clipStart, endX: mainEnd, tabIdx: i})
+					result.zones = append(result.zones, clickZone{startX: clipStart, endX: mainEnd, tabIdx: i})
 				}
 				closeStart := max(clipStart, overlayX+lay.tab.MainZoneEnd())
 				if clipEnd > closeStart {
-					t.zones = append(t.zones, clickZone{startX: closeStart, endX: clipEnd, tabIdx: i, isClose: true})
+					result.zones = append(result.zones, clickZone{startX: closeStart, endX: clipEnd, tabIdx: i, isClose: true})
 				}
 			}
 			continue
 		default:
-			t.dragBounds = append(t.dragBounds, tabBound{start: screenX, end: screenX + visWidth, tabIdx: i, sessionID: t.tabs[i].SessionID})
+			result.dragBounds = append(result.dragBounds, tabBound{start: screenX, end: screenX + visWidth, tabIdx: i, sessionID: t.tabs[i].SessionID})
 			tabLayers = append(tabLayers, layerInfo{Content: seg, X: finalX, Y: 0})
 		}
 
 		mainStart := max(0, renderX)
 		mainEnd := min(tabViewWidth, renderX+lay.tab.MainZoneEnd())
 		if mainEnd > mainStart {
-			t.zones = append(t.zones, clickZone{startX: cursor + mainStart, endX: cursor + mainEnd, tabIdx: i})
+			result.zones = append(result.zones, clickZone{startX: cursor + mainStart, endX: cursor + mainEnd, tabIdx: i})
 		}
 		closeStart := max(0, renderX+lay.tab.MainZoneEnd())
 		closeEnd := min(tabViewWidth, renderX+lay.tab.Width())
 		if closeEnd > closeStart {
-			t.zones = append(t.zones, clickZone{startX: cursor + closeStart, endX: cursor + closeEnd, tabIdx: i, isClose: true})
+			result.zones = append(result.zones, clickZone{startX: cursor + closeStart, endX: cursor + closeEnd, tabIdx: i, isClose: true})
 		}
 	}
 
@@ -1215,22 +1272,27 @@ func (t *TabBar) View() string {
 			style = attnArrowStyle
 		}
 		line += style.Render(scrollRightText)
-		t.zones = append(t.zones, clickZone{startX: cursor, endX: cursor + scrollArrowWidth, tabIdx: noTab, isScrollRight: true})
+		result.zones = append(result.zones, clickZone{startX: cursor, endX: cursor + scrollArrowWidth, tabIdx: noTab, isScrollRight: true})
 		cursor += scrollArrowWidth
 	}
 
 	line += plusStyle.Render(plusButtonText)
-	t.zones = append(t.zones, clickZone{startX: cursor, endX: cursor + plusButtonWidth, tabIdx: noTab, isPlus: true})
+	result.zones = append(result.zones, clickZone{startX: cursor, endX: cursor + plusButtonWidth, tabIdx: noTab, isPlus: true})
 	cursor += plusButtonWidth
 	line += spacer(max(0, fullWidth-cursor))
 
-	line = ansi.Truncate(line, fullWidth, "")
-	for i := range t.zones {
-		t.zones[i].startX = max(0, min(t.zones[i].startX, fullWidth))
-		t.zones[i].endX = max(t.zones[i].startX, min(t.zones[i].endX, fullWidth))
+	if fullWidth < plusButtonWidth {
+		line = plusStyle.Render("+" + spacer(fullWidth-1))
+		result.zones = []clickZone{{startX: 0, endX: fullWidth, tabIdx: noTab, isPlus: true}}
+		result.dragBounds = nil
 	}
-	t.cachedView = line //rubocop:disable Lint/TUIViewPurity
-	return t.cachedView
+	line = ansi.Truncate(line, fullWidth, "")
+	for i := range result.zones {
+		result.zones[i].startX = max(0, min(result.zones[i].startX, fullWidth))
+		result.zones[i].endX = max(result.zones[i].startX, min(result.zones[i].endX, fullWidth))
+	}
+	result.view = line
+	return result
 }
 
 func (t *TabBar) ensureActiveVisible(layouts []tabLayout, availWidth int) {
@@ -1324,9 +1386,6 @@ func (t *TabBar) startScrollAnimation() tea.Cmd {
 	}
 
 	fullWidth := t.width
-	if fullWidth <= 0 {
-		fullWidth = fallbackWidth
-	}
 	selectorW := 0
 	availWidth := fullWidth - plusButtonWidth - selectorW
 	needsScroll := totalTabWidth > availWidth
@@ -1355,7 +1414,7 @@ func (t *TabBar) startScrollAnimation() tea.Cmd {
 func (t *TabBar) clampScroll() { t.scrollOffset = max(0, t.scrollOffset) }
 
 func (t *TabBar) reconcileScroll() {
-	if len(t.tabs) <= 1 {
+	if t.width == 0 || len(t.tabs) <= 1 {
 		t.scrollOffset = 0
 		t.scrollAnim.Cancel()
 		t.scrollPending = false
@@ -1369,9 +1428,6 @@ func (t *TabBar) reconcileScroll() {
 	}
 
 	fullWidth := t.width
-	if fullWidth <= 0 {
-		fullWidth = fallbackWidth
-	}
 	selectorW := 0
 	availWidth := fullWidth - plusButtonWidth - selectorW
 	needsScroll := totalTabWidth > availWidth
@@ -1391,7 +1447,7 @@ func (t *TabBar) reconcileScroll() {
 }
 
 func (t *TabBar) hasAnimatedIndicator() bool {
-	if t.Height() == 0 || t.animationsStopped {
+	if t.Height() == 0 || t.width == 0 || t.animationsStopped {
 		return false
 	}
 	viewStart, viewWidth, _ := t.currentTabViewMetrics()
@@ -1611,9 +1667,6 @@ func (t *TabBar) hasSessionID(sessionID string) bool {
 
 func (t *TabBar) clampFloatingX(x, tabWidth int) int {
 	width := t.width
-	if width <= 0 {
-		width = fallbackWidth
-	}
 	return max(0, min(x, max(0, width-tabWidth)))
 }
 
@@ -1624,7 +1677,7 @@ func (t *TabBar) clampFloatingX(x, tabWidth int) int {
 // the tab. After drop, the same overlay is briefly kept alive and animated
 // into the dragged tab's final slot for a smooth handoff.
 func (t *TabBar) GetDragLayerInfo(screenWidth, tabBarY int) *DragLayerInfo {
-	if t.Height() == 0 || screenWidth <= 0 {
+	if t.Height() == 0 || t.width == 0 || screenWidth <= 0 {
 		return nil
 	}
 	if t.drag.active {
@@ -1667,6 +1720,7 @@ func (t *TabBar) GetDragLayerInfo(screenWidth, tabBarY int) *DragLayerInfo {
 
 // recordVisualState checkpoints overlay cells after model changes, independently of View calls.
 func (t *TabBar) recordVisualState() {
+	t.installGeometry()
 	t.hadOverlay = t.settlingDrop != nil || t.drag.active
 	switch {
 	case t.settlingDrop != nil:

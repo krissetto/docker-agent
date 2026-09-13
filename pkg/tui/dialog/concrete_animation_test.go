@@ -95,7 +95,7 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 					finishConcreteDialog(t, runtime, &tick, mgr)
 				}
 
-				mgr.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+				mgr.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
 				tick = runtime.EnsureRunning()
 				require.True(t, mgr.stack[0].anim.Running(), "terminal change retargets the shared outer transition")
 				assertConcreteRootFrame(t, mgr)

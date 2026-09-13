@@ -953,7 +953,10 @@ func (m *appModel) handleThemeCancelPreview(originalRef string) (tea.Model, tea.
 
 func (m *appModel) invalidateCachesForThemeChange() {
 	// markdown's style cache resets itself via styles.OnThemeChange.
-	m.statusBar.InvalidateCache()
+	m.viewCacheValid = false
+	if m.tabBar != nil {
+		m.tabBar.InvalidateCache()
+	}
 }
 
 func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
@@ -961,10 +964,16 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	// Re-target the file watcher: theme changes (picker selection, preview,
 	// hot reload) can move the active theme to a different backing file.
 	m.watchCurrentTheme()
-	return m, tea.Batch(
-		m.updateDialogCmd(messages.ThemeChangedMsg{}),
-		m.updateChatCmd(messages.ThemeChangedMsg{}),
-	)
+	cmds := []tea.Cmd{m.updateDialogCmd(messages.ThemeChangedMsg{})}
+	for _, ed := range m.editors {
+		_, cmd := ed.Update(messages.ThemeChangedMsg{})
+		cmds = append(cmds, cmd)
+	}
+	for _, page := range m.chatPages {
+		_, cmd := page.Update(messages.ThemeChangedMsg{})
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.

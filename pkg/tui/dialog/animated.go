@@ -56,6 +56,9 @@ type animatedDialog struct {
 	disabled                  bool
 	lastBoundsEvent           dialogBoundsEvent
 	boundsMeasurementCount    int
+	cachedView                string
+	viewTheme                 uint64
+	viewValid                 bool
 }
 
 func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxHeight int) (*animatedDialog, tea.Cmd) {
@@ -75,7 +78,7 @@ func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxH
 }
 
 func (a *animatedDialog) desiredBounds(maxWidth, maxHeight int) (int, int) {
-	view := a.dialog.View()
+	view := a.intrinsicView()
 	return min(max(0, lipgloss.Width(view)), max(0, maxWidth)), min(max(0, lipgloss.Height(view)), max(0, maxHeight))
 }
 
@@ -120,6 +123,7 @@ func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd
 		}
 		return nil
 	}
+	a.invalidateView()
 	w, h := a.measureBounds(cause, maxWidth, maxHeight, false)
 	if a.disabled || w == 0 || h == 0 {
 		a.anim.Cancel()
@@ -202,7 +206,7 @@ func (a *animatedDialog) view() string {
 }
 
 func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
-	view := a.dialog.View()
+	view := a.intrinsicView()
 	if closable {
 		view = renderCloseControl(view, hovered)
 	}
@@ -220,12 +224,18 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 		lines = lines[y:min(len(lines), y+h)]
 	} else if h > fullH {
 		padded := make([]string, 0, h)
+		// Resize padding remains card chrome, not transparent/trimmed full-width blank rows.
+		blank := styles.DialogStyle.Padding(0, 2).BorderTop(false).BorderBottom(false).Width(w).Render("")
+		padding := make([]string, h-fullH)
+		for i := range padding {
+			padding[i] = blank
+		}
 		if len(lines) == 1 {
 			padded = append(padded, lines...)
-			padded = append(padded, make([]string, h-fullH)...)
+			padded = append(padded, padding...)
 		} else {
 			padded = append(padded, lines[:len(lines)-1]...)
-			padded = append(padded, make([]string, h-fullH)...)
+			padded = append(padded, padding...)
 			padded = append(padded, lines[len(lines)-1])
 		}
 		lines = padded
@@ -267,3 +277,13 @@ func isUserInputMsg(msg tea.Msg) bool {
 		return false
 	}
 }
+
+func (a *animatedDialog) intrinsicView() string {
+	if !a.viewValid || a.viewTheme != styles.ThemeGeneration() {
+		a.cachedView = a.dialog.View()
+		a.viewValid = true
+		a.viewTheme = styles.ThemeGeneration()
+	}
+	return a.cachedView
+}
+func (a *animatedDialog) invalidateView() { a.viewValid = false }

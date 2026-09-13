@@ -59,3 +59,27 @@ func TestThemeChanged_RestylesSearchInput(t *testing.T) { //nolint:paralleltest 
 	assertColorEqual(t, styles.PlaceholderColor, e.textarea.Styles().Focused.Placeholder.GetForeground(),
 		"textarea placeholder should follow the new theme's placeholder color")
 }
+
+func TestWarmEditorThemeSwitchWithoutNotification(t *testing.T) { //nolint:paralleltest // theme globals
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	e := New(nil).(*editor)
+	e.SetSize(36, 3)
+	e.SetValue("kept draft")
+	e.Blur()
+	e.View()
+	for _, ref := range []string{"default-light", "nord", "default"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		got := e.View()
+		fresh := New(nil).(*editor)
+		fresh.SetSize(36, 3)
+		fresh.SetValue("kept draft")
+		fresh.Blur()
+		assert.Equal(t, fresh.View(), got, ref)
+		assert.Equal(t, "kept draft", e.Value())
+		assertColorEqual(t, styles.PlaceholderColor, e.textarea.Styles().Focused.Placeholder.GetForeground())
+		assertColorEqual(t, styles.MutedStyle.GetForeground(), e.searchInput.Styles().Focused.Text.GetForeground())
+	}
+}

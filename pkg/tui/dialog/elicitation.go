@@ -7,11 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
@@ -24,13 +26,6 @@ const (
 	defaultCharLimit = 500
 	numberCharLimit  = 50
 	defaultWidth     = 50
-
-	// elicitationHeaderLines is the count of fixed header lines above the
-	// scrollable body (title + separator).
-	elicitationHeaderLines = 2
-	// elicitationOverhead is the dialog height not available to the body:
-	// header (2) + footer blank+help (2) + frame border+padding (4).
-	elicitationOverhead = 8
 )
 
 // ElicitationField represents a form field extracted from a JSON schema.
@@ -71,19 +66,16 @@ type ElicitationDialog struct {
 
 	scrollview *scrollview.Model
 	// fieldStarts[i] is the line offset of field i's label inside the
-	// scrollable body. Populated by View() / Position().
+	// scrollable body. Prepared at input and size boundaries.
 	fieldStarts []int
 	// fieldGeoms[i] describes field i's wrapped row layout (label height and
 	// per-option row ranges) relative to fieldStarts[i]. Populated together
-	// with fieldStarts by View().
+	// with fieldStarts by prepareLayout().
 	fieldGeoms []fieldGeometry
 	// scrollableRow is the absolute screen row of the first scrollable line.
 	scrollableRow int
-	// reanchorFocus asks the next View() to scroll the focused control back
-	// into view. Set on real resizes: rewrapping at the new width can move
-	// the focused rows far from the current scroll offset, and only View()
-	// knows the fresh geometry. Consumed one-shot so ordinary renders never
-	// override the user's scroll position.
+	scrollableCol int
+	// Resizes reanchor focus once during layout preparation, never during rendering.
 	reanchorFocus bool
 }
 
@@ -133,6 +125,7 @@ func NewElicitationDialog(message string, schema any, meta map[string]any, ref E
 
 	base := BaseDialog{}
 	scrollviewView := base.newScrollview(scrollview.WithReserveScrollbarSpace(true))
+	base.bodyScroll = scrollviewView
 	d := &ElicitationDialog{
 		BaseDialog:  base,
 		title:       title,
@@ -187,28 +180,30 @@ func (d *ElicitationDialog) OutsideClickDismissCmd() tea.Cmd {
 }
 
 func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+
 	// Let the scrollview consume mouse wheel/scrollbar drag and the
-	// PgUp/PgDn/Home/End keys before falling through to dialog handling.
-	if handled, cmd := d.scrollview.Update(msg); handled {
-		return d, cmd
+	// PgUp/PgDn keys before falling through to dialog handling.
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+		if handled, cmd := d.UpdateBodyScroll(msg); handled {
+			return d, cmd
+		}
 	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		// A real resize rewraps the body, which can strand the focused
-		// control far from the current scroll offset; have the next View()
-		// reanchor it once fresh geometry exists. Skip the initial sizing at
-		// open so the dialog still opens scrolled to the top.
-		if d.Width() > 0 && (msg.Width != d.Width() || msg.Height != d.Height()) {
-			d.reanchorFocus = true
-		}
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
+
 	case tea.PasteMsg:
 		// Forward paste to the active text input
 		if d.hasFreeFormInput() {
 			var cmd tea.Cmd
 			d.responseInput, cmd = d.responseInput.Update(msg)
+			d.EnsureBodyLineVisible(len(d.layout().bodyLines) - 1)
 			return d, cmd
 		}
 		if d.isTextInputField() {
@@ -308,6 +303,7 @@ func (d *ElicitationDialog) updateCurrentInput(msg tea.KeyPressMsg) (layout.Mode
 	if d.hasFreeFormInput() {
 		var cmd tea.Cmd
 		d.responseInput, cmd = d.responseInput.Update(msg)
+		d.EnsureBodyLineVisible(len(d.layout().bodyLines) - 1)
 		return d, cmd
 	}
 	if d.isTextInputField() {
@@ -505,28 +501,21 @@ func (d *ElicitationDialog) parseAndValidateField(val string, field ElicitationF
 type elicitationLayout struct {
 	dialogWidth  int
 	contentWidth int             // inside dialog frame
-	viewport     int             // height of the scrollable region in lines
 	bodyLines    []string        // pre-rendered body, one entry per line
 	fieldStarts  []int           // line offset of each field's label
 	fieldGeoms   []fieldGeometry // wrapped row layout per field, relative to fieldStarts
 }
 
-// dialogHeight is the total rendered height of the dialog, including frame.
-func (l elicitationLayout) dialogHeight() int { return l.viewport + elicitationOverhead }
-
 func (d *ElicitationDialog) layout() elicitationLayout {
 	dialogWidth := d.ComputeDialogWidth(70, 60, 90)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
-	innerWidth := max(1, contentWidth-d.scrollview.ReservedCols())
+	innerWidth := d.BodyContentWidth(dialogWidth)
 
 	bodyLines, fieldStarts, fieldGeoms := d.buildBody(innerWidth)
-	maxViewport := max(1, min(d.Height()*80/100, 40)-elicitationOverhead)
-	viewport := max(1, min(len(bodyLines), maxViewport))
 
 	return elicitationLayout{
 		dialogWidth:  dialogWidth,
 		contentWidth: contentWidth,
-		viewport:     viewport,
 		bodyLines:    bodyLines,
 		fieldStarts:  fieldStarts,
 		fieldGeoms:   fieldGeoms,
@@ -579,85 +568,26 @@ func (d *ElicitationDialog) buildBody(width int) (lines []string, fieldStarts []
 
 	case d.hasFreeFormInput():
 		body.AddSeparator()
-		d.responseInput.SetWidth(width)
-		body.AddContent(d.responseInput.View())
+		input := d.responseInput
+		input.SetStyles(styles.DialogInputStyle)
+		input.SetWidth(width)
+		body.AddContent(input.View())
 	}
 
 	return strings.Split(body.Build(), "\n"), fieldStarts, fieldGeoms
 }
 
-func (d *ElicitationDialog) View() string {
+func (d *ElicitationDialog) content() (width int, header, body, footer string) {
 	l := d.layout()
-	// Cache the per-field row offsets and the dialog's screen-space top row
-	// so mouse-click handling in Update() can hit-test against the geometry
-	// produced by this render. View() is the only place that knows the final
-	// layout, so we accept the mutation as a render-cache compromise.
-	d.fieldStarts = l.fieldStarts //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-	d.fieldGeoms = l.fieldGeoms   //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-
-	// Configure the scrollview viewport and give it the body. Scroll position
-	// is intentionally not adjusted here: the dialog opens scrolled to the top
-	// (so the user can read the full question/message from the start), and
-	// only changes when the user interacts (focus moves, selection changes,
-	// or scroll keys/wheel). Auto-scrolling on every render would prevent the
-	// user from scrolling back up to see the question header above the
-	// initially focused option/field.
-	d.scrollview.SetSize(l.contentWidth, l.viewport)
-	d.scrollview.SetContent(l.bodyLines, len(l.bodyLines))
-
-	// One-shot exception to the no-auto-scroll rule above: right after a
-	// resize the rewrapped geometry can leave the focused control outside
-	// the old scroll offset, so reanchor it now that fieldStarts/fieldGeoms
-	// and the scrollview dimensions are fresh. Free-form dialogs have no
-	// field rows, so this is a no-op for them.
-	if d.reanchorFocus {
-		d.reanchorFocus = false //rubocop:disable Lint/TUIViewPurity // one-shot resize flag consumed by the first render at the new size
-		d.ensureFocusVisible()
-	}
-
-	// Tell the scrollview where it lives on screen (for scrollbar drag) and
-	// remember the body's top row for our own mouse click hit-testing.
-	row, col := CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
-	frameTop := styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop()
-	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
-	d.scrollableRow = row + frameTop + elicitationHeaderLines //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-	d.scrollview.SetPosition(col+frameLeft, d.scrollableRow)
-
-	parts := []string{
-		RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle),
-		RenderSeparator(l.contentWidth),
-	}
-	parts = append(parts, strings.Split(d.scrollview.View(), "\n")...)
-	parts = append(parts, "", RenderHelpKeys(l.contentWidth, d.helpPairs()...))
-
-	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	header = lipgloss.JoinVertical(lipgloss.Left, RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle), RenderSeparator(l.contentWidth))
+	body = strings.Join(l.bodyLines, "\n")
+	footer = d.RenderActions(l.contentWidth, Action{Label: "Submit", Key: tea.KeyPressMsg{Code: tea.KeyEnter}})
+	return l.dialogWidth, header, body, footer
 }
 
-// helpPairs returns key/description pairs for the dialog's bottom help line,
-// in left-to-right display order.
-func (d *ElicitationDialog) helpPairs() []string {
-	var pairs []string
-	if d.hasSelectionFields() {
-		pairs = append(pairs, "↑/↓", "select")
-	}
-	if len(d.fields) > 0 {
-		pairs = append(pairs, "tab", "next field")
-	}
-	pairs = append(pairs, "enter", "submit")
-	if d.scrollview.NeedsScrollbar() {
-		pairs = append(pairs, "pgup/pgdn", "scroll")
-	}
-	return pairs
-}
-
-// hasSelectionFields returns true if any field uses selection-based input (boolean or enum).
-func (d *ElicitationDialog) hasSelectionFields() bool {
-	for _, field := range d.fields {
-		if field.Type == "boolean" || field.Type == "enum" {
-			return true
-		}
-	}
-	return false
+func (d *ElicitationDialog) View() string {
+	width, header, body, footer := d.content()
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, body, footer)
 }
 
 func (d *ElicitationDialog) renderField(content *Content, i int, field ElicitationField, contentWidth int) fieldGeometry {
@@ -690,8 +620,10 @@ func (d *ElicitationDialog) renderField(content *Content, i int, field Elicitati
 	case "enum":
 		d.renderEnumField(content, &geom, i, field, isFocused, contentWidth)
 	default:
-		d.inputs[i].SetWidth(contentWidth)
-		content.AddContent(d.inputs[i].View())
+		input := d.inputs[i]
+		input.SetStyles(styles.DialogInputStyle)
+		input.SetWidth(contentWidth)
+		content.AddContent(input.View())
 	}
 
 	// Show error message if present
@@ -756,7 +688,29 @@ func capitalizeFirst(s string) string {
 
 // handleMouseClick handles mouse click events for field focus and selection toggling.
 func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
-	if len(d.fieldStarts) == 0 || len(d.fieldGeoms) != len(d.fieldStarts) || d.scrollableRow == 0 {
+	view := d.View()
+	row, col := d.CenterDialog(view)
+	dl := NewDialogLayout(view, row, col)
+	if d.CloseButtonHit(msg, dl) {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
+	}
+	if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		return d.Update(action)
+	}
+	if msg.X < d.scrollableCol || msg.X >= d.scrollableCol+d.scrollview.ContentWidth() {
+		return d, nil
+	}
+	if d.hasFreeFormInput() {
+		line := msg.Y - d.scrollableRow + d.BodyScrollOffset()
+		if msg.Y >= d.scrollableRow && msg.Y < d.scrollableRow+d.scrollview.VisibleHeight() && line == len(d.layout().bodyLines)-1 {
+			cmd := d.responseInput.Focus()
+			SetTextInputCursorAtCell(&d.responseInput, msg.X-d.scrollableCol)
+			return d, cmd
+		}
+		return d, nil
+	}
+	if len(d.fieldStarts) == 0 || len(d.fieldGeoms) != len(d.fieldStarts) {
 		return d, nil
 	}
 	relY := msg.Y - d.scrollableRow
@@ -777,6 +731,9 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 		// Any wrapped row of an option counts as a click on that option.
 		opt := d.fieldGeoms[i].optionAt(line - start)
 		if opt < 0 {
+			if d.isTextInputField() && line-start == d.fieldGeoms[i].labelHeight {
+				SetTextInputCursorAtCell(&d.inputs[i], msg.X-d.scrollableCol)
+			}
 			return d, nil
 		}
 		switch f := d.fields[i]; f.Type {
@@ -793,8 +750,7 @@ func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Mode
 }
 
 func (d *ElicitationDialog) Position() (row, col int) {
-	l := d.layout()
-	return CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
+	return d.CenterDialog(d.View())
 }
 
 // --- Input initialization ---
@@ -857,4 +813,62 @@ func renderMarkdownMessage(message string, contentWidth int) string {
 		return styles.DialogContentStyle.Width(contentWidth).Render(message)
 	}
 	return strings.TrimRight(rendered, "\n")
+}
+
+// SetTextInputCursorAtCell maps a cell inside the text area (excluding its prompt)
+// to a rune position without losing the input's history-dependent viewport.
+func SetTextInputCursorAtCell(input *textinput.Model, cell int) {
+	probe := *input
+	probeStyles := probe.Styles()
+	prefixRunes, captured := 0, false
+	capture := func(prefix string) string {
+		if !captured {
+			prefixRunes, captured = utf8.RuneCountInString(prefix), true
+		}
+		return prefix
+	}
+	// View renders the visible text before its cursor first. Probe a value copy
+	// so neither its appearance nor the editor's viewport changes during hit testing.
+	probeStyles.Focused.Text = lipgloss.NewStyle().Transform(capture)
+	probeStyles.Blurred.Text = probeStyles.Focused.Text
+	probe.SetStyles(probeStyles)
+	_ = probe.View()
+	value := []rune(input.Value())
+	position := min(len(value), max(0, input.Position()-prefixRunes))
+	graphemes := uniseg.NewGraphemes(string(value[position:]))
+	remaining := max(0, cell)
+	for graphemes.Next() {
+		width := graphemes.Width()
+		if width > remaining {
+			break
+		}
+		remaining -= width
+		position += len(graphemes.Runes())
+	}
+	input.SetCursor(position)
+}
+
+func (d *ElicitationDialog) SetSize(width, height int) tea.Cmd {
+	d.reanchorFocus = d.Width() > 0 && (width != d.Width() || height != d.Height())
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
+}
+
+func (d *ElicitationDialog) prepareLayout() {
+	width := d.BodyContentWidth(d.ComputeDialogWidth(70, 60, 90))
+	d.responseInput.SetWidth(width)
+	for i := range d.inputs {
+		d.inputs[i].SetWidth(width)
+	}
+	l := d.layout()
+	d.fieldStarts, d.fieldGeoms = l.fieldStarts, l.fieldGeoms
+	frameWidth, header, body, footer := d.content()
+	d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	if d.reanchorFocus {
+		d.reanchorFocus = false
+		d.ensureFocusVisible()
+		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	}
+	d.scrollableCol, d.scrollableRow, _, _ = d.BodyScrollBounds()
 }

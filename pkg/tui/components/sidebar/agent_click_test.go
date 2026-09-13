@@ -55,7 +55,7 @@ func TestSidebar_HandleClickType_Agent(t *testing.T) {
 		}
 	}
 	assert.True(t, foundAgent1, "should be able to click on agent1")
-	assert.True(t, foundAgent2, "should be able to click on agent2")
+	assert.False(t, foundAgent2, "unused configured agents are not tree rows")
 }
 
 // TestSidebar_AgentClickZones_EveryRenderedLineMapped verifies that every
@@ -93,13 +93,7 @@ func TestSidebar_AgentClickZones_EveryRenderedLineMapped(t *testing.T) {
 		}
 	}
 	assert.Positive(t, counts["agent1"], "agent1 should own rendered lines")
-	assert.Positive(t, counts["agent2"], "agent2 should own rendered lines")
-	// agent2 is a non-current roster agent: its mini-card spans the name line,
-	// the model line and one joined metric line at this width (the compact
-	// vocabulary renders, as agent1's preferred wide metric line would
-	// overflow), and ALL of them must map to it so a click on any card line
-	// switches to the agent.
-	assert.Equal(t, 3, counts["agent2"], "a roster agent owns every line of its card")
+	assert.Zero(t, counts["agent2"], "unused configured agents own no tree rows")
 
 	// The number of click zones equals the number of owned (non-blank) lines:
 	// every owned line is clickable.

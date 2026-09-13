@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -39,6 +40,26 @@ func NewSnapshotsDialog(fileCounts []int) Dialog {
 func (d *snapshotsDialog) Init() tea.Cmd { return nil }
 
 func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
+	switch m := msg.(type) {
+	case tea.MouseClickMsg:
+		if m.Button == tea.MouseLeft {
+			x, y, w, h := d.BodyScrollBounds()
+			if m.X >= x && m.X < x+w && m.Y >= y && m.Y < y+h {
+				idx := m.Y - y + d.BodyScrollOffset()
+				if idx < len(d.fileCounts)+1 {
+					d.selected = idx
+				}
+				return d, nil
+			}
+		}
+	case tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
+		if handled, cmd := d.UpdateBodyScroll(msg); handled {
+			return d, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -49,6 +70,7 @@ func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, cmd
 		}
 		cmd := d.handleKey(msg)
+		d.EnsureBodyLineVisible(d.selected)
 		return d, cmd
 	}
 	return d, nil
@@ -86,26 +108,19 @@ func (d *snapshotsDialog) Position() (row, col int) {
 	return d.CenterDialog(d.View())
 }
 
-func (d *snapshotsDialog) View() string {
+func (d *snapshotsDialog) View() string { return d.renderBody(false) }
+
+func (d *snapshotsDialog) renderBody(prepare bool) string {
 	width := d.ComputeDialogWidth(snapshotsDialogWidthPercent, snapshotsDialogMinWidth, snapshotsDialogMaxWidth)
-	inner := d.ContentWidth(width, 2)
+	inner := d.BodyContentWidth(width)
 
-	content := NewContent(inner).AddTitle("Snapshots").AddSeparator().AddSpace()
-
-	if len(d.fileCounts) > 0 {
-		count := pluralize(len(d.fileCounts), "snapshot", "snapshots") + " captured"
-		content = content.
-			AddContent(styles.DialogOptionsStyle.Width(inner).Render(count)).
-			AddSpace()
+	header := RenderTitle("Snapshots", inner, styles.DialogTitleStyle)
+	footer := d.RenderActionKeys(inner, d.helpKeys()...)
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, width, header, d.bodyContent(inner), footer)
+		return ""
 	}
-
-	body := content.
-		AddContent(d.bodyContent(inner)).
-		AddSpace().
-		AddHelpKeys(d.helpKeys()...).
-		Build()
-
-	return styles.DialogStyle.Width(width).Render(body)
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, d.bodyContent(inner), footer)
 }
 
 // bodyContent returns either the empty-state line or the snapshot list,
@@ -150,8 +165,8 @@ func (d *snapshotsDialog) renderRow(name, desc string, selected bool, width int)
 	left := nameStyle.Render(" " + name + " ")
 	right := descStyle.Render(" " + desc + " ")
 	gap := max(0, width-lipgloss.Width(left))
-	return left + lipgloss.PlaceHorizontal(gap, lipgloss.Right, right,
-		lipgloss.WithWhitespaceStyle(descStyle))
+	return toolcommon.TruncateText(left+lipgloss.PlaceHorizontal(gap, lipgloss.Right, right,
+		lipgloss.WithWhitespaceStyle(descStyle)), width)
 }
 
 func pluralize(n int, singular, plural string) string {
@@ -160,4 +175,10 @@ func pluralize(n int, singular, plural string) string {
 		word = singular
 	}
 	return fmt.Sprintf("%d %s", n, word)
+}
+
+func (d *snapshotsDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

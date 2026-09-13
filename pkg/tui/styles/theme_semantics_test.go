@@ -153,3 +153,37 @@ func TestBuiltinThemeSemanticANSIMatrix(t *testing.T) { //nolint:paralleltest //
 	require.NoError(t, err, "run UPDATE_GOLDEN=1 go test ./pkg/tui/styles -run SemanticANSIMatrix")
 	assert.Equal(t, string(want), snapshot.String())
 }
+
+func TestBuiltinInputAndTabSurfaceHierarchy(t *testing.T) {
+	t.Parallel()
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	for _, ref := range refs {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		c := theme.Colors
+		assert.Equal(t, c.EditorBg, c.TabActiveBg, ref)
+		assert.Equal(t, c.Background, c.TabBg, ref)
+		app, ok := relativeLuminanceHex(c.Background)
+		require.True(t, ok)
+		input, ok := relativeLuminanceHex(c.EditorBg)
+		require.True(t, ok)
+		if app > 0.5 {
+			assert.Less(t, input, app, ref)
+		} else {
+			assert.Greater(t, input, app, ref)
+		}
+		assert.NotEqual(t, c.TabActiveFg, c.TabInactiveFg, ref)
+	}
+}
+
+func TestAppliedActiveTabAlwaysFollowsEditorSurface(t *testing.T) { //nolint:paralleltest // theme globals
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	theme := DefaultTheme()
+	theme.Colors.EditorBg = "#123456"
+	theme.Colors.TabActiveBg = "#abcdef"
+	ApplyTheme(theme)
+	assert.Equal(t, EditorBg, TabActiveBg)
+	assert.Equal(t, "#abcdef", CurrentTheme().Colors.TabActiveBg, "legacy config value remains intact")
+}

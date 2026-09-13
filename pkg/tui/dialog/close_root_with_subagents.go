@@ -3,6 +3,7 @@ package dialog
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -61,20 +62,46 @@ func (d *closeRootWithSubagentsDialog) Init() tea.Cmd {
 
 // Update handles messages for the dialog.
 func (d *closeRootWithSubagentsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			view := d.View()
+			row, col := d.CenterDialog(view)
+			dl := NewDialogLayout(view, row, col)
+			if d.CloseButtonHit(msg, dl) {
+				cmd := d.CancelDialogCmd()
+				return d, cmd
+			}
+			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				return d.Update(action)
+			}
+		}
+
 	case tea.KeyPressMsg:
-		switch {
-		case key.Matches(msg, d.keyMap.Yes):
-			return d, tea.Sequence(
-				core.CmdHandler(CloseDialogMsg{}),
-				core.CmdHandler(CloseRootWithSubagentsConfirmedMsg{SessionID: d.sessionID}),
-			)
-		case key.Matches(msg, d.keyMap.No), key.Matches(msg, d.keyMap.Esc):
-			return d, core.CmdHandler(CloseDialogMsg{})
+		if cmd := HandleQuit(msg); cmd != nil {
+			cmd := d.CancelDialogCmd()
+			return d, cmd
+		}
+		switch d.HandleConfirmKey(msg, ConfirmKeyMap{Yes: d.keyMap.Yes, No: d.keyMap.No}) {
+		case ConfirmKeyConfirmed:
+			return d, ConfirmAndClose(core.CmdHandler(CloseRootWithSubagentsConfirmedMsg{SessionID: d.sessionID}))
+		case ConfirmKeyCancelled:
+			cmd := d.CancelDialogCmd()
+			return d, cmd
+		case ConfirmKeyFocusToggled:
+			return d, nil
 		}
 	}
 
@@ -87,21 +114,29 @@ func (d *closeRootWithSubagentsDialog) Position() (row, col int) {
 }
 
 // View renders the confirmation dialog.
-func (d *closeRootWithSubagentsDialog) View() string {
+func (d *closeRootWithSubagentsDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth := d.ComputeDialogWidth(60, 50, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
+	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	content := NewContent(contentWidth).
-		AddTitle("Close session").
-		AddSeparator().
-		AddSpace().
-		AddQuestion("This session has running subagents. Closing it will interrupt their current work and close their tabs. Continue?").
-		AddSpace().
-		AddHelpKeys("Y", "yes", "N", "no", "Esc", "cancel").
-		Build()
+	header = RenderTitle("Close session", contentWidth, styles.DialogTitleStyle)
+	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("This session has running subagents. Closing it will interrupt their current work and close their tabs. Continue?")
+	footer = d.RenderConfirmButtons(contentWidth)
+	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer
+}
 
-	return styles.DialogStyle.
-		Padding(1, 2).
-		Width(dialogWidth).
-		Render(content)
+func (d *closeRootWithSubagentsDialog) View() string {
+	style, width, header, body, footer := d.content()
+	return d.RenderScrollableBody(style, width, header, body, footer)
+}
+
+func (d *closeRootWithSubagentsDialog) prepareLayout() {
+	style, width, header, body, footer := d.content()
+	d.PrepareScrollableBody(style, width, header, body, footer)
+}
+
+func (d *closeRootWithSubagentsDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
 }

@@ -58,8 +58,8 @@ func TestTour_FirstRunOffer(t *testing.T) {
 	d := newTUI(t, "testdata/basic.yaml", 120, 40, tui.WithTourOffer(false))
 
 	d.WaitFor(tuitest.Contains("Welcome to docker agent")).
-		WaitFor(tuitest.Contains("take the tour")).
+		WaitFor(tuitest.Contains("Take the tour")).
 		Type("n").
-		WaitFor(tuitest.Absent("take the tour")).
+		WaitFor(tuitest.Absent("Take the tour")).
 		WaitFor(tuitest.Contains("Maybe later"))
 }

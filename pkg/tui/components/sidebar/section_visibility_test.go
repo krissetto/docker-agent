@@ -37,9 +37,9 @@ func TestRenderSections_AllVisibleByDefault(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.Contains(t, out, "Token Usage")
-	assert.Contains(t, out, "Agent")
-	assert.Contains(t, out, "Tools")
-	assert.Contains(t, out, "12 tools available")
+	assert.Contains(t, out, "root")
+	assert.NotContains(t, out, "Tools")
+	assert.NotContains(t, out, "12 tools available")
 }
 
 func TestRenderSections_HideUsage(t *testing.T) {
@@ -50,7 +50,7 @@ func TestRenderSections_HideUsage(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "Token Usage")
-	assert.Contains(t, out, "Tools", "other sections stay visible")
+	assert.Contains(t, out, "root", "the tree stays visible")
 }
 
 func TestRenderSections_HideTools(t *testing.T) {
@@ -72,19 +72,21 @@ func TestRenderSections_HideSessionPath(t *testing.T) {
 	s.gitBranchName = "main"
 
 	out := renderedSections(s)
-	require.Contains(t, out, "~/projects/myapp (main)")
+	require.Contains(t, out, "myapp")
+	require.Contains(t, out, "main")
+	require.NotContains(t, out, "~/projects")
 	visibleLines := len(s.renderSections(40))
 
 	s.SetSectionVisibility(SectionVisibility{HideSessionPath: true})
 	out = renderedSections(s)
 
 	assert.NotContains(t, out, "~/projects/myapp")
-	assert.NotContains(t, out, "(main)", "the branch suffix goes with the path")
+	assert.NotContains(t, out, "main", "the branch goes with the path")
 	assert.Contains(t, out, "Session", "the session tab and title stay visible")
 	assert.Contains(t, out, "Token Usage", "other sections stay visible")
 
 	hiddenLines := len(s.renderSections(40))
-	assert.Equal(t, visibleLines-2, hiddenLines,
+	assert.Equal(t, visibleLines-3, hiddenLines,
 		"hiding the path drops its line and separator without leaving a blank row")
 }
 
@@ -100,7 +102,7 @@ func TestRenderSections_HideAgentsClearsClickZones(t *testing.T) {
 	out := renderedSections(s)
 
 	assert.NotContains(t, out, "openai/gpt-4")
-	assert.Empty(t, s.agentClickZones, "hidden agents must not keep stale click zones")
+	assert.Len(t, s.agentClickZones, 1, "legacy roster visibility does not hide the canonical tree")
 }
 
 func TestCollapsedViewModel_HideUsage(t *testing.T) {
@@ -166,7 +168,7 @@ func TestCollapsedInfoLine_ShowsAgentsToolsTodos(t *testing.T) {
 
 	info := ansi.Strip(s.collapsedInfoLine(60))
 	assert.Contains(t, info, "▶ root")
-	assert.Contains(t, info, "12 tools")
+	assert.NotContains(t, info, "12 tools")
 	assert.Contains(t, info, "1/2 todos")
 
 	vm := s.computeCollapsedViewModel(60)
@@ -190,8 +192,8 @@ func TestCollapsedInfoLine_ShowsTeamRoster(t *testing.T) {
 
 	info := ansi.Strip(s.collapsedInfoLine(120))
 	assert.Contains(t, info, "▶ root openai/gpt-4", "current agent leads with its model")
-	assert.Contains(t, info, "planner")
-	assert.Contains(t, info, "reviewer")
+	assert.NotContains(t, info, "planner")
+	assert.NotContains(t, info, "reviewer")
 	assert.NotContains(t, info, "+2", "roster names replace the bare count")
 }
 
@@ -207,7 +209,7 @@ func TestCollapsedInfoLine_HonorsVisibility(t *testing.T) {
 	info := ansi.Strip(s.collapsedInfoLine(60))
 	assert.NotContains(t, info, "▶ root")
 	assert.NotContains(t, info, "todos")
-	assert.Contains(t, info, "12 tools", "tools stay visible")
+	assert.Empty(t, info, "no legacy tools section remains")
 
 	s.SetSectionVisibility(SectionVisibility{HideAgents: true, HideTools: true, HideTodos: true})
 	assert.Empty(t, s.collapsedInfoLine(60), "hiding every section removes the line")
@@ -250,7 +252,7 @@ func TestRenderSections_SectionGap(t *testing.T) {
 		s.SetSectionGap(gap)
 		lines := s.renderSections(40)
 		assert.Equal(t, gap, sectionTitleGap(lines, "Token Usage"), "gap %d before Token Usage", gap)
-		assert.Equal(t, gap, sectionTitleGap(lines, "Tools"), "gap %d before Tools", gap)
+		assert.Equal(t, gap, sectionTitleGap(lines, "gpt-4"), "gap %d before model", gap)
 	}
 }
 

@@ -219,6 +219,16 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if cmd := d.handleOutsideClickDismiss(msg); cmd != nil {
 				return d, cmd
 			}
+			if actions, ok := d.stack[len(d.stack)-1].dialog.(interface {
+				ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bool)
+			}); ok {
+				e := &d.stack[len(d.stack)-1]
+				row, col := e.position(d.width, d.height)
+				dl := NewDialogLayout(e.view(), row+e.offsetY, col+e.offsetX)
+				if action, hit := actions.ActionKeyAt(msg.X, msg.Y, dl); hit {
+					return d, d.forwardToTop(action)
+				}
+			}
 			// The close control gets first refusal; other title clicks drag.
 			if d.closeButtonHit(msg.X, msg.Y) {
 				return d, d.semanticCloseTop()
@@ -234,6 +244,9 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		hovered := d.closeButtonHit(msg.X, msg.Y)
 		d.visualDirty = d.visualDirty || hovered != d.stack[top].closeHovered
 		d.stack[top].closeHovered = hovered
+		if chrome, ok := d.stack[top].dialog.(interface{ SetCloseHover(hovered bool) }); ok {
+			chrome.SetCloseHover(hovered)
+		}
 		if d.pointerSuppressed() {
 			return d, nil
 		}
@@ -241,7 +254,7 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			d.visualDirty = d.handleDragMotion(msg.X, msg.Y) || d.visualDirty
 			return d, nil
 		}
-		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
+		cmd := d.forwardToTopWithoutRetarget(d.adjustMouseMsg(msg))
 		return d, cmd
 
 	case tea.MouseReleaseMsg:
@@ -260,13 +273,13 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if d.pointerSuppressed() {
 			return d, nil
 		}
-		return d, d.forwardToTop(msg)
+		return d, d.forwardToTopWithoutRetarget(d.adjustMouseMsg(msg))
 
 	case tea.MouseWheelMsg:
 		if d.pointerSuppressed() {
 			return d, nil
 		}
-		cmd := d.forwardToTop(d.adjustMouseMsg(msg))
+		cmd := d.forwardToTopWithoutRetarget(d.adjustMouseMsg(msg))
 		d.takeTopVisualDirty()
 		return d, cmd
 	case tea.KeyPressMsg:
@@ -310,6 +323,7 @@ func (d *manager) broadcastToAll(msg tea.Msg) tea.Cmd {
 	for i := range d.stack {
 		u, cmd := d.stack[i].dialog.Update(msg)
 		d.stack[i].dialog = u.(Dialog)
+		d.stack[i].invalidateView()
 		cmds = append(cmds, cmd, d.stack[i].retarget("broadcast:"+stringType(msg), d.width, d.height))
 	}
 	return tea.Batch(cmds...)
@@ -329,8 +343,22 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 		return nil
 	}
 	top := len(d.stack) - 1
+	if scroller, ok := d.stack[top].dialog.(interface {
+		UpdateActionScroll(msg tea.Msg) (bool, tea.Cmd)
+	}); ok {
+		if handled, cmd := scroller.UpdateActionScroll(msg); handled {
+			d.takeTopVisualDirty()
+			return cmd
+		}
+	}
 	u, cmd := d.stack[top].dialog.Update(msg)
 	d.stack[top].dialog = u.(Dialog)
+	switch msg.(type) {
+	case tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+		// Registered viewports publish actual visual changes below; boundary input stays warm.
+	default:
+		d.stack[top].invalidateView()
+	}
 	d.takeTopVisualDirty()
 	if !retarget {
 		return cmd
@@ -362,14 +390,27 @@ func (d *manager) handleDragStart(x, y int) bool {
 	row, col := e.position(d.width, d.height)
 	row += e.offsetY
 	col += e.offsetX
-	w := lipgloss.Width(e.dialog.View())
+	w := e.renderWidth
 
 	// Check horizontal bounds
 	if x < col || x >= col+w {
 		return false
 	}
 	// Check vertical bounds: click must be within the title zone
-	if y < row || y >= row+titleZoneHeight {
+	zoneHeight := titleZoneHeight
+	if body, ok := e.dialog.(interface{ BodyScrollBounds() (int, int, int, int) }); ok {
+		_, _, _, h := body.BodyScrollBounds()
+		if h > 0 {
+			zoneHeight = 2
+		}
+	}
+	if body, ok := e.dialog.(interface{ BodyScrollBounds() (int, int, int, int) }); ok {
+		_, bodyY, _, h := body.BodyScrollBounds()
+		if h > 0 {
+			zoneHeight = min(zoneHeight, bodyY+e.offsetY-row)
+		}
+	}
+	if y < row || y >= row+zoneHeight {
 		return false
 	}
 
@@ -426,6 +467,10 @@ func (d *manager) adjustMouseMsg(msg tea.Msg) tea.Msg {
 		m.X -= e.offsetX
 		m.Y -= e.offsetY
 		return m
+	case messages.WheelCoalescedMsg:
+		m.X -= e.offsetX
+		m.Y -= e.offsetY
+		return m
 	case tea.MouseWheelMsg:
 		m.X -= e.offsetX
 		m.Y -= e.offsetY
@@ -444,7 +489,7 @@ func (d *manager) closeButtonHit(x, y int) bool {
 	row, col := e.position(d.width, d.height)
 	row += e.offsetY
 	col += e.offsetX
-	width := lipgloss.Width(e.view())
+	width := e.renderWidth
 	return y == row+styles.DialogStyle.GetBorderTopSize() &&
 		x == col+width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
 }
@@ -750,7 +795,11 @@ func (d *manager) takeTopVisualDirty() {
 		return
 	}
 	if dirty, ok := d.stack[len(d.stack)-1].dialog.(interface{ TakeVisualDirty() bool }); ok {
-		d.visualDirty = dirty.TakeVisualDirty() || d.visualDirty
+		changed := dirty.TakeVisualDirty()
+		if changed {
+			d.stack[len(d.stack)-1].invalidateView()
+		}
+		d.visualDirty = changed || d.visualDirty
 	}
 }
 

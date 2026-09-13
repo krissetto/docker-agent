@@ -7,8 +7,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 func TestBaseDialogScrollviewDirtyGeneration(t *testing.T) {
@@ -66,4 +68,39 @@ func TestSettledDialogScrollbarDragInvalidatesManager(t *testing.T) {
 	assert.False(t, d.viewport.IsDragging())
 	assert.False(t, mgr.TakeVisualDirty())
 	mgr.Cleanup()
+}
+
+func TestPreparedFamilyViewsPreserveScrollResourcesAndSelection(t *testing.T) {
+	fixtures := []struct {
+		name string
+		new  func() Dialog
+	}{
+		{"settings", func() Dialog { return NewSettingsDialog(messages.Preferences{}, true) }},
+		{"commands", func() Dialog { return NewCommandPaletteDialog(concretePaletteCommands(2, 10)) }},
+		{"models", func() Dialog { return NewModelPickerDialog(nil) }},
+		{"plans", func() Dialog { return NewPlanBrowserDialog(plans.ListResult{}) }},
+		{"readonly", func() Dialog { return NewHelpDialog(nil) }},
+		{"snapshots", func() Dialog { return NewSnapshotsDialog(make([]int, 30)) }},
+	}
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			d := f.new()
+			d.SetSize(40, 12)
+			d.View()
+			visual := d.(interface{ TakeVisualDirty() bool })
+			visual.TakeVisualDirty()
+			bounds := d.(interface {
+				BodyScrollBounds() (int, int, int, int)
+				BodyScrollOffset() int
+			})
+			x, y, w, h := bounds.BodyScrollBounds()
+			offset := bounds.BodyScrollOffset()
+			for range 20 {
+				d.View()
+				require.False(t, visual.TakeVisualDirty(), "View cannot change viewport generation")
+				nextX, nextY, nextW, nextH := bounds.BodyScrollBounds()
+				require.Equal(t, []int{x, y, w, h, offset}, []int{nextX, nextY, nextW, nextH, bounds.BodyScrollOffset()})
+			}
+		})
+	}
 }

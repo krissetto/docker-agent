@@ -40,18 +40,20 @@ type toolRenderCache struct {
 	lineCounted bool
 
 	// Rendered output - invalidated when width/splitView/status changes
-	rendered       string
-	renderCached   bool
-	renderedWidth  int
-	renderedSplit  bool
-	renderedStatus types.ToolStatus
+	themeGeneration uint64
+	rendered        string
+	renderCached    bool
+	renderedWidth   int
+	renderedSplit   bool
+	renderedStatus  types.ToolStatus
 }
 
 var (
 	// cacheMu guards both the LRU and the per-entry fields. A regular Mutex
 	// (not RWMutex) is used because LRU.Get mutates the recency list.
-	cache   = lrucache.New[string, *toolRenderCache](renderCacheSize)
-	cacheMu sync.Mutex
+	cache      = lrucache.New[string, *toolRenderCache](renderCacheSize)
+	cacheMu    sync.Mutex
+	cacheEpoch uint64
 
 	lexerCache concurrent.Map[string, chroma.Lexer]
 )
@@ -61,6 +63,7 @@ var (
 func InvalidateCaches() {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
+	cacheEpoch++
 	cache.Range(func(_ string, c *toolRenderCache) bool {
 		c.renderCached = false
 		return true
@@ -95,10 +98,16 @@ func getOrCreateCache(toolCallID string) *toolRenderCache {
 }
 
 func renderEditFile(toolCall tools.ToolCall, width int, splitView bool, toolStatus types.ToolStatus) string {
+	return renderEditFileCached(toolCall, width, splitView, toolStatus, renderEditFileUncached)
+}
+
+func renderEditFileCached(toolCall tools.ToolCall, width int, splitView bool, toolStatus types.ToolStatus, render func(tools.ToolCall, int, bool, types.ToolStatus) string) string {
 	c := getOrCreateCache(toolCall.ID)
+	generation := styles.ThemeGeneration()
 
 	cacheMu.Lock()
-	if c.renderCached &&
+	epoch := cacheEpoch
+	if c.renderCached && c.themeGeneration == generation &&
 		c.renderedWidth == width &&
 		c.renderedSplit == splitView &&
 		c.renderedStatus == toolStatus {
@@ -108,12 +117,13 @@ func renderEditFile(toolCall tools.ToolCall, width int, splitView bool, toolStat
 	}
 	cacheMu.Unlock()
 
-	result := renderEditFileUncached(toolCall, width, splitView, toolStatus)
+	result := render(toolCall, width, splitView, toolStatus)
 
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	c.rendered = result
-	c.renderCached = true
+	c.themeGeneration = generation
+	c.renderCached = generation == styles.ThemeGeneration() && epoch == cacheEpoch
 	c.renderedWidth = width
 	c.renderedSplit = splitView
 	c.renderedStatus = toolStatus

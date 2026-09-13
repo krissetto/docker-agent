@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -126,6 +127,8 @@ type settingsDialog struct {
 	tab         int
 	selected    [tabCount]int
 	confirmYOLO bool
+	rowText     map[int]string
+	rowLines    map[int]int
 }
 
 func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialog {
@@ -148,7 +151,41 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 func (d *settingsDialog) Init() tea.Cmd { return nil }
 
 func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.prepareBody()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
+	case tea.MouseClickMsg:
+		if msg.Button != tea.MouseLeft {
+			return d, nil
+		}
+		x, y, w, h := d.BodyScrollBounds()
+		if msg.X >= x && msg.X < x+w && msg.Y >= y && msg.Y < y+h {
+			line := msg.Y - y + d.BodyScrollOffset()
+			for row, at := range d.rowLines {
+				if at == line && d.selectable(d.tab, row) {
+					d.selected[d.tab] = row
+					cmd := d.changeValue(1)
+					return d, cmd
+				}
+			}
+		}
+		// The tab bar sits immediately above the body viewport.
+		if msg.Y == y-1 {
+			col := x
+			for i, label := range settingsTabLabels {
+				if msg.X >= col && msg.X < col+len(label)+2 {
+					d.tab = i
+					d.confirmYOLO = false
+					return d, nil
+				}
+				col += len(label) + 3
+			}
+		}
+		return d, nil
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
@@ -222,6 +259,8 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return d.changeValue(-1)
 	case "right", "l", "space":
 		return d.changeValue(1)
+	case "ctrl+s":
+		return d.apply()
 	case "enter":
 		if d.tab == tabAppearance && d.selected[d.tab] == rowTheme {
 			return core.CmdHandler(messages.OpenThemePickerMsg{})
@@ -357,19 +396,51 @@ func (d *settingsDialog) cancel() tea.Cmd {
 func (d *settingsDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
 
 func (d *settingsDialog) View() string {
+	width, header, body, footer, _ := d.bodyParts()
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, body, footer)
+}
+
+func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) {
 	width := d.ComputeDialogWidth(settingsWidthPercent, settingsMinWidth, settingsMaxWidth)
-	inner := d.ContentWidth(width, 2)
-	content := NewContent(inner).AddTitle("Settings").AddSeparator().AddSpace().AddContent(d.renderTabBar(inner))
-	switch d.tab {
+	inner := max(1, d.ContentWidth(width, 2)-2)
+	local := *d
+	local.rowText = make(map[int]string)
+	content := NewContent(inner)
+	switch local.tab {
 	case tabBehavior:
-		d.renderBehaviorTab(content, inner)
+		local.renderBehaviorTab(content, inner)
 	case tabNotifications:
-		d.renderNotificationsTab(content, inner)
+		local.renderNotificationsTab(content, inner)
 	default:
-		d.renderAppearanceTab(content, inner)
+		local.renderAppearanceTab(content, inner)
 	}
-	content.AddSpace().AddHelpKeys("↑/↓", "navigate", "←/→", "change", "tab", "switch tab", "enter", "apply")
-	return styles.DialogStyle.Width(width).MaxHeight(max(1, d.Height())).Render(content.Build())
+	body := content.Build()
+	rows := make(map[int]int)
+	physicalLine := 0
+	for line := range strings.SplitSeq(ansi.Strip(body), "\n") {
+		for row, text := range local.rowText {
+			if line == text {
+				rows[row] = physicalLine
+			}
+		}
+		physicalLine += max(1, lipgloss.Height(ansi.Hardwrap(strings.TrimRight(line, " "), inner, true)))
+	}
+	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + d.renderTabBar(inner)
+	footer := d.RenderActionKeys(inner, "tab", "Next tab", "left", "Decrease", "right", "Change", "ctrl+s", "Apply")
+	return width, header, body, footer, rows
+}
+
+func (d *settingsDialog) prepareBody() {
+	width, header, body, footer, rows := d.bodyParts()
+	d.rowLines = rows
+	d.PrepareScrollableBody(styles.DialogStyle, width, header, body, footer)
+	d.EnsureBodyLineVisible(rows[d.selected[d.tab]])
+}
+
+func (d *settingsDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareBody()
+	return cmd
 }
 
 func (d *settingsDialog) renderTabBar(width int) string {
@@ -381,7 +452,7 @@ func (d *settingsDialog) renderTabBar(width int) string {
 		}
 		tabs = append(tabs, style.Render(label))
 	}
-	return lipgloss.PlaceHorizontal(width, lipgloss.Center, strings.Join(tabs, "    "))
+	return ansi.Truncate(strings.Join(tabs, "   "), width, "")
 }
 
 func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
@@ -446,7 +517,7 @@ func (d *settingsDialog) renderSendModeOption(opt sendModeOption) string {
 		labelStyle = styles.PaletteSelectedActionStyle
 		glyphStyle = styles.SecondaryStyle.Foreground(styles.Success)
 	}
-	return prefix + glyphStyle.Render(glyph) + " " + labelStyle.Render(opt.label) + "   " + styles.MutedStyle.Render(opt.desc)
+	return d.recordRow(rowSendMode, prefix+glyphStyle.Render(glyph)+" "+labelStyle.Render(opt.label)+"   "+styles.MutedStyle.Render(opt.desc))
 }
 
 func (d *settingsDialog) renderSelectorRow(row int, label, valueLabel string, width int) string {
@@ -456,7 +527,7 @@ func (d *settingsDialog) renderSelectorRow(row int, label, valueLabel string, wi
 		labelStyle, valueStyle, prefix = styles.PaletteSelectedActionStyle, styles.HighlightWhiteStyle, styles.HighlightWhiteStyle.Render("› ")
 	}
 	left := prefix + labelStyle.Render(label)
-	return left + strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(value))) + valueStyle.Render(value)
+	return d.recordRow(row, left+strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(value)))+valueStyle.Render(value))
 }
 
 func (d *settingsDialog) renderStepperRow(row int, label string, value int, unit string, width int, disabled bool) string {
@@ -479,7 +550,7 @@ func (d *settingsDialog) renderToggleRow(row int, label string, enabled bool) st
 	if enabled {
 		checkStyle = checkStyle.Foreground(styles.Success)
 	}
-	return prefix + checkStyle.Render(check) + " " + labelStyle.Render(label)
+	return d.recordRow(row, prefix+checkStyle.Render(check)+" "+labelStyle.Render(label))
 }
 
 // renderNestedToggleRow renders a toggle row indented under its parent row.
@@ -493,7 +564,7 @@ func (d *settingsDialog) renderNestedToggleRow(row int, label string, enabled, d
 		}
 		return "    " + styles.MutedStyle.Render(check+" "+label)
 	}
-	return "  " + d.renderToggleRow(row, label, enabled)
+	return d.recordRow(row, "  "+d.renderToggleRow(row, label, enabled))
 }
 
 // visibleSectionLabels returns the sidebar section labels that are visible
@@ -642,4 +713,11 @@ func renderBandPreview(s messages.LayoutSettings, width int, bottom bool) string
 	)
 
 	return strings.Join(lines, "\n")
+}
+
+func (d *settingsDialog) recordRow(row int, text string) string {
+	if d.rowText != nil {
+		d.rowText[row] = ansi.Strip(text)
+	}
+	return text
 }

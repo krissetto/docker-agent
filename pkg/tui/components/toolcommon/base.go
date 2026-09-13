@@ -33,6 +33,7 @@ type Base struct {
 	render              Renderer
 	collapsedRenderer   CollapsedRenderer
 	spinnerRegistered   bool // tracks whether spinner is registered with coordinator
+	themeGeneration     uint64
 	lastRendered        string
 	lastRenderedHeight  int
 	lastCollapsed       string
@@ -88,6 +89,7 @@ func (b *Base) Init() tea.Cmd {
 }
 
 func (b *Base) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	b.ensureTheme()
 	isActive := b.isSpinnerActive()
 
 	var initCmd tea.Cmd
@@ -113,6 +115,7 @@ func (b *Base) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (b *Base) View() string {
+	b.ensureTheme()
 	rendered := b.render(b.message, b.spinner, b.sessionState, b.width, b.height)
 	height := renderedViewHeight(rendered)
 	if b.shouldKeepLastPendingRender(rendered, height, b.lastRendered, b.lastRenderedHeight) {
@@ -133,6 +136,7 @@ func (b *Base) ExpandedView() string {
 // CollapsedView returns a simplified view for use in collapsed reasoning blocks.
 // Falls back to the regular View() if no collapsed renderer is provided.
 func (b *Base) CollapsedView() string {
+	b.ensureTheme()
 	if b.collapsedRenderer != nil {
 		rendered := b.collapsedRenderer(b.message, b.spinner, b.sessionState, b.width, b.height)
 		height := renderedViewHeight(rendered)
@@ -146,6 +150,14 @@ func (b *Base) CollapsedView() string {
 		return rendered
 	}
 	return b.View()
+}
+
+func (b *Base) ensureTheme() {
+	if generation := styles.ThemeGeneration(); b.themeGeneration != generation {
+		b.themeGeneration = generation
+		b.lastRendered, b.lastCollapsed = "", ""
+		b.lastRenderedHeight, b.lastCollapsedHeight = 0, 0
+	}
 }
 
 func (b *Base) shouldKeepLastPendingRender(rendered string, height int, last string, lastHeight int) bool {

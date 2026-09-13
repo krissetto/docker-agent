@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func newTestPlanDetail(t *testing.T, p plans.Plan) *planDetailDialog {
@@ -143,4 +144,18 @@ func TestPlanDetailUpdatedAgeAdvances(t *testing.T) {
 
 	d.now = func() time.Time { return base.Add(2 * time.Hour) }
 	assert.Contains(t, d.View(), "2h ago", "the age must advance with the clock, without any data message")
+}
+
+func TestPlanMarkdownCacheTracksThemeGeneration(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	d := newTestPlanDetail(t, sharedDetailPlan())
+	d.View()
+	before := d.renderedTheme
+	theme := *original
+	theme.Markdown.Heading = "#10abcd"
+	styles.ApplyTheme(&theme)
+	d.View()
+	require.NotEqual(t, before, d.renderedTheme)
+	require.Equal(t, styles.ThemeGeneration(), d.renderedTheme)
 }

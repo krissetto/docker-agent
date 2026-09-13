@@ -14,6 +14,7 @@ type CollapsedViewModel struct {
 	TitleWithStar    string
 	WorkingIndicator string
 	WorkingDir       string
+	Branch           string
 	UsageSummary     string
 	// InfoLine is the compact agents/tools/todos summary shown when the
 	// sidebar renders as a horizontal band.
@@ -44,6 +45,8 @@ func (vm CollapsedViewModel) LineCount() int {
 			lines += linesNeeded(lipgloss.Width(vm.UsageSummary), vm.ContentWidth)
 		}
 	}
+
+	lines += linesNeededOptional(vm.Branch, vm.ContentWidth)
 
 	if vm.InfoLine != "" {
 		lines += linesNeeded(lipgloss.Width(vm.InfoLine), vm.ContentWidth)
@@ -100,6 +103,9 @@ func RenderCollapsedView(vm CollapsedViewModel) string {
 	default:
 		if vm.WorkingDir != "" {
 			lines = append(lines, vm.WorkingDir)
+			if vm.Branch != "" {
+				lines = append(lines, vm.Branch)
+			}
 		}
 		if vm.UsageSummary != "" {
 			lines = append(lines, vm.UsageSummary)
@@ -120,4 +126,11 @@ func linesNeeded(textWidth, contentWidth int) int {
 		return 1
 	}
 	return max(1, (textWidth+contentWidth-1)/contentWidth)
+}
+
+func linesNeededOptional(text string, width int) int {
+	if text == "" {
+		return 0
+	}
+	return linesNeeded(lipgloss.Width(text), width)
 }

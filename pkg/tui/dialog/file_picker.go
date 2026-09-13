@@ -11,6 +11,7 @@ import (
 	"github.com/docker/go-units"
 
 	"github.com/docker/docker-agent/pkg/fsx"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -210,6 +211,9 @@ func (d *filePickerDialog) loadDirectory() {
 func (d *filePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
@@ -220,6 +224,12 @@ func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if dbl, _ := d.handleListClick(msg, nil); dbl {
+			cmd := d.activateSelected()
+			return d, cmd
+		}
+		return d, nil
 	case tea.PasteMsg:
 		cmd := d.updateInput(msg, d.filterEntries)
 		return d, cmd
@@ -312,48 +322,25 @@ func (d *filePickerDialog) filterEntries() {
 	d.scrollview.SetScrollOffset(0)
 }
 
-func (d *filePickerDialog) View() string {
-	dialogWidth, _, contentWidth := d.dialogSize()
-	d.textInput.SetWidth(contentWidth)
+func (d *filePickerDialog) View() string { return d.renderBody(false) }
 
-	displayDir := d.currentDir
-	if len(displayDir) > contentWidth-4 {
-		displayDir = "…" + displayDir[len(displayDir)-(contentWidth-5):]
-	}
-	dirLine := styles.MutedStyle.Render("📁 " + displayDir)
-
-	var allLines []string
+func (d *filePickerDialog) renderBody(prepare bool) string {
+	d.textInput.SetStyles(styles.DialogInputStyle)
+	width, _, inner := d.dialogSize()
+	d.textInput.SetWidth(inner)
+	header := RenderTitle("Attach File", inner, styles.DialogTitleStyle) + "\n" + styles.MutedStyle.Render(toolcommon.TruncateText(d.currentDir, inner)) + "\n" + d.textInput.View()
+	var lines []string
 	for i, entry := range d.filtered {
-		allLines = append(allLines, d.renderEntry(entry, i == d.selected, contentWidth))
+		lines = append(lines, d.renderEntry(entry, i == d.selected, inner))
 	}
-
-	d.updateScrollviewPosition()
-	d.scrollview.SetContent(allLines, len(allLines))
-
-	var scrollableContent string
-	switch {
-	case d.err != nil:
-		scrollableContent = d.renderErrorState(d.err.Error(), contentWidth)
-	case len(d.filtered) == 0:
-		scrollableContent = d.renderEmptyState("No files found", contentWidth)
-	default:
-		scrollableContent = d.scrollview.View()
+	if d.err != nil {
+		lines = []string{d.err.Error()}
+	} else if len(lines) == 0 {
+		lines = []string{"No files found"}
 	}
-
-	helpRow1, helpRow2 := d.filePickerHelpKeysRows(d.regionWidth(contentWidth))
-	content := NewContent(d.regionWidth(contentWidth)).
-		AddTitle("Attach File").
-		AddSpace().
-		AddContent(dirLine).
-		AddContent(d.textInput.View()).
-		AddSeparator().
-		AddContent(scrollableContent).
-		AddSpace().
-		AddHelpKeys(helpRow1...).
-		AddHelpKeys(helpRow2...).
-		Build()
-
-	return styles.DialogStyle.Width(dialogWidth).Render(content)
+	row1, row2 := d.filePickerHelpKeysRows(d.regionWidth(inner))
+	footer := d.RenderActionKeys(d.regionWidth(inner), append(row1, row2...)...)
+	return d.renderPicker(prepare, width, header, lines, footer)
 }
 
 func (d *filePickerDialog) renderEntry(entry fileEntry, selected bool, maxWidth int) string {
@@ -406,4 +393,10 @@ func (d *filePickerDialog) filePickerHelpKeysRows(contentWidth int) (row1, row2 
 		return all, nil
 	}
 	return all[:8], all[8:]
+}
+
+func (d *filePickerDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.pickerCore.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

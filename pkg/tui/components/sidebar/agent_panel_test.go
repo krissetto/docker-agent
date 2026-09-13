@@ -415,7 +415,7 @@ func TestDetailedCardResizeAcrossThreshold(t *testing.T) {
 
 	render := func(width int) []string {
 		m.SetSize(width, 200)
-		lines := strings.Split(ansi.Strip(m.View()), "\n")
+		lines := strings.Split(ansi.Strip(m.agentInfo(m.contentWidth(false))), "\n")
 		for i, line := range lines {
 			lines[i] = strings.TrimRight(line, " ")
 		}
@@ -505,7 +505,7 @@ func TestClickZonesEveryLine(t *testing.T) {
 			foundOther = true
 		}
 	}
-	assert.True(t, foundCurrent, "clicking the current agent's line switches to it")
+	assert.False(t, foundCurrent, "the active agent does not replace the canonical root")
 	assert.True(t, foundOther, "clicking another agent's line switches to it")
 }
 

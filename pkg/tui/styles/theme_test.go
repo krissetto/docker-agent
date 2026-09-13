@@ -762,3 +762,25 @@ func TestAbsentAyuRegistryAndLegacyFixtureResolution(t *testing.T) {
 	require.Equal(t, TabBg, EditorStyle.GetBackground())
 	require.Equal(t, TabBg, SuggestionGhostStyle.GetBackground())
 }
+
+func TestRegisteredPartialThemeUsesOwnInputSurface(t *testing.T) {
+	t.Parallel()
+	registry := newThemeRegistry()
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"explicit", "background: '#101820'\n  editor_bg: '#202830'\n  tab_bg: '#506070'", "#202830"},
+		{"dark", "background: '#101820'\n  tab_bg: '#506070'", raisedEditorBackground("#101820")},
+		{"light", "background: '#f0f4f8'", raisedEditorBackground("#f0f4f8")},
+		{"legacy", "tab_bg: '#506070'", "#506070"},
+		{"ansi-black", "background: '0'\n  tab_bg: '#506070'", raisedEditorBackground("#000000")},
+		{"ansi-blue", "background: '39'", raisedEditorBackground("#00afff")},
+	} {
+		ref := "partial-" + tc.name
+		require.NoError(t, registry.RegisterBuiltinThemes(fstest.MapFS{"themes/" + ref + ".yaml": {Data: []byte("colors:\n  " + tc.yaml + "\n")}}))
+		theme, err := registry.LoadTheme(ref)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, theme.Colors.EditorBg)
+		cached, err := registry.LoadTheme(ref)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, cached.Colors.EditorBg)
+	}
+}

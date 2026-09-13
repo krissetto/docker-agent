@@ -1,7 +1,6 @@
 package dialog
 
 import (
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -69,14 +68,24 @@ func DefaultConfirmKeyMap() ConfirmKeyMap {
 // BaseDialog provides common functionality for dialog implementations.
 // It handles size management, position calculation, and common UI patterns.
 type BaseDialog struct {
-	scrollviews                    []scrollviewRegistration
-	responseSent                   bool
-	width, height                  int
-	closeHovered                   bool
-	visualDirty                    bool
-	confirmFocus                   ConfirmButtonFocus
-	confirmBtnNoX, confirmBtnNoW   int
-	confirmBtnYesX, confirmBtnYesW int
+	scrollviews                           []scrollviewRegistration
+	responseSent                          bool
+	width, height                         int
+	closeHovered                          bool
+	visualDirty                           bool
+	confirmFocus                          ConfirmButtonFocus
+	confirmBtnNoX, confirmBtnNoW          int
+	confirmBtnYesX, confirmBtnYesW        int
+	actionRows                            []dialogActionRow
+	actionScroll                          *scrollview.Model
+	actionScrollActive                    bool
+	actionFooterStart, actionFooterHeight int
+	actionContentX, actionContentWidth    int
+	bodyScroll                            *scrollview.Model
+	bodyX, bodyY, bodyWidth, bodyHeight   int
+	bodyMaxHeight                         int
+	bodyFillHeight                        bool
+	cardWidth, cardHeight                 int
 }
 
 type scrollviewRegistration struct {
@@ -152,25 +161,26 @@ func ConfirmAndClose(cmd tea.Cmd) tea.Cmd {
 	return tea.Sequence(closeCmd, cmd)
 }
 
-// RenderConfirmButtons renders centered, terminal-cell-addressable action pills.
+// RenderConfirmButtons renders right-aligned, terminal-cell-addressable action pills.
 func (b *BaseDialog) RenderConfirmButtons(contentWidth int) string {
-	button := lipgloss.NewStyle().Padding(0, 2).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
-	focused := lipgloss.NewStyle().Padding(0, 2).Bold(true).Foreground(styles.SelectedFg).Background(styles.Selected)
 	noLabel, yesLabel := "No", "Yes"
-	noStyle, yesStyle := button, button
 	if b.confirmFocus == ConfirmFocusYes {
 		yesLabel += confirmEnterSuffix
-		yesStyle = focused
 	} else {
 		noLabel += confirmEnterSuffix
-		noStyle = focused
 	}
-	no, yes := noStyle.Render(noLabel), yesStyle.Render(yesLabel)
-	b.confirmBtnNoW, b.confirmBtnYesW = lipgloss.Width(no), lipgloss.Width(yes)
-	const gap = 2
-	b.confirmBtnNoX = max(0, (contentWidth-b.confirmBtnNoW-gap-b.confirmBtnYesW)/2)
-	b.confirmBtnYesX = b.confirmBtnNoX + b.confirmBtnNoW + gap
-	return strings.Repeat(" ", b.confirmBtnNoX) + no + strings.Repeat(" ", gap) + yes
+	out := b.RenderActions(contentWidth, Action{Label: noLabel, Key: tea.KeyPressMsg{Code: 'n', Text: "n"}}, Action{Label: yesLabel, Key: tea.KeyPressMsg{Code: 'y', Text: "y"}})
+	// Legacy confirmation handlers retain their measured pill columns.
+	for _, row := range b.actionRows {
+		for _, hit := range row.hits {
+			if hit.key.Code == 'n' {
+				b.confirmBtnNoX, b.confirmBtnNoW = hit.x, hit.width
+			} else {
+				b.confirmBtnYesX, b.confirmBtnYesW = hit.x, hit.width
+			}
+		}
+	}
+	return out
 }
 
 // DialogLayout captures rendered bounds for chrome hit testing.
@@ -190,9 +200,12 @@ func (b *BaseDialog) CloseButtonHit(msg tea.MouseClickMsg, dl DialogLayout) bool
 	return msg.Y == dl.Row+styles.DialogStyle.GetBorderTopSize() && msg.X == dl.Col+dl.Width-styles.DialogStyle.GetBorderRightSize()-1-dialogCloseInset
 }
 
-// ResetCloseHover clears pointer-derived chrome state at a dialog lifecycle
-// boundary. A dialog must not inherit hover merely because the pointer has not
-// moved since another dialog occupied the same cells.
+// SetCloseHover synchronizes concrete chrome with the manager pointer state.
+func (b *BaseDialog) SetCloseHover(hovered bool) {
+	b.visualDirty = b.visualDirty || b.closeHovered != hovered
+	b.closeHovered = hovered
+}
+
 func (b *BaseDialog) ResetCloseHover() {
 	b.closeHovered = false
 }
@@ -223,31 +236,53 @@ func (b *BaseDialog) TakeVisualDirty() bool {
 }
 
 // HandleConfirmButtonsClick performs exact terminal-cell pill hit testing.
-func (b *BaseDialog) HandleConfirmButtonsClick(msg tea.MouseClickMsg, dl DialogLayout, style lipgloss.Style, onYes tea.Cmd) tea.Cmd {
-	lines := strings.Split(ansi.Strip(dl.View), "\n")
-	buttonRow := -1
-	for i, v := range slices.Backward(lines) {
-		if strings.Contains(v, "No") && strings.Contains(v, "Yes") {
-			buttonRow = dl.Row + i
-			break
-		}
-	}
-	if msg.Y != buttonRow {
+func (b *BaseDialog) HandleConfirmButtonsClick(msg tea.MouseClickMsg, dl DialogLayout, _ lipgloss.Style, onYes tea.Cmd) tea.Cmd {
+	if msg.Button != tea.MouseLeft {
 		return nil
 	}
-	relX := msg.X - dl.Col - style.GetBorderLeftSize() - style.GetPaddingLeft()
-	if relX >= b.confirmBtnNoX && relX < b.confirmBtnNoX+b.confirmBtnNoW {
-		return func() tea.Msg { return CloseDialogMsg{} }
-	}
-	if relX >= b.confirmBtnYesX && relX < b.confirmBtnYesX+b.confirmBtnYesW {
-		return ConfirmAndClose(onYes)
+	if k, ok := b.ActionKeyAt(msg.X, msg.Y, dl); ok {
+		if k.Code == 'n' {
+			return closeDialogCmd()
+		}
+		if k.Code == 'y' {
+			return ConfirmAndClose(onYes)
+		}
 	}
 	return nil
 }
 
 // RenderCard renders dialog content with the shared top-right close control.
 func (b *BaseDialog) RenderCard(style lipgloss.Style, dialogWidth int, content string) string {
-	return renderCloseControl(style.Width(dialogWidth).Render(content), b.closeHovered)
+	width := min(max(1, dialogWidth), max(1, b.width))
+	if b.height < 8 {
+		style = style.PaddingTop(0).PaddingBottom(0)
+	}
+	if width < 10 {
+		style = style.PaddingLeft(0).PaddingRight(0)
+	}
+	inner := max(1, width-style.GetHorizontalFrameSize())
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], inner, "")
+	}
+	available := max(1, b.height-style.GetVerticalFrameSize())
+	if len(lines) > available {
+		// Preserve the action rows, rather than clipping the bottom of the card.
+		footer := min(max(1, len(b.actionRows)), available)
+		lines = append(lines[:available-footer], lines[len(lines)-footer:]...)
+	}
+	view := renderCloseControl(style.Width(width).Render(strings.Join(lines, "\n")), b.closeHovered)
+	view = clampRenderedFrame(view, b.width, b.height)
+	b.cardWidth, b.cardHeight = lipgloss.Width(view), lipgloss.Height(view)
+	b.actionContentX = style.GetBorderLeftSize() + style.GetPaddingLeft()
+	b.actionContentWidth = max(0, min(inner, b.cardWidth-b.actionContentX-style.GetBorderRightSize()-style.GetPaddingRight()))
+	b.actionFooterHeight = len(b.actionRows)
+	if b.actionScrollActive && b.actionScroll != nil {
+		b.actionFooterHeight = b.actionScroll.VisibleHeight()
+	}
+	b.actionFooterHeight = min(b.actionFooterHeight, len(lines))
+	b.actionFooterStart = style.GetBorderTopSize() + style.GetPaddingTop() + len(lines) - b.actionFooterHeight
+	return view
 }
 
 func renderCloseControl(view string, hovered bool) string {
@@ -300,14 +335,14 @@ func (b *BaseDialog) ComputeDialogWidth(percent, minWidth, maxWidth int) int {
 	if width > maxWidth {
 		width = min(maxWidth, b.width-4)
 	}
-	return width
+	return min(max(1, width), max(1, b.width))
 }
 
 // ContentWidth calculates the inner content width given dialog width and padding.
 func (b *BaseDialog) ContentWidth(dialogWidth, paddingX int) int {
 	// Border takes one character on each side
 	frameHorizontal := (paddingX * 2) + 2
-	return max(10, dialogWidth-frameHorizontal)
+	return max(1, dialogWidth-frameHorizontal)
 }
 
 // CenterDialog returns the (row, col) position to center a rendered dialog.
@@ -507,4 +542,280 @@ func (dc *Content) AddHelp(text string) *Content {
 // Build returns the final dialog content as a vertical join.
 func (dc *Content) Build() string {
 	return lipgloss.JoinVertical(lipgloss.Left, dc.parts...)
+}
+
+// Action connects a visible action pill to its existing keyboard path.
+type Action struct {
+	Label string
+	Key   tea.KeyPressMsg
+}
+type dialogActionRow struct {
+	text string
+	hits []dialogActionHit
+}
+type dialogActionHit struct {
+	x, width int
+	key      tea.KeyPressMsg
+}
+
+func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
+	b.actionRows = nil
+	width := max(1, contentWidth)
+	button := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
+	var rendered []string
+	var row string
+	var hits []dialogActionHit
+	flush := func() {
+		if row == "" {
+			return
+		}
+		offset := max(0, width-lipgloss.Width(row))
+		for i := range hits {
+			hits[i].x += offset
+		}
+		text := strings.Repeat(" ", offset) + row
+		b.actionRows = append(b.actionRows, dialogActionRow{text: ansi.Strip(text), hits: hits})
+		rendered = append(rendered, text)
+		row, hits = "", nil
+	}
+	for _, action := range actions {
+		pill := button.Render(ansi.Truncate(action.Label, max(1, width-2), ""))
+		if row != "" && lipgloss.Width(row)+1+lipgloss.Width(pill) > width {
+			flush()
+		}
+		if row != "" {
+			row += " "
+		}
+		hits = append(hits, dialogActionHit{x: lipgloss.Width(row), width: lipgloss.Width(pill), key: action.Key})
+		row += pill
+	}
+	flush()
+	return strings.Join(rendered, "\n")
+}
+
+// RenderActionKeys reuses family key bindings while omitting redundant navigation hints.
+func (b *BaseDialog) RenderActionKeys(width int, bindings ...string) string {
+	var actions []Action
+	for i := 0; i+1 < len(bindings); i += 2 {
+		name, label := bindings[i], bindings[i+1]
+		switch label {
+		case "navigate", "scroll", "up", "down":
+			continue
+		}
+		name = strings.Split(name, "/")[0]
+		k := tea.KeyPressMsg{}
+		switch name {
+		case "enter", "Enter":
+			k.Code = tea.KeyEnter
+		case "esc":
+			k.Code = tea.KeyEscape
+		case "left":
+			k.Code = tea.KeyLeft
+		case "right":
+			k.Code = tea.KeyRight
+		case "tab":
+			k.Code = tea.KeyTab
+		case "space":
+			k.Code = tea.KeySpace
+		case "backspace":
+			k.Code = tea.KeyBackspace
+		default:
+			if strings.HasPrefix(name, "alt+") {
+				k.Mod = tea.ModAlt
+				name = strings.TrimPrefix(name, "alt+")
+			}
+			if strings.HasPrefix(name, "ctrl+") {
+				k.Mod = tea.ModCtrl
+				name = strings.TrimPrefix(name, "ctrl+")
+			}
+			runes := []rune(name)
+			if len(runes) != 1 {
+				continue
+			}
+			k.Code = runes[0]
+			if k.Mod == 0 {
+				k.Text = name
+			}
+		}
+		actions = append(actions, Action{Label: label, Key: k})
+	}
+	return b.RenderActions(width, actions...)
+}
+
+func (b *BaseDialog) ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bool) {
+	lines := strings.Split(ansi.Strip(dl.View), "\n")
+	line := y - dl.Row
+	if line < 0 || line >= len(lines) || line < b.actionFooterStart || line >= b.actionFooterStart+b.actionFooterHeight || x < dl.Col+b.actionContentX || x >= dl.Col+b.actionContentX+b.actionContentWidth {
+		return tea.KeyPressMsg{}, false
+	}
+	rowIndex := line - b.actionFooterStart
+	if b.actionScrollActive && b.actionScroll != nil {
+		rowIndex += b.actionScroll.ScrollOffset()
+	}
+	if rowIndex >= 0 && rowIndex < len(b.actionRows) {
+		rel := x - dl.Col - b.actionContentX
+		for _, hit := range b.actionRows[rowIndex].hits {
+			if rel >= hit.x && rel < min(hit.x+hit.width, b.actionContentWidth) {
+				return hit.key, true
+			}
+		}
+	}
+	return tea.KeyPressMsg{}, false
+}
+
+// PrepareScrollableBody updates body and footer viewports only at input/size lifecycle boundaries.
+func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int, header, body, footer string) {
+	if b.bodyScroll == nil {
+		b.bodyScroll = b.newScrollview(scrollview.WithKeyMap(&scrollview.ScrollKeyMap{PageUp: key.NewBinding(key.WithKeys("pgup")), PageDown: key.NewBinding(key.WithKeys("pgdown"))}), scrollview.WithReserveScrollbarSpace(true))
+	}
+	style, width, inner, available := b.bodyFrame(style, dialogWidth)
+	headers, footers := bodyChrome(header, footer, available)
+	b.actionScrollActive = len(footers) > max(1, available-1)
+	if b.actionScrollActive {
+		if b.actionScroll == nil {
+			b.actionScroll = b.newScrollview(scrollview.WithKeyMap(nil), scrollview.WithFadeEffectDisabled())
+		}
+		b.actionScroll.SetSize(inner+2, max(1, available-1))
+		b.actionScroll.SetContent(footers, len(footers))
+	}
+	footerHeight := len(footers)
+	if b.actionScrollActive {
+		footerHeight = b.actionScroll.VisibleHeight()
+	}
+	lines := wrapBodyLines(body, max(1, inner-b.bodyScroll.ReservedCols()))
+	viewport := max(1, available-len(headers)-footerHeight)
+	if !b.bodyFillHeight {
+		viewport = min(viewport, max(1, len(lines)))
+	}
+	b.bodyScroll.SetSize(inner, viewport)
+	b.bodyScroll.SetContent(lines, len(lines))
+	total := len(headers) + viewport + footerHeight + style.GetVerticalFrameSize()
+	row, col := CenterPosition(b.width, b.height, width, min(b.height, total))
+	b.bodyX, b.bodyY = col+style.GetBorderLeftSize()+style.GetPaddingLeft(), row+style.GetBorderTopSize()+style.GetPaddingTop()+len(headers)
+	b.bodyWidth, b.bodyHeight = inner, viewport
+	b.bodyScroll.SetPosition(b.bodyX, b.bodyY)
+	if b.actionScrollActive {
+		b.actionScroll.SetPosition(b.bodyX, b.bodyY+viewport)
+	}
+}
+
+// RenderScrollableBody composes current themed content using already-prepared viewport geometry.
+func (b *BaseDialog) RenderScrollableBody(style lipgloss.Style, dialogWidth int, header, body, footer string) string {
+	style, width, inner, available := b.bodyFrame(style, dialogWidth)
+	headers, footers := bodyChrome(header, footer, available)
+	if b.bodyScroll == nil {
+		return b.RenderCard(style, width, strings.Join(append(append(headers, body), footers...), "\n"))
+	}
+	lines := wrapBodyLines(body, max(1, inner-b.bodyScroll.ReservedCols()))
+	start := min(b.bodyScroll.ScrollOffset(), len(lines))
+	out := b.bodyScroll.ViewWithRestyledLines(lines[start:])
+	if b.actionScrollActive && b.actionScroll != nil {
+		start := min(b.actionScroll.ScrollOffset(), len(footers))
+		footers = strings.Split(b.actionScroll.ViewWithRestyledLines(footers[start:]), "\n")
+	}
+	parts := append(headers, out)
+	parts = append(parts, footers...)
+	return b.RenderCard(style, width, strings.Join(parts, "\n"))
+}
+
+func (b *BaseDialog) bodyFrame(style lipgloss.Style, dialogWidth int) (lipgloss.Style, int, int, int) {
+	width := min(max(1, dialogWidth), max(1, b.width))
+	if b.height < 8 {
+		style = style.PaddingTop(0).PaddingBottom(0)
+	}
+	if width < 10 {
+		style = style.PaddingLeft(0).PaddingRight(0)
+	}
+	height := b.height
+	if b.bodyMaxHeight > 0 {
+		height = min(height, b.bodyMaxHeight)
+	}
+	return style, width, max(1, width-style.GetHorizontalFrameSize()), max(1, height-style.GetVerticalFrameSize())
+}
+
+func bodyChrome(header, footer string, available int) ([]string, []string) {
+	var headers, footers []string
+	if header != "" {
+		headers = strings.Split(header, "\n")
+	}
+	if footer != "" {
+		footers = strings.Split(footer, "\n")
+	}
+	if len(headers)+len(footers)+1 > available {
+		headers = headers[:min(1, len(headers))]
+	}
+	if len(headers)+len(footers)+1 > available {
+		headers = nil
+	}
+	return headers, footers
+}
+
+func wrapBodyLines(body string, width int) []string {
+	var lines []string
+	for line := range strings.SplitSeq(body, "\n") {
+		if lipgloss.Width(strings.TrimRight(ansi.Strip(line), " ")) <= width {
+			lines = append(lines, line)
+		} else {
+			lines = append(lines, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+		}
+	}
+	return lines
+}
+
+func (b *BaseDialog) UpdateActionScroll(msg tea.Msg) (bool, tea.Cmd) {
+	if !b.actionScrollActive || b.actionScroll == nil {
+		return false, nil
+	}
+	switch m := msg.(type) {
+	case tea.MouseWheelMsg:
+		if m.Y < b.bodyY+b.bodyHeight || m.Y >= b.bodyY+b.bodyHeight+b.actionScroll.VisibleHeight() {
+			return false, nil
+		}
+	case messages.WheelCoalescedMsg:
+		if m.Y < b.bodyY+b.bodyHeight || m.Y >= b.bodyY+b.bodyHeight+b.actionScroll.VisibleHeight() {
+			return false, nil
+		}
+	}
+	return b.actionScroll.Update(msg)
+}
+
+func (b *BaseDialog) UpdateBodyScroll(msg tea.Msg) (bool, tea.Cmd) {
+	if handled, cmd := b.UpdateActionScroll(msg); handled {
+		return handled, cmd
+	}
+	if b.bodyScroll == nil {
+		return false, nil
+	}
+	return b.bodyScroll.Update(msg)
+}
+
+func (b *BaseDialog) BodyScrollBounds() (x, y, width, height int) {
+	return b.bodyX, b.bodyY, b.bodyWidth, b.bodyHeight
+}
+
+func (b *BaseDialog) BodyScrollOffset() int {
+	if b.bodyScroll == nil {
+		return 0
+	}
+	return b.bodyScroll.ScrollOffset()
+}
+
+func (b *BaseDialog) EnsureBodyLineVisible(line int) {
+	if b.bodyScroll != nil {
+		b.bodyScroll.EnsureLineVisible(line)
+	}
+}
+
+// BodyContentWidth is the text width after the reserved scrollbar columns.
+func (b *BaseDialog) BodyContentWidth(dialogWidth int) int {
+	return max(1, b.ContentWidth(dialogWidth, 2)-2)
+}
+
+func preparesDialogBody(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+		return false
+	default:
+		return true
+	}
 }

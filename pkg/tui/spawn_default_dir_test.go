@@ -17,7 +17,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
-	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -47,7 +46,6 @@ func newSpawnTestModel(t *testing.T, spy *spySpawner, opts ...Option) *appModel 
 	m.application = app.New(t.Context(), nil, session.New(), runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m.workingSpinner = spinner.New(m.ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle)
 	m.tabBar = tabbar.New(m.ar, 0)
-	m.statusBar = statusbar.New(m)
 	m.supervisor = supervisor.New(spy.spawn)
 	// Mirror New: the initial session is registered with the supervisor.
 	_, err := m.supervisor.AddSession(t.Context(), m.application, m.application.Session(), "/initial", func() {})

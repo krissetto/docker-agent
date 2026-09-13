@@ -1,6 +1,9 @@
 package styles
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // themeChangeHooks are run at the end of every ApplyTheme, after all style
 // variables have been rebuilt. Packages that memoize rendering derived from
@@ -8,6 +11,7 @@ import "sync"
 // invalidation hook at init time, so no ApplyTheme caller can forget to
 // reset them.
 var (
+	themeGeneration    atomic.Uint64
 	themeChangeHooksMu sync.Mutex
 	themeChangeHooks   []func()
 )
@@ -20,8 +24,12 @@ func OnThemeChange(fn func()) {
 	themeChangeHooks = append(themeChangeHooks, fn)
 }
 
+// ThemeGeneration identifies the current palette for component-local render caches.
+func ThemeGeneration() uint64 { return themeGeneration.Load() }
+
 // runThemeChangeHooks runs all registered theme-change hooks.
 func runThemeChangeHooks() {
+	themeGeneration.Add(1)
 	themeChangeHooksMu.Lock()
 	hooks := make([]func(), len(themeChangeHooks))
 	copy(hooks, themeChangeHooks)

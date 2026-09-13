@@ -126,6 +126,7 @@ type Model interface {
 	// re-renders with current styling (e.g. after the agent color registry
 	// changes on a TeamInfoEvent that arrived after a session restore).
 	InvalidateRenderCaches()
+	ResizeCacheStats() (rebuilds, misses, renderedMessages uint64)
 
 	// StopAnimations unregisters every view from the animation coordinator.
 	// Call it when the list is discarded or its host view goes away, so
@@ -263,11 +264,15 @@ type model struct {
 	totalHeight        int                       // Total height of all content in lines
 	renderDirty        bool                      // True when rendered content needs rebuild
 
-	visualGeneration  uint64
-	contentGeneration uint64
-	segmentsRevision  uint64
-	lastFrameKey      transcriptFrameKey
-	lastFrameOutput   string
+	themeGeneration    uint64
+	transcriptRebuilds uint64
+	itemMisses         uint64
+	renderedMessages   uint64
+	visualGeneration   uint64
+	contentGeneration  uint64
+	segmentsRevision   uint64
+	lastFrameKey       transcriptFrameKey
+	lastFrameOutput    string
 
 	selection selectionState
 
@@ -338,6 +343,7 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 	}
 	return &model{
 		ar:                   ar,
+		themeGeneration:      styles.ThemeGeneration(),
 		slackAnimationSub:    ar.Subscribe(),
 		width:                width,
 		height:               height,
@@ -428,6 +434,10 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, nil
 
 	case messages.ThemeChangedMsg:
+		m.themeGeneration = styles.ThemeGeneration()
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.SetStyles(inlineEditStyles())
+		}
 		// Theme changed - invalidate all render caches
 		m.invalidateAllItems()
 		editfile.InvalidateCaches()
@@ -752,16 +762,16 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		return m, nil
 	case "up", "k":
 		if m.focused {
-			cmd := m.selectPreviousMessage()
-			return m, cmd
+			m.selectPreviousMessage()
+			return m, nil
 		} else {
 			m.scrollUp()
 		}
 		return m, nil
 	case "down", "j":
 		if m.focused {
-			cmd := m.selectNextMessage()
-			return m, cmd
+			m.selectNextMessage()
+			return m, nil
 		} else {
 			cmd := m.scrollDown()
 			return m, cmd
@@ -987,18 +997,30 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 	if m.width == width && m.height == height {
 		return nil // Dimensions unchanged — skip expensive cache invalidation
 	}
+	widthChanged := m.width != width
 	m.width = width
 	m.height = height
 
 	m.scrollview.SetSize(width, height)
-	contentWidth := m.contentWidth()
-	for _, view := range m.views {
-		view.SetSize(contentWidth, 0)
+	var cmds []tea.Cmd
+	if widthChanged {
+		cmds = append(cmds, m.materializeDeferredTail())
+		contentWidth := m.contentWidth()
+		for _, view := range m.views {
+			cmds = append(cmds, view.SetSize(contentWidth, 0))
+		}
+		m.invalidateAllItems()
+	} else {
+		cmds = append(cmds, m.materializeDeferredTailForRange(m.scrollOffset, m.scrollOffset+height))
+		if !m.userHasScrolled {
+			m.scrollOffset = max(0, m.totalScrollableHeight()-height)
+		} else {
+			m.scrollOffset = min(m.scrollOffset, max(0, m.totalScrollableHeight()-height))
+		}
+		m.scrollview.SetScrollOffset(m.scrollOffset)
 	}
-
-	m.invalidateAllItems()
 	m.visualGeneration++
-	return nil
+	return tea.Batch(cmds...)
 }
 
 func (m *model) SetPosition(x, y int) tea.Cmd {
@@ -1073,9 +1095,6 @@ func (m *model) FocusAt(x, y int) tea.Cmd {
 	}
 	m.renderDirty = true
 
-	if m.messageTypeChanged(oldIndex, m.selectedMessageIndex) {
-		return tea.Batch(materializeCmd, core.CmdHandler(messages.InvalidateStatusBarMsg{}))
-	}
 	return materializeCmd
 }
 
@@ -1141,6 +1160,11 @@ func (m *model) RenderedContentHeight() int {
 }
 
 func (m *model) VisualGeneration() uint64 { return m.visualGeneration }
+
+// ResizeCacheStats reports event-loop-owned, monotonic transcript work counters.
+func (m *model) ResizeCacheStats() (rebuilds, misses, renderedMessages uint64) {
+	return m.transcriptRebuilds, m.itemMisses, m.renderedMessages
+}
 
 const (
 	defaultScrollAmount = 1
@@ -1360,9 +1384,9 @@ func (m *model) findNextSelectableMessage(fromIndex int) int {
 	return -1
 }
 
-func (m *model) selectPreviousMessage() tea.Cmd {
+func (m *model) selectPreviousMessage() {
 	if len(m.messages) == 0 {
-		return nil
+		return
 	}
 	if prevIndex := m.findPreviousSelectableMessage(m.selectedMessageIndex); prevIndex >= 0 {
 		oldIndex := m.selectedMessageIndex
@@ -1373,16 +1397,12 @@ func (m *model) selectPreviousMessage() tea.Cmd {
 		m.invalidateItem(prevIndex)
 		m.renderDirty = true
 		m.scrollToSelectedMessage()
-		if m.messageTypeChanged(oldIndex, prevIndex) {
-			return core.CmdHandler(messages.InvalidateStatusBarMsg{})
-		}
 	}
-	return nil
 }
 
-func (m *model) selectNextMessage() tea.Cmd {
+func (m *model) selectNextMessage() {
 	if len(m.messages) == 0 {
-		return nil
+		return
 	}
 	if nextIndex := m.findNextSelectableMessage(m.selectedMessageIndex); nextIndex >= 0 {
 		oldIndex := m.selectedMessageIndex
@@ -1393,21 +1413,7 @@ func (m *model) selectNextMessage() tea.Cmd {
 		m.invalidateItem(nextIndex)
 		m.renderDirty = true
 		m.scrollToSelectedMessage()
-		if m.messageTypeChanged(oldIndex, nextIndex) {
-			return core.CmdHandler(messages.InvalidateStatusBarMsg{})
-		}
 	}
-	return nil
-}
-
-func (m *model) messageTypeChanged(oldIndex, newIndex int) bool {
-	if oldIndex < 0 || newIndex < 0 {
-		return true
-	}
-	if oldIndex >= len(m.messages) || newIndex >= len(m.messages) {
-		return true
-	}
-	return m.messages[oldIndex].Type != m.messages[newIndex].Type
 }
 
 func (m *model) scrollToSelectedMessage() {
@@ -1464,7 +1470,7 @@ func (m *model) shouldCacheMessage(index int) bool {
 			}
 		}
 		return false
-	case types.MessageTypeUser:
+	case types.MessageTypeUser, types.MessageTypeAgentInput, types.MessageTypeRuntimeNotice:
 		return true
 	default:
 		return false
@@ -1506,6 +1512,8 @@ func (m *model) renderItem(index int, view layout.Model) renderedItem {
 		}
 	}
 
+	m.itemMisses++
+	m.renderedMessages++
 	if v, ok := view.(message.Model); ok {
 		if segments, ok := v.RenderedSegments(m.contentWidth()); ok {
 			item := renderedItem{segments: &segments, height: len(segments.Header) + len(segments.Stable) + len(segments.Tail)}
@@ -1582,10 +1590,18 @@ func (m *model) needsSeparator(index int) bool {
 }
 
 func (m *model) ensureAllItemsRendered() {
+	if generation := styles.ThemeGeneration(); m.themeGeneration != generation {
+		m.themeGeneration = generation
+		if m.inlineEditMsgIndex >= 0 {
+			m.inlineEditTextarea.SetStyles(inlineEditStyles())
+		}
+		m.InvalidateRenderCaches()
+	}
 	if !m.renderDirty && (len(m.renderedLines) > 0 || m.activeSegments != nil) {
 		return
 	}
 
+	m.transcriptRebuilds++
 	m.invalidateFrameContent()
 	if len(m.views) == 0 {
 		m.renderedLines = nil
@@ -3018,21 +3034,7 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0 // No limit
 
-	// Set custom styles with background color matching the user message style
-	inlineEditStyle := textarea.Styles{
-		Focused: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Blurred: textarea.StyleState{
-			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
-			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
-		},
-		Cursor: textarea.CursorStyle{
-			Color: styles.Accent,
-		},
-	}
-	ta.SetStyles(inlineEditStyle)
+	ta.SetStyles(inlineEditStyles())
 
 	// Mirror the composer's configurable newline keys (ctrl+j by default),
 	// always offering shift+enter for terminals with keyboard enhancements.
@@ -3048,8 +3050,23 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 	m.invalidateItem(msgIndex)
 	m.renderDirty = true
 
-	// Invalidate statusbar cache since bindings have changed
-	return tea.Batch(ta.Focus(), core.CmdHandler(messages.InvalidateStatusBarMsg{}))
+	return ta.Focus()
+}
+
+func inlineEditStyles() textarea.Styles {
+	return textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Blurred: textarea.StyleState{
+			Base:        styles.BaseStyle.Background(styles.BackgroundAlt),
+			Placeholder: styles.BaseStyle.Background(styles.BackgroundAlt).Foreground(styles.PlaceholderColor),
+		},
+		Cursor: textarea.CursorStyle{
+			Color: styles.Accent,
+		},
+	}
 }
 
 // CancelInlineEdit cancels the current inline edit and restores the original content.
@@ -3081,11 +3098,7 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 	m.invalidateAllItems() // Invalidate all to update selection highlight
 	m.renderDirty = true
 
-	// Invalidate statusbar cache since bindings have changed
-	return tea.Batch(
-		core.CmdHandler(InlineEditCancelledMsg{WasInSelectionMode: prevSelection >= 0}),
-		core.CmdHandler(messages.InvalidateStatusBarMsg{}),
-	)
+	return core.CmdHandler(InlineEditCancelledMsg{WasInSelectionMode: prevSelection >= 0})
 }
 
 // IsInlineEditing returns true if inline editing is currently active.
@@ -3115,25 +3128,16 @@ func (m *model) commitInlineEdit() tea.Cmd {
 
 	m.invalidateAllItems()
 
-	// Invalidate statusbar cache since bindings have changed
-	invalidateCmd := core.CmdHandler(messages.InvalidateStatusBarMsg{})
-
 	if content == "" {
 		// Empty content is treated as cancellation - notify the chat page
-		return tea.Batch(
-			core.CmdHandler(InlineEditCancelledMsg{}),
-			invalidateCmd,
-		)
+		return core.CmdHandler(InlineEditCancelledMsg{})
 	}
 
 	// Emit InlineEditCommittedMsg with the edited content - the chat page handles branching
-	return tea.Batch(
-		core.CmdHandler(InlineEditCommittedMsg{
-			SessionPosition: sessionPos,
-			Content:         content,
-		}),
-		invalidateCmd,
-	)
+	return core.CmdHandler(InlineEditCommittedMsg{
+		SessionPosition: sessionPos,
+		Content:         content,
+	})
 }
 
 // InlineEditCommittedMsg is sent when inline editing is committed.

@@ -362,3 +362,25 @@ func TestFilePickerHiddenDirsAndFilesSeparately(t *testing.T) {
 	assert.Contains(t, names, ".hidden_dir/")
 	assert.Contains(t, names, ".hidden_file")
 }
+
+func TestFilePickerMouseSelectsAndActivatesVisibleRow(t *testing.T) {
+	d := newTestFilePickerDialog(setupTestDir(t))
+	d.SetSize(60, 12)
+	d.View()
+	index := -1
+	for i, entry := range d.filtered {
+		if entry.name == "visible_file.txt" {
+			index = i
+		}
+	}
+	require.GreaterOrEqual(t, index, 0)
+	d.scrollview.EnsureLineVisible(index)
+	d.View()
+	x, y, _, _ := d.BodyScrollBounds()
+	click := tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y + index - d.scrollview.ScrollOffset()}
+	_, cmd := d.Update(click)
+	require.Nil(t, cmd)
+	require.Equal(t, index, d.selected)
+	_, cmd = d.Update(click)
+	require.NotNil(t, cmd, "double-click follows Enter activation")
+}

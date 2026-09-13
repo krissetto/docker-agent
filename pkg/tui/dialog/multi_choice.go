@@ -41,7 +41,7 @@ type MultiChoiceResultMsg struct {
 type MultiChoiceConfig struct {
 	DialogID          string              // Unique identifier for this dialog instance
 	Title             string              // Dialog title (used as the main header)
-	Options           []MultiChoiceOption // List of options (max 10 for number selection 0-9)
+	Options           []MultiChoiceOption // All options; first ten have number shortcuts
 	AllowCustom       bool                // Whether to allow custom text input
 	AllowSecondary    bool                // Whether to allow secondary action (e.g., skip)
 	SecondaryLabel    string              // Label for secondary button (default: "Skip")
@@ -61,12 +61,8 @@ const (
 
 // Layout constants for multi-choice dialog.
 const (
-	multiChoiceMinDialogWidth    = 70 // Minimum dialog width (enough for help + buttons)
-	multiChoiceMaxDialogWidth    = 85 // Maximum dialog width
-	multiChoiceScreenWidthFactor = 90 // Max percentage of screen width (90%)
-	multiChoiceMinLabelWidth     = 10 // Minimum width for option labels
-	multiChoiceButtonSpacing     = 2  // Spacing between buttons
-	multiChoiceMinHelpSpacing    = 2  // Minimum spacing between help text and buttons
+	multiChoiceMinDialogWidth = 70
+	multiChoiceMaxDialogWidth = 85
 )
 
 // indexToDisplayNum converts a 0-based option index to a display number.
@@ -101,19 +97,16 @@ type clickableRange struct {
 type multiChoiceDialog struct {
 	BaseDialog
 
-	config            MultiChoiceConfig
-	selected          selection       // Currently selected item (-1 = none)
-	customInput       textinput.Model // Text input for custom response
-	keyMap            multiChoiceKeyMap
-	clickables        []clickableRange // Clickable areas for mouse handling (supports multi-row)
-	contentAbsRow     int              // Absolute screen row where content starts
-	contentAbsCol     int              // Absolute screen column where content starts
-	secondaryBtnCol   int              // Column where secondary button starts (relative to content)
-	secondaryBtnWidth int              // Width of secondary button
-	primaryBtnCol     int              // Column where primary button starts (relative to content)
-	primaryBtnWidth   int              // Width of primary button
-	btnRow            int              // Row of the buttons (relative to content)
-	tabOverride       bool             // When true, inverts the default action (Skip <-> Continue)
+	config        MultiChoiceConfig
+	selected      selection       // Currently selected item (-1 = none)
+	customInput   textinput.Model // Text input for custom response
+	keyMap        multiChoiceKeyMap
+	clickables    []clickableRange // Clickable areas for mouse handling (supports multi-row)
+	contentAbsRow int              // Absolute screen row where content starts
+	contentAbsCol int              // Absolute screen column where content starts
+
+	reanchorFocus bool
+	tabOverride   bool // When true, inverts the default action (Skip <-> Continue)
 }
 
 type multiChoiceKeyMap struct {
@@ -192,33 +185,12 @@ func (d *multiChoiceDialog) renderNumberBox(num int) (rendered string, width int
 	return rendered, lipgloss.Width(rendered)
 }
 
-// computeHelpAndButtonsWidth calculates the actual width of help text and buttons.
 func (d *multiChoiceDialog) computeHelpAndButtonsWidth() int {
-	// Build the actual help text
-	helpStyle := styles.DialogHelpStyle
-	keyStyle := helpStyle.Foreground(styles.TextSecondary)
-
-	numOptions := len(d.config.Options)
-	if d.config.AllowCustom {
-		numOptions++
+	width := lipgloss.Width(d.config.PrimaryLabel) + 6
+	if d.config.AllowSecondary {
+		width += lipgloss.Width(d.config.SecondaryLabel) + 8
 	}
-
-	helpParts := []string{}
-	if numOptions > 0 {
-		helpParts = append(helpParts, keyStyle.Render("↑/↓ "+formatKeyRange(numOptions))+" "+helpStyle.Render("select"))
-	} else {
-		helpParts = append(helpParts, keyStyle.Render("↑/↓")+" "+helpStyle.Render("navigate"))
-	}
-	helpText := strings.Join(helpParts, "  ")
-	helpWidth := lipgloss.Width(helpText)
-
-	// Build the actual buttons (use longer variant with ↵ for measurement)
-	btnStyle := lipgloss.NewStyle().Padding(0, 2)
-	secondaryBtn := btnStyle.Render(d.config.SecondaryLabel + " ↵")
-	primaryBtn := btnStyle.Render(d.config.PrimaryLabel + " ↵")
-	btnWidth := lipgloss.Width(secondaryBtn) + multiChoiceButtonSpacing + lipgloss.Width(primaryBtn)
-
-	return helpWidth + multiChoiceMinHelpSpacing + btnWidth
+	return width
 }
 
 // computeDialogWidth calculates optimal dialog width based on content.
@@ -263,10 +235,9 @@ func (d *multiChoiceDialog) computeDialogWidth() int {
 	// Calculate total dialog width
 	dialogWidth := min(max(maxContentWidth+frameWidth, multiChoiceMinDialogWidth), multiChoiceMaxDialogWidth)
 
-	// Don't exceed screen width
-	screenLimit := d.Width() * multiChoiceScreenWidthFactor / 100
-	if dialogWidth > screenLimit && screenLimit > multiChoiceMinDialogWidth {
-		dialogWidth = screenLimit
+	// Minimums are preferences, never a reason to exceed the terminal.
+	if d.Width() > 0 {
+		dialogWidth = min(dialogWidth, d.Width())
 	}
 
 	return dialogWidth
@@ -279,6 +250,16 @@ func (d *multiChoiceDialog) Init() tea.Cmd {
 
 // Update handles messages.
 func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+		if handled, cmd := d.UpdateBodyScroll(msg); handled {
+			return d, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -289,6 +270,7 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if d.selected == selectionCustom {
 			var cmd tea.Cmd
 			d.customInput, cmd = d.customInput.Update(msg)
+			d.reanchorFocus = true
 			return d, cmd
 		}
 		// Auto-select custom mode when pasting if custom is allowed
@@ -297,15 +279,19 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			d.customInput.Focus()
 			var cmd tea.Cmd
 			d.customInput, cmd = d.customInput.Update(msg)
+			d.reanchorFocus = true
 			return d, cmd
 		}
 		return d, nil
 
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
+			cmd := d.CancelDialogCmd()
 			return d, cmd
 		}
-		return d.handleKeyPress(msg)
+		model, cmd := d.handleKeyPress(msg)
+		d.reanchorFocus = true
+		return model, cmd
 
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
@@ -319,6 +305,12 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 // handleKeyPress handles key presses.
 func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	keyStr := msg.String()
+	if keyStr == "ctrl+enter" {
+		return d.submitPrimary()
+	}
+	if keyStr == "ctrl+s" {
+		return d.submitSecondary()
+	}
 
 	// If custom is selected, forward most keys to the text input (including numbers)
 	if d.selected == selectionCustom {
@@ -525,35 +517,40 @@ func (d *multiChoiceDialog) submitPrimary() (layout.Model, tea.Cmd) {
 
 // handleMouseClick handles mouse clicks.
 func (d *multiChoiceDialog) handleMouseClick(x, y int) (layout.Model, tea.Cmd) {
-	relY := y - d.contentAbsRow
-	relX := x - d.contentAbsCol
-
-	// Check buttons
-	if relY == d.btnRow {
-		// Skip button
-		if relX >= d.secondaryBtnCol && relX < d.secondaryBtnCol+d.secondaryBtnWidth {
-			return d.submitSecondary()
-		}
-		// Primary button
-		if relX >= d.primaryBtnCol && relX < d.primaryBtnCol+d.primaryBtnWidth {
-			return d.submitPrimary()
-		}
+	view := d.View()
+	row, col := d.CenterDialog(view)
+	dl := NewDialogLayout(view, row, col)
+	if d.CloseButtonHit(tea.MouseClickMsg{X: x, Y: y}, dl) {
+		cmd := d.CancelDialogCmd()
+		return d, cmd
 	}
-
-	// Check clickable areas (options) - now supports row ranges for word wrap
+	if action, ok := d.ActionKeyAt(x, y, dl); ok {
+		return d.Update(action)
+	}
+	bodyX, bodyY, width, height := d.BodyScrollBounds()
+	if x < bodyX || x >= bodyX+width || y < bodyY || y >= bodyY+height {
+		return d, nil
+	}
+	line := y - bodyY + d.BodyScrollOffset()
 	for _, area := range d.clickables {
-		if relY >= area.startRow && relY <= area.endRow {
-			if d.selected == area.selection {
-				// Already selected - deselect
-				d.selected = selectionNone
-			} else {
-				d.selected = area.selection
-			}
-			d.updateFocus()
-			return d, nil
+		if line < area.startRow || line > area.endRow {
+			continue
 		}
+		if area.selection == selectionCustom {
+			d.selected = selectionCustom
+			cmd := d.customInput.Focus()
+			numberWidth := lipgloss.Width(strconv.Itoa(indexToDisplayNum(len(d.config.Options)))) + 3
+			SetTextInputCursorAtCell(&d.customInput, x-bodyX-numberWidth)
+			return d, cmd
+		}
+		if d.selected == area.selection {
+			d.selected = selectionNone
+		} else {
+			d.selected = area.selection
+		}
+		d.updateFocus()
+		return d, nil
 	}
-
 	return d, nil
 }
 
@@ -576,65 +573,37 @@ func (d *multiChoiceDialog) sendResult(result MultiChoiceResult) tea.Cmd {
 	)
 }
 
-// View renders the dialog.
-func (d *multiChoiceDialog) View() string {
-	dialogWidth := d.computeDialogWidth()
-	contentWidth := d.ContentWidth(dialogWidth, 2)
-
-	content := NewContent(contentWidth)
-	content.AddTitle(d.config.Title)
-	content.AddSeparator()
-
-	// Reset clickables
-	d.clickables = nil
-	rowIdx := 0
-
-	// Render options with number keys (1-indexed, 0 for 10th)
+func (d *multiChoiceDialog) buildBody(contentWidth int) (string, []clickableRange) {
+	var parts []string
+	var clickables []clickableRange
+	line := 0
 	for i, opt := range d.config.Options {
-		isSelected := d.selected == selection(i)
-		displayNum := indexToDisplayNum(i)
-		line := d.renderOption(displayNum, opt.Label, isSelected, contentWidth)
-		content.AddContent(line)
-
-		// Calculate how many rows this option takes
-		lineHeight := lipgloss.Height(line)
-		d.clickables = append(d.clickables, clickableRange{
-			startRow:  rowIdx,
-			endRow:    rowIdx + lineHeight - 1,
-			selection: selection(i),
-		})
-		rowIdx += lineHeight
+		view := d.renderOption(indexToDisplayNum(i), opt.Label, d.selected == selection(i), contentWidth)
+		height := lipgloss.Height(view)
+		clickables = append(clickables, clickableRange{startRow: line, endRow: line + height - 1, selection: selection(i)})
+		line += height
+		parts = append(parts, view)
 	}
-
-	// Render custom input if allowed (as another option)
 	if d.config.AllowCustom {
-		isSelected := d.selected == selectionCustom
-		customLine := d.renderCustomOption(isSelected, contentWidth)
-		content.AddContent(customLine)
-
-		lineHeight := lipgloss.Height(customLine)
-		d.clickables = append(d.clickables, clickableRange{
-			startRow:  rowIdx,
-			endRow:    rowIdx + lineHeight - 1,
-			selection: selectionCustom,
-		})
-		rowIdx += lineHeight
+		view := d.renderCustomOption(d.selected == selectionCustom, contentWidth)
+		height := lipgloss.Height(view)
+		clickables = append(clickables, clickableRange{startRow: line, endRow: line + height - 1, selection: selectionCustom})
+		parts = append(parts, view)
 	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...), clickables
+}
 
-	// Spacing before help/buttons
-	content.AddSpace()
-	rowIdx++
-	content.AddSpace()
-	rowIdx++
+func (d *multiChoiceDialog) content() (width int, header, body, footer string) {
+	dialogWidth := d.computeDialogWidth()
+	body, _ = d.buildBody(d.BodyContentWidth(dialogWidth))
+	header = RenderTitle(d.config.Title, d.ContentWidth(dialogWidth, 2), styles.DialogTitleStyle)
+	footer = d.renderHelpAndButtons(d.ContentWidth(dialogWidth, 2))
+	return dialogWidth, header, body, footer
+}
 
-	// Help text and buttons on same row
-	helpAndButtons := d.renderHelpAndButtons(contentWidth)
-	content.AddContent(helpAndButtons)
-	// Cache the button row index so click handling in Update() can hit-test
-	// against the same layout that was just rendered.
-	d.btnRow = rowIdx //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
-
-	return styles.DialogStyle.Width(dialogWidth).Render(content.Build())
+func (d *multiChoiceDialog) View() string {
+	width, header, body, footer := d.content()
+	return d.RenderScrollableBody(styles.DialogStyle, width, header, body, footer)
 }
 
 // renderOption renders a numbered option with selection indicator, with word wrap support.
@@ -665,7 +634,7 @@ func (d *multiChoiceDialog) renderOption(num int, label string, isSelected bool,
 	// Calculate available width for label (allow word wrap)
 	labelWidth := max(
 		// -1 for space between number box and label
-		contentWidth-numBoxWidth-1, multiChoiceMinLabelWidth,
+		contentWidth-numBoxWidth-1, 1,
 	)
 
 	// Apply width constraint for word wrapping
@@ -679,7 +648,7 @@ func (d *multiChoiceDialog) renderOption(num int, label string, isSelected bool,
 		labelRendered = labelStyle.Width(labelWidth).Render(label)
 	}
 
-	return numBox + " " + labelRendered
+	return lipgloss.JoinHorizontal(lipgloss.Top, numBox+" ", labelRendered)
 }
 
 // renderCustomOption renders the custom text input as an option.
@@ -709,14 +678,16 @@ func (d *multiChoiceDialog) renderCustomOption(isSelected bool, contentWidth int
 
 	// Calculate available width for text display
 	// -1 for space between number box and input, -1 for cursor space
-	availableWidth := max(contentWidth-numBoxWidth-2, multiChoiceMinLabelWidth)
+	availableWidth := max(contentWidth-numBoxWidth-2, 1)
 
 	value := d.customInput.Value()
 
 	if isSelected {
 		// Set width and let textinput handle its own scrolling/viewport
-		d.customInput.SetWidth(availableWidth)
-		return numBox + " " + d.customInput.View()
+		input := d.customInput
+		input.SetStyles(styles.DialogInputStyle)
+		input.SetWidth(availableWidth)
+		return numBox + " " + input.View()
 	}
 
 	// When not selected, show truncated text with ellipsis if too long
@@ -725,7 +696,7 @@ func (d *multiChoiceDialog) renderCustomOption(isSelected bool, contentWidth int
 		if isFaded {
 			placeholderStyle = styles.DialogContentStyle.Foreground(styles.TextMutedGray).Italic(true)
 		}
-		return numBox + " " + placeholderStyle.Render(d.config.CustomPlaceholder)
+		return numBox + " " + placeholderStyle.Render(truncateWithEllipsisEnd(d.config.CustomPlaceholder, availableWidth))
 	}
 
 	// Truncate with ellipsis at end (showing beginning of text when not selected)
@@ -765,96 +736,49 @@ func truncateWithEllipsisEnd(text string, maxWidth int) string {
 	return result + ellipsis
 }
 
-// renderHelpAndButtons renders help text on left and buttons on right.
+// renderHelpAndButtons renders only actionable controls, aligned to the right.
 func (d *multiChoiceDialog) renderHelpAndButtons(contentWidth int) string {
-	secondaryIsDefault := d.isSecondaryDefault()
-
-	// Help text
-	helpStyle := styles.DialogHelpStyle
-	keyStyle := helpStyle.Foreground(styles.TextSecondary)
-
-	numOptions := len(d.config.Options)
-	if d.config.AllowCustom {
-		numOptions++
+	var actions []Action
+	secondaryLabel, primaryLabel := d.config.SecondaryLabel, d.config.PrimaryLabel
+	if d.config.AllowSecondary && (!d.hasSelection() || d.isSecondaryDefault()) {
+		secondaryLabel += " ↵"
+	} else if d.hasSelection() {
+		primaryLabel += " ↵"
 	}
-
-	helpParts := []string{}
-	if numOptions > 0 {
-		helpParts = append(helpParts, keyStyle.Render("↑/↓ "+formatKeyRange(numOptions))+" "+helpStyle.Render("select"))
-	} else {
-		helpParts = append(helpParts, keyStyle.Render("↑/↓")+" "+helpStyle.Render("navigate"))
+	if d.config.AllowSecondary {
+		actions = append(actions, Action{Label: secondaryLabel, Key: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}})
 	}
-	helpText := strings.Join(helpParts, "  ")
-
-	// Button styles
-	defaultBtnStyle := lipgloss.NewStyle().
-		Foreground(styles.Background).
-		Background(styles.Accent).
-		Padding(0, 2).
-		Bold(true)
-
-	normalBtnStyle := lipgloss.NewStyle().
-		Foreground(styles.TextMuted).
-		Padding(0, 2)
-
-	var secondaryBtn, primaryBtn string
-
-	if secondaryIsDefault {
-		// Secondary is default
-		secondaryBtn = defaultBtnStyle.Render(d.config.SecondaryLabel + " ↵")
-		primaryBtn = normalBtnStyle.Render(d.config.PrimaryLabel)
-	} else {
-		// Primary is default
-		secondaryBtn = normalBtnStyle.Render(d.config.SecondaryLabel)
-		primaryBtn = defaultBtnStyle.Render(d.config.PrimaryLabel + " ↵")
-	}
-
-	// Calculate widths
-	helpWidth := lipgloss.Width(helpText)
-	secondaryWidth := lipgloss.Width(secondaryBtn)
-	primaryWidth := lipgloss.Width(primaryBtn)
-	totalBtnWidth := secondaryWidth + multiChoiceButtonSpacing + primaryWidth
-
-	// Calculate spacing between help and buttons
-	spacing := max(contentWidth-helpWidth-totalBtnWidth, multiChoiceMinHelpSpacing)
-
-	// Store button positions for click detection (relative to content area)
-	d.secondaryBtnCol = helpWidth + spacing
-	d.secondaryBtnWidth = secondaryWidth
-	d.primaryBtnCol = d.secondaryBtnCol + secondaryWidth + multiChoiceButtonSpacing
-	d.primaryBtnWidth = primaryWidth
-
-	return helpText + strings.Repeat(" ", spacing) + secondaryBtn + strings.Repeat(" ", multiChoiceButtonSpacing) + primaryBtn
+	actions = append(actions, Action{Label: primaryLabel, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}})
+	return d.RenderActions(contentWidth, actions...)
 }
 
-// Position returns the dialog position (centered).
 func (d *multiChoiceDialog) Position() (row, col int) {
-	dialogWidth := d.computeDialogWidth()
-	contentWidth := d.ContentWidth(dialogWidth, 2)
-	renderedDialog := d.View()
-	dialogHeight := lipgloss.Height(renderedDialog)
-	row, col = CenterPosition(d.Width(), d.Height(), dialogWidth, dialogHeight)
+	return d.CenterDialog(d.View())
+}
 
-	// Calculate absolute position of content area using style getters
-	borderTop := styles.DialogStyle.GetBorderTopSize()
-	borderLeft := styles.DialogStyle.GetBorderLeftSize()
-	paddingTop := styles.DialogStyle.GetPaddingTop()
-	paddingLeft := styles.DialogStyle.GetPaddingLeft()
+func (d *multiChoiceDialog) SetSize(width, height int) tea.Cmd {
+	d.reanchorFocus = d.Width() > 0 && (width != d.Width() || height != d.Height())
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
+}
 
-	contentRow := row + borderTop + paddingTop
-	contentCol := col + borderLeft + paddingLeft
-
-	// Title
-	titleStyle := styles.DialogTitleStyle.Width(contentWidth)
-	title := titleStyle.Render(d.config.Title)
-	contentRow += lipgloss.Height(title)
-
-	// Separator
-	separatorHeight := lipgloss.Height(RenderSeparator(contentWidth))
-	contentRow += separatorHeight
-
-	d.contentAbsRow = contentRow
-	d.contentAbsCol = contentCol
-
-	return row, col
+func (d *multiChoiceDialog) prepareLayout() {
+	width := d.BodyContentWidth(d.computeDialogWidth())
+	numberWidth := lipgloss.Width(strconv.Itoa(indexToDisplayNum(len(d.config.Options)))) + 2
+	d.customInput.SetWidth(max(1, width-numberWidth-2))
+	_, d.clickables = d.buildBody(width)
+	frameWidth, header, body, footer := d.content()
+	d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	if d.reanchorFocus {
+		d.reanchorFocus = false
+		for _, area := range d.clickables {
+			if area.selection == d.selected {
+				d.EnsureBodyLineVisible(area.startRow)
+				break
+			}
+		}
+		d.PrepareScrollableBody(styles.DialogStyle, frameWidth, header, body, footer)
+	}
+	d.contentAbsCol, d.contentAbsRow, _, _ = d.BodyScrollBounds()
 }

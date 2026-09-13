@@ -425,11 +425,11 @@ func TestMultiChoiceDialog_ClickToggle(t *testing.T) {
 	// Simulate click to select
 	d.selected = selectionNone
 	clickY := d.contentAbsRow + 0 // First option
-	d.handleMouseClick(10, clickY)
+	d.handleMouseClick(d.contentAbsCol+1, clickY)
 	assert.Equal(t, selection(0), d.selected)
 
 	// Click again to deselect
-	d.handleMouseClick(10, clickY)
+	d.handleMouseClick(d.contentAbsCol+1, clickY)
 	assert.Equal(t, selectionNone, d.selected)
 }
 
@@ -670,12 +670,35 @@ func TestMultiChoiceDialog_TabOverride(t *testing.T) {
 	d = updated.(*multiChoiceDialog)
 	assert.False(t, d.isSecondaryDefault())
 	view2 := d.View()
-	assert.Contains(t, view2, "Continue ↵")
+	// With no selection, primary submission still falls back to Skip.
+	assert.Contains(t, view2, "Skip ↵")
+	assert.NotContains(t, view2, "Continue ↵")
 
 	// Press Tab again to toggle back
 	updated, _ = d.Update(tabKey)
 	d = updated.(*multiChoiceDialog)
 	assert.True(t, d.isSecondaryDefault())
+
+	for _, action := range []string{"enter", "Skip", "Continue"} {
+		t.Run(action, func(t *testing.T) {
+			probe := NewMultiChoiceDialog(config).(*multiChoiceDialog)
+			probe.SetSize(100, 40)
+			_, _ = probe.Update(tabKey)
+			var cmd tea.Cmd
+			if action == "enter" {
+				_, cmd = probe.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			} else {
+				x, y := familyActionCell(t, probe, action)
+				_, cmd = probe.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			}
+			msgs := collectMsgs(cmd)
+			require.True(t, hasMsg[CloseDialogMsg](msgs))
+			result, ok := findMsg[MultiChoiceResultMsg](msgs)
+			require.True(t, ok)
+			assert.Equal(t, "skip", result.Result.OptionID)
+			assert.True(t, result.Result.IsSkipped, "empty primary falls back to secondary")
+		})
+	}
 }
 
 func TestMultiChoiceDialog_TabOverride_WithSelection(t *testing.T) {
@@ -705,6 +728,24 @@ func TestMultiChoiceDialog_TabOverride_WithSelection(t *testing.T) {
 	assert.True(t, d.isSecondaryDefault())
 	view2 := d.View()
 	assert.Contains(t, view2, "Skip ↵")
+	assert.NotContains(t, view2, "Continue ↵")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.True(t, result.Result.IsSkipped, "Enter follows the Tab-overridden default")
+
+	// Explicit action clicks do not inherit the keyboard default override.
+	probe := NewMultiChoiceDialog(config).(*multiChoiceDialog)
+	probe.SetSize(100, 40)
+	probe.selected = selection(0)
+	_, _ = probe.Update(tabKey)
+	x, y := familyActionCell(t, probe, "Continue")
+	_, cmd = probe.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	result, ok = findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.Equal(t, "opt1", result.Result.OptionID)
+	assert.Equal(t, "value1", result.Result.Value)
+	assert.False(t, result.Result.IsSkipped)
 }
 
 func TestMultiChoiceDialog_EscapeCancels(t *testing.T) {
@@ -959,8 +1000,7 @@ func TestMultiChoiceDialog_MouseClick_SkipButton(t *testing.T) {
 	_, _ = d.Position()
 
 	// Click on skip button
-	clickX := d.contentAbsCol + d.secondaryBtnCol + 1
-	clickY := d.contentAbsRow + d.btnRow
+	clickX, clickY := familyActionCell(t, d, "Skip")
 	_, cmd := d.handleMouseClick(clickX, clickY)
 	require.NotNil(t, cmd)
 
@@ -988,8 +1028,7 @@ func TestMultiChoiceDialog_MouseClick_ContinueButton(t *testing.T) {
 	_, _ = d.Position()
 
 	// Click on continue button
-	clickX := d.contentAbsCol + d.primaryBtnCol + 1
-	clickY := d.contentAbsRow + d.btnRow
+	clickX, clickY := familyActionCell(t, d, "Continue")
 	_, cmd := d.handleMouseClick(clickX, clickY)
 	require.NotNil(t, cmd)
 
@@ -1122,9 +1161,9 @@ func TestMultiChoiceDialog_HelpText_WithOptions(t *testing.T) {
 	d.SetSize(100, 40)
 
 	view := d.View()
-	// Should show "1-3" for 2 options + custom (1-indexed)
-	assert.Contains(t, view, "1-3")
-	assert.Contains(t, view, "select")
+	// Numbered choices are self-describing; redundant navigation hints are omitted.
+	assert.Contains(t, view, "Continue")
+	assert.NotContains(t, view, "select")
 }
 
 func TestMultiChoiceDialog_HelpText_NoOptions(t *testing.T) {
@@ -1141,8 +1180,8 @@ func TestMultiChoiceDialog_HelpText_NoOptions(t *testing.T) {
 	d.SetSize(100, 40)
 
 	view := d.View()
-	// Should show "navigate" instead of "select"
-	assert.Contains(t, view, "navigate")
+	assert.Contains(t, view, "Continue")
+	assert.NotContains(t, view, "navigate")
 }
 
 func TestMultiChoiceDialog_EmptyCustom_FallsBackToSkip(t *testing.T) {
@@ -1399,7 +1438,6 @@ func TestMultiChoiceDialog_HelpText_TenOptions(t *testing.T) {
 	d.SetSize(100, 50)
 
 	view := d.View()
-	// Should show "0-9" for 10 options
-	assert.Contains(t, view, "0-9")
-	assert.Contains(t, view, "select")
+	assert.Contains(t, view, "Continue")
+	assert.NotContains(t, view, "select")
 }

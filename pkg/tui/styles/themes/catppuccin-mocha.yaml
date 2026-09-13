@@ -50,7 +50,7 @@ colors:
   selected: "#585b70"
   selected_fg: "#ffffff"
   suggestion_ghost: "#7f849c"
-  tab_bg: "#181825"
+  tab_bg: "#1e1e2e"
   tab_active_bg: "#313244"
   tab_active_fg: "#cdd6f4"
   tab_inactive_fg: "#9399b2"

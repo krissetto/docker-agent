@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -80,7 +82,8 @@ type messageModel struct {
 	// in pairs for each new chunk, and the chat list also re-renders for hover
 	// tracking and scroll updates; without this cache each call would re-parse
 	// the entire accumulated markdown from scratch.
-	renderCache renderCache
+	renderCache     renderCache
+	themeGeneration uint64
 
 	// codeBlocks holds the fenced code blocks emitted by the last call to
 	// render() for assistant messages, with Line indices translated into the
@@ -135,18 +138,20 @@ type markdownImagePlaceholder struct {
 // can change its output. The key is small enough (a string and a few flags)
 // that comparing it is much cheaper than rendering markdown.
 type renderCache struct {
-	inputOrigin session.InputOrigin
-	valid       bool
-	content     string
-	msgType     types.MessageType
-	width       int
-	selected    bool
-	hovered     bool
-	expanded    bool
-	editable    bool
-	sameAgent   bool
-	result      string
-	imageID     int
+	inputReference lifecycle.InputReference
+	sender         string
+	inputOrigin    session.InputOrigin
+	valid          bool
+	content        string
+	msgType        types.MessageType
+	width          int
+	selected       bool
+	hovered        bool
+	expanded       bool
+	editable       bool
+	sameAgent      bool
+	result         string
+	imageID        int
 }
 
 // New creates a new message view
@@ -313,11 +318,26 @@ func (mv *messageModel) SetHovered(hovered bool) {
 // the message (used when process-global styling such as the agent color
 // registry changes underneath otherwise-identical inputs).
 func (mv *messageModel) InvalidateRenderCache() {
-	mv.renderCache.valid = false
+	mv.renderCache = renderCache{}
+	mv.streamLines = assistantStreamLines{}
+	mv.segmentCodeBlocks = nil
+	if mv.mdRenderer != nil {
+		mv.mdRenderer.Reset()
+	}
+}
+
+func (mv *messageModel) ensureTheme() {
+	if generation := styles.ThemeGeneration(); mv.themeGeneration != generation {
+		mv.themeGeneration = generation
+		mv.InvalidateRenderCache()
+	}
 }
 
 // Update handles messages and updates the message view state
 func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if _, ok := msg.(messages.ThemeChangedMsg); ok {
+		mv.InvalidateRenderCache()
+	}
 	if loaded, ok := msg.(markdownImagesLoadedMsg); ok && loaded.target == mv {
 		// Unmark failed URLs so a later SetMessage can retry them.
 		for _, ref := range loaded.requested {
@@ -370,6 +390,7 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 }
 
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	mv.ensureTheme()
 	if mv.finalized {
 		defer func() {
 			mv.mdRenderer = nil
@@ -458,6 +479,7 @@ func (mv *messageModel) View() string {
 // calls with the same inputs (very common during streaming, hover tracking,
 // and from Height()) skip the expensive markdown parse.
 func (mv *messageModel) Render(width int) string {
+	mv.ensureTheme()
 	msg := mv.message
 
 	// Spinner-driven types (MessageTypeSpinner, MessageTypeLoading, and an empty
@@ -474,6 +496,8 @@ func (mv *messageModel) Render(width int) string {
 			c.width == width &&
 			c.msgType == msg.Type &&
 			c.inputOrigin == msg.InputOrigin &&
+			c.inputReference == msg.InputReference &&
+			c.sender == msg.Sender &&
 			c.selected == mv.selected &&
 			c.hovered == mv.hovered &&
 			c.expanded == mv.expanded &&
@@ -489,18 +513,20 @@ func (mv *messageModel) Render(width int) string {
 
 	if cacheable {
 		mv.renderCache = renderCache{
-			valid:       true,
-			content:     msg.Content,
-			msgType:     msg.Type,
-			inputOrigin: msg.InputOrigin,
-			width:       width,
-			selected:    mv.selected,
-			hovered:     mv.hovered,
-			expanded:    mv.expanded,
-			editable:    msg.SessionPosition != nil,
-			sameAgent:   mv.sameAgentAsPrevious(msg),
-			result:      result,
-			imageID:     mv.markdownImageID,
+			valid:          true,
+			content:        msg.Content,
+			msgType:        msg.Type,
+			inputOrigin:    msg.InputOrigin,
+			inputReference: msg.InputReference,
+			sender:         msg.Sender,
+			width:          width,
+			selected:       mv.selected,
+			hovered:        mv.hovered,
+			expanded:       mv.expanded,
+			editable:       msg.SessionPosition != nil,
+			sameAgent:      mv.sameAgentAsPrevious(msg),
+			result:         result,
+			imageID:        mv.markdownImageID,
 		}
 	}
 	return result

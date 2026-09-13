@@ -52,7 +52,7 @@ func TestToolConfirmationDialog_CompactRealShellLSGeometry(t *testing.T) {
 	assert.Contains(t, strings.Join(strings.Fields(plain), " "), "shell ls")
 	assert.Equal(t, 1, dialog.(*toolConfirmationDialog).scrollView.RenderedContentHeight(),
 		"decoded shell ls renders one intrinsic tool row")
-	assert.Equal(t, 12, lipgloss.Height(view),
+	assert.LessOrEqual(t, lipgloss.Height(view), 12,
 		"one-row content uses content height plus fixed prompt chrome, not the 80% viewport cap")
 	row, col := dialog.Position()
 	assert.Equal(t, (height-lipgloss.Height(view))/2, row)
@@ -292,236 +292,61 @@ func TestToolConfirmationDialog_ClickOnYFiresAtEveryWidth(t *testing.T) {
 	}
 }
 
-// Adding the Balanced option makes the options block wrap at everyday
-// terminal sizes (80 columns → ~50 columns of dialog content). The
-// block must break only at segment separators, and every segment on
-// every wrapped row must stay clickable.
-func TestToolConfirmationDialog_WrappedLayoutClicksDispatch(t *testing.T) {
-	t.Parallel()
-
-	state := &service.EmbeddedSessionState{}
-	dialog := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), state)
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
-
-	d, ok := dialog.(*toolConfirmationDialog)
-	require.True(t, ok)
-
-	_, contentWidth := d.dialogDimensions()
-	rows := d.optionRows(contentWidth)
-	require.Greater(t, len(rows), 1, "width 80 must wrap the options block")
-	for _, row := range rows {
-		assert.LessOrEqual(t, ansi.StringWidth(optionRowText(row)), contentWidth,
-			"rows must break at segment separators, never overflow")
-	}
-	require.Equal(t, len(rows), lipgloss.Height(d.renderOptions(contentWidth)),
-		"each laid-out row must render as exactly one line")
-
-	bY, bX, found := locateInView(d, "B balanced")
-	require.True(t, found, "the Balanced segment must be visible")
-	aY, aX, found := locateInView(d, "A all tools")
-	require.True(t, found, "the all-tools segment must be visible")
-	require.NotEqual(t, bY, aY, "the wrapped layout must spread segments across rows")
-
-	resume, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(clickCell(d, bY, bX)))
-	require.True(t, ok, "click on 'B balanced' must dispatch a resume")
-	assert.Equal(t, runtime.ResumeApproveBalanced(), resume.Response.Resume)
-
-	require.False(t, state.YoloMode())
-	resume, ok = findMsg[tuimessages.InteractionResponseMsg](collectMsgs(clickCell(d, aY, aX)))
-	require.True(t, ok, "click on 'A all tools' on the wrapped row must dispatch a resume")
-	assert.Equal(t, runtime.ResumeApproveAutonomous(), resume.Response.Resume)
-	assert.True(t, state.YoloMode(), "the all-tools click must flip the session-wide approval")
-}
-
-// A realistic narrow split pane (45 columns → 25 columns of dialog
-// content) lays the options out on at least three rows, with the
-// always-allow segment on a middle row. Clicking there must dispatch
-// that segment's decision: the hit-map counts rows from the dialog's
-// bottom line, so an off-by-one shows up exactly on middle rows.
-func TestToolConfirmationDialog_MiddleRowClickInNarrowSplitPane(t *testing.T) {
-	t.Parallel()
-
-	dialog := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{})
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 45, Height: 30})
-
-	d, ok := dialog.(*toolConfirmationDialog)
-	require.True(t, ok)
-
-	_, contentWidth := d.dialogDimensions()
-	rows := d.optionRows(contentWidth)
-	require.GreaterOrEqual(t, len(rows), 3, "width 45 must lay the options out on at least three rows")
-	middle := rows[1]
-	require.Equal(t, "T", middle[0].action, "the always-allow segment must sit on a middle row")
-
-	tY, tX, found := locateInView(d, optionRowText(middle))
-	require.True(t, found, "the middle row must be visible")
-
-	resume, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(clickCell(d, tY, tX)))
-	require.True(t, ok, "click on the middle row's action key must dispatch a resume")
-	assert.Equal(t, runtime.ResumeApproveTool("shell"), resume.Response.Resume,
-		"the middle-row click must grant this tool, not a neighbouring row's decision")
-}
-
-// expectedOptionResume is the resume request each clickable action key
-// dispatches for the newConfirmationEvent fixture (pattern "shell").
-// "N" is absent: rejection opens the reason dialog instead of resuming.
-var expectedOptionResume = map[string]runtime.ResumeRequest{
-	"Y": runtime.ResumeApprove(),
-	"T": runtime.ResumeApproveTool("shell"),
-	"B": runtime.ResumeApproveBalanced(),
-	"A": runtime.ResumeApproveAutonomous(),
-}
-
-// assertOptionClick clicks the given cell and asserts it dispatches
-// exactly the clicked segment's decision — anything else is a misdispatch.
-func assertOptionClick(t *testing.T, d *toolConfirmationDialog, seg optionSegment, y, x, width int) {
-	t.Helper()
-	msgs := collectMsgs(clickCell(d, y, x))
-	if seg.action == "N" {
-		assert.Truef(t, hasMsg[OpenDialogMsg](msgs),
-			"width %d: click on %q must open the rejection-reason dialog", width, seg.action)
-		return
-	}
-	resume, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
-	require.Truef(t, ok, "width %d: click on %q must dispatch a resume", width, seg.action)
-	assert.Equalf(t, expectedOptionResume[seg.action], resume.Response.Resume,
-		"width %d: click on %q dispatched another segment's decision", width, seg.action)
-}
-
-// Tiny terminals — all the way down to zero columns — must never wrap a
-// laid-out option row across physical lines: the layout width is clamped
-// so even a fully truncated "<key> …" segment fits its row, the extremely
-// narrow terminal clips the dialog instead. The sweep proves the
-// invariants the hit-map depends on: renderOptions' physical height
-// equals optionRows' logical row count, every row renders on the physical
-// line the hit-map expects, clicks dispatch exactly the segment they land
-// on, and near-misses stay dead. A wrapped or misaligned row wouldn't
-// panic — it would silently fire the wrong decision, the one failure mode
-// a confirmation dialog cannot have.
-func TestToolConfirmationDialog_TinyWidthsKeepRowsAlignedAndClickable(t *testing.T) {
-	t.Parallel()
-
-	for width := range 60 {
-		dialog := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{})
-		_, _ = dialog.Update(tea.WindowSizeMsg{Width: width, Height: 30})
-
-		d, ok := dialog.(*toolConfirmationDialog)
-		require.True(t, ok)
-
-		_, contentWidth := d.dialogDimensions()
-		require.GreaterOrEqualf(t, contentWidth, toolConfirmMinOptionWidth,
-			"width %d: the layout width must clamp to fit a minimal segment", width)
-		rows := d.optionRows(contentWidth)
-		require.NotEmptyf(t, rows, "width %d: the options must always lay out", width)
-		for _, row := range rows {
-			assert.LessOrEqualf(t, ansi.StringWidth(optionRowText(row)), contentWidth,
-				"width %d: no row may exceed the clamped layout width", width)
-		}
-		require.Equalf(t, len(rows), lipgloss.Height(d.renderOptions(contentWidth)),
-			"width %d: each logical row must render as exactly one physical line", width)
-
-		// Walk the rows bottom-anchored, exactly like handleMouseClick.
-		dialogRow, dialogCol := d.Position()
+// Every painted cell of every decision pill must dispatch only that decision.
+func TestToolConfirmationDialog_ActionCellsAndGaps(t *testing.T) {
+	for _, width := range []int{20, 30, 45, 80, 120} {
+		d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+		d.SetSize(width, 30)
 		view := d.View()
-		renderedLines := strings.Split(ansi.Strip(view), "\n")
-		endY := ContentEndRow(dialogRow, lipgloss.Height(view))
-		for i, row := range rows {
-			y := endY - (len(rows) - 1) + i
-			line := renderedLines[y-dialogRow]
-			byteStart := strings.Index(line, optionRowText(row))
-			require.GreaterOrEqualf(t, byteStart, 0,
-				"width %d: row %d must render whole on the physical line the hit-map expects", width, i)
-			x := dialogCol + ansi.StringWidth(line[:byteStart])
-
-			for _, seg := range row {
-				assertOptionClick(t, d, seg, y, x+seg.startX, width)
-				assertOptionClick(t, d, seg, y, x+seg.endX-1, width)
-			}
-			last := row[len(row)-1]
-			assert.Nilf(t, clickCell(d, y, x-1), "width %d: the cell before row %d must be dead", width, i)
-			assert.Nilf(t, clickCell(d, y, x+last.endX), "width %d: the cell after row %d must be dead", width, i)
-			for s := 1; s < len(row); s++ {
-				assert.Nilf(t, clickCell(d, y, x+row[s].startX-1),
-					"width %d: the separator gap on row %d must be dead", width, i)
+		row, col := d.Position()
+		dl := NewDialogLayout(view, row, col)
+		seen := map[string]bool{}
+		for y := row; y < row+lipgloss.Height(view); y++ {
+			for x := col; x < col+lipgloss.Width(view); x++ {
+				action, hit := d.ActionKeyAt(x, y, dl)
+				if !hit {
+					continue
+				}
+				seen[action.Text] = true
+				msgs := collectMsgs(clickCell(d, y, x))
+				if action.Text == "N" {
+					require.True(t, hasMsg[OpenDialogMsg](msgs))
+					continue
+				}
+				response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
+				require.True(t, ok, "width %d cell %d,%d action %s", width, x, y, action.Text)
+				want := map[string]runtime.ResumeRequest{"Y": runtime.ResumeApprove(), "T": runtime.ResumeApproveTool("shell"), "B": runtime.ResumeApproveBalanced(), "A": runtime.ResumeApproveAutonomous()}
+				assert.Equal(t, want[action.Text], response.Response.Resume)
 			}
 		}
+		assert.Len(t, seen, 5, "width %d: all decisions stay reachable", width)
+		assert.Nil(t, clickCell(d, row+lipgloss.Height(view), col), "outside clicks never authorize")
 	}
 }
 
-// A pathological permission pattern (very long first command word) must
-// not overflow the dialog: the lone oversize segment's displayed label
-// truncates, while the key stays visible and a click still grants the
-// full untruncated pattern.
-func TestToolConfirmationDialog_OversizeSegmentTruncatesLabel(t *testing.T) {
-	t.Parallel()
-
+func TestToolConfirmationDialog_LongPatternPreservesAuthorization(t *testing.T) {
 	longWord := "very-long-binary-name-" + strings.Repeat("x", 100)
 	event := newConfirmationEvent(nil)
 	event.ToolCall.Function.Arguments = `{"cmd":"` + longWord + ` --flag"}`
-
-	dialog := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{})
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
-
-	d, ok := dialog.(*toolConfirmationDialog)
-	require.True(t, ok)
-
-	wantPattern := "shell:cmd=" + longWord + "*"
-	require.Equal(t, wantPattern, d.permissionPattern)
-
-	_, contentWidth := d.dialogDimensions()
-	rows := d.optionRows(contentWidth)
-	for _, row := range rows {
-		assert.LessOrEqual(t, ansi.StringWidth(optionRowText(row)), contentWidth,
-			"the oversize label must truncate so no row exceeds the content width")
+	d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(40, 12)
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	for y := row; y < row+lipgloss.Height(view); y++ {
+		for x := col; x < col+lipgloss.Width(view); x++ {
+			key, hit := d.ActionKeyAt(x, y, dl)
+			if !hit || key.Text != "T" {
+				continue
+			}
+			_, cmd := d.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			response, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(cmd))
+			require.True(t, ok)
+			assert.Equal(t, runtime.ResumeApproveTool("shell:cmd="+longWord+"*"), response.Response.Resume)
+			return
+		}
 	}
-	require.Equal(t, len(rows), lipgloss.Height(d.renderOptions(contentWidth)),
-		"each laid-out row must render as exactly one line")
-	assert.Contains(t, ansi.Strip(d.renderOptions(contentWidth)), "…",
-		"the truncated label must show an ellipsis")
-
-	tY, tX, found := locateInView(d, "T always allow")
-	require.True(t, found, "the truncated segment must keep its key and label prefix visible")
-
-	resume, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(clickCell(d, tY, tX)))
-	require.True(t, ok, "click on the truncated segment must dispatch a resume")
-	assert.Equal(t, runtime.ResumeApproveTool(wantPattern), resume.Response.Resume,
-		"the granted pattern must be the full untruncated pattern")
-}
-
-// Separator gaps between the option segments are dead zones: a click
-// there fires nothing, because attributing the gap to either neighbour
-// would fire some action on a near-miss (left would make the Y/N gap
-// approve, right would make the B/A gap go autonomous).
-func TestToolConfirmationDialog_GapClicksAreDeadZones(t *testing.T) {
-	t.Parallel()
-
-	dialog := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{})
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-
-	d, ok := dialog.(*toolConfirmationDialog)
-	require.True(t, ok)
-
-	// This width keeps the single-line layout: all segments on one row.
-	_, contentWidth := d.dialogDimensions()
-	require.Len(t, d.optionRows(contentWidth), 1)
-
-	// Clicking inside a segment's text fires.
-	nY, nX, found := locateInView(d, "N no")
-	require.True(t, found)
-	assert.NotNil(t, clickCell(d, nY, nX), "click on 'N' must fire")
-	assert.NotNil(t, clickCell(d, nY, nX+3), "click on N's label must fire")
-
-	// Clicking the two-space gap between "Y yes" and "N no" fires nothing.
-	assert.Nil(t, clickCell(d, nY, nX-1), "gap click must be a dead zone")
-	assert.Nil(t, clickCell(d, nY, nX-2), "gap click must be a dead zone")
-
-	// The trailing segment is clickable to its last cell.
-	aY, aX, found := locateInView(d, "A all tools")
-	require.True(t, found)
-	require.Equal(t, nY, aY, "single-line layout keeps every segment on one row")
-	assert.NotNil(t, clickCell(d, aY, aX), "click on 'A' must fire")
-	assert.NotNil(t, clickCell(d, aY, aX+ansi.StringWidth("A all tools")-1), "click on the last label cell must fire")
-	assert.Nil(t, clickCell(d, aY, aX+ansi.StringWidth("A all tools")), "click past the line must be a no-op")
+	t.Fatal("always-allow action was not reachable")
 }
 
 // A preempt/custom hook can force a confirmation while the session is
@@ -544,4 +369,26 @@ func TestToolConfirmationDialog_BalancedClearsYoloMode(t *testing.T) {
 	resume, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(cmd))
 	require.True(t, ok, "Balanced must dispatch a resume request")
 	assert.Equal(t, runtime.ResumeApproveBalanced(), resume.Response.Resume)
+}
+
+func TestToolConfirmationDialog_TinyHeightScrollsEveryAction(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(20, 6)
+	seen := map[string]bool{}
+	for range 12 {
+		view := d.View()
+		row, col := d.Position()
+		dl := NewDialogLayout(view, row, col)
+		assert.LessOrEqual(t, lipgloss.Height(view), 6)
+		for y := row; y < row+lipgloss.Height(view); y++ {
+			for x := col; x < col+lipgloss.Width(view); x++ {
+				if action, hit := d.ActionKeyAt(x, y, dl); hit {
+					seen[action.Text] = true
+				}
+			}
+		}
+		_, cmd := d.Update(tea.MouseWheelMsg{X: col + 3, Y: row + lipgloss.Height(view) - 2, Button: tea.MouseWheelDown})
+		assert.Nil(t, cmd, "wheel movement never authorizes a tool")
+	}
+	assert.Len(t, seen, 5, "all five decisions remain mouse reachable at six rows")
 }

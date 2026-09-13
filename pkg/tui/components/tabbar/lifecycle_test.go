@@ -46,8 +46,9 @@ func TestHiddenTabbarSettlesAndRejectsDelayedInput(t *testing.T) {
 	assert.Equal(t, 1, tb.Height())
 	assert.LessOrEqual(t, lipgloss.Width(tb.View()), 18)
 	tb.SetTabs(tabs[:1], 99)
-	assert.Zero(t, runtime.ActiveCount(), "single tab is hidden even when busy")
-	assert.Empty(t, tb.View())
+	assert.Positive(t, runtime.ActiveCount(), "single busy tab remains visible and animated")
+	assert.NotEmpty(t, tb.View())
+	tb.StopAnimations()
 }
 
 func TestStationaryDragStopsTickingAndResumesOnMotion(t *testing.T) {

@@ -1,6 +1,10 @@
 package markdown
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/docker/docker-agent/pkg/tui/styles"
+)
 
 // IncrementalRenderer is a markdown renderer specialized for streaming use:
 // it remembers the most recently rendered "stable prefix" of the input and,
@@ -22,7 +26,8 @@ import "strings"
 //
 // IncrementalRenderer is not safe for concurrent use.
 type IncrementalRenderer struct {
-	width int
+	width           int
+	themeGeneration uint64
 
 	// inputPrefix is the longest stable prefix of the most recent input that
 	// ends at a block boundary. outputPrefix is its rendered counterpart.
@@ -86,6 +91,10 @@ func (r *IncrementalRenderer) RenderWithCodeBlocks(input string) (string, []Code
 }
 
 func (r *IncrementalRenderer) renderParts(input string) (string, string, []CodeBlock, error) {
+	if generation := styles.ThemeGeneration(); r.themeGeneration != generation {
+		r.themeGeneration = generation
+		r.Reset()
+	}
 	if input == "" {
 		r.inputPrefix = ""
 		r.outputPrefix = ""

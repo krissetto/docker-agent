@@ -153,12 +153,12 @@ func TestActiveAgentsOnly_CollapsedBandFiltered(t *testing.T) {
 	recordAgentUsageWithCost(m, "s-planner", "planner", 10_000, 100_000, 0.01)
 
 	info := ansi.Strip(m.collapsedInfoLine(120))
-	require.Contains(t, info, "reviewer", "the filter is off by default")
+	require.NotContains(t, info, "reviewer", "the band does not list unused team agents")
 
 	m.SetActiveAgentsOnly(true)
 	info = ansi.Strip(m.collapsedInfoLine(120))
 	assert.Contains(t, info, "▶ root")
-	assert.Contains(t, info, "planner")
+	assert.NotContains(t, info, "planner", "historical participation does not invent a tree node")
 	assert.NotContains(t, info, "reviewer")
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/session"
@@ -648,4 +649,18 @@ func TestSessionBrowserNavigationSkipsHeaders(t *testing.T) {
 		d.Update(upKey)
 	}
 	require.Equal(t, 0, d.selected)
+}
+
+func TestSessionBrowserPreparedOriginMatchesFirstPositionAndRenderedRows(t *testing.T) {
+	d := NewSessionBrowserDialog([]session.Summary{{ID: "one", Title: "First"}, {ID: "two", Title: "Second"}}, "").(*sessionBrowserDialog)
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+	bodyX, bodyY, bodyWidth, bodyHeight := d.BodyScrollBounds()
+	require.Positive(t, bodyX)
+	require.Positive(t, bodyWidth)
+	require.Positive(t, bodyHeight)
+	row, _ := d.Position()
+	require.Equal(t, row+sessionBrowserListStartY, bodyY, "prepared body origin must match the first reported card position")
+	view := d.View()
+	require.Equal(t, (d.Height()-lipgloss.Height(view))/2, row)
+	require.Equal(t, row+sessionBrowserListStartY, bodyY)
 }

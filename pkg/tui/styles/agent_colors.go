@@ -57,6 +57,9 @@ func SetAgentOrder(agentNames []string) {
 // Must be called with agentRegistry.Lock held.
 func rebuildAgentColorCache() {
 	theme := CurrentTheme()
+	fallbackAccentStyle = BaseStyle.Foreground(Accent)
+	fallbackBadgeColors = AgentBadgeColors{Fg: EnsureContrast(Background, Accent), Bg: Accent}
+	fallbackBadgeStyle = BaseStyle.Foreground(fallbackBadgeColors.Fg).Background(fallbackBadgeColors.Bg).Padding(0, 1)
 
 	hues := theme.Colors.AgentHues
 	if len(hues) == 0 {

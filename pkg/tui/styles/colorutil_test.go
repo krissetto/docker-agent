@@ -330,3 +330,14 @@ func TestLabF_BelowThreshold(t *testing.T) {
 	assert.False(t, math.IsNaN(result))
 	assert.False(t, math.IsInf(result, 0))
 }
+
+func TestRaisedEditorBackgroundSupportsANSIColors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ background, resolved string }{
+		{"0", "#000000"}, {"39", "#00afff"}, {"231", "#ffffff"},
+	} {
+		got := raisedEditorBackground(tc.background)
+		assert.Equal(t, raisedEditorBackground(tc.resolved), got)
+		assert.NotEqual(t, tc.resolved, got)
+	}
+}

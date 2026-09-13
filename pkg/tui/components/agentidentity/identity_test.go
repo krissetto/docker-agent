@@ -59,8 +59,9 @@ func TestIdentityBorderKeepsNeutralSuffix(t *testing.T) {
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "1819e-exact-node", Name: "root", Agent: "root", DisplayID: "1819e"}
 	style := styles.UserMessageStyle
 	line := strings.Split(Border(style.Width(40).Render("body"), ref, 40, style), "\n")[0]
-	hover := Hover(line, 3, 3+ansi.StringWidth(ref.Label()), ref)
-	for x := 3 + len(ref.Name); x < 3+ansi.StringWidth(ref.Label()); x++ {
+	start := style.GetBorderLeftSize() + style.GetPaddingLeft()
+	hover := Hover(line, start, start+ansi.StringWidth(ref.Label()), ref)
+	for x := start + len(ref.Name); x < start+ansi.StringWidth(ref.Label()); x++ {
 		assert.Equal(t, color.RGBAModel.Convert(styles.MutedStyle.GetForeground()), foregroundAt(line, x))
 		assert.Equal(t, foregroundAt(line, x), foregroundAt(hover, x))
 	}

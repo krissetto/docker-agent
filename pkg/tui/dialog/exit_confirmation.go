@@ -3,6 +3,7 @@ package dialog
 import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -74,6 +75,14 @@ func (d *exitConfirmationDialog) OutsideClickDismissCmd() tea.Cmd { return d.Can
 
 // Update handles messages for the exit confirmation dialog.
 func (d *exitConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		defer d.prepareLayout()
+	}
+	if handled, cmd := d.UpdateBodyScroll(msg); handled {
+		return d, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -85,14 +94,10 @@ func (d *exitConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if d.CloseButtonHit(msg, dl) {
 				return d, func() tea.Msg { return CloseDialogMsg{} }
 			}
-			if cmd := d.HandleConfirmButtonsClick(msg, dl, styles.DialogStyle.Padding(1, 2), core.CmdHandler(ExitConfirmedMsg{})); cmd != nil {
-				return d, cmd
+			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
+				return d.Update(action)
 			}
 		}
-
-	case tea.MouseMotionMsg:
-		d.HandleMouseMotion(msg.X, msg.Y, d.layout())
-		return d, nil
 
 	case tea.KeyPressMsg:
 		switch d.HandleConfirmKey(msg, ConfirmKeyMap{Yes: d.keyMap.Yes, No: d.keyMap.No}) {
@@ -114,18 +119,29 @@ func (d *exitConfirmationDialog) Position() (row, col int) {
 }
 
 // View renders the exit confirmation dialog.
-func (d *exitConfirmationDialog) View() string {
+func (d *exitConfirmationDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth := d.ComputeDialogWidth(50, 30, 50)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
+	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	content := NewContent(contentWidth).
-		AddTitle("Exit").
-		AddSeparator().
-		AddSpace().
-		AddQuestion("Do you want to exit?").
-		AddSpace().
-		AddContent(d.RenderConfirmButtons(contentWidth)).
-		Build()
+	header = RenderTitle("Exit", contentWidth, styles.DialogTitleStyle)
+	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("Do you want to exit?")
+	footer = d.RenderConfirmButtons(contentWidth)
+	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer
+}
 
-	return d.RenderCard(styles.DialogStyle.Padding(1, 2), dialogWidth, content)
+func (d *exitConfirmationDialog) View() string {
+	style, width, header, body, footer := d.content()
+	return d.RenderScrollableBody(style, width, header, body, footer)
+}
+
+func (d *exitConfirmationDialog) prepareLayout() {
+	style, width, header, body, footer := d.content()
+	d.PrepareScrollableBody(style, width, header, body, footer)
+}
+
+func (d *exitConfirmationDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.prepareLayout()
+	return cmd
 }

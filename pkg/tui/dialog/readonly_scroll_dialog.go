@@ -5,7 +5,6 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -54,6 +53,7 @@ func newReadOnlyScrollDialog(
 		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 		scrollview.WithReserveScrollbarSpace(true),
 	)
+	base.bodyScroll = scrollviewView
 	return readOnlyScrollDialog{
 		BaseDialog: base,
 		scrollview: scrollviewView,
@@ -69,6 +69,9 @@ func (d *readOnlyScrollDialog) Init() tea.Cmd {
 }
 
 func (d *readOnlyScrollDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -100,58 +103,24 @@ func (d *readOnlyScrollDialog) maxViewport() int {
 	return max(1, maxHeight-fixedLines-dialogChrome)
 }
 
-// dialogHeight computes the actual total rendered height based on content and viewport.
-func (d *readOnlyScrollDialog) dialogHeight(contentLineCount int) int {
-	s := d.size
-	maxHeight := min(d.Height()*s.heightPercent/100, s.heightMax)
-	needed := contentLineCount + fixedLines + dialogChrome
-	return min(needed, maxHeight)
-}
+func (d *readOnlyScrollDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
 
-func (d *readOnlyScrollDialog) intrinsicHeight() int {
-	_, contentWidth := d.dialogWidth()
-	allLines := d.render(contentWidth, d.maxViewport())
-	const headerLines = 3
-	return d.dialogHeight(max(0, len(allLines)-headerLines))
-}
+func (d *readOnlyScrollDialog) View() string { return d.renderBody(false) }
 
-func (d *readOnlyScrollDialog) Position() (row, col int) {
-	dw, _ := d.dialogWidth()
-	return CenterPosition(d.Width(), d.Height(), dw, d.intrinsicHeight())
-}
-
-func (d *readOnlyScrollDialog) View() string {
+func (d *readOnlyScrollDialog) renderBody(prepare bool) string {
 	dialogWidth, contentWidth := d.dialogWidth()
-	maxViewport := d.maxViewport()
-	allLines := d.render(contentWidth, maxViewport)
-
-	const headerLines = 3 // title + separator + space
-	contentLines := allLines[headerLines:]
-
-	// Viewport: show all content if it fits, otherwise cap at maxViewport.
-	viewport := min(len(contentLines), maxViewport)
-
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	d.scrollview.SetSize(regionWidth, viewport)
-
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+headerLines)
-	d.scrollview.SetContent(contentLines, len(contentLines))
-
-	// Use ViewWithLines to guarantee exactly `viewport` lines of output.
-	scrollOut := d.scrollview.View()
-	scrollOutLines := strings.Split(scrollOut, "\n")
-	for len(scrollOutLines) < viewport {
-		scrollOutLines = append(scrollOutLines, "")
+	allLines := d.render(max(1, contentWidth), d.maxViewport())
+	headerLines := min(3, len(allLines))
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "esc", "Close")
+	if prepare {
+		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), "\n"+footer)
+		return ""
 	}
-	scrollOutLines = scrollOutLines[:viewport]
+	return d.RenderScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), "\n"+footer)
+}
 
-	parts := make([]string, 0, headerLines+viewport+2)
-	parts = append(parts, allLines[:headerLines]...)
-	parts = append(parts, scrollOutLines...)
-	parts = append(parts, "", RenderHelpKeys(regionWidth, d.helpKeys...))
-
-	height := d.dialogHeight(len(contentLines))
-	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Height(height).MaxHeight(height).Render(content)
+func (d *readOnlyScrollDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

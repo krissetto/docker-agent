@@ -942,6 +942,11 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// ResizeCacheStats reports transcript work on the owning event loop.
+func (p *chatPage) ResizeCacheStats() (rebuilds, misses, renderedMessages uint64) {
+	return p.messages.ResizeCacheStats()
+}
+
 // GetSize returns the current dimensions
 func (p *chatPage) GetSize() (width, height int) {
 	return p.width, p.height

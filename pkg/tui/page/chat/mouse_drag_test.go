@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -44,8 +45,16 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	coderY := renderedLineContaining(t, p.sidebar.View(), "coder")
 	sl := p.computeSidebarLayout()
 	sidebarX := styles.AppPadding + sl.sidebarStartX
-	p.handleMouseMotion(tea.MouseMotionMsg{X: sidebarX, Y: coderY})
-	assert.Contains(t, ansi.Strip(p.sidebar.View()), "coder (a1b2c)")
+	coderLine := strings.Split(ansi.Strip(p.sidebar.View()), "\n")[coderY]
+	prefix, _, found := strings.Cut(coderLine, "coder")
+	require.True(t, found)
+	coderX := ansi.StringWidth(prefix)
+	click, nodeID := p.sidebar.HandleClickType(coderX, coderY)
+	require.Equal(t, sidebar.ClickSubagent, click)
+	require.Equal(t, "a1b2c", nodeID, "the actual name cell routes to the canonical node ID")
+	p.handleMouseMotion(tea.MouseMotionMsg{X: sidebarX + coderX, Y: coderY})
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "coder (a1b2c)",
+		"ordinary motion over the rendered name must establish hover before drag capture")
 
 	// Fill the chat, start a real messages-scrollbar thumb drag, and move it to
 	// the same absolute Y as the sidebar row. The drag capture path broadcasts

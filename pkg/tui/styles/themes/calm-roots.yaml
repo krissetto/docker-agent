@@ -49,14 +49,14 @@ colors:
   selected: "#2A3B5C"        # Darker blue-gray - selected items background (for warm white text)
   selected_fg: "#D4D4D8"     # Warm white - text on selected items, menu highlights
   suggestion_ghost: "#6B6B6B"
-  tab_bg: "#25252c"
-  tab_active_bg: "#363640"   # User message background
+  tab_bg: "#282c34"
+  tab_active_bg: "#32363e"   # User message background
   tab_active_fg: "#D4D4D8"   # Warm white
   tab_inactive_fg: "#808080"
   tab_border: "#9A88C0"      # Lavender border
   placeholder: "#808080"
   # Shared shell/editor semantic colors
-  editor_bg: "#25252c"
+  editor_bg: "#32363e"
   card_bg: "#363640"
   shell_bg: "#282c34"
   tab_hover_bg: "#363640"

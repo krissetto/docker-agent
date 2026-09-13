@@ -48,6 +48,7 @@ type costDialog struct {
 // per-frame equality check can decide whether the cached lines are current.
 type costCacheKey struct {
 	width                     int
+	themeGeneration           uint64
 	itemCount                 int
 	inputTokens, outputTokens int64
 	totalCost                 float64
@@ -63,6 +64,8 @@ func NewCostDialog(sess *session.Session) Dialog {
 		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 		scrollview.WithReserveScrollbarSpace(true),
 	)
+	base.bodyScroll = scrollviewView
+	base.bodyFillHeight = true
 	return &costDialog{
 		BaseDialog: base,
 		session:    sess,
@@ -77,6 +80,9 @@ func NewCostDialog(sess *session.Session) Dialog {
 func (d *costDialog) Init() tea.Cmd { return nil }
 
 func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if preparesDialogBody(msg) {
+		defer d.renderBody(true)
+	}
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -107,14 +113,21 @@ func (d *costDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
 }
 
 func (d *costDialog) Position() (row, col int) {
+	if d.cardWidth > 0 {
+		return CenterPosition(d.Width(), d.Height(), d.cardWidth, d.cardHeight)
+	}
 	dialogWidth, maxHeight, _ := d.dialogSize()
 	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
 }
 
-func (d *costDialog) View() string {
-	dialogWidth, maxHeight, contentWidth := d.dialogSize()
-	content := d.renderContent(contentWidth, maxHeight)
-	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
+func (d *costDialog) View() string { return d.renderBody(false) }
+func (d *costDialog) renderBody(prepare bool) string {
+	_, maxHeight, contentWidth := d.dialogSize()
+	if prepare {
+		d.prepareContent(contentWidth)
+		return ""
+	}
+	return d.renderContent(contentWidth, maxHeight)
 }
 
 // ---------------------------------------------------------------------------
@@ -377,11 +390,12 @@ func (d *costDialog) renderContent(contentWidth, maxHeight int) string {
 func (d *costDialog) cacheKey(contentWidth int) costCacheKey {
 	input, output := d.session.Usage()
 	return costCacheKey{
-		width:        contentWidth,
-		itemCount:    d.session.ItemCount(),
-		inputTokens:  input,
-		outputTokens: output,
-		totalCost:    d.session.TotalCost(),
+		width:           contentWidth,
+		themeGeneration: styles.ThemeGeneration(),
+		itemCount:       d.session.ItemCount(),
+		inputTokens:     input,
+		outputTokens:    output,
+		totalCost:       d.session.TotalCost(),
 	}
 }
 
@@ -538,24 +552,10 @@ func (d *costDialog) renderUsageLine(u totalUsage, totalCost float64, labelWidth
 		suffix)
 }
 
-func (d *costDialog) applyScrolling(allLines []string, contentWidth, maxHeight int) string {
-	const headerLines = 3 // title + separator + space
-	const footerLines = 2 // space + help
-
-	visibleLines := max(1, maxHeight-headerLines-footerLines-4)
-	contentLines := allLines[headerLines:]
-
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	d.scrollview.SetSize(regionWidth, visibleLines)
-
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+headerLines)
-	d.scrollview.SetContent(contentLines, len(contentLines))
-
-	// Build final output. Use slices.Clone to avoid mutating allLines.
-	parts := slices.Clone(allLines[:headerLines])
-	parts = append(parts, d.scrollview.View(), "", RenderHelpKeys(regionWidth, "↑↓", "scroll", "c", "copy"))
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+func (d *costDialog) applyScrolling(allLines []string, contentWidth, _ int) string {
+	width, _, _ := d.dialogSize()
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy", "esc", "Close")
+	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
 }
 
 // ---------------------------------------------------------------------------
@@ -721,4 +721,21 @@ func padToWidth(s string, width int) string {
 		return s + strings.Repeat(" ", width-currentWidth)
 	}
 	return s
+}
+
+func (d *costDialog) prepareContent(contentWidth int) {
+	if k := d.cacheKey(contentWidth); d.cachedLines == nil || d.cachedKey != k {
+		d.cachedLines = d.buildLines(contentWidth)
+		d.cachedKey = k
+	}
+	width, _, _ := d.dialogSize()
+	allLines := d.cachedLines
+	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy", "esc", "Close")
+	d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
+}
+
+func (d *costDialog) SetSize(width, height int) tea.Cmd {
+	cmd := d.BaseDialog.SetSize(width, height)
+	d.renderBody(true)
+	return cmd
 }

@@ -115,8 +115,9 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 							require.Nil(t, strip[x].bg, "label cutout x=%d", x)
 						}
 					}
-					require.Empty(t, strings.TrimSpace(ansi.Strip(rows[y+1])), "footer gap")
-					require.Equal(t, regionFooterGap, root.hitTestRegion(y+1))
+					require.Equal(t, len(rows)-1, y, "context strip is the final screen row")
+					require.Equal(t, regionOutside, root.hitTestRegion(y+1))
+					require.NotContains(t, ansi.Strip(root.View().Content), "Ctrl+c quit")
 				})
 			}
 		}

@@ -37,3 +37,14 @@ func TestOnThemeChange(t *testing.T) {
 	styles.ApplyThemeRef(styles.DefaultThemeRef)
 	assert.Equal(t, 2, calls)
 }
+
+func TestThemeGenerationAdvancesOnEveryApplication(t *testing.T) { //nolint:paralleltest // theme globals
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	before := styles.ThemeGeneration()
+	styles.ApplyTheme(styles.DefaultTheme())
+	assert.Greater(t, styles.ThemeGeneration(), before)
+	before = styles.ThemeGeneration()
+	styles.ApplyTheme(styles.DefaultTheme())
+	assert.Greater(t, styles.ThemeGeneration(), before, "reapplying a changed in-memory palette also invalidates caches")
+}

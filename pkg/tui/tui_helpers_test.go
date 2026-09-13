@@ -6,24 +6,18 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
-	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 )
 
-func TestKeyboardEnhancementsPreserveQuitOnlyFooter(t *testing.T) {
+func TestKeyboardEnhancementsUpdateCompleteHelp(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.focusedPanel = PanelEditor
 	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
-	m.statusBar = statusbar.New(m, statusbar.WithTitle(""))
-	m.statusBar.SetWidth(400)
 
-	before := m.statusBar.View()
-	require.Equal(t, "Ctrl+c quit", strings.TrimSpace(ansi.Strip(before)))
 	var beforeNewline string
 	for _, binding := range m.AllBindings() {
 		if binding.Help().Desc == "newline" {
@@ -34,7 +28,6 @@ func TestKeyboardEnhancementsPreserveQuitOnlyFooter(t *testing.T) {
 
 	_, _ = m.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
 
-	require.Equal(t, before, m.statusBar.View(), "keyboard enhancements must not add footer clutter")
 	var afterNewline string
 	for _, binding := range m.AllBindings() {
 		if binding.Help().Desc == "newline" {
@@ -122,7 +115,7 @@ func TestHitTestFullRegion(t *testing.T) {
 	//   y=[20]     resize handle (1 row)
 	//   y=[21..22] tab bar       (tabBarHeight = 2)
 	//   y=[23..27] editor        (editorHeight = 5)
-	//   y>=28      status bar
+	//   y>=28      context usage
 	const (
 		contentHeight = 20
 		tabBarHeight  = 2
@@ -141,8 +134,8 @@ func TestHitTestFullRegion(t *testing.T) {
 		{name: "last row of tab bar", y: 22, want: regionTabBar},
 		{name: "first row of editor", y: 23, want: regionEditor},
 		{name: "last row of editor", y: 27, want: regionEditor},
-		{name: "status bar", y: 28, want: regionStatusBar},
-		{name: "far below the screen", y: 100, want: regionStatusBar},
+		{name: "context usage", y: 28, want: regionContextUsage},
+		{name: "far below the screen", y: 100, want: regionOutside},
 	}
 
 	for _, tt := range tests {
@@ -160,11 +153,11 @@ func TestHitTestFullRegion(t *testing.T) {
 func TestHitTestFullRegion_NoTabBar(t *testing.T) {
 	t.Parallel()
 
-	// When only one tab is open the tab bar collapses to height 0:
+	// When tabs are explicitly hidden the tab bar has height 0:
 	//   y=[0..19]  content
 	//   y=[20]     resize handle
 	//   y=[21..25] editor (tabBarHeight = 0, editorHeight = 5)
-	//   y>=26      status bar
+	//   y>=26      context usage
 	const (
 		contentHeight = 20
 		tabBarHeight  = 0
@@ -180,7 +173,7 @@ func TestHitTestFullRegion_NoTabBar(t *testing.T) {
 		{name: "resize handle", y: 20, want: regionResizeHandle},
 		{name: "editor first row", y: 21, want: regionEditor},
 		{name: "editor last row", y: 25, want: regionEditor},
-		{name: "status bar", y: 26, want: regionStatusBar},
+		{name: "context usage", y: 26, want: regionContextUsage},
 	}
 
 	for _, tt := range tests {

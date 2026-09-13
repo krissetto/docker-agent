@@ -33,7 +33,7 @@ func TestInputIdentityLeanLiveCachedTreeAndRestoredParity(t *testing.T) {
 		assert.NotContains(t, out, "child-session")
 		for line := range strings.SplitSeq(out, "\n") {
 			if strings.Contains(line, "worker (a1b2c)") {
-				assert.Contains(t, line, "━", "sender embedded in border, not header")
+				assert.NotContains(t, line, "━", "sender is inset in the ordinary USER padding row without a top rule")
 			}
 		}
 		return out

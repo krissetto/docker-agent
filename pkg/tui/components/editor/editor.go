@@ -130,11 +130,12 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea textarea.Model
-	hist     *history.History
-	width    int
-	height   int
-	working  bool
+	themeGeneration uint64
+	textarea        textarea.Model
+	hist            *history.History
+	width           int
+	height          int
+	working         bool
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -732,8 +733,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		e.configureNewlineKeybinding()
 		return e, nil
 	case messages.ThemeChangedMsg:
-		e.textarea.SetStyles(styles.InputStyle)
-		e.searchInput.SetStyles(searchInputStyles())
+		e.refreshTheme()
 		return e, nil
 	case tea.WindowSizeMsg:
 		e.textarea.SetWidth(msg.Width - 2)
@@ -1341,8 +1341,17 @@ func (e *editor) getPasteCompletionItems() []completion.Item {
 	return items
 }
 
-// View renders the component
+func (e *editor) refreshTheme() {
+	e.textarea.SetStyles(styles.InputStyle)
+	e.searchInput.SetStyles(searchInputStyles())
+	e.themeGeneration = styles.ThemeGeneration()
+}
+
+// View renders the component.
 func (e *editor) View() string {
+	if e.themeGeneration != styles.ThemeGeneration() {
+		e.refreshTheme()
+	}
 	view := e.textarea.View()
 
 	if e.textarea.Focused() && e.hasSuggestion && e.suggestion != "" {
