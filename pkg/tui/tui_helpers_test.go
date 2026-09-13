@@ -15,15 +15,15 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 )
 
-func TestKeyboardEnhancementsPreserveCommandOnlyFooter(t *testing.T) {
+func TestKeyboardEnhancementsPreserveQuitOnlyFooter(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.focusedPanel = PanelEditor
 	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
-	m.statusBar = statusbar.New(m)
+	m.statusBar = statusbar.New(m, statusbar.WithTitle(""))
 	m.statusBar.SetWidth(400)
 
 	before := m.statusBar.View()
-	require.Equal(t, "Ctrl+k", strings.TrimSpace(ansi.Strip(before)))
+	require.Equal(t, "Ctrl+c quit", strings.TrimSpace(ansi.Strip(before)))
 	var beforeNewline string
 	for _, binding := range m.AllBindings() {
 		if binding.Help().Desc == "newline" {

@@ -212,7 +212,8 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 	require.Greater(t, height, 3, "narrow width must remeasure wrapped content before layout")
 	require.Equal(t, regionEditor, root.hitTestRegion(root.editorTop()))
 	require.Equal(t, regionContextUsage, root.hitTestRegion(root.editorTop()+height))
-	require.Equal(t, regionStatusBar, root.hitTestRegion(root.editorTop()+height+1))
+	require.Equal(t, regionFooterGap, root.hitTestRegion(root.editorTop()+height+1))
+	require.Equal(t, regionStatusBar, root.hitTestRegion(root.editorTop()+height+2))
 	require.Equal(t, strings.Repeat("wrapped draft ", 9), root.editor.Value())
 	for _, width := range []int{120, 83, 40} {
 		_, _ = root.Update(tea.WindowSizeMsg{Width: width, Height: 30})

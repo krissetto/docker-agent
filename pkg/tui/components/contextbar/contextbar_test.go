@@ -137,3 +137,21 @@ func TestAnimationDurationSupportsRootShrinkTiming(t *testing.T) {
 	// 330ms; the usage bar remains a slower, readable transition.
 	assert.Equal(t, 670*time.Millisecond, animDuration)
 }
+
+func TestContextTrackUsesEditorSurfaceNotTabSurface(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	theme, err := styles.LoadTheme("default-light")
+	require.NoError(t, err)
+	require.NotEqual(t, theme.Colors.TabBg, theme.Colors.EditorBg)
+	styles.ApplyTheme(theme)
+	m := New(animation.NewRuntime())
+	m.SetWidth(40)
+	m.SetContextUsageDirect(1, 100)
+	view := m.View()
+	r, g, b, _ := styles.EditorBg.RGBA()
+	background := fmt.Sprintf("48;2;%d;%d;%dm", r>>8, g>>8, b>>8)
+	require.Contains(t, view, background)
+	require.Equal(t, 40, ansi.StringWidth(view))
+	require.Contains(t, view, " Context 1%")
+}

@@ -82,11 +82,19 @@ func TestActualProgramContextUsageLifecycleAndIdleCleanup(t *testing.T) {
 	program.Send(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 90, ContextLimit: 100}))
 	require.Positive(t, snapshot().active)
 	program.Send(messages.SwitchTabMsg{SessionID: "context-second"})
-	require.NotContains(t, snapshot().contextView, "Context 75%", "switch cannot retain previous session's display")
+	require.NotContains(t, snapshot().contextView, "Context 20%", "known destination animates from displayed position")
 	program.Send(runtime.AgentInfo("root", "test/model", "", "", 100))
-	require.Contains(t, snapshot().contextView, "Context 20%")
+	require.Eventually(t, func() bool {
+		s := snapshot()
+		return strings.Contains(s.content, "Context ") && !strings.Contains(s.contextView, "Context 20%") && !strings.Contains(s.contextView, "Context 75%") && !strings.Contains(s.contextView, "Context 0%")
+	}, time.Second, time.Millisecond, "tab change renders a nonzero intermediate usage")
+	require.Eventually(t, func() bool { return strings.Contains(snapshot().contextView, "Context 20%") }, time.Second, time.Millisecond)
 	program.Send(messages.SwitchTabMsg{SessionID: "profile"})
-	require.Contains(t, snapshot().contextView, "Context 90%", "switch seeds that session's latest target, not another session's animated value")
+	require.NotContains(t, snapshot().contextView, "Context 90%", "return animates to the selected session's canonical target")
+	program.Send(messages.SwitchTabMsg{SessionID: "context-second"})
+	program.Send(messages.SwitchTabMsg{SessionID: "profile"})
+	program.Send(messages.RoutedMsg{SessionID: "context-second", Inner: messages.SessionRuntimeEventMsg{Event: runtime.NewTokenUsageEvent("context-second", "root", &runtime.Usage{ContextLength: 1, ContextLimit: 100})}})
+	require.Eventually(t, func() bool { return strings.Contains(snapshot().contextView, "Context 90%") }, time.Second, time.Millisecond, "late background updates cannot pull the selected target back")
 	program.Send(messages.SessionRuntimeEventMsg{Event: &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: &session.Session{ID: "profile"}}}})
 	require.Contains(t, snapshot().contextView, "Context 0%", "projection reset drops stale usage")
 	require.Eventually(t, func() bool { return snapshot().active == 0 }, time.Second, time.Millisecond)
@@ -133,4 +141,72 @@ func TestContextUsageHydratesCanonicalRestoredSnapshotAndInertGeometry(t *testin
 	require.False(t, root.dialogMgr.Open())
 	require.False(t, root.isDragging)
 	require.Equal(t, before, root.editor.Value())
+}
+
+func TestActualProgramContextSurvivesStreamingPartialUsage(t *testing.T) {
+	root, _, _ := wallClockRoot(t, 120, 40)
+	root.storeContextUsage("profile", "root", runtime.Usage{ContextLength: 20, ContextLimit: 100})
+	root.contextBar.SetContextUsageDirect(20, 100)
+	program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
+	snapshot := func() shellSnapshot {
+		reply := make(chan shellSnapshot, 1)
+		program.Send(shellSnapshotMsg{reply: reply})
+		select {
+		case s := <-reply:
+			return s
+		case <-time.After(time.Second):
+			t.Fatal("stream snapshot timed out")
+			return shellSnapshot{}
+		}
+	}
+	send := func(event runtime.Event) { program.Send(messages.SessionRuntimeEventMsg{Event: event}) }
+	visible := func(s shellSnapshot) {
+		require.Contains(t, ansi.Strip(s.content), "Context ")
+		require.Equal(t, 116, ansi.StringWidth(s.contextView))
+		require.Contains(t, s.contextView, "▄")
+	}
+	send(runtime.StreamStarted("profile", "root"))
+	visible(snapshot())
+	require.Contains(t, snapshot().contextView, "Context 20%")
+	send(runtime.AgentChoice("root", "profile", "streaming before usage"))
+	send(runtime.AgentInfo("root", "test/model", "", "", 0))
+	send(runtime.NewTokenUsageEvent("profile", "root", nil))
+	send(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{OutputTokens: 3}))
+	require.Contains(t, snapshot().contextView, "Context 20%")
+	send(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 65}))
+	require.Eventually(t, func() bool {
+		s := snapshot()
+		visible(s)
+		return !strings.Contains(s.contextView, "Context 20%") && !strings.Contains(s.contextView, "Context 65%")
+	}, time.Second, time.Millisecond)
+	intermediate := snapshot()
+	send(runtime.NewTokenUsageEvent("profile", "helper", &runtime.Usage{ContextLength: 99, ContextLimit: 100}))
+	require.NotContains(t, snapshot().contextView, "Context 99%")
+	send(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 85, ContextLimit: 100}))
+	require.NotContains(t, snapshot().contextView, "Context 85%", "retarget must not snap")
+	send(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{Cost: 0.1}))
+	require.Eventually(t, func() bool { s := snapshot(); visible(s); return strings.Contains(s.contextView, "Context 85%") }, time.Second, time.Millisecond)
+	require.Greater(t, snapshot().ticks, intermediate.ticks)
+	send(runtime.StreamStopped("profile", "root", "completed"))
+	require.Eventually(t, func() bool { return snapshot().active == 0 }, time.Second, time.Millisecond)
+	settled := snapshot()
+	visible(settled)
+	require.Contains(t, settled.contextView, "Context 85%")
+	require.Never(t, func() bool { return snapshot().ticks != settled.ticks }, 80*time.Millisecond, time.Millisecond)
+}
+
+func TestContextUsagePartialMetadataAndExplicitZero(t *testing.T) {
+	root, _, _ := wallClockRoot(t, 120, 40)
+	defer root.ar.Stop()
+	root.storeContextUsage("profile", "root", runtime.Usage{ContextLength: 60, ContextLimit: 100})
+	root.trackContextUsage(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{OutputTokens: 5}), root.application.Session())
+	require.EqualValues(t, 60, root.contextUsage["profile"]["root"].ContextLength)
+	require.EqualValues(t, 100, root.contextUsage["profile"]["root"].ContextLimit)
+	root.trackContextUsage(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 0, ContextLimit: 100}), root.application.Session())
+	require.Zero(t, root.contextUsage["profile"]["root"].ContextLength, "a complete empty-window snapshot is authoritative")
+	root.trackContextUsage(runtime.NewTokenUsageEvent("profile", "root", &runtime.Usage{ContextLength: 25}), root.application.Session())
+	require.EqualValues(t, 25, root.contextUsage["profile"]["root"].ContextLength)
+	require.EqualValues(t, 100, root.contextUsage["profile"]["root"].ContextLimit)
+	root.trackContextUsage(runtime.AgentInfo("root", "test/model", "", "", 0), root.application.Session())
+	require.EqualValues(t, 100, root.contextUsage["profile"]["root"].ContextLimit, "unknown metadata does not clear a known window")
 }

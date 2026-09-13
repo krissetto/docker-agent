@@ -1364,8 +1364,8 @@ func (e *editor) SetSize(width, height int) tea.Cmd {
 	e.width = width
 	e.height = max(height, 1)
 
-	e.textarea.SetWidth(max(width, 10))
-	e.searchInput.SetWidth(max(width, 10))
+	e.textarea.SetWidth(max(width, 1))
+	e.searchInput.SetWidth(max(width, 1))
 	e.updateTextareaHeight()
 
 	if e.textarea.Width() != oldWidth && e.textarea.Height() == oldHeight {

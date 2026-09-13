@@ -144,7 +144,7 @@ func (m *Model) Update(msg tea.Msg) {
 }
 
 // View renders the bar as a single line of [blockFill] characters followed
-// by a "Context xx%" label. Each cell uses TabBg as its background (so the
+// by a "Context xx%" label. Each cell uses EditorBg as its background (so the
 // top half matches the editor) and the foreground color determines the bottom
 // half. The bar fills left to right: the solid portion uses a dim tint of the
 // fill color, then a short gradient ramps up to the full fill color so the
@@ -183,7 +183,7 @@ func (m *Model) View() string {
 	fillFg := fillColor(m.contextPercent)
 	trackFg := styles.Background
 	baseFg := blendColor(trackFg, fillFg, 1.0/float64(gradientLen+1))
-	bg := lipgloss.NewStyle().Background(styles.TabBg)
+	bg := lipgloss.NewStyle().Background(styles.EditorBg)
 
 	var sb strings.Builder
 	if solidWidth > 0 {

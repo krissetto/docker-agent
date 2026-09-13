@@ -717,3 +717,48 @@ func TestAllBuiltinThemes_HaveCoreColors(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyEditorBackgroundCompatibility(t *testing.T) {
+	t.Parallel()
+	base := DefaultTheme()
+	for _, tc := range []struct {
+		name     string
+		override ThemeColors
+		want     string
+	}{
+		{"empty", ThemeColors{}, base.Colors.EditorBg},
+		{"unrelated", ThemeColors{Accent: "#123456"}, base.Colors.EditorBg},
+		{"legacy tab", ThemeColors{TabBg: "#123456"}, "#123456"},
+		{"explicit editor", ThemeColors{TabBg: "#123456", EditorBg: "#234567"}, "#234567"},
+		{"editor only", ThemeColors{EditorBg: "#345678"}, "#345678"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := mergeTheme(base, &Theme{Colors: tc.override})
+			require.Equal(t, tc.want, merged.Colors.EditorBg)
+			require.Equal(t, base.Colors.Background, merged.Colors.Background)
+		})
+	}
+}
+
+func TestAbsentAyuRegistryAndLegacyFixtureResolution(t *testing.T) {
+	registry := newThemeRegistry()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	require.False(t, registry.IsBuiltinTheme("ayu-dark"))
+	_, err := registry.LoadTheme("ayu-dark")
+	require.ErrorContains(t, err, "not found")
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	ApplyTheme(nil)
+	require.Equal(t, DefaultThemeRef, CurrentTheme().Ref)
+	require.Equal(t, "#25252c", CurrentTheme().Colors.EditorBg)
+	// Synthetic legacy-theme values test resolution, not the unavailable user's palette.
+	require.NoError(t, registry.RegisterBuiltinThemes(fstest.MapFS{"themes/ayu-dark.yaml": {Data: []byte("name: Ayu fixture\ncolors:\n  tab_bg: '#123456'\n")}}))
+	theme, err := registry.LoadTheme("ayu-dark")
+	require.NoError(t, err)
+	ApplyTheme(theme)
+	require.Equal(t, "ayu-dark", CurrentTheme().Ref)
+	require.Equal(t, "#123456", theme.Colors.EditorBg)
+	require.Equal(t, TabBg, EditorStyle.GetBackground())
+	require.Equal(t, TabBg, SuggestionGhostStyle.GetBackground())
+}

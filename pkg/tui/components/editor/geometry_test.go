@@ -146,3 +146,14 @@ func TestEditorViewWidthIncludesMarginsExactlyOnceAfterResize(t *testing.T) {
 		}
 	}
 }
+
+func TestNarrowEditorHonorsAllocatedWidth(t *testing.T) {
+	for _, width := range []int{1, 2, 8, 10, 40} {
+		e := New(nil).(*editor)
+		e.SetSize(width, 1)
+		require.Equal(t, width, e.textarea.Width())
+		_, height := e.GetSize()
+		require.Equal(t, height, lipgloss.Height(e.View()), "placeholder must not wrap outside the allocation")
+		require.Equal(t, width+styles.EditorStyle.GetHorizontalFrameSize(), lipgloss.Width(e.View()))
+	}
+}

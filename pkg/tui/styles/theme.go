@@ -924,6 +924,9 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	}
 	if override.EditorBg != "" {
 		result.EditorBg = override.EditorBg
+	} else if override.TabBg != "" {
+		// Legacy themes used tab_bg for the editor before editor_bg existed.
+		result.EditorBg = override.TabBg
 	}
 	if override.CardBg != "" {
 		result.CardBg = override.CardBg

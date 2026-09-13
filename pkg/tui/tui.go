@@ -607,7 +607,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m.chatPage = initialChatPage
 
 	// Initialize status bar (pass m as help provider)
-	m.statusBar = statusbar.New(m)
+	m.statusBar = statusbar.New(m, statusbar.WithTitle(m.appName+" "+m.appVersion))
 
 	// Add the initial session to the supervisor. It borrows the run's
 	// runtime like every other tab: closing it must not tear that runtime
@@ -623,6 +623,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Initialize tab bar with current tabs
 	tabs, activeIdx := sv.GetTabs()
 	m.initialTabCmd = tea.Batch(tb.SetVisible(!m.leanMode), tb.SetTabs(tabs, activeIdx))
+	m.statusBar.SetShowNewTab(tb.Height() == 0)
 
 	return m
 }
@@ -1042,6 +1043,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.TabsUpdatedMsg:
 		prevHeight := m.tabBar.Height()
 		tabCmd := m.tabBar.SetTabs(msg.Tabs, msg.ActiveIdx)
+		m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
 		if m.tabBar.Height() != prevHeight {
 			cmd := m.resizeAll()
 			return m, tea.Batch(tabCmd, cmd)
@@ -2654,6 +2656,7 @@ func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 }
 
 const (
+	footerGapHeight      = 1
 	editorShrinkDelay    = 330 * time.Millisecond
 	editorShrinkDuration = animation.ShortDuration
 )
@@ -2685,7 +2688,17 @@ func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session)
 	switch event := event.(type) {
 	case *runtime.TokenUsageEvent:
 		if event.Usage != nil && event.SessionID != "" {
-			m.storeContextUsage(event.SessionID, event.AgentName, *event.Usage)
+			usage := *event.Usage
+			previous := m.contextUsage[event.SessionID][event.AgentName]
+			// Streaming/harness accounting can omit context metadata; only a
+			// session reset clears the last known context window.
+			if usage.ContextLength <= 0 && usage.ContextLimit <= 0 {
+				usage.ContextLength = previous.ContextLength
+			}
+			if usage.ContextLimit <= 0 {
+				usage.ContextLimit = previous.ContextLimit
+			}
+			m.storeContextUsage(event.SessionID, event.AgentName, usage)
 		}
 	case *runtime.AgentInfoEvent:
 		if sess == nil {
@@ -2696,14 +2709,16 @@ func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session)
 			usage.InputTokens, usage.OutputTokens = sess.Usage()
 			usage.ContextLength = usage.InputTokens + usage.OutputTokens
 		}
-		usage.ContextLimit = event.ContextLimit
+		if event.ContextLimit > 0 {
+			usage.ContextLimit = event.ContextLimit
+		}
 		m.storeContextUsage(sess.ID, event.AgentName, usage)
 	case *app.SessionResetEvent:
 		sessionID, agentName := event.GetSessionID(), event.Snapshot.Status.AgentName
 		if agentName == "" && sessionID == m.contextSessionID {
 			agentName = m.contextAgentName
 		}
-		usage := m.contextUsage[sessionID][agentName]
+		usage := runtime.Usage{ContextLimit: m.contextUsage[sessionID][agentName].ContextLimit}
 		delete(m.contextUsage, sessionID)
 		if restored := event.Snapshot.Session; restored != nil {
 			usage.InputTokens, usage.OutputTokens = restored.Usage()
@@ -2732,13 +2747,17 @@ func (m *appModel) syncContextBar() tea.Cmd {
 	}
 	m.ensureContextBar()
 	sessionID, agentName := m.application.Session().ID, m.sessionState.CurrentAgentName()
-	usage := m.contextUsage[sessionID][agentName]
+	usage, known := m.contextUsage[sessionID][agentName]
 	if sessionID != m.contextSessionID || agentName != m.contextAgentName {
-		// Never interpolate from another session/agent's percentage.
-		m.contextBar.Cancel()
-		m.contextBar.SetContextUsageDirect(usage.ContextLength, usage.ContextLimit)
+		initial := m.contextSessionID == ""
 		m.contextSessionID, m.contextAgentName = sessionID, agentName
-		return nil
+		if initial || !known || usage.ContextLimit <= 0 {
+			m.contextBar.Cancel()
+			m.contextBar.SetContextUsageDirect(usage.ContextLength, usage.ContextLimit)
+			return nil
+		}
+		// The target belongs to the selected owner; only the displayed
+		// position carries across tabs so rapid switches remain continuous.
 	}
 	return m.contextBar.SetContextUsage(usage.ContextLength, usage.ContextLimit)
 }
@@ -2750,6 +2769,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	width, height := m.width, m.height
 	if !m.leanMode {
 		m.ensureContextBar()
+		m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
 		m.contextBar.SetWidth(max(0, width-2*styles.EditorHMargin))
 		cmds = append(cmds, m.syncContextBar())
 	}
@@ -2762,7 +2782,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 			chromeHeight = 1 // working/pause indicator line
 		}
 	} else {
-		chromeHeight = m.tabBar.Height() + m.statusBar.Height() + 1 + contextbar.Height // resize handle and context strip
+		chromeHeight = m.tabBar.Height() + m.statusBar.Height() + 1 + contextbar.Height + footerGapHeight // resize handle, context strip and footer gap
 	}
 
 	// Calculate editor height
@@ -2806,7 +2826,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 
 	m.tour.SetSize(width, height, m.contentHeight)
 
-	m.completions.SetEditorBottom(editorHeight + contextbar.Height + m.statusBar.Height())
+	m.completions.SetEditorBottom(editorHeight + contextbar.Height + footerGapHeight + m.statusBar.Height())
 	m.completions.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
 	m.notification.SetSize(width, height)
@@ -2885,12 +2905,7 @@ func (m *appModel) AllBindings() []key.Binding {
 
 // Bindings returns primary hints; the help dialog retains the complete bindings.
 func (m *appModel) Bindings() []key.Binding {
-	keys := core.GetKeys()
-	if m.leanMode {
-		return []key.Binding{keys.Quit}
-	}
-
-	return []key.Binding{keys.Commands}
+	return []key.Binding{core.GetKeys().Quit}
 }
 
 // handleKeyPress handles all keyboard input with proper priority routing.
@@ -3261,8 +3276,8 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m, tea.Batch(m.updateEditorCmd(adjustedMsg), m.editor.Focus())
 
 	case regionStatusBar:
-		if msg.Button == tea.MouseLeft && m.statusBar.ClickedCommands(msg.X) {
-			return m, core.CmdHandler(dialog.OpenDialogMsg{Model: dialog.NewCommandPaletteDialog(m.commandCategories())})
+		if msg.Button == tea.MouseLeft && m.statusBar.ClickedNewTab(msg.X) {
+			return m.handleSpawnSession("")
 		}
 	}
 
@@ -3410,6 +3425,7 @@ const (
 	regionContextBar
 	regionStatusBar
 	regionContextUsage
+	regionFooterGap
 )
 
 // hitTestRegion determines which layout region a Y coordinate falls in.
@@ -3431,6 +3447,9 @@ func (m *appModel) hitTestRegion(y int) layoutRegion {
 		}
 		if y < m.editorTop()+editorHeight+contextbar.Height {
 			return regionContextUsage
+		}
+		if y < m.editorTop()+editorHeight+contextbar.Height+footerGapHeight {
+			return regionFooterGap
 		}
 		return regionStatusBar
 	}
@@ -3486,7 +3505,7 @@ func (m *appModel) editorTop() int {
 func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	// Calculate target lines from drag position
 	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
-	targetLines := m.height - y - editorPadding - m.tabBar.Height() - m.editor.BannerHeight() - m.statusBar.Height() - contextbar.Height
+	targetLines := m.height - y - editorPadding - m.tabBar.Height() - m.editor.BannerHeight() - m.statusBar.Height() - contextbar.Height - footerGapHeight
 	minLines := 4
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
@@ -3674,7 +3693,7 @@ func (m *appModel) composeView() tea.View {
 		viewParts = append(viewParts, lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(m.contextBar.View()))
 	}
 	if statusBarView != "" {
-		viewParts = append(viewParts, statusBarView)
+		viewParts = append(viewParts, "", statusBarView)
 	}
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
 

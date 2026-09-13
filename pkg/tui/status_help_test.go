@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/key"
@@ -19,8 +20,8 @@ func TestPrimaryHelpKeepsCompleteKeyboardHelp(t *testing.T) {
 		m.keyboardEnhancementsSupported = enhanced
 		bindings := m.Bindings()
 		require.Len(t, bindings, 1)
-		require.Equal(t, "commands", bindings[0].Help().Desc)
-		require.Equal(t, []string{"ctrl+k"}, bindings[0].Keys())
+		require.Equal(t, "quit", bindings[0].Help().Desc)
+		require.Equal(t, []string{"ctrl+c"}, bindings[0].Keys())
 		nl := "ctrl+j"
 		if enhanced {
 			nl = "shift+enter"
@@ -89,7 +90,7 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 			msg = tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift}
 		}
 		for _, hint := range m.Bindings() {
-			require.False(t, key.Matches(msg, hint), "newline is absent from the command-only footer")
+			require.False(t, key.Matches(msg, hint), "newline is absent from the quit-only footer")
 		}
 		var newline key.Binding
 		for _, binding := range m.AllBindings() {
@@ -101,4 +102,26 @@ func TestHiddenFooterShortcutsStillDispatch(t *testing.T) {
 		_, _ = m.Update(msg)
 		require.Equal(t, "first\n", m.editor.Value())
 	}
+}
+
+func TestRootFooterNewTabPlacementAndDispatch(t *testing.T) {
+	m, _, _ := wallClockRoot(t, 120, 40)
+	defer m.ar.Stop()
+	defer m.dialogMgr.Cleanup()
+	footer := ansi.Strip(m.statusBar.View())
+	require.True(t, strings.HasPrefix(footer, " Ctrl+c quit"))
+	require.Contains(t, footer, "+ new tab")
+	require.True(t, strings.HasSuffix(footer, m.appName+" "+m.appVersion+" "))
+	require.Zero(t, m.tabBar.Height())
+	x := strings.Index(footer, "+ new tab")
+	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: m.height - 1, Button: tea.MouseLeft})
+	_, opened := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, opened, "footer dispatches the existing new-session directory picker")
+	_, cmd = m.Update(tea.MouseClickMsg{X: x, Y: m.height - 2, Button: tea.MouseLeft})
+	require.Nil(t, cmd, "footer gap does not reuse the button's horizontal hit region")
+	_, _ = m.Update(messages.TabsUpdatedMsg{Tabs: layoutTabs(), ActiveIdx: 0})
+	require.Positive(t, m.tabBar.Height())
+	require.NotContains(t, ansi.Strip(m.statusBar.View()), "+ new tab")
+	require.Contains(t, ansi.Strip(m.tabBar.View()), "+")
+	require.False(t, m.statusBar.ClickedNewTab(x), "hidden footer button has no stale hit target")
 }
