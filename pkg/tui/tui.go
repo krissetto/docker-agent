@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -207,6 +208,13 @@ type appModel struct {
 	viewTabGeneration        uint64
 	viewChatGeneration       uint64
 	viewSidebarGeneration    uint64
+	viewPaneGenerations      map[string]uint64
+	panes                    splitLayout
+	paneGeometry             splitGeometry
+	paneBounds               splitRect
+	paneShell                chat.SplitShellGeometry
+	paneGesture              *panePointerTransaction
+	paneHydration            *paneHydrationTransaction
 
 	// Window state
 	wWidth, wHeight int
@@ -698,6 +706,9 @@ func (m *appModel) reapplyKeyboardEnhancements() {
 
 func (m *appModel) commandCategories() []commands.Category {
 	categories := m.buildCommandCategories(m.ctx(), m)
+	if !m.leanMode {
+		categories = append([]commands.Category{paneCommandCategory()}, categories...)
+	}
 	if len(m.disabledCommands) == 0 {
 		return categories
 	}
@@ -757,22 +768,29 @@ func (m *appModel) editorOpts() []editor.Option {
 // the given app and stores them in the per-session maps under tabID. The active
 // convenience pointers (m.chatPage, m.sessionState, m.editor) are also updated.
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
+	m.createSessionComponents(tabID, a, sess)
+	m.application = a
+	m.sessionState = m.sessionStates[tabID]
+	m.chatPage = m.chatPages[tabID]
+	m.editor = m.editors[tabID]
+}
+
+// createSessionComponents builds the canonical components without changing focus.
+// Command closures retain the live root resolver, as on normal tab activation;
+// this does not create a supervisor, execution owner, or additional observer.
+func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *session.Session) {
 	if old := m.chatPages[tabID]; old != nil {
 		chat.Cleanup(old)
 	}
 	ss := service.NewSessionState(sess)
 	cp := chat.New(m.ar, m.ctx(), a, ss, m.chatPageOpts()...)
 	cp.SetRoutingID(tabID)
-	ed := editor.New(m.history, m.editorOpts()...)
-
-	m.chatPages[tabID] = cp
-	m.sessionStates[tabID] = ss
-	m.editors[tabID] = ed
-
-	m.application = a
-	m.sessionState = ss
-	m.chatPage = cp
-	m.editor = ed
+	opts := []editor.Option{editor.WithCompletions(completions.NewCommandCompletion(m.commandCategories()), completions.NewFileCompletion(m.ctx()))}
+	if a.IsReadOnly() {
+		opts = append(opts, editor.WithReadOnly())
+	}
+	ed := editor.New(m.history, opts...)
+	m.chatPages[tabID], m.sessionStates[tabID], m.editors[tabID] = cp, ss, ed
 }
 
 // initAndFocusComponents returns a batch of commands that initializes and focuses
@@ -968,13 +986,14 @@ func tabVisualGeneration(tabBar *tabbar.TabBar) uint64 {
 
 func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	beforeVisual := m.chatPage.VisualGeneration()
+	beforePanesValid := m.visiblePaneCacheValid()
 	beforeSidebarVisual := sidebarVisualGeneration(m.chatPage)
 	beforeTabVisual := tabVisualGeneration(m.tabBar)
 	beforeResizeHover := m.isHoveringHandle
 	beforeEditorHeight := m.editorHeight
 	canRestore := m.canRestorePointerCache(msg)
 	defer func() {
-		if canRestore && (m.chatPage.VisualGeneration() != beforeVisual ||
+		if canRestore && ((!m.visiblePaneCacheValid() && beforePanesValid) || m.chatPage.VisualGeneration() != beforeVisual ||
 			sidebarVisualGeneration(m.chatPage) != beforeSidebarVisual ||
 			tabVisualGeneration(m.tabBar) != beforeTabVisual ||
 			m.isHoveringHandle != beforeResizeHover || m.editorHeight != beforeEditorHeight) {
@@ -991,7 +1010,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			messages.CloseTabMsg, messages.ReorderTabMsg,
 			messages.OpenSubagentMsg,
 			messages.ToggleSidebarMsg, messages.OpenSettingsDialogMsg,
-			messages.ShowPlanBrowserMsg:
+			messages.ShowPlanBrowserMsg, messages.OpenPanesMsg, messages.PaneActionMsg:
 			return m, nil
 		}
 	}
@@ -1022,7 +1041,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tickPaused {
 			return m, nil
 		}
-		cmds := []tea.Cmd{m.updateChatCmd(msg), m.updateDialogCmd(msg), m.tickResponsePrompt()}
+		cmds := []tea.Cmd{m.tickVisiblePanes(msg), m.updateDialogCmd(msg), m.tickResponsePrompt()}
 		if m.messageBar != nil {
 			cmds = append(cmds, m.messageBar.Update(msg))
 			if m.messageBar.TakeVisualDirty() {
@@ -1071,7 +1090,22 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Tab management ---
 
+	case paneHydratedMsg:
+		cmd := m.finishPaneHydration(msg)
+		return m, cmd
+
+	case messages.OpenPanesMsg:
+		cmd := m.openPanes()
+		return m, cmd
+
+	case messages.PaneActionMsg:
+		cmd := m.handlePaneAction(msg)
+		return m, cmd
+
 	case messages.TabsUpdatedMsg:
+		if (m.paneGesture != nil && !slices.Equal(m.paneGesture.order, tabOrderIDs(msg.Tabs))) || (m.paneHydration != nil && !slices.Equal(m.paneHydration.order, tabOrderIDs(msg.Tabs))) {
+			m.cancelPaneGesture()
+		}
 		prevHeight := m.tabBar.Height()
 		tabCmd := m.setTabs(msg.Tabs, msg.ActiveIdx)
 		if m.tabBar.Height() != prevHeight {
@@ -1156,6 +1190,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.BlurMsg:
+		m.cancelPaneGesture()
 		m.focused = false
 		m.tickPaused = true
 		m.isDragging, m.isHoveringHandle = false, false
@@ -1745,6 +1780,9 @@ func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	if generation, ok := m.supervisor.RouteGeneration(msg.SessionID); !ok || (msg.RouteGeneration != 0 && msg.RouteGeneration != generation) {
+		if send, ok := msg.Inner.(messages.SendMsg); ok {
+			return m, notification.ErrorCmd("Message was not sent: originating session closed or replaced. Unsent draft: " + send.Content)
+		}
 		return m, nil
 	}
 	activeID := m.supervisor.ActiveID()
@@ -1761,7 +1799,8 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 
-	presentationCmd := chat.SetSidebarPresentationActive(chatPage, false)
+	visible := m.paneVisible(msg.SessionID)
+	presentationCmd := tea.Batch(setPaneVisible(chatPage, visible), chat.SetSidebarPresentationActive(chatPage, false))
 	inner := msg.Inner
 	var runtimeEvent runtime.Event
 	if bridged, ok := inner.(messages.SessionRuntimeEventMsg); ok {
@@ -1798,9 +1837,20 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	// except its routed one-shot timers: presentation deadlines (e.g. the sidebar's transfer box)
 	// must keep running while the tab is hidden, and their expiry lands back here as a RoutedMsg
 	// for this page. Applying such a timer arms no new ones, so this cannot loop.
-	updated, _ := chatPage.Update(msg.Inner)
+	updated, pageCmd := chatPage.Update(msg.Inner)
 	page := updated.(chat.Page)
 	m.chatPages[msg.SessionID] = page
+	_, sending := msg.Inner.(messages.SendMsg)
+	if visible || sending {
+		if sending && m.history != nil {
+			send := msg.Inner.(messages.SendMsg)
+			if !send.BypassQueue {
+				_ = m.history.Add(send.Content)
+			}
+		}
+		return m, tea.Batch(presentationCmd, m.routePaneCmd(msg.SessionID, pageCmd))
+	}
+	presentationCmd = tea.Batch(presentationCmd, setPaneVisible(page, false))
 
 	// Shared plans are scope-global: a mutation from a background tab's agent
 	// must still live-refresh the plan dialogs open on the active tab.
@@ -2019,12 +2069,20 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 // current shared SessionRuntime (nil cleanup); Supervisor preserves ownership in
 // the latter case.
 func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Session) (tea.Model, tea.Cmd) {
-	activeID := m.supervisor.ActiveID()
+	id := m.supervisor.ActiveID()
+	a := m.replaceSessionForTab(ctx, id, sess)
+	m.initSessionComponents(id, a, sess)
+	cmd := m.initAndFocusComponents()
+	return m, cmd
+}
 
-	slog.DebugContext(ctx, "Replacing empty session in-place", "tab_id", activeID, "loaded_session", sess.ID)
+// replaceSessionForTab retains the existing working-directory and borrowed
+// runtime ownership rules, independently of the shared composer selection.
+func (m *appModel) replaceSessionForTab(ctx context.Context, tabID string, sess *session.Session) *app.App {
+	slog.DebugContext(ctx, "Replacing empty session in-place", "tab_id", tabID, "loaded_session", sess.ID)
 
 	// Cleanup old editor for the active session
-	if ed, ok := m.editors[activeID]; ok {
+	if ed, ok := m.editors[tabID]; ok {
 		ed.Cleanup()
 	}
 
@@ -2032,7 +2090,8 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 	// App. Local shared-runtime spawners return nil cleanup, explicitly
 	// transferring the current runner's ownership; remote/distinct spawners may
 	// return their own cleanup and retire the old backend.
-	runner := m.supervisor.GetRunner(activeID)
+	runner := m.supervisor.GetRunner(tabID)
+	application := runner.App
 	sessWorkingDir := sess.WorkingDir
 	if sessWorkingDir != "" && runner != nil && sessWorkingDir != runner.WorkingDir && m.supervisor.Spawner() != nil {
 		spawned, err := m.supervisor.Spawner()(ctx, sessWorkingDir)
@@ -2043,12 +2102,12 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 				}
 			}
 			slog.DebugContext(ctx, "Respawning runtime for working dir mismatch",
-				"tab_id", activeID,
+				"tab_id", tabID,
 				"old_dir", runner.WorkingDir,
 				"new_dir", sessWorkingDir,
 				"owns_runtime", spawned.Ownership == RuntimeOwned)
-			m.supervisor.ReplaceRunnerApp(ctx, activeID, spawned, sessWorkingDir)
-			m.application = spawned.App
+			m.supervisor.ReplaceRunnerApp(ctx, tabID, spawned, sessWorkingDir)
+			application = spawned.App
 		} else {
 			slog.WarnContext(ctx, "Failed to respawn runtime for working dir, using existing",
 				"working_dir", sessWorkingDir, "error", err)
@@ -2056,16 +2115,14 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 	}
 
 	// Replace the session in the app and rebuild all per-session components.
-	m.application.ReplaceSession(ctx, sess)
-	m.supervisor.RefreshProjection(ctx, activeID)
-	m.initSessionComponents(activeID, m.application, sess)
+	application.ReplaceSession(ctx, sess)
+	m.supervisor.RefreshProjection(ctx, tabID)
 
 	if sess.Title != "" {
-		m.supervisor.SeedTitle(activeID, sess.Title)
+		m.supervisor.SeedTitle(tabID, sess.Title)
 	}
 
-	cmd := m.initAndFocusComponents()
-	return m, cmd
+	return application
 }
 
 // handleClearSession resets the current tab by creating a fresh session
@@ -2280,6 +2337,7 @@ func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime
 // Existing chat pages and editors are preserved (not recreated) so that in-flight streaming
 // content and draft text are retained when switching back to a tab.
 func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
+	previousPaneID := m.paneFocus()
 	// If a background dialog (e.g. pending elicitation) is open on the
 	// outgoing tab, capture both its originating event and the live dialog
 	// instance before the supervisor flips activeID. We only commit the
@@ -2322,6 +2380,9 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		}
 		return m, notification.ErrorCmd("Session not found")
 	}
+
+	m.cancelPaneGesture()
+	m.selectPaneTab(previousPaneID, sessionID)
 
 	// Now that the switch is committed, finalize the dialog hand-off.
 	m.modelPickerGeneration++
@@ -2409,7 +2470,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, m.editor.Focus(), m.resizeAll())
 	} else {
-		cmds = append(cmds, m.resizeAll(), m.chatPage.ScrollToBottom(), m.editor.Focus())
+		cmds = append(cmds, m.resizeAll(), m.editor.Focus())
 	}
 
 	if m.chatPage.IsWorking() {
@@ -2679,6 +2740,10 @@ func (m *appModel) tabHasRunningSubagents(sessionID string) bool {
 }
 
 func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
+	m.cancelPaneGesture()
+	if next, ok := m.panes.Remove(sessionID); ok {
+		m.panes = next
+	}
 	if m.tabHasRunningSubagents(sessionID) || len(m.descendantAttachedTabs(sessionID)) > 0 {
 		m.supervisor.RetainCleanupUntilShutdown(sessionID)
 	}
@@ -2743,11 +2808,15 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 		return model, tea.Batch(append(cmds, cmd)...)
 	}
 
+	if m.panesEnabled() {
+		cmds = append(cmds, m.resizeAll())
+	}
 	return m, tea.Batch(cmds...)
 }
 
 // handleWindowResize handles window resize.
 func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
+	m.cancelPaneGesture()
 	m.wWidth, m.wHeight = width, height
 
 	tabCmd := m.tabBar.SetWidth(tabFrameWidth(width))
@@ -2955,7 +3024,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 
 	// Content gets remaining space
 	m.contentHeight = max(1, height-chromeHeight-editorRenderedHeight)
-	cmds = append(cmds, m.chatPage.SetSize(width, m.contentHeight))
+	cmds = append(cmds, m.resizePanes())
 
 	if m.leanMode {
 		return tea.Batch(cmds...)
@@ -2986,6 +3055,9 @@ func (m *appModel) Bindings() []key.Binding {
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea.Cmd) {
+	if gestureCmd, handled := m.handlePaneGestureKey(msg); handled {
+		return m, gestureCmd
+	}
 	if msg.String() != "esc" {
 		defer func() { cmd = tea.Batch(cmd, m.clearResponsePrompt()) }()
 	}
@@ -2997,7 +3069,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		switch msg.String() {
 		case "enter":
 			model, cmd := m.handleStopSpeak()
-			sendCmd := m.editor.SendContent()
+			sendCmd := m.stampEditorSend(m.editor.SendContent())
 			return model, tea.Batch(cmd, sendCmd)
 
 		case "esc":
@@ -3282,6 +3354,9 @@ func sidebarVisualGeneration(page chat.Page) uint64 {
 }
 
 func (m *appModel) canRestorePointerCache(msg tea.Msg) bool {
+	if m.paneGesture != nil {
+		return false
+	}
 	if !m.viewCacheValid || m.tabBar == nil || m.chatPage == nil || m.dialogMgr == nil || m.dialogMgr.Open() ||
 		m.chatPage.IsSelecting() || m.notification.Open() {
 		return false
@@ -3352,6 +3427,9 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m.forwardDialog(msg)
 	}
 
+	if m.beginPaneGesture(msg) {
+		return m, nil
+	}
 	region := m.hitTestRegion(msg.Y)
 	if m.messageBar != nil && region != regionMessageBar {
 		m.messageBar.SetFocused(false)
@@ -3370,6 +3448,9 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		adjusted.Y = msg.Y - (m.height - m.messageBarHeight())
 		return m, m.messageBar.Update(adjusted)
 	case regionContent:
+		if m.panesEnabled() {
+			return m.forwardPanePointer(msg, msg.X, msg.Y, true)
+		}
 		return m.forwardChat(msg)
 
 	case regionResizeHandle:
@@ -3422,6 +3503,22 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.paneGesture != nil {
+		cmd := m.movePaneGesture(msg)
+		return m, cmd
+	}
+	if m.dialogMgr.Open() {
+		var hoverCmd tea.Cmd
+		if !m.leanMode && !m.dialogMgr.Closing() && m.dialogMgr.TopIsBackground() {
+			y := -1
+			if m.hitTestRegion(msg.Y) == regionTabBar {
+				y = msg.Y - m.contentHeight - 1
+			}
+			hoverCmd = m.tabBar.UpdateHover(msg.X-tabFrameOrigin(), y)
+		}
+		dialogCmd := m.updateDialogCmd(msg)
+		return m, tea.Batch(hoverCmd, dialogCmd)
+	}
 	var cmds []tea.Cmd
 	batchWith := func(cmd tea.Cmd) tea.Cmd {
 		if cmd != nil {
@@ -3488,6 +3585,9 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 	m.isHoveringHandle = region == regionResizeHandle
 	switch region {
 	case regionContent:
+		if m.panesEnabled() {
+			return m.forwardPanePointer(msg, msg.X, msg.Y, false)
+		}
 		model, cmd := m.forwardChat(msg)
 		return model, batchWith(cmd)
 	case regionEditor:
@@ -3501,6 +3601,10 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 
 // handleMouseRelease routes mouse release events with adjusted coordinates.
 func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.paneGesture != nil {
+		cmd := m.releasePaneGesture(msg)
+		return m, cmd
+	}
 	if m.isDragging {
 		m.isDragging = false
 		return m, nil
@@ -3533,6 +3637,9 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 	region := m.hitTestRegion(msg.Y)
 	switch region {
 	case regionContent:
+		if m.panesEnabled() {
+			return m.forwardPanePointer(msg, msg.X, msg.Y, false)
+		}
 		return m.forwardChat(msg)
 	case regionEditor:
 		adjustedMsg := msg
@@ -3562,6 +3669,9 @@ func (m *appModel) handleWheelCoalesced(msg messages.WheelCoalescedMsg) (tea.Mod
 		}
 		return m, m.tabBar.Update(messages.WheelCoalescedMsg{Delta: msg.Delta, X: msg.X - tabFrameOrigin(), Y: msg.Y - m.contentHeight - 1})
 	case regionContent:
+		if m.panesEnabled() {
+			return m.forwardPanePointer(msg, msg.X, msg.Y, false)
+		}
 		return m.forwardChat(msg)
 	case regionEditor:
 		m.editor.ScrollByWheel(msg.Delta)
@@ -3785,7 +3895,7 @@ func (m *appModel) View() tea.View {
 		m.viewAgentColorGeneration == styles.AgentColorGeneration() &&
 		m.viewTabGeneration == tabVisualGeneration(m.tabBar) &&
 		m.viewChatGeneration == chatVisualGeneration(m.chatPage) &&
-		m.viewSidebarGeneration == sidebarVisualGeneration(m.chatPage) {
+		m.viewSidebarGeneration == sidebarVisualGeneration(m.chatPage) && m.visiblePaneCacheValid() {
 		return m.viewCache
 	}
 	view := m.composeView()
@@ -3794,6 +3904,7 @@ func (m *appModel) View() tea.View {
 	m.viewTabGeneration = tabVisualGeneration(m.tabBar)
 	m.viewChatGeneration = chatVisualGeneration(m.chatPage)
 	m.viewSidebarGeneration = sidebarVisualGeneration(m.chatPage)
+	m.cachePaneGenerations()
 	m.viewCache = view
 	m.viewCacheValid = true
 	return view
@@ -3819,7 +3930,12 @@ func (m *appModel) composeView() tea.View {
 	}
 
 	// Content area (messages + sidebar) -- swaps per tab
-	contentView := m.chatPage.View()
+	var contentView string
+	if m.panesEnabled() {
+		contentView = m.composePanes()
+	} else {
+		contentView = m.chatPage.View()
+	}
 
 	// Lean mode: editor appears right after the last message, with empty
 	// space pushed to the top via bottom-alignment.
@@ -3872,7 +3988,7 @@ func (m *appModel) composeView() tea.View {
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
 
 	// Handle overlays
-	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active() || m.tabBar.HasFloatingOverlay()
+	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open() || m.tour.Active() || m.tabBar.HasFloatingOverlay() || m.paneGesture != nil || m.paneHydration != nil
 
 	if hasOverlays {
 		baseLayer := lipgloss.NewLayer(baseView)
@@ -3885,7 +4001,13 @@ func (m *appModel) composeView() tea.View {
 			allLayers = append(allLayers, tourLayer)
 		}
 
-		if drag := m.tabBar.GetDragLayerInfo(tabFrameWidth(m.width), m.contentHeight+1); drag != nil {
+		if m.paneHydration != nil && !m.dialogMgr.Open() {
+			allLayers = append(allLayers, lipgloss.NewLayer(paneClipped("Loading session for pane… (Esc cancels)", m.width, 1)).Y(max(0, m.contentHeight-1)))
+		}
+		if preview := m.paneGestureLayer(); preview != nil {
+			allLayers = append(allLayers, preview)
+		}
+		if drag := m.tabBar.GetDragLayerInfo(tabFrameWidth(m.width), m.contentHeight+1); drag != nil && !m.dialogMgr.Open() {
 			allLayers = append(allLayers, lipgloss.NewLayer(drag.Content).X(drag.X+tabFrameOrigin()).Y(drag.Y))
 		}
 		if m.dialogMgr.Open() {

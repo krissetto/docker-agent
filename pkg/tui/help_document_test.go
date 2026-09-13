@@ -121,6 +121,9 @@ type helpProgramState struct {
 	inline, title, closing       bool
 	topView, content, savedFirst string
 	sent                         []messages.SendMsg
+	sentOrigins                  []messages.RoutedMsg
+	activeID                     string
+	routeGeneration              uint64
 	commits                      []messagelist.InlineEditCommittedMsg
 	tabs                         int
 	contentHeight                int
@@ -133,6 +136,7 @@ type helpProgramModel struct {
 	root               *appModel
 	captureSubmissions bool
 	sent               []messages.SendMsg
+	sentOrigins        []messages.RoutedMsg
 	commits            []messagelist.InlineEditCommittedMsg
 }
 
@@ -141,6 +145,18 @@ func (m *helpProgramModel) View() tea.View { return m.root.View() }
 func (m *helpProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.captureSubmissions {
 		switch value := msg.(type) {
+		case messages.RoutedMsg:
+			// Accepted composer submissions now retain their canonical origin.
+			// Observe only valid sends for this fixture's active owner; all
+			// other routed messages still exercise the production dispatcher.
+			if send, ok := value.Inner.(messages.SendMsg); ok {
+				generation, exists := m.root.supervisor.RouteGeneration(value.SessionID)
+				if exists && value.SessionID == m.root.supervisor.ActiveID() && value.RouteGeneration == generation {
+					m.sent = append(m.sent, send)
+					m.sentOrigins = append(m.sentOrigins, value)
+					return m, nil
+				}
+			}
 		case messages.SendMsg:
 			m.sent = append(m.sent, value)
 			return m, nil
@@ -162,7 +178,9 @@ func (m *helpProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if page, ok := m.root.chatPage.(interface{ SidebarView() string }); ok {
 			sidebarView = page.SidebarView()
 		}
-		query.reply <- helpProgramState{contentHeight: m.root.contentHeight, sidebarView: sidebarView, savedFirst: savedFirst, sent: append([]messages.SendMsg(nil), m.sent...), commits: append([]messagelist.InlineEditCommittedMsg(nil), m.commits...), topView: topView, content: m.root.View().Content, tabs: m.root.supervisor.Count(), doc: m.root.helpDocument(), draft: m.root.editor.Value(), top: m.root.dialogMgr.TopDialog(), layers: len(m.root.dialogMgr.GetLayers()), inline: m.root.chatPage.IsInlineEditing(), title: m.root.chatPage.IsTitleEditing(), closing: m.root.dialogMgr.Closing(), sidebarCollapsed: m.root.chatPage.GetSidebarSettings().Collapsed, focus: m.root.focusedPanel}
+		activeID := m.root.supervisor.ActiveID()
+		generation, _ := m.root.supervisor.RouteGeneration(activeID)
+		query.reply <- helpProgramState{activeID: activeID, routeGeneration: generation, sentOrigins: append([]messages.RoutedMsg(nil), m.sentOrigins...), contentHeight: m.root.contentHeight, sidebarView: sidebarView, savedFirst: savedFirst, sent: append([]messages.SendMsg(nil), m.sent...), commits: append([]messagelist.InlineEditCommittedMsg(nil), m.commits...), topView: topView, content: m.root.View().Content, tabs: m.root.supervisor.Count(), doc: m.root.helpDocument(), draft: m.root.editor.Value(), top: m.root.dialogMgr.TopDialog(), layers: len(m.root.dialogMgr.GetLayers()), inline: m.root.chatPage.IsInlineEditing(), title: m.root.chatPage.IsTitleEditing(), closing: m.root.dialogMgr.Closing(), sidebarCollapsed: m.root.chatPage.GetSidebarSettings().Collapsed, focus: m.root.focusedPanel}
 		return m, nil
 	}
 	_, cmd := m.root.Update(msg)
@@ -406,8 +424,13 @@ func TestActualProgramEnhancedNewlineAndConfiguredShiftEnterOwnership(t *testing
 				require.Equal(t, "first\n\n", helpProgramSnapshot(t, program).draft)
 			case "editor_send":
 				require.Eventually(t, func() bool { return len(helpProgramSnapshot(t, program).sent) == 1 }, time.Second, time.Millisecond)
-				require.Equal(t, "first\n", helpProgramSnapshot(t, program).sent[0].Content)
-				require.Empty(t, helpProgramSnapshot(t, program).draft)
+				submitted := helpProgramSnapshot(t, program)
+				require.Equal(t, "first\n", submitted.sent[0].Content)
+				require.Len(t, submitted.sentOrigins, 1, "configured send is captured once with its canonical envelope")
+				require.Equal(t, submitted.activeID, submitted.sentOrigins[0].SessionID)
+				require.Equal(t, submitted.routeGeneration, submitted.sentOrigins[0].RouteGeneration)
+				require.Positive(t, submitted.routeGeneration)
+				require.Empty(t, submitted.draft)
 				program.Send(messages.EditUserMessageMsg{MsgIndex: 0, SessionPosition: 0, OriginalContent: "INLINE ORIGINAL"})
 				require.Eventually(t, func() bool { return helpProgramSnapshot(t, program).inline }, time.Second, time.Millisecond)
 				require.NotContains(t, helpKeys(helpProgramSnapshot(t, program).doc.Current, "inline.newline"), "shift+enter")

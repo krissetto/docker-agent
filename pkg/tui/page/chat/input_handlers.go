@@ -25,7 +25,7 @@ import (
 // Returns the updated model and command. All key presses are handled (forwarded to messages if no match).
 func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	// When editing title, route keypresses to the sidebar
-	if p.sidebar.IsEditingTitle() {
+	if p.sidebarInteractive() && p.sidebar.IsEditingTitle() {
 		switch msg.Key().Code {
 		case tea.KeyEnter:
 			newTitle := p.sidebar.CommitTitleEdit()
@@ -306,9 +306,11 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 		p.messages = messagesModel.(messages.Model)
 		cmds = append(cmds, messagesCmd)
 
-		sidebarModel, sidebarCmd := p.sidebar.Update(msg)
-		p.sidebar = sidebarModel.(sidebar.Model)
-		cmds = append(cmds, sidebarCmd)
+		if p.sidebarInteractive() {
+			sidebarModel, sidebarCmd := p.sidebar.Update(msg)
+			p.sidebar = sidebarModel.(sidebar.Model)
+			cmds = append(cmds, sidebarCmd)
+		}
 		if p.messages.IsScrollbarDragging() {
 			cmds = append(cmds, p.sidebar.ClearSubagentHover())
 		}
@@ -346,16 +348,18 @@ func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, te
 	p.messages = messagesModel.(messages.Model)
 	cmds = append(cmds, messagesCmd)
 
-	sidebarModel, sidebarCmd := p.sidebar.Update(msg)
-	p.sidebar = sidebarModel.(sidebar.Model)
-	cmds = append(cmds, sidebarCmd)
+	if p.sidebarInteractive() {
+		sidebarModel, sidebarCmd := p.sidebar.Update(msg)
+		p.sidebar = sidebarModel.(sidebar.Model)
+		cmds = append(cmds, sidebarCmd)
+	}
 
 	return p, tea.Batch(cmds...)
 }
 
 // isScrollbarDragging returns true if any scrollable component has an active scrollbar drag.
 func (p *chatPage) isScrollbarDragging() bool {
-	return p.messages.IsScrollbarDragging() || p.sidebar.IsScrollbarDragging()
+	return p.messages.IsScrollbarDragging() || (p.sidebarInteractive() && p.sidebar.IsScrollbarDragging())
 }
 
 // handleMouseWheel handles mouse wheel events.
@@ -364,6 +368,8 @@ func (p *chatPage) handleWheelCoalesced(msg msgtypes.WheelCoalescedMsg) (layout.
 		return p, nil
 	}
 	switch p.wheelTarget(msg.X, msg.Y) {
+	case wheelTargetNone:
+		return p, nil
 	case wheelTargetSidebar:
 		model, cmd := p.sidebar.Update(msg)
 		p.sidebar = model.(sidebar.Model)
@@ -380,9 +386,19 @@ type wheelTarget int
 const (
 	wheelTargetMessages wheelTarget = iota
 	wheelTargetSidebar
+	wheelTargetNone
 )
 
-func (p *chatPage) wheelTarget(x, _ int) wheelTarget {
+func (p *chatPage) wheelTarget(x, y int) wheelTarget {
+	if g := p.splitPresentation; g != nil {
+		if p.sidebarInteractive() && g.Shell.Sidebar.contains(x, y) {
+			return wheelTargetSidebar
+		}
+		if p.PointerTargetsMessages(x, y) {
+			return wheelTargetMessages
+		}
+		return wheelTargetNone
+	}
 	sl := p.computeSidebarLayout()
 	if sl.mode == sidebarVertical && !p.sidebar.IsCollapsed() {
 		adjustedX := x - styles.AppPadding

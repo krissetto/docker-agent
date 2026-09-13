@@ -90,7 +90,7 @@ func TestClickReleaseBeforeHoldSwitchesWithoutDrag(t *testing.T) {
 	tb.View()
 	require.Len(t, tb.dragBounds, 3)
 	x := tb.dragBounds[1].start + 2
-	require.NotNil(t, tb.Update(tea.MouseClickMsg{X: x, Button: tea.MouseLeft}))
+	require.Empty(t, commandMessages(tb.Update(tea.MouseClickMsg{X: x, Button: tea.MouseLeft})), "press schedules no hold timer or activation")
 	assert.True(t, tb.drag.pending)
 	msgs := commandMessages(tb.Update(tea.MouseReleaseMsg{X: x, Button: tea.MouseLeft}))
 	require.Len(t, msgs, 1)
@@ -158,21 +158,20 @@ func TestPressHoldMotionReleaseUsesStableIDsAndDeterministicTicks(t *testing.T) 
 	source := tb.dragBounds[1]
 	grabX := source.start + (source.end-source.start)/3
 	holdCmd := tb.Update(tea.MouseClickMsg{X: grabX, Button: tea.MouseLeft})
-	require.NotNil(t, holdCmd)
+	require.Empty(t, commandMessages(holdCmd), "press schedules no hold timer")
 	require.True(t, tb.drag.pending)
 	assert.False(t, tb.drag.active, "press remains visually pending below the hold threshold")
 	assert.Nil(t, tb.GetDragLayerInfo(100, 4), "pending press must not flash a drag layer")
 
-	// Advancing the component clock below the threshold does not activate drag;
-	// only the matching delayed hold event may cross that state boundary.
+	// Time alone does not activate drag; crossing three terminal columns does.
 	tb.Tick()
 	assert.True(t, tb.drag.pending)
-	tb.Update(DragHoldMsg{seq: tb.drag.seq})
+	tb.Update(tea.MouseMotionMsg{X: grabX + 3, Button: tea.MouseLeft})
 	require.True(t, tb.drag.active)
 	assert.False(t, tb.drag.pending)
 	activeLayer := tb.GetDragLayerInfo(100, 4)
 	require.NotNil(t, activeLayer)
-	assert.Equal(t, grabX-tb.drag.grabOffset, activeLayer.X)
+	assert.Equal(t, grabX+3-tb.drag.grabOffset, activeLayer.X)
 	assert.Contains(t, activeLayer.Content, "Bravo")
 	assert.NotContains(t, tb.View(), "Bravo", "active source is rendered only in the floating layer")
 
@@ -514,7 +513,7 @@ func TestDragTerminationInventory(t *testing.T) {
 	}{
 		{name: "release over tab", termination: tea.MouseReleaseMsg{X: 16, Button: tea.MouseLeft}, active: true, wantSettle: true},
 		{name: "release outside", termination: tea.MouseReleaseMsg{X: 200, Button: tea.MouseLeft}, active: true, wantSettle: true},
-		{name: "focus loss", termination: tea.BlurMsg{}, active: true, wantSettle: true},
+		{name: "focus loss rolls back", termination: tea.BlurMsg{}, active: true, wantSettle: false},
 		{name: "other button", termination: tea.MouseClickMsg{X: 16, Button: tea.MouseRight}, active: true, wantSettle: true},
 		{name: "before hold boundary", termination: tea.MouseReleaseMsg{X: 16, Button: tea.MouseLeft}, active: false},
 	} {

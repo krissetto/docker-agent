@@ -39,6 +39,18 @@ func (m *appModel) helpDocument() help.Document {
 			doc.Current = append(doc.Current, section)
 		}
 	}
+	if m.paneHydration != nil && !m.dialogMgr.Open() {
+		doc.Context = "Loading session pane"
+		add(helpSection("panes.loading", "Loading session", "", helpEntry("panes.cancel-load", []string{"esc"}, "Cancel pending split; keep existing layout and draft")))
+	}
+	if m.paneGesture != nil && !m.dialogMgr.Open() {
+		doc.Context = "Pane gesture"
+		add(helpSection("panes.gesture", "Pane gesture", "", helpEntry("panes.cancel", []string{"esc"}, "Cancel preview without changing tabs or panes")))
+		if m.paneGesture.keyboard {
+			add(helpSection("panes.resize", "Resize divider", "", helpEntry("panes.arrows", []string{"left", "right", "up", "down"}, "Preview divider position"), helpEntry("panes.commit", []string{"enter"}, "Commit divider position")))
+			return doc
+		}
+	}
 	// Transcription Enter/Esc precede even modal routing. Other keys continue.
 	if m.transcriber.IsRunning() {
 		doc.Context += " — transcribing"
@@ -174,6 +186,9 @@ func (m *appModel) helpDocument() help.Document {
 		}
 		// Mouse targets coexist, unlike keyboard aliases with precedence.
 		doc.Current = append(doc.Current, section)
+	}
+	if !m.leanMode {
+		doc.Current = append(doc.Current, paneHelp())
 	}
 	if m.leanMode {
 		doc.Context += " — lean layout (not the standalone lean UI)"
@@ -320,6 +335,9 @@ func (m *appModel) referenceHelp() []help.Section {
 			helpEntry("tour.quit", []string{"esc"}, "Tour active: quit tour"), helpEntry("tour.next", []string{"enter"}, "Tour active, empty composer focused: advance")),
 	}
 	sections = append(sections, rootMouseHelp()...)
+	if !m.leanMode {
+		sections = append(sections, paneHelp())
+	}
 	if m.buildCommandCategories != nil {
 		for _, category := range m.commandCategories() {
 			section := help.Section{ID: "commands." + category.Name, Title: "Commands — " + category.Name}
@@ -335,4 +353,15 @@ func (m *appModel) referenceHelp() []help.Section {
 		}
 	}
 	return append(sections, dialog.ReferenceHelp()...)
+}
+
+func paneHelp() help.Section {
+	return helpSection("panes", "Session panes", "Full TUI only; no pane gestures behind dialogs",
+		helpEntry("panes.actions", []string{"/panes"}, "Open searchable action/source picker: split left/right/up/down, focus, remove pane, single view, resize divider"),
+		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Split or move the canonical session; center/self/sidebar/composer drops cancel"),
+		helpEntry("panes.focus", []string{"click pane"}, "Focus session and its existing draft, attachments, context and sidebar"),
+		helpEntry("panes.scroll", []string{"wheel over pane"}, "Scroll only that pane without switching composer"),
+		helpEntry("panes.divider", []string{"drag divider"}, "Preview a clamped divider; release commits"),
+		helpEntry("panes.cancel-reference", []string{"esc"}, "Cancel gesture before response interruption; outside release, Blur, resize or dialog opening also cancel"),
+		helpEntry("panes.remove", []string{"/panes → Remove pane", "/panes → Single view"}, "Change layout only; never close/cancel the session tab"))
 }

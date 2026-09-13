@@ -185,11 +185,8 @@ type Page interface {
 
 func (p *chatPage) VisualGeneration() uint64 { return p.messages.VisualGeneration() }
 
-// SidebarView exposes the existing presentation surface to its shell compositor.
-func (p *chatPage) SidebarView() string { return p.sidebar.View() }
-
 func (p *chatPage) SidebarVisualGeneration() uint64 {
-	return p.sidebar.VisualGeneration()
+	return p.sidebar.VisualGeneration() + p.shellVisualGeneration
 }
 
 type sidebarClick struct {
@@ -301,6 +298,10 @@ type chatPage struct {
 	// shifts (e.g. the collapsed sidebar band growing when async startup info
 	// arrives) that would otherwise leave mouse hit-testing offset.
 	appliedLayout sidebarLayout
+
+	splitPresentation     *SplitPresentationGeometry
+	presentationHidden    bool
+	shellVisualGeneration uint64
 }
 
 // sidebarHidden reports whether the sidebar should be omitted entirely from
@@ -311,7 +312,11 @@ func (p *chatPage) sidebarHidden() bool {
 
 // computeSidebarLayout calculates the layout based on current state.
 func (p *chatPage) computeSidebarLayout() sidebarLayout {
-	innerWidth := p.width - appPaddingHorizontal
+	return p.computeSidebarLayoutForSize(p.width, p.height)
+}
+
+func (p *chatPage) computeSidebarLayoutForSize(width, height int) sidebarLayout {
+	innerWidth := max(0, width-appPaddingHorizontal)
 
 	// No sidebar at all (lean mode or hideSidebar): chat fills the area.
 	if p.sidebarHidden() {
@@ -319,7 +324,7 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 			mode:       sidebarCollapsedNarrow,
 			innerWidth: innerWidth,
 			chatWidth:  innerWidth,
-			chatHeight: max(1, p.height),
+			chatHeight: max(1, height),
 		}
 	}
 
@@ -328,9 +333,9 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 
 	var mode sidebarLayoutMode
 	switch {
-	case sideBySide && p.width >= minWindowWidth && !p.sidebar.IsCollapsed():
+	case sideBySide && width >= minWindowWidth && !p.sidebar.IsCollapsed():
 		mode = sidebarVertical
-	case sideBySide && p.width >= minWindowWidth:
+	case sideBySide && width >= minWindowWidth:
 		mode = sidebarCollapsed
 	default:
 		mode = sidebarCollapsedNarrow
@@ -355,20 +360,20 @@ func (p *chatPage) computeSidebarLayout() sidebarLayout {
 			l.handleX = l.chatWidth
 			l.sidebarStartX = l.chatWidth + toggleColumnWidth
 		}
-		l.chatHeight = max(1, p.height)
+		l.chatHeight = max(1, height)
 		l.sidebarHeight = l.chatHeight
 
 	case sidebarCollapsed:
 		l.sidebarWidth = innerWidth - toggleColumnWidth
 		l.chatWidth = innerWidth
 		l.sidebarHeight = p.sidebar.CollapsedHeight(l.sidebarWidth)
-		l.chatHeight = max(1, p.height-l.sidebarHeight)
+		l.chatHeight = max(1, height-l.sidebarHeight)
 
 	case sidebarCollapsedNarrow:
 		l.sidebarWidth = innerWidth
 		l.chatWidth = innerWidth
 		l.sidebarHeight = p.sidebar.CollapsedHeight(l.sidebarWidth)
-		l.chatHeight = max(1, p.height-l.sidebarHeight)
+		l.chatHeight = max(1, height-l.sidebarHeight)
 	}
 
 	return l
@@ -603,6 +608,7 @@ func ClearSidebarHover(page Page) tea.Cmd {
 // SetSidebarPresentationActive prevents hidden updates from acquiring finite animation leases.
 func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
+		active = active && p.sidebarInteractive()
 		if !active {
 			p.lastSidebarClick = sidebarClick{}
 		}
@@ -638,6 +644,7 @@ func Cleanup(page Page) {
 
 // Update handles messages and updates the page state
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	defer p.stopHiddenPresentation()
 	model, cmd := p.update(msg)
 	// State changes (async sidebar updates, streaming indicators) can move
 	// child components without any resize. Child positions are only applied
@@ -680,7 +687,7 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return p, cmd
 
 	case tea.PasteMsg:
-		if p.sidebar.IsEditingTitle() {
+		if p.sidebarInteractive() && p.sidebar.IsEditingTitle() {
 			return p, p.sidebar.UpdateTitleInput(msg)
 		}
 		model, cmd := p.messages.Update(msg)
@@ -894,6 +901,9 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 
 // View renders the chat page (messages + sidebar only, no editor or resize handle)
 func (p *chatPage) View() string {
+	if p.splitPresentation != nil {
+		return p.TranscriptView()
+	}
 	sl := p.computeSidebarLayout()
 
 	messagesView := p.messagesView(sl)
@@ -959,6 +969,9 @@ func (p *chatPage) View() string {
 // The glyph points toward the edge the sidebar collapses to and flips when
 // the sidebar sits on the left.
 func (p *chatPage) renderSidebarHandle(height int) string {
+	if height <= 0 {
+		return ""
+	}
 	lines := make([]string, height)
 
 	expandGlyph, collapseGlyph := "«", "»"
@@ -981,6 +994,9 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	p.width = width
 	p.height = height
+	if p.splitPresentation != nil {
+		return p.applySplitPresentation()
+	}
 
 	var cmds []tea.Cmd
 
@@ -1578,6 +1594,9 @@ func (p *chatPage) routedTimerCmd(timer sidebar.TransferTimer) tea.Cmd {
 }
 
 func (p *chatPage) PointerTargetsMessages(x, y int) bool {
+	if g := p.splitPresentation; g != nil {
+		return !p.presentationHidden && g.Transcript.contains(x, y)
+	}
 	sl := p.computeSidebarLayout()
 	return !sl.isInBand(y) && (sl.mode != sidebarVertical || p.sidebar.IsCollapsed() || !sl.isInSidebar(x-styles.AppPadding))
 }
@@ -1585,6 +1604,12 @@ func (p *chatPage) PointerTargetsMessages(x, y int) bool {
 // handleSidebarClickType checks what was clicked in the sidebar area.
 // Returns the click type and, for ClickAgent, the agent name.
 func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string) {
+	if g := p.splitPresentation; g != nil {
+		if p.sidebarInteractive() && g.Shell.Sidebar.contains(x, y) {
+			return p.sidebar.HandleClickType(x-g.Shell.Sidebar.X, y-g.Shell.Sidebar.Y)
+		}
+		return sidebar.ClickNone, ""
+	}
 	adjustedX := x - styles.AppPadding
 	sl := p.computeSidebarLayout()
 
@@ -1602,6 +1627,9 @@ func (p *chatPage) handleSidebarClickType(x, y int) (sidebar.ClickResult, string
 
 // routeMouseEvent routes mouse events to the appropriate component based on coordinates.
 func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
+	if p.splitPresentation != nil {
+		return p.routeSplitMouseEvent(msg)
+	}
 	sl := p.computeSidebarLayout()
 
 	var x, y int
@@ -1675,4 +1703,6 @@ func (p *chatPage) ScrollToBottom() tea.Cmd {
 }
 
 // IsTitleEditing reports whether the sidebar title input is active.
-func (p *chatPage) IsTitleEditing() bool { return p.sidebar.IsEditingTitle() }
+func (p *chatPage) IsTitleEditing() bool {
+	return p.sidebarInteractive() && p.sidebar.IsEditingTitle()
+}

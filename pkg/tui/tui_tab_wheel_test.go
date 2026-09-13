@@ -83,6 +83,8 @@ func TestActualProgramTabWheelRoutingClampAndBoundaryOrder(t *testing.T) {
 	x := strings.Index(line, "Wheel tab 00") + tabFrameOrigin() + 2
 	require.Greater(t, x, tabFrameOrigin())
 	program.Send(tea.MouseClickMsg{X: x, Y: start.tabY, Button: tea.MouseLeft})
+	require.False(t, snapshot().overlay, "press alone never schedules a hold overlay")
+	program.Send(tea.MouseMotionMsg{X: x + 3, Y: start.tabY, Button: tea.MouseLeft})
 	require.Eventually(t, func() bool { return snapshot().overlay }, time.Second, time.Millisecond)
 	wheel(tea.MouseWheelRight, start.tabY, 1)
 	require.Eventually(t, func() bool { return !snapshot().overlay }, time.Second, time.Millisecond, "release after wheel completes the drag")

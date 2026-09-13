@@ -261,9 +261,12 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 		t.Parallel()
 		m := &appModel{ctx: t.Context, buildCommandCategories: build}
 		got := m.commandCategories()
-		if len(got) != 2 {
-			t.Fatalf("len(categories) = %d, want 2", len(got))
+		if len(got) != 3 {
+			t.Fatalf("len(categories) = %d, want 3 (Panes, Session, Settings)", len(got))
 		}
+		require.Equal(t, "Panes", got[0].Name)
+		require.Len(t, got[0].Commands, 1)
+		require.Equal(t, "/panes", got[0].Commands[0].SlashCommand)
 	})
 
 	t.Run("filters slash commands and drops empty categories", func(t *testing.T) {
@@ -272,9 +275,12 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 		WithDisabledCommands([]string{"/cost", "eval", "/theme"})(m)
 
 		got := m.commandCategories()
-		if len(got) != 1 {
-			t.Fatalf("len(categories) = %d, want 1 (Settings dropped, Session kept)", len(got))
+		if len(got) != 2 {
+			t.Fatalf("len(categories) = %d, want 2 (Panes and Session kept, Settings dropped)", len(got))
 		}
+		require.Equal(t, "Panes", got[0].Name)
+		require.Equal(t, "/panes", got[0].Commands[0].SlashCommand)
+		got = got[1:]
 		if got[0].Name != "Session" {
 			t.Fatalf("category = %q, want Session", got[0].Name)
 		}
@@ -288,9 +294,12 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 		m := &appModel{ctx: t.Context, buildCommandCategories: build}
 		WithDisabledCommands([]string{"", "  "})(m)
 		got := m.commandCategories()
-		if len(got) != 2 {
-			t.Fatalf("len(categories) = %d, want 2", len(got))
+		if len(got) != 3 {
+			t.Fatalf("len(categories) = %d, want 3 (Panes, Session, Settings)", len(got))
 		}
+		require.Equal(t, "Panes", got[0].Name)
+		require.Len(t, got[0].Commands, 1)
+		require.Equal(t, "/panes", got[0].Commands[0].SlashCommand)
 	})
 
 	t.Run("matching is case-insensitive", func(t *testing.T) {
@@ -298,14 +307,38 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 		m := &appModel{ctx: t.Context, buildCommandCategories: build}
 		WithDisabledCommands([]string{"/Cost", "EVAL", "/Theme"})(m)
 		got := m.commandCategories()
-		if len(got) != 1 {
-			t.Fatalf("len(categories) = %d, want 1 (Settings dropped, Session kept)", len(got))
+		if len(got) != 2 {
+			t.Fatalf("len(categories) = %d, want 2 (Panes and Session kept, Settings dropped)", len(got))
 		}
+		require.Equal(t, "Panes", got[0].Name)
+		require.Equal(t, "/panes", got[0].Commands[0].SlashCommand)
+		got = got[1:]
 		if got[0].Name != "Session" {
 			t.Fatalf("category = %q, want Session", got[0].Name)
 		}
 		if len(got[0].Commands) != 1 || got[0].Commands[0].SlashCommand != "/exit" {
 			t.Fatalf("session commands = %+v, want only /exit", got[0].Commands)
+		}
+	})
+
+	t.Run("panes follows disabled commands and lean visibility", func(t *testing.T) {
+		t.Parallel()
+		m := &appModel{ctx: t.Context, buildCommandCategories: build}
+		WithDisabledCommands([]string{"/PANES"})(m)
+		got := m.commandCategories()
+		require.Len(t, got, 2)
+		require.Equal(t, "Session", got[0].Name)
+		require.Equal(t, "Settings", got[1].Name)
+		m.disabledCommands = nil
+		m.leanMode = true
+		got = m.commandCategories()
+		require.Len(t, got, 2)
+		require.Equal(t, "Session", got[0].Name)
+		require.Equal(t, "Settings", got[1].Name)
+		for _, category := range got {
+			for _, item := range category.Commands {
+				require.NotEqual(t, "/panes", item.SlashCommand)
+			}
 		}
 	})
 }

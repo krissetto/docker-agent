@@ -954,6 +954,15 @@ func (mv *messageModel) StopAnimation() {
 	}
 }
 
+// ResumeAnimation reacquires only the existing pending-message spinner lease.
+// Unlike Init, it never starts or retries markdown image loading.
+func (mv *messageModel) ResumeAnimation() tea.Cmd {
+	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
+		return mv.spinner.Init()
+	}
+	return nil
+}
+
 // Finalize releases per-message render state that no longer needs to be kept
 // resident once the message is no longer the actively streaming view. This is
 // called by the parent message list when a new top-level message arrives, and

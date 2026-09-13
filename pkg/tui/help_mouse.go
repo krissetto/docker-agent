@@ -12,7 +12,7 @@ func rootMouseHelp() []help.Section {
 			{ID: "nd.tabs.mouse.plus.new.tab", Keys: []string{"left click"}, Description: "New tab", Condition: "plus hit target visible"},
 			{ID: "nd.tabs.mouse.overflow.arrows.scroll.tab.strip", Keys: []string{"left click"}, Description: "Scroll tab strip", Condition: "overflow arrows hit target visible"},
 			{ID: "nd.tabs.mouse.tab.strip.scroll.tab.strip.wheel", Keys: []string{"wheel"}, Description: "Scroll tab strip wheel", Condition: "tab strip hit target visible"},
-			{ID: "nd.tabs.mouse.tab.reorder.tabs", Keys: []string{"hold drag release"}, Description: "Reorder tabs", Condition: "tab hit target visible"},
+			{ID: "nd.tabs.mouse.tab.reorder.tabs", Keys: []string{"drag release"}, Description: "Reorder tabs horizontally (3-column or 2-row threshold); drag upward to a transcript edge to split", Condition: "tab hit target visible"},
 		}},
 		{ID: "mouse.sidebar", Title: "Sidebar \u2014 mouse", Entries: []help.Entry{
 			{ID: "nd.sidebar.mouse.toggle.glyph.toggle.sidebar", Keys: []string{"left click"}, Description: "Toggle sidebar", Condition: "toggle glyph hit target visible"},

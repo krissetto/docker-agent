@@ -194,6 +194,15 @@ func (b *Base) StopAnimation() {
 	}
 }
 
+// ResumeAnimation restores the existing running-tool spinner without reinitializing the view.
+func (b *Base) ResumeAnimation() tea.Cmd {
+	if b.isSpinnerActive() && !b.spinnerRegistered {
+		b.spinnerRegistered = true
+		return b.spinner.Init()
+	}
+	return nil
+}
+
 func (b *Base) isSpinnerActive() bool {
 	return b.message.ToolStatus == types.ToolStatusPending ||
 		b.message.ToolStatus == types.ToolStatusRunning

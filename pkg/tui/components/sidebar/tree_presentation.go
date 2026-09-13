@@ -161,9 +161,23 @@ func (m *model) SetPresentationActive(active bool) tea.Cmd {
 		return nil
 	}
 	m.presentationActive = false
-	m.CancelPresentation()
+	m.StopAnimation()
 	m.reconcileDirty = true
 	m.ReconcileLayout()
 	m.presentationActive = active
-	return nil
+	if !active {
+		return nil
+	}
+	var cmds []tea.Cmd
+	if m.needsSpinner() {
+		cmds = append(cmds, m.startSpinner())
+	}
+	cmds = append(cmds, m.syncSubagentSpinner())
+	if _, visible := m.visibleTransfer(); visible {
+		cmds = append(cmds, m.transferAnimation.Start())
+	}
+	for _, state := range m.ragIndexing {
+		cmds = append(cmds, state.spinner.Init())
+	}
+	return tea.Batch(cmds...)
 }

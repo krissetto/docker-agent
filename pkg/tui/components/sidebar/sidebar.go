@@ -544,8 +544,8 @@ func (m *model) needsSpinner() bool {
 // startSpinner registers the spinner with the animation coordinator if not already active.
 // Safe to call multiple times - only the first call registers.
 func (m *model) startSpinner() tea.Cmd {
-	if m.spinnerActive {
-		return nil // Already registered
+	if !m.presentationActive || m.spinnerActive {
+		return nil // Hidden or already registered
 	}
 	m.spinnerActive = true
 	return m.spinner.Init()
@@ -816,7 +816,7 @@ func (m *model) visibleTransfer() (transferPresentation, bool) {
 func (m *model) resyncTransferPresentation(prev transferPresentation, prevOK bool) tea.Cmd {
 	m.invalidateCache()
 	cur, ok := m.visibleTransfer()
-	if !ok {
+	if !ok || !m.presentationActive {
 		m.transferAnimationElapsed = 0
 		m.transferAnimation.Stop()
 		return nil
@@ -1005,7 +1005,7 @@ func (m *model) rootedChildren(snapshot subagent.Snapshot) []subagent.NodeSnapsh
 // syncSubagentSpinner starts/stops the shared subagent spinner based on
 // whether any node is currently running.
 func (m *model) syncSubagentSpinner() tea.Cmd {
-	running := hasRunningSubagent(m.subagentNodes)
+	running := m.presentationActive && hasRunningSubagent(m.subagentNodes)
 	switch {
 	case running && !m.subagentSpinnerOn:
 		m.subagentSpinnerOn = true
@@ -1546,6 +1546,11 @@ func (m *model) updateScrollviewMouse(msg tea.Msg) tea.Cmd {
 
 // Update handles messages and updates the component state.
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	defer func() {
+		if !m.presentationActive {
+			m.StopAnimation()
+		}
+	}()
 	_, cmd := m.update(msg)
 	return m, tea.Batch(cmd, m.ReconcileLayout())
 }

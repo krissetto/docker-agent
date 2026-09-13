@@ -828,6 +828,22 @@ func (m *Model) StopAnimation() {
 	}
 }
 
+// ResumeAnimation restores live tool spinners and any still-current finite
+// fade. Hidden time advances the canonical deadline rather than restarting it.
+func (m *Model) ResumeAnimation() tea.Cmd {
+	m.computeFadeProgressAt(m.now())
+	var cmds []tea.Cmd
+	if m.hasFadingTools() {
+		cmds = append(cmds, m.animationSub.Start())
+	}
+	for _, entry := range m.toolEntries {
+		if view, ok := entry.view.(interface{ ResumeAnimation() tea.Cmd }); ok {
+			cmds = append(cmds, view.ResumeAnimation())
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 // headerLineIndex returns the view line index of the Thinking header. The
 // agent badge, when shown, occupies two lines (badge + blank) above it.
 func (m *Model) headerLineIndex() int {

@@ -35,10 +35,6 @@ const (
 	// noTab is the sentinel value for click zones that don't map to a tab.
 	noTab = -1
 
-	// dragHoldDelay is how long the mouse must be held down on a tab before
-	// drag-and-drop mode activates. Prevents visual flash on normal clicks.
-	dragHoldDelay = 200 * time.Millisecond
-
 	// scrollStep is the number of columns scrolled per wheel tick or arrow click.
 	scrollStep = 3
 
@@ -65,7 +61,8 @@ type clickZone struct {
 	isScrollRight bool
 }
 
-// DragHoldMsg is sent after dragHoldDelay to activate drag mode.
+// DragHoldMsg is the internal activation token used once a pointer crosses
+// the drag distance threshold. No delayed hold command is scheduled.
 type DragHoldMsg struct {
 	seq int // ties the timer to the click that started it
 }
@@ -709,11 +706,8 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		t.plusHoverFrom, t.plusHoverTo = 0, 0
 		t.plusAnim.Cancel()
 		t.plusHovered, t.plusPressed = false, false
-		if t.drag.active {
-			return t.handleMouseRelease(t.drag.cursorX)
-		}
-		if t.drag.pending {
-			t.drag = dragState{dropIdx: noTab}
+		if t.drag.active || t.drag.pending {
+			t.CancelPointer()
 		}
 		return nil
 
@@ -804,7 +798,7 @@ func (t *TabBar) handleLeftClickDown(x int) tea.Cmd {
 			t.dragSeq++
 			seq := t.dragSeq
 			t.drag = dragState{pending: true, dragIdx: z.tabIdx, dropIdx: noTab, startX: x, cursorX: x, seq: seq}
-			return tea.Tick(dragHoldDelay, func(time.Time) tea.Msg { return DragHoldMsg{seq: seq} })
+			return nil
 		}
 		break
 	}
@@ -821,8 +815,9 @@ func (t *TabBar) handleMouseMotion(x int) tea.Cmd {
 	previousX, previousDrop := t.drag.cursorX, t.drag.dropIdx
 	t.drag.cursorX = x
 	if t.drag.pending {
-		// Do NOT update startX: it records the original click position and
-		// is used to compute grabOffset when DragHoldMsg fires.
+		if x-t.drag.startX >= 3 || t.drag.startX-x >= 3 {
+			return t.Update(DragHoldMsg{seq: t.drag.seq})
+		}
 		return nil
 	}
 

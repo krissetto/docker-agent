@@ -3159,6 +3159,27 @@ func (m *model) StopAnimations() {
 	}
 }
 
+// ResumeAnimations reacquires only presentation subscriptions. It does not
+// initialize views, retry image loading, rebuild markdown, or change scrolling.
+func (m *model) ResumeAnimations() tea.Cmd {
+	var cmds []tea.Cmd
+	if m.bottomSlack > 0 {
+		cmds = append(cmds, m.slackAnimationSub.Start())
+	}
+	for i, view := range m.views {
+		// Hidden time may finish a reasoning fade. Refresh that live item only,
+		// not the historical transcript or its markdown caches.
+		if block, ok := view.(*reasoningblock.Model); ok && block.NeedsTick() {
+			m.invalidateItem(i)
+		}
+		if owner, ok := view.(interface{ ResumeAnimation() tea.Cmd }); ok {
+			cmds = append(cmds, owner.ResumeAnimation())
+		}
+	}
+	m.visualGeneration++
+	return tea.Batch(cmds...)
+}
+
 func (m *model) RemovePendingSessionPosition(position int) {
 	if position < 0 {
 		return

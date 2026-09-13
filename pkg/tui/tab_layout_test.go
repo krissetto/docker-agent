@@ -12,7 +12,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -107,13 +106,16 @@ func TestTabFramePointerRoutes(t *testing.T) {
 			require.Equal(t, layoutTabs()[0].SessionID, closeMsg.SessionID)
 
 			_, cmd = m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			for _, msg := range collectMsgs(cmd) {
-				if _, ok := msg.(tabbar.DragHoldMsg); ok {
-					_, _ = m.Update(msg)
-				}
-			}
-			_, _ = m.Update(tea.MouseMotionMsg{X: x + 8, Y: y, Button: tea.MouseLeft})
+			require.Empty(t, collectMsgs(cmd), "tab press must not schedule a hold timer")
+			motion := tea.MouseMotionMsg{X: x + 8, Y: y, Button: tea.MouseLeft}
+			_, _ = m.Update(messages.PointerUpdateMsg{X: motion.X, Y: motion.Y, Motion: &motion})
 			layer := m.tabBar.GetDragLayerInfo(tabFrameWidth(m.width), y)
+			if background {
+				require.Nil(t, layer, "modal pointer motion never creates a behind-dialog drag overlay")
+				_, _ = m.Update(tea.MouseReleaseMsg{X: x + 8, Y: y, Button: tea.MouseLeft})
+				require.False(t, m.tabBar.IsDragging())
+				return
+			}
 			require.NotNil(t, layer)
 			require.Equal(t, 8, layer.X, "motion preserves tab-local grab point")
 			if !background {

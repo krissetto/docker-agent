@@ -85,3 +85,11 @@ func (m *appModel) syncTabAgents() tea.Cmd {
 	m.viewCacheValid = false
 	return m.tabBar.SetTabs(m.tabInfos, activeIdx)
 }
+
+func tabOrderIDs(tabs []messages.TabInfo) []string {
+	ids := make([]string, len(tabs))
+	for i, tab := range tabs {
+		ids[i] = tab.SessionID
+	}
+	return ids
+}

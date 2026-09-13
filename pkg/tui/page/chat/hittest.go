@@ -51,6 +51,26 @@ func NewHitTest(page *chatPage) *HitTest {
 // It checks regions in priority order (most specific first).
 func (h *HitTest) At(x, y int) MouseTarget {
 	p := h.page
+	if p.presentationHidden {
+		return TargetNone
+	}
+	if g := p.splitPresentation; g != nil {
+		if p.sidebarInteractive() {
+			if g.Shell.SidebarHandle.contains(x, y) {
+				if y == g.Shell.SidebarHandle.Y {
+					return TargetSidebarToggle
+				}
+				return TargetSidebarResizeHandle
+			}
+			if g.Shell.Sidebar.contains(x, y) {
+				return h.sidebarClickTarget(x, y)
+			}
+		}
+		if g.Transcript.contains(x, y) {
+			return TargetMessages
+		}
+		return TargetNone
+	}
 
 	// Check sidebar toggle glyph
 	if h.isOnSidebarToggleGlyph(x, y) {

@@ -62,6 +62,14 @@ func (m *inlineImagesModel) StopAnimation() {
 	animation.StopView(m.model)
 }
 
+// ResumeAnimation forwards only animation ownership, never image initialization.
+func (m *inlineImagesModel) ResumeAnimation() tea.Cmd {
+	if view, ok := m.model.(interface{ ResumeAnimation() tea.Cmd }); ok {
+		return view.ResumeAnimation()
+	}
+	return nil
+}
+
 func (m *inlineImagesModel) render(content string) string {
 	if m.sessionState != nil && m.sessionState.HideToolResults() {
 		return content

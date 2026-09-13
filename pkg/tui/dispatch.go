@@ -3,6 +3,7 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -28,18 +29,36 @@ import (
 func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 	updated, cmd := m.chatPage.Update(msg)
 	m.chatPage = updated.(chat.Page)
+	if id := m.paneFocus(); id != "" {
+		m.chatPages[id] = m.chatPage
+	}
+	if m.panesEnabled() {
+		if _, tick := msg.(animation.TickMsg); !tick {
+			cmd = tea.Batch(cmd, m.resizePanes())
+		}
+	}
 	return cmd
 }
 
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 	updated, cmd := m.editor.Update(msg)
+	cmd = m.stampEditorSend(cmd)
 	m.editor = updated.(editor.Editor)
+	if id := m.paneFocus(); id != "" {
+		m.editors[id] = m.editor
+	}
 	return cmd
 }
 
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
+	if _, opening := msg.(dialog.OpenDialogMsg); opening {
+		m.cancelPaneGesture()
+		if m.tabBar != nil {
+			m.tabBar.CancelPointer()
+		}
+	}
 	updated, cmd := m.dialogMgr.Update(msg)
 	m.dialogMgr = updated.(dialog.Manager)
 	if _, opening := msg.(dialog.OpenDialogMsg); opening && m.dialogMgr.Open() && !m.dialogMgr.TopIsBackground() {
