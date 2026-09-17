@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -213,4 +214,89 @@ func TestModelPickerToolChangesTheCallingSessionOnly(t *testing.T) {
 	require.False(t, result.IsError, result.Output)
 	_, callerModels = caller.(*sessionHandle).driver.ModelSnapshot()
 	assert.Equal(t, "gpt-5", callerModels[0].BaseConfig().ModelConfig.Model, "revert returns to the agent's default")
+}
+
+func TestFallbackReasoningControlsTargetPrimarySessionBinding(t *testing.T) {
+	for _, primaryCapable := range []bool{true, false} {
+		name := "primary capable fallback unsupported"
+		primaryModel, fallbackModel := "gpt-5", "gpt-4o"
+		if !primaryCapable {
+			name = "primary unsupported fallback capable"
+			primaryModel, fallbackModel = fallbackModel, primaryModel
+		}
+		t.Run(name, func(t *testing.T) {
+			primary := newConfigProvider(latest.ModelConfig{Provider: "openai", Model: primaryModel})
+			fallback := newConfigProvider(latest.ModelConfig{Provider: "openai", Model: fallbackModel})
+			root := agent.New("root", "test", agent.WithModel(primary), agent.WithFallbackModel(fallback))
+			r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(emptyCatalogStore{}),
+				WithModelSwitcherConfig(&ModelSwitcherConfig{ProviderRegistry: testProviderRegistry(), EnvProvider: environment.NewMapEnvProvider(nil)}))
+			require.NoError(t, err)
+			handle, err := r.CreateSession(t.Context(), session.New(session.WithAgentName("root")), SessionBinding{AgentName: "root"})
+			require.NoError(t, err)
+			h := handle.(*sessionHandle)
+			other, err := r.CreateSession(t.Context(), session.New(session.WithAgentName("root")), SessionBinding{AgentName: "root"})
+			require.NoError(t, err)
+
+			for _, activeFallback := range []bool{false, true, false} {
+				if activeFallback {
+					r.fallback.cooldowns.Set("root", 0, time.Hour)
+				} else {
+					r.fallback.cooldowns.Clear("root")
+				}
+				info, teamInfo := collectAgentInfo(func(sink EventSink) { h.EmitPinnedAgentInfo(t.Context(), sink) })
+				require.NotNil(t, info)
+				require.NotNil(t, teamInfo)
+				require.Len(t, teamInfo.AvailableAgents, 1)
+				details := teamInfo.AvailableAgents[0]
+				wantModel := primaryModel
+				if activeFallback {
+					wantModel = fallbackModel
+					require.NotNil(t, details.PrimaryThinking)
+					assert.False(t, details.CanCycleThinking, "active fallback reasoning is never a mutation target")
+					wantMode := "default"
+					if primaryCapable {
+						wantMode = "unsupported"
+					}
+					assert.Equal(t, wantMode, details.ThinkingMode, "active reasoning still describes F")
+				} else {
+					assert.Nil(t, details.PrimaryThinking, "ordinary projection shape stays unchanged")
+				}
+				assert.Equal(t, "openai/"+wantModel, info.Model)
+				assert.Equal(t, wantModel, details.ModelID)
+				assert.NotEmpty(t, details.ModelName)
+				control := details.ThinkingControl()
+				assert.Equal(t, "openai/"+primaryModel, control.ModelRef)
+				assert.Equal(t, primaryCapable, control.CanCycle)
+				assert.Equal(t, primaryCapable, h.Metadata().Capabilities.ThinkingLevels)
+				_, err = h.CycleThinkingLevel(t.Context())
+				if primaryCapable {
+					require.NoError(t, err)
+					_, models := h.driver.ModelSnapshot()
+					require.Len(t, models, 1)
+					assert.Equal(t, primaryModel, models[0].ID().Model)
+					assert.NotNil(t, models[0].BaseConfig().ModelConfig.ThinkingBudget)
+				} else {
+					require.ErrorIs(t, err, ErrUnsupported)
+					assert.Equal(t, "unsupported", control.Mode)
+				}
+				assert.Nil(t, fallback.BaseConfig().ModelConfig.ThinkingBudget, "cycling must not mutate fallback configuration")
+				assert.Same(t, fallback, root.FallbackModels()[0])
+				assert.False(t, root.HasModelOverride())
+				_, otherModels := other.(*sessionHandle).driver.ModelSnapshot()
+				assert.Nil(t, otherModels[0].BaseConfig().ModelConfig.ThinkingBudget, "sibling session keeps its primary")
+			}
+		})
+	}
+}
+
+func TestReasoningCapabilityRequiresModelSwitcher(t *testing.T) {
+	root := agent.New("root", "test", agent.WithModel(newConfigProvider(latest.ModelConfig{Provider: "openai", Model: "gpt-5"})))
+	r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(emptyCatalogStore{}))
+	require.NoError(t, err)
+	h, err := r.CreateSession(t.Context(), session.New(session.WithAgentName("root")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	assert.False(t, h.Metadata().Capabilities.ThinkingLevels)
+	assert.False(t, r.agentDetailsFromTeam(t.Context())[0].ThinkingControl().CanCycle)
+	_, err = h.CycleThinkingLevel(t.Context())
+	require.ErrorIs(t, err, ErrUnsupported)
 }

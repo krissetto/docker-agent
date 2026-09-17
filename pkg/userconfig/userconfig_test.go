@@ -1579,3 +1579,15 @@ func TestConfig_AliasSafetyRoundTrip(t *testing.T) {
 	assert.Equal(t, latest.SafetyModeStrict, alias.Safety)
 	assert.Equal(t, latest.SafetyModeBalanced, loaded.GetSettings().Safety)
 }
+
+func TestSettingsDimInactivePanesDefaults(t *testing.T) {
+	var settings *Settings
+	assert.True(t, settings.GetDimInactivePanes())
+	settings = &Settings{}
+	assert.True(t, settings.GetDimInactivePanes())
+	value := false
+	settings.DimInactivePanes = &value
+	assert.False(t, settings.GetDimInactivePanes())
+	value = true
+	assert.True(t, settings.GetDimInactivePanes())
+}

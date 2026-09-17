@@ -76,8 +76,8 @@ A `--model` override still takes precedence over models in the configuration.
   share files; async sessions do not provide per-worker filesystem isolation.
 - The launcher explicitly executes `/opt/async-agent/docker-agent`, forces
   auto-update off, disables telemetry, and passes the SBX workspace as working
-  directory. Data/config/cache live under `WORKSPACE/.docker-agent-try/`; add
-  this directory to your project's `.gitignore` and keep transcripts private.
+  directory. Data/config/cache use Docker Agent's default locations; keep
+  transcripts private.
 - Use a **new workspace and sandbox name** when trying a different kit build or
   digest. Do not adopt old custom-branch databases: async migrations 31–33 are
   not a compatibility promise for those databases. Intentional resume within

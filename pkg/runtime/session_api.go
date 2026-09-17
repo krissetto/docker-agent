@@ -142,9 +142,71 @@ type SessionCatalog interface {
 	ListSessions(ctx context.Context) ([]SessionCatalogEntry, error)
 }
 
+// SessionSummaryOptions opts into metadata for child sessions. The zero value
+// preserves the root-only scope of the historical session catalog.
+type SessionSummaryOptions struct {
+	IncludeChildren bool
+}
+
+// SessionSummaryEntry is a metadata-only browser row. It never contains a
+// transcript; Model is the session's canonical binding, not a preview lookup.
+type SessionSummaryEntry struct {
+	SessionID   string    `json:"session_id"`
+	ParentID    string    `json:"parent_id,omitempty"`
+	Title       string    `json:"title"`
+	AgentName   string    `json:"agent_name,omitempty"`
+	Model       string    `json:"model,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   string    `json:"updated_at"`
+	Starred     bool      `json:"starred"`
+	NumMessages int       `json:"num_messages"`
+	Cost        float64   `json:"cost"`
+	WorkingDir  string    `json:"working_dir,omitempty"`
+	Loaded      bool      `json:"loaded"`
+	Loadable    bool      `json:"loadable"`
+	// RequiresConfirmation marks a cold child candidate, not an access grant.
+	// Durable membership is validated only by the confirmed session loader.
+	RequiresConfirmation bool   `json:"requires_confirmation,omitempty"`
+	RouteError           string `json:"route_error,omitempty"`
+}
+
+// SessionSummaryCatalog is the additive, read-only catalog surface for clients
+// that must not hydrate, restore or attach sessions while browsing.
+type SessionSummaryCatalog interface {
+	ListSessionSummaries(ctx context.Context, options SessionSummaryOptions) ([]SessionSummaryEntry, error)
+}
+
 // SessionLoader restores/attaches a catalog row under a caller context.
 type SessionLoader interface {
 	LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error)
+}
+
+// SessionViewPreparer prepares a confirmed, non-executing session attachment.
+type SessionViewPreparer interface {
+	PrepareSessionView(ctx context.Context, sessionID string) (PreparedSessionView, error)
+}
+
+// PreparedSessionView owns only unpublished preparation resources. Commit runs
+// asynchronously; Abort never revokes canonical owners after publication.
+type PreparedSessionView interface {
+	Info() PreparedSessionViewInfo
+	Commit(ctx context.Context) (CommittedSessionView, error)
+	Abort()
+}
+
+type PreparedSessionViewInfo struct {
+	SessionID     string              `json:"session_id"`
+	RootSessionID string              `json:"root_session_id"`
+	Session       *session.Session    `json:"session"`
+	Binding       SessionBinding      `json:"binding"`
+	WorkingDir    string              `json:"working_dir"`
+	Attach        *SubagentAttachInfo `json:"attach,omitempty"`
+}
+
+type CommittedSessionView struct {
+	SessionHandle SessionHandle
+	Info          PreparedSessionViewInfo
 }
 
 // AgentSwitcher clones a top-level conversation into a fresh immutable
@@ -436,6 +498,7 @@ type SessionStatus struct {
 	Pending         int          `json:"pending"`
 	TurnID          string       `json:"turn_id,omitempty"`
 	LastError       string       `json:"last_error,omitempty"`
+	Dormant         bool         `json:"dormant,omitempty"`
 	PauseArmed      bool         `json:"pause_armed,omitempty"`
 	Paused          bool         `json:"paused,omitempty"`
 	PauseGeneration uint64       `json:"pause_generation,omitempty"`

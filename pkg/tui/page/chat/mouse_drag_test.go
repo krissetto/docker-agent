@@ -58,7 +58,7 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	require.Equal(t, sidebar.ClickSubagent, click)
 	require.Equal(t, "a1b2c", nodeID, "the actual name cell routes to the canonical node ID")
 	_, hoverCmd := p.handleMouseMotion(tea.MouseMotionMsg{X: sidebarX + coderX, Y: coderY})
-	tickCmd := tea.Batch(startCmd, hoverCmd)
+	tickCmd := tea.Batch(startCmd, hoverCmd, p.ar.Continue())
 	var nextTick func(tea.Cmd) (animation.TickMsg, bool)
 	nextTick = func(cmd tea.Cmd) (animation.TickMsg, bool) {
 		if cmd == nil {
@@ -107,7 +107,7 @@ func TestMessagesScrollbarDragDoesNotHoverSidebarSubagent(t *testing.T) {
 	require.True(t, p.messages.IsScrollbarDragging())
 
 	_, leaveCmd := p.handleMouseMotion(tea.MouseMotionMsg{X: messagesScrollbarX, Y: coderY, Button: tea.MouseLeft})
-	tickCmd = tea.Batch(tickCmd, leaveCmd)
+	tickCmd = tea.Batch(tickCmd, leaveCmd, p.ar.Continue())
 	for step := 0; step < 30 && strings.Contains(ansi.Strip(p.sidebar.View()), "(a1b2c)"); step++ {
 		tickCmd = advance(tickCmd)
 	}

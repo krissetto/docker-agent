@@ -277,3 +277,63 @@ func TestSplitSendAttachmentFollowUpAndStaleClosedReplacedOwners(t *testing.T) {
 		})
 	}
 }
+
+func TestThinkingCycleCommandPreservesExactOriginAndUnrelatedMessages(t *testing.T) {
+	action := messages.CycleThinkingLevelMsg{SessionID: "canonical-session", AgentName: "agent", ModelRef: "provider/model"}
+	command := tea.Sequence(
+		func() tea.Msg { return messages.SwitchTabMsg{SessionID: "other"} },
+		tea.Batch(func() tea.Msg { return action }),
+	)
+	results := collectMsgs(stampThinkingCycleCommand("routing-owner", 7, command))
+	var found bool
+	for _, result := range results {
+		routed, ok := result.(messages.RoutedMsg)
+		if !ok {
+			continue
+		}
+		require.Equal(t, "routing-owner", routed.SessionID)
+		require.EqualValues(t, 7, routed.RouteGeneration)
+		cycle, ok := routed.Inner.(messages.CycleThinkingLevelMsg)
+		require.True(t, ok)
+		require.EqualValues(t, 7, cycle.RouteGeneration)
+		require.Equal(t, action.SessionID, cycle.SessionID)
+		found = true
+	}
+	require.True(t, found)
+	require.Contains(t, results, tea.Msg(messages.SwitchTabMsg{SessionID: "other"}))
+}
+
+func TestThinkingCycleRejectsZeroStaleAndForeignProjection(t *testing.T) {
+	root := splitTestRoot(t)
+	generation, _ := root.supervisor.RouteGeneration("profile")
+	valid := messages.CycleThinkingLevelMsg{SessionID: root.application.Session().ID, AgentName: root.sessionState.CurrentAgentName(), ModelRef: root.application.CurrentAgentModel(root.ctx()), RouteGeneration: generation}
+	for _, mutate := range []func(*messages.CycleThinkingLevelMsg){
+		func(msg *messages.CycleThinkingLevelMsg) { msg.RouteGeneration = 0 },
+		func(msg *messages.CycleThinkingLevelMsg) { msg.RouteGeneration++ },
+		func(msg *messages.CycleThinkingLevelMsg) { msg.SessionID = "foreign" },
+		func(msg *messages.CycleThinkingLevelMsg) { msg.AgentName = "foreign" },
+		func(msg *messages.CycleThinkingLevelMsg) { msg.ModelRef = "different/model" },
+	} {
+		msg := valid
+		mutate(&msg)
+		_, cmd := root.handleScopedThinkingCycle(msg)
+		require.Nil(t, cmd)
+	}
+	root.handleSwitchTab("second")
+	_, cmd := root.Update(messages.RoutedMsg{SessionID: "profile", RouteGeneration: generation, Inner: valid})
+	require.Nil(t, cmd, "queued footer action cannot switch or mutate the newly focused owner")
+}
+
+func TestThinkingCycleCanonicalProjectionMatchesConfiguredAlias(t *testing.T) {
+	root := splitTestRoot(t)
+	root.sessionState.SetCurrentAgentName("worker")
+	root.sessionState.SetAvailableAgents([]runtime.AgentDetails{{Name: "worker", Provider: "provider", Model: "configured alias", ModelID: "canonical-model", ModelName: "Friendly name", CanCycleThinking: true}})
+	root.application.TrackCurrentAgentModel("configured alias")
+	require.Equal(t, "provider/canonical-model", root.thinkingModelReference())
+	root.application.TrackCurrentAgentModel("provider/configured alias")
+	require.Equal(t, "provider/canonical-model", root.thinkingModelReference())
+	root.application.TrackCurrentAgentModel("provider/canonical-model")
+	require.Equal(t, "provider/canonical-model", root.thinkingModelReference())
+	root.application.TrackCurrentAgentModel("provider/replacement")
+	require.Equal(t, "provider/replacement", root.thinkingModelReference(), "stale TeamInfo must not validate the previous model click")
+}

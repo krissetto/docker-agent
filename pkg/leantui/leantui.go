@@ -5,24 +5,63 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
+	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/gitbranch"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	"github.com/docker/docker-agent/pkg/plans"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sound"
+	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
+
+// Transcriber is the existing platform audio service, injectable for tests.
+type Transcriber interface {
+	Start(ctx context.Context, handler transcribe.TranscriptHandler) error
+	Stop()
+	IsRunning() bool
+	IsSupported() bool
+}
+
+// TabStore reuses the host's existing ordered tab metadata store.
+type TabStore interface {
+	GetTabs(ctx context.Context) ([]tuistate.TabEntry, string, error)
+	AddTab(ctx context.Context, sessionID, workingDir string) error
+	RemoveTab(ctx context.Context, sessionID string) error
+	SetActiveTab(ctx context.Context, sessionID string) error
+	ClearTabs(ctx context.Context) error
+	ReplaceTab(ctx context.Context, oldID, newID, workingDir string) error
+}
 
 // Config wires the lean TUI to a prepared App and the initial run parameters.
 type Config struct {
-	App        *app.App
-	WorkingDir string
-	Cleanup    func()
-	History    *history.History
+	SessionViews   supervisor.SessionViewAcquirer
+	TabStore       TabStore
+	RestoreTabs    bool
+	RestoreSession func(context.Context, string, string) (*app.App, func(), error)
+	Transcriber    Transcriber
+	App            *app.App
+	WorkingDir     string
+	Cleanup        func()
+	History        *history.History
+	// SpawnSession is the host spawner: nil source creates; nonnil source forks.
+	// Cleanup is supplied only for an owned runtime.
+	SpawnSession func(context.Context, string, *session.Session) (*app.App, func(), error)
 
 	FirstMessage           *string
 	FirstMessageAttachment string
@@ -44,14 +83,23 @@ type Config struct {
 // Run drives the lean TUI until the user exits. It owns the terminal (raw
 // mode, no alternate screen) for its lifetime and restores it on return.
 func Run(ctx context.Context, cfg Config) error {
-	term, err := ui.NewTerminal(os.Stdin, os.Stdout)
+	return runWithTerminalFactory(ctx, cfg, ui.NewTerminal)
+}
+
+// The factory seam lets lifecycle failure tests avoid a physical terminal.
+func runWithTerminalFactory(ctx context.Context, cfg Config, factory func(*os.File, *os.File) (*ui.Terminal, error)) error {
+	if cfg.Cleanup != nil {
+		defer cfg.Cleanup()
+	}
+	loopCtx, loopCancel := context.WithCancel(ctx)
+	defer loopCancel()
+	host := &viewerHost{ctx: func() context.Context { return loopCtx }, views: make(map[*app.App]*model), applications: []*app.App{cfg.App}}
+	defer host.close()
+	term, err := factory(os.Stdin, os.Stdout)
 	if err != nil {
 		return err
 	}
 	defer term.Restore()
-
-	loopCtx, loopCancel := context.WithCancel(ctx)
-	defer loopCancel()
 
 	if cfg.History == nil {
 		cfg.History, err = history.New("")
@@ -61,7 +109,11 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	m := newModel(term, cfg)
-	branchWatcher, err := gitbranch.Watch(loopCtx, cfg.WorkingDir)
+	m.viewers = host
+	defer m.stopSpeech()
+	m.restoreViewerMetadata(loopCtx, cfg)
+	host.cleanup = m.restoredCleanup
+	branchWatcher, err := gitbranch.Watch(loopCtx, m.app.Session().WorkingDir)
 	if err != nil {
 		return err
 	}
@@ -76,15 +128,36 @@ func Run(ctx context.Context, cfg Config) error {
 	done := make(chan struct{})
 	defer close(done)
 
-	go readKeys(term.Reader(), keys, done)
-	go func() {
-		m.app.Subscribe(loopCtx, func(msg any) {
-			select {
-			case events <- msg:
-			case <-done:
-			}
-		}, app.SubscribeOptions{PreserveSessionMetadata: true})
-	}()
+	keyReaderDone := make(chan struct{})
+	keyReaderStop := make(chan struct{})
+	startKeyReader := func() {
+		reader := term.Reader()
+		finished := keyReaderDone
+		stop := keyReaderStop
+		go func() {
+			defer close(finished)
+			readKeys(reader, keys, stop)
+		}()
+	}
+	startKeyReader()
+	defer func() { close(keyReaderStop) }()
+	m.runExternal = func(command *exec.Cmd) error {
+		close(keyReaderStop)
+		term.Reader().Cancel()
+		<-keyReaderDone
+		err := term.RunExternal(command)
+		keyReaderDone = make(chan struct{})
+		keyReaderStop = make(chan struct{})
+		startKeyReader()
+		m.r.Repaint()
+		return err
+	}
+	host.events, host.store, host.cold, host.restore = events, cfg.TabStore, m.restoredEntries, cfg.RestoreSession
+	if theme := styles.CurrentTheme(); theme != nil {
+		m.retargetThemeWatcher(theme.Ref)
+	}
+	m.subscribeViewer(loopCtx, m.app)
+	m.app.Start(loopCtx)
 	go func() {
 		for {
 			w, h, ok := term.Resized()
@@ -117,6 +190,7 @@ func Run(ctx context.Context, cfg Config) error {
 	animationTicker := time.NewTicker(100 * time.Millisecond)
 	defer animationTicker.Stop()
 	branchChanges := branchWatcher.Changes()
+	branchOwner := m.app
 
 	m.render()
 	for !m.quitting {
@@ -127,13 +201,16 @@ func Run(ctx context.Context, cfg Config) error {
 			m.handleKey(loopCtx, k)
 			m.render()
 		case ev := <-events:
-			m.handleEvent(loopCtx, ev)
+			m.routeViewerEvent(loopCtx, ev)
 			m.render()
 		case sz := <-resizes:
 			m.width, m.height = sz[0], sz[1]
 			m.r.SetSize(sz[0], sz[1])
 			m.render()
 		case <-animationTicker.C:
+			if m.majorNoticeVisible && !m.hasMajorNotice(time.Now()) {
+				m.render()
+			}
 			if m.busy {
 				m.spinnerFrame++
 				m.render()
@@ -143,15 +220,13 @@ func Run(ctx context.Context, cfg Config) error {
 				branchChanges = nil
 				continue
 			}
-			m.status.Branch = branch
+			m.routeViewerEvent(loopCtx, viewerEvent{origin: branchOwner, event: viewerBranch(branch)})
 			m.render()
 		}
 	}
 
 	m.renderFinal()
-	if cfg.Cleanup != nil {
-		cfg.Cleanup()
-	}
+	m.viewers.close()
 	return nil
 }
 
@@ -174,9 +249,47 @@ func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 }
 
 type model struct {
-	app  *app.App
-	term *ui.Terminal
-	r    *ui.Renderer
+	sessionViews          supervisor.SessionViewAcquirer
+	viewAcquireCancel     context.CancelFunc
+	viewAcquireGeneration uint64
+	runtimeStatus         runtime.SessionStatus
+	transcriber           Transcriber
+	speechGeneration      uint64
+	majorEvents           *messagebar.Aggregator
+	majorHighWater        [2]uint64
+	majorNoticeVisible    bool
+	priorityNoticeUntil   time.Time
+	restoredEntries       []tuistate.TabEntry
+	restoredCleanup       []func()
+	soundSequence         uint64
+	soundEnabled          bool
+	soundThreshold        time.Duration
+	streamStarted         time.Time
+	playSound             func(context.Context, sound.Event)
+	historyStore          *history.History
+	spawnSession          func(context.Context, string, *session.Session) (*app.App, func(), error)
+	runExternal           func(*exec.Cmd) error
+	plansService          plans.Service
+	themeResolve          func(string) string
+	themeList             func() ([]string, error)
+	themeLoad             func(string) (*styles.Theme, error)
+	themeApply            func(*styles.Theme)
+	settingsSave          func(func(*userconfig.Config) error) error
+	queueSendMode         bool
+	interruptMode         string
+	interruptPending      bool
+	lastInterrupt         time.Time
+	budgetUsage           *runtime.BudgetUsageEvent
+	subagentSnapshot      *subagent.Snapshot
+	elicitations          map[string]*runtime.ElicitationRequestEvent
+	maxIterations         map[string]*runtime.MaxIterationsReachedEvent
+	rejectReason          string
+	rejectingTool         bool
+	viewers               *viewerHost
+	draftAttachments      []messages.Attachment
+	app                   *app.App
+	term                  *ui.Terminal
+	r                     *ui.Renderer
 
 	width  int
 	height int
@@ -225,12 +338,28 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		sessionState = service.NewSessionState(cfg.App.Session())
 	}
 
+	if cfg.Transcriber == nil {
+		cfg.Transcriber = transcribe.New(os.Getenv("OPENAI_API_KEY"))
+	}
 	renderImages := cfg.RenderImages == nil || *cfg.RenderImages
 
 	branch := gitbranch.Current(cfg.WorkingDir)
 
+	settings := userconfig.Get()
+	interruptMode := settings.GetInterruptConfirmation()
 	return &model{
 		app:              cfg.App,
+		sessionViews:     cfg.SessionViews,
+		historyStore:     cfg.History,
+		spawnSession:     cfg.SpawnSession,
+		transcriber:      cfg.Transcriber,
+		interruptMode:    interruptMode,
+		queueSendMode:    settings.GetBusySendMode() == "queue",
+		settingsSave:     userconfig.Update,
+		soundEnabled:     settings.GetSound(),
+		soundThreshold:   time.Duration(settings.GetSoundThreshold()) * time.Second,
+		playSound:        sound.Play,
+		majorEvents:      &messagebar.Aggregator{},
 		term:             term,
 		r:                ui.NewRenderer(term.Writer(), w, h),
 		width:            w,

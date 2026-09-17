@@ -87,7 +87,7 @@ func frozenClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration
 // is non-nil it replaces the runtime created by New before the spinner and
 // chat page are built, so both share it. The tab bar constructed inside New
 // keeps the wall runtime, but it only reads ar.Now() and never schedules a
-// tick itself (the harness discards Init()'s commands and EnsureRunning goes
+// tick itself (the harness discards Init()'s commands and owner Continue goes
 // through m.ar), so its clock stays at zero.
 func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appModel, time.Duration, goruntime.MemStats) {
 	tb.Helper()

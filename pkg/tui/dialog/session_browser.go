@@ -42,7 +42,6 @@ type sessionBrowserKeyMap struct {
 // Session browser dialog dimension constants
 const (
 	sessionBrowserListOverhead = 12 // title(1) + space(1) + input(1) + separator(1) + separator(1) + id(1) + space(1) + help(1) + borders(2) + extra(2)
-	sessionBrowserListStartY   = 6  // border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1)
 	sessionBrowserDirMaxLen    = 28 // max display length of a session's working dir in a list row
 )
 
@@ -257,7 +256,8 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case tea.MouseClickMsg:
 		// Scrollbar clicks already handled above; this handles list item clicks
-		if msg.Button == tea.MouseLeft {
+		x, y, width, height := d.BodyScrollBounds()
+		if msg.Button == tea.MouseLeft && msg.X >= x && msg.X < x+width-d.scrollview.ReservedCols() && msg.Y >= y && msg.Y < y+height {
 			if idx := d.mouseYToSessionIndex(msg.Y); idx >= 0 {
 				now := time.Now()
 				if idx == d.lastClickIndex && now.Sub(d.lastClickTime) < styles.DoubleClickThreshold {
@@ -490,12 +490,7 @@ func (d *sessionBrowserDialog) ensureSelectedVisible() {
 // mouseYToSessionIndex converts a mouse Y position to a session index in the filtered list.
 // Returns -1 if the position is not on a session (outside the list or on a section header).
 func (d *sessionBrowserDialog) mouseYToSessionIndex(y int) int {
-	dialogRow, _ := d.Position()
-	visLines := d.scrollview.VisibleHeight()
-	listStartY := dialogRow + sessionBrowserListStartY
-	if d.bodyScroll == d.scrollview {
-		listStartY = d.bodyY
-	}
+	_, listStartY, _, visLines := d.BodyScrollBounds()
 
 	if y < listStartY || y >= listStartY+visLines {
 		return -1

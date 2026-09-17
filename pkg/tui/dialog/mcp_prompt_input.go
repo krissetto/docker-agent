@@ -249,8 +249,12 @@ func (d *MCPPromptInputDialog) buildBody(innerWidth int) (body string, fieldStar
 		input.SetWidth(max(1, innerWidth-lipgloss.Width(input.Prompt)))
 		fieldStarts[i] = line
 		fieldHeights[i] = lipgloss.Height(labelView) + 1
-		parts = append(parts, labelView, input.View(), "")
-		line += fieldHeights[i] + 1
+		parts = append(parts, labelView, input.View())
+		line += fieldHeights[i]
+		if i < len(d.inputs)-1 {
+			parts = append(parts, "")
+			line++
+		}
 	}
 	if len(d.inputs) == 0 {
 		parts = append(parts, styles.DialogContentStyle.Width(innerWidth).Render("No required parameters"))
@@ -322,7 +326,7 @@ func (d *MCPPromptInputDialog) Position() (row, col int) {
 }
 
 func (d *MCPPromptInputDialog) SetSize(width, height int) tea.Cmd {
-	d.reanchorFocus = d.Width() > 0 && (width != d.Width() || height != d.Height())
+	d.reanchorFocus = d.bodyPreparationCount == 0 || width != d.Width() || height != d.Height()
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.prepareLayout()
 	return cmd

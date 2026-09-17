@@ -43,6 +43,7 @@ type SessionTab struct {
 	routeGeneration uint64
 	projection      *app.PresentationState
 	cleanup         func()
+	owner           *viewOwner
 }
 
 // RuntimeOwnership declares whether a spawned App borrows the runner's
@@ -73,6 +74,14 @@ type Supervisor struct {
 	runners         map[string]*SessionTab
 	order           []string // Maintains tab order
 	retiredCleanups []func()
+	closed          bool
+	viewConfig      *HostViewConfig
+	viewContext     func() context.Context
+	viewCancel      context.CancelFunc
+	viewOwners      map[viewOwnerKey]*viewOwner
+	ownerResources  []*viewOwner
+	viewLeases      map[*hostedView]struct{}
+	ownerOperations sync.WaitGroup
 	activeID        string
 	spawner         SessionSpawner
 	program         *tea.Program
@@ -121,6 +130,13 @@ func (s *Supervisor) SetProgram(p *tea.Program) {
 // AddSession adds an existing session to the supervisor.
 func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.Session, workingDir string, cleanup func()) (string, error) {
 	s.mu.Lock()
+	if s.closed || sess == nil {
+		s.mu.Unlock()
+		if cleanup != nil {
+			cleanup()
+		}
+		return "", runtime.ErrSessionClosed
+	}
 	if _, exists := s.runners[sess.ID]; exists {
 		s.mu.Unlock()
 		if cleanup != nil {
@@ -138,12 +154,27 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		cleanup:      cleanup,
 	}
 
+	if a != nil {
+		for _, owner := range s.ownerResources {
+			if !owner.removed && sameSessionRuntime(owner.resources.Sessions, a.SessionRuntime()) {
+				if owner.resources.Cleanup == nil && cleanup != nil {
+					owner.resources.Cleanup = sync.OnceFunc(cleanup)
+				}
+				runner.owner = owner
+				runner.cleanup = nil
+				break
+			}
+		}
+	}
+
 	// Create a cancellable context for this session
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
 	runner.lifetimeCtx = sessionCtx
+	// Starting an App can enter the runtime; pin the operation and do it only
+	// after releasing the lifecycle lock.
 	if a != nil {
-		a.Start(sessionCtx)
+		s.ownerOperations.Add(1)
 	}
 
 	s.runners[sess.ID] = runner
@@ -164,12 +195,22 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		go s.subscribeWithRouting(routeCtx, a, sess.ID, generation, nil, routeDone)
 	}
 	s.mu.Unlock()
+	if a != nil {
+		a.Start(sessionCtx)
+		s.ownerOperations.Done()
+	}
 
 	return sess.ID, nil
 }
 
 // SpawnSession creates and adds a new session.
 func (s *Supervisor) SpawnSession(ctx context.Context, workingDir string) (string, error) {
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return "", runtime.ErrSessionClosed
+	}
 	if s.spawner == nil {
 		return "", errors.New("session spawning is not available")
 	}
@@ -312,7 +353,7 @@ func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessi
 		if bridged, ok := msg.(app.SessionEventMsg); ok {
 			s.applyPresentation(sessionID, bridged.Projection, bridged.Event)
 			msg = bridged.Event
-			inner = messages.SessionRuntimeEventMsg{Event: bridged.Event, Seed: bridged.Seed, Projection: bridged.Projection}
+			inner = messages.SessionRuntimeEventMsg{Event: bridged.Event, Seed: bridged.Seed, Projection: bridged.Projection, OriginSessionID: bridged.OriginSessionID, TurnID: bridged.TurnID, Epoch: bridged.Epoch, Sequence: bridged.Sequence}
 		}
 		s.handleRuntimeEvent(sessionID, msg)
 		select {
@@ -638,8 +679,14 @@ func (s *Supervisor) SeedTitle(sessionID, title string) {
 func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spawned SpawnedSession, workingDir string) {
 	s.mu.Lock()
 	runner, ok := s.runners[sessionID]
-	if !ok {
+	if !ok || s.closed {
 		s.mu.Unlock()
+		if spawned.Ownership == RuntimeOwned && spawned.Cleanup != nil {
+			spawned.Cleanup()
+		}
+		if spawned.App != nil {
+			spawned.App.Close()
+		}
 		return
 	}
 
@@ -651,6 +698,7 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 		runner.routeCancel()
 	}
 	oldCleanup := runner.cleanup
+	oldOwner := runner.owner
 	oldApp := runner.App
 
 	// Replace app and working directory. Borrowed replacement explicitly
@@ -660,6 +708,32 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	runner.WorkingDir = workingDir
 	if spawned.Ownership == RuntimeOwned {
 		runner.cleanup = spawned.Cleanup
+		runner.owner = nil
+	}
+	if spawned.App != nil {
+		for _, owner := range s.ownerResources {
+			if !owner.removed && sameSessionRuntime(owner.resources.Sessions, spawned.App.SessionRuntime()) {
+				// A compatibility host can register the initial borrowed runtime
+				// before a custom spawner transfers its cleanup ownership. Keep
+				// that callback in the resource record, not the replaceable view.
+				// An existing cleanup remains the sole retirement authority;
+				// registered spawners return its normal-close wrapper instead.
+				if owner.resources.Cleanup == nil && spawned.Ownership == RuntimeOwned && spawned.Cleanup != nil {
+					owner.resources.Cleanup = sync.OnceFunc(spawned.Cleanup)
+				}
+				runner.owner = owner
+				runner.cleanup = nil
+				break
+			}
+		}
+	}
+	ownerReplaced := oldOwner != runner.owner
+	if oldOwner != nil && ownerReplaced {
+		oldOwner.closeRequested = true
+	}
+	if oldOwner != nil && ownerReplaced && !oldOwner.retained && !oldOwner.initial && oldOwner.refs == 0 && !s.ownerHasRunnerLocked(oldOwner) {
+		s.removeOwnerLocked(oldOwner)
+		oldCleanup = oldOwner.resources.Cleanup
 	}
 	runner.sessionState = runtime.SessionStateSettled
 
@@ -668,17 +742,21 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	runner.cancel = cancel
 	runner.lifetimeCtx = sessionCtx
 	if spawned.App != nil {
-		spawned.App.Start(sessionCtx)
+		s.ownerOperations.Add(1)
 	}
 
 	s.notifyTabsUpdated()
 	s.mu.Unlock()
+	if spawned.App != nil {
+		spawned.App.Start(sessionCtx)
+		s.ownerOperations.Done()
+	}
 
 	if oldApp != nil && oldApp != spawned.App {
 		oldApp.Close()
 	}
 	// Run old cleanup outside the lock only when ownership was replaced.
-	if spawned.Ownership == RuntimeOwned && oldCleanup != nil {
+	if (spawned.Ownership == RuntimeOwned || ownerReplaced) && oldCleanup != nil {
 		go oldCleanup()
 	}
 
@@ -784,9 +862,18 @@ func (s *Supervisor) Spawner() SessionSpawner {
 func (s *Supervisor) RetainCleanupUntilShutdown(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if runner := s.runners[sessionID]; runner != nil && runner.cleanup != nil {
-		s.retiredCleanups = append(s.retiredCleanups, runner.cleanup)
-		runner.cleanup = nil
+	if runner := s.runners[sessionID]; runner != nil {
+		if runner.owner != nil {
+			// Existing running-child safety ownership is never denied by the
+			// optional view cap and never cancelled to make room.
+			runner.owner.retained = true
+			runner.owner.safety = true
+			return
+		}
+		if runner.cleanup != nil {
+			s.retiredCleanups = append(s.retiredCleanups, runner.cleanup)
+			runner.cleanup = nil
+		}
 	}
 }
 
@@ -812,6 +899,13 @@ func (s *Supervisor) CloseSession(sessionID string) string {
 
 	// Remove from maps
 	delete(s.runners, sessionID)
+	if owner := runner.owner; owner != nil {
+		owner.closeRequested = true
+		if !owner.retained && !owner.initial && owner.refs == 0 && !s.ownerHasRunnerLocked(owner) {
+			s.removeOwnerLocked(owner)
+			cleanup = owner.resources.Cleanup
+		}
+	}
 
 	// Remove from order slice, remembering where it was.
 	closedIdx := 0
@@ -878,6 +972,16 @@ func (s *Supervisor) ReorderTab(fromIdx, toIdx int) {
 // Shutdown closes all sessions.
 func (s *Supervisor) Shutdown() {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	cancelHost := s.viewCancel
+	leases := make([]*hostedView, 0, len(s.viewLeases))
+	for lease := range s.viewLeases {
+		leases = append(leases, lease)
+	}
 
 	// Cancel all contexts first, then collect cleanup functions.
 	cleanups := s.retiredCleanups
@@ -911,6 +1015,26 @@ func (s *Supervisor) Shutdown() {
 			close(done)
 		}
 	})
+
+	if cancelHost != nil {
+		cancelHost()
+	}
+	// Abort waits for an accepted commit without holding supervisor.mu.
+	// Operations that already entered are drained before resource teardown.
+	for _, lease := range leases {
+		lease.Abort()
+	}
+	s.ownerOperations.Wait()
+	s.mu.Lock()
+	for _, owner := range s.ownerResources {
+		owner.removed = true
+		if owner.resources.Cleanup != nil {
+			cleanups = append(cleanups, owner.resources.Cleanup)
+		}
+	}
+	s.ownerResources = nil
+	s.viewOwners = nil
+	s.mu.Unlock()
 
 	// Fence projections and run cleanups outside the lock.
 	for _, a := range apps {

@@ -36,13 +36,15 @@ func (m *model) syncBranchSpans() tea.Cmd {
 	}
 	seen := make(map[subagent.NodeID]bool)
 	changed := false
-	var walk func([]subagent.NodeSnapshot)
-	walk = func(nodes []subagent.NodeSnapshot) {
+	var walk func([]subagent.NodeSnapshot) int
+	walk = func(nodes []subagent.NodeSnapshot) int {
+		total := 0
 		for _, node := range nodes {
 			id := node.Node.ID
 			seen[id] = true
 			span, exists := m.branchSpans[id]
-			span.count = descendantCount(node.Children)
+			span.count = walk(node.Children)
+			total += 1 + span.count
 			target := 0.0
 			if span.count > 0 && m.collapsedBranches[id] {
 				target = 1
@@ -67,8 +69,8 @@ func (m *model) syncBranchSpans() tea.Cmd {
 				}
 			}
 			m.branchSpans[id] = span
-			walk(node.Children)
 		}
+		return total
 	}
 	walk(m.subagentNodes)
 	for id := range m.branchSpans {
@@ -142,4 +144,28 @@ func (m *model) capturedBranchAt(x, y int) (treeControl, bool) {
 		return treeControl{}, false
 	}
 	return treeControl{id: capture.id, x: x - m.layoutCfg.PaddingLeft}, true
+}
+
+// Hover changes only ID reveal targets, not branch topology or descendant counts.
+func (m *model) syncBranchHover() tea.Cmd {
+	changed := false
+	for id, span := range m.branchSpans {
+		target := 0.0
+		if m.hoverTarget == "node:"+string(id) && m.hoveredSubagent == id {
+			target = 1
+		}
+		if target != span.idTarget {
+			span.idFrom, span.idTarget, span.idElapsed = span.idValue, target, 0
+			span.idRunning = m.presentationActive
+			if !m.presentationActive {
+				span.idValue = target
+			}
+			m.branchSpans[id] = span
+			changed = true
+		}
+	}
+	if changed && m.presentationActive {
+		return m.presentationSub.Start()
+	}
+	return nil
 }

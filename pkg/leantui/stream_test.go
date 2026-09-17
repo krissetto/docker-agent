@@ -73,12 +73,26 @@ func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
 	assert.Equal(t, ui.PromptWidth+5, cursorCol)
 }
 
-func TestConversationLinesShowsSpinnerWhenBusy(t *testing.T) {
+// Session-local activity uses the existing footer, never a pane header or
+// the transcript scrollback.
+func TestBusyActivityIsLocalToStatusFooter(t *testing.T) {
 	t.Parallel()
 	m := bareModel(24)
 	m.busy = true
-	lines := m.screen.Transcript.Lines(80, m.spinnerFrame, m.busy, m.sessionState, nil)
-	assert.Contains(t, strings.Join(lines, ""), "Working")
+	m.status.Agent = "worker"
+	assert.Empty(t, m.screen.Transcript.Lines(80, m.spinnerFrame, m.busy, m.sessionState, nil))
+	lines, _, _ := m.buildLines()
+	text := strings.Join(lines, "")
+	assert.Contains(t, text, "worker")
+	assert.Contains(t, text, "active")
+	assert.Equal(t, 1, strings.Count(text, "worker"), "no replacement header duplicates identity")
+	assert.NotContains(t, text, "Working")
+	m.spinnerFrame++
+	next, _, _ := m.buildLines()
+	assert.Equal(t, lines, next, "activity does not redraw just for an animation clock tick")
+	m.busy = false
+	idle, _, _ := m.buildLines()
+	assert.Contains(t, strings.Join(idle, ""), "ready")
 }
 
 func TestToolConfirmationReplacesRunningTool(t *testing.T) {

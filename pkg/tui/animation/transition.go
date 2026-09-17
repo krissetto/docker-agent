@@ -13,8 +13,9 @@ import (
 //
 // Usage:
 //
-//	var t animation.Transition
-//	cmd := t.Start(140*time.Millisecond, animation.EaseOutCubic)
+//	t := animation.NewTransition(ar)
+//	t.Start(140*time.Millisecond, animation.EaseOutCubic)
+//	// The program owner returns ar.Continue() after Init and every Update.
 //
 //	// On each TickMsg:
 //	if t.Running() {
@@ -89,8 +90,8 @@ func Linear(t float64) float64 {
 
 // Start begins the transition over the given duration using the provided easing
 // function. If a transition is already running it is replaced without
-// re-registering. Returns a command to start the tick chain when this is the
-// first registration.
+// re-registering. Start only registers work and returns nil for command-signature
+// compatibility; the program owner schedules through Runtime.Continue.
 func (tr *Transition) Start(duration time.Duration, fn EasingFunc) tea.Cmd {
 	if duration <= 0 {
 		duration = time.Nanosecond

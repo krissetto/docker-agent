@@ -47,8 +47,12 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 				runtime := animation.NewRuntime()
 				mgr := &manager{runtime: runtime, width: 81, height: 31}
 				_, cmd := mgr.handleOpen(OpenDialogMsg{Model: fixture.new()})
-				require.NotNil(t, cmd)
-				tick := runtime.EnsureRunning()
+				if fixture.name == "commands" {
+					require.NotNil(t, cmd, "command palette retains its cursor initialization")
+				} else {
+					require.Nil(t, cmd, "opening only registers animation")
+				}
+				tick := runtime.Continue()
 				require.NotNil(t, tick)
 				assert.Equal(t, int32(1), runtime.ActiveCount())
 
@@ -67,7 +71,9 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 						if i != 1 {
 							require.True(t, mgr.stack[0].anim.Running(), "filter height changes retarget the shared outer transition")
 						}
-						tick = runtime.EnsureRunning()
+						if tick == nil {
+							tick = runtime.Continue()
+						}
 						assertConcreteRootFrame(t, mgr)
 						if mgr.stack[0].anim.Running() {
 							stepConcreteDialog(t, runtime, &tick, mgr)
@@ -77,7 +83,9 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 					}
 				case *settingsDialog:
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
-					tick = runtime.EnsureRunning()
+					if tick == nil {
+						tick = runtime.Continue()
+					}
 					require.True(t, mgr.stack[0].anim.Running(), "category content change retargets the shared outer transition")
 					assertConcreteRootFrame(t, mgr)
 					stepConcreteDialog(t, runtime, &tick, mgr)
@@ -87,16 +95,22 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 					d.confirmYOLO = false
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeySpace})
 					require.True(t, mgr.stack[0].anim.Running(), "toggle-dependent content retargets the shared outer transition")
-					tick = runtime.EnsureRunning()
+					if tick == nil {
+						tick = runtime.Continue()
+					}
 					assertConcreteRootFrame(t, mgr)
 					finishConcreteDialog(t, runtime, &tick, mgr)
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
-					tick = runtime.EnsureRunning()
+					if tick == nil {
+						tick = runtime.Continue()
+					}
 					finishConcreteDialog(t, runtime, &tick, mgr)
 				}
 
 				mgr.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
-				tick = runtime.EnsureRunning()
+				if tick == nil {
+					tick = runtime.Continue()
+				}
 				require.True(t, mgr.stack[0].anim.Running(), "terminal change retargets the shared outer transition")
 				assertConcreteRootFrame(t, mgr)
 				stepConcreteDialog(t, runtime, &tick, mgr)
@@ -104,16 +118,22 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 				assert.NotEqual(t, settled, mgr.stack[0].targetHeight)
 
 				mgr.handleClose()
-				tick = runtime.EnsureRunning()
+				if tick == nil {
+					tick = runtime.Continue()
+				}
 				assertConcreteRootFrame(t, mgr)
 				stepConcreteDialog(t, runtime, &tick, mgr)
 				assertConcreteRootFrame(t, mgr)
 				mgr.stack[0].reopen(mgr.width, mgr.height)
-				tick = runtime.EnsureRunning()
+				if tick == nil {
+					tick = runtime.Continue()
+				}
 				assertConcreteRootFrame(t, mgr)
 				finishConcreteDialog(t, runtime, &tick, mgr)
 				mgr.handleClose()
-				tick = runtime.EnsureRunning()
+				if tick == nil {
+					tick = runtime.Continue()
+				}
 				finishConcreteDialog(t, runtime, &tick, mgr)
 				mgr.handleTick(animation.TickMsg{})
 				assert.Empty(t, mgr.stack)

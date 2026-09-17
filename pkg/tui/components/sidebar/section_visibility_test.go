@@ -143,11 +143,11 @@ func TestCollapsedView_HiddenPathLeavesNoBlankRow(t *testing.T) {
 	s.workingDirectory = "~/projects/myapp"
 	s.gitBranchName = ""
 
-	withPath := s.computeCollapsedViewModel(60).LineCount()
+	require.Equal(t, 2, s.computeCollapsedViewModel(60).LineCount())
 
 	s.SetSectionVisibility(SectionVisibility{HideSessionPath: true, HideUsage: true})
 	vm := s.computeCollapsedViewModel(60)
-	assert.Equal(t, withPath-1, vm.LineCount(), "the path+usage row disappears entirely")
+	assert.Equal(t, 2, vm.LineCount(), "model metadata remains in the second row")
 
 	lines := strings.Split(RenderCollapsedView(vm), "\n")
 	assert.Len(t, lines, vm.LineCount(), "LineCount matches the divider-free band render")
@@ -215,7 +215,7 @@ func TestCollapsedInfoLine_HonorsVisibility(t *testing.T) {
 	assert.Empty(t, s.collapsedInfoLine(60), "hiding every section removes the line")
 }
 
-func TestCollapsedLineCount_GrowsWithInfoLine(t *testing.T) {
+func TestCollapsedLineCount_StableWithInfoLine(t *testing.T) {
 	t.Parallel()
 
 	s := newVisibilityTestSidebar(t)
@@ -224,7 +224,8 @@ func TestCollapsedLineCount_GrowsWithInfoLine(t *testing.T) {
 	s.SetSectionVisibility(SectionVisibility{HideAgents: true, HideTools: true, HideTodos: true})
 	withoutInfo := s.computeCollapsedViewModel(60).LineCount()
 
-	assert.Equal(t, withoutInfo+1, withInfo, "the info line adds one band line")
+	assert.Equal(t, 2, withInfo)
+	assert.Equal(t, withInfo, withoutInfo, "identity shares the title row")
 }
 
 // sectionTitleGap returns the number of consecutive blank lines immediately
@@ -252,7 +253,10 @@ func TestRenderSections_SectionGap(t *testing.T) {
 		s.SetSectionGap(gap)
 		lines := s.renderSections(40)
 		assert.Equal(t, 1, sectionTitleGap(lines, "$0.00"), "old gap %d cannot change deliberate breathing room", gap)
-		assert.Equal(t, 1, sectionTitleGap(lines, "gpt-4"), "old gap %d cannot change deliberate breathing room", gap)
+		assert.Equal(t, 1, sectionTitleGap(lines, "root"), "identity block stays spaced below usage")
+		assert.Equal(t, 0, sectionTitleGap(lines, "gpt-4"), "model immediately follows canonical identity")
+		assert.Equal(t, "root", ansi.Strip(lines[s.modelStart-1]))
+		assert.NotContains(t, ansi.Strip(s.footerView(40)), "root", "identity is no longer in the footer")
 	}
 }
 

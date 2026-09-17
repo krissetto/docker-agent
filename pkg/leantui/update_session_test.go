@@ -676,3 +676,82 @@ func TestOptionUpWithdrawalErrorKeepsPendingInput(t *testing.T) {
 	assert.Len(t, m.pendingUsers, 1)
 	assert.Equal(t, "draft", m.screen.Editor.Text())
 }
+
+func TestProjectedReasoningWaitsForCanonicalRefreshAfterCycle(t *testing.T) {
+	m, handle := sessionModel(t)
+	m.status.ThinkingMode = "effort"
+	m.status.ThinkingLevel = "low"
+	m.status.Thinking = "low"
+	m.status.CanCycleThinking = true
+	m.handleCycleThinkingLevel(t.Context())
+	assert.Equal(t, effort.High, handle.level)
+	assert.Equal(t, "low", m.status.ThinkingLevel, "action must not infer projection before the canonical event")
+	m.handleEvent(t.Context(), runtime.TeamInfo([]runtime.AgentDetails{{Name: "agent", ThinkingMode: "effort", ThinkingLevel: "high", CanCycleThinking: true}}, "agent"))
+	assert.Equal(t, "high", m.status.ThinkingLevel)
+}
+
+func TestFriendlyModelCompletionRetainsCanonicalRef(t *testing.T) {
+	m, handle := sessionModel(t)
+	handle.models = []runtime.ModelChoice{{Name: "config-alias", Ref: "config-alias", Provider: "provider", ModelID: "canonical-id", ModelName: "Friendly Model"}}
+	m.handleModelCommand(t.Context(), "")
+	choice, ok := m.screen.Autocomplete.Current()
+	require.True(t, ok)
+	assert.Equal(t, "Friendly Model", choice.Name)
+	assert.Equal(t, "config-alias", choice.Value)
+}
+
+func TestShiftTabUsesPrimaryCapabilityAcrossFallbackProjectionTransitions(t *testing.T) {
+	for _, capable := range []bool{true, false} {
+		m, handle := sessionModel(t)
+		handle.thinkingLevels = capable
+		primary := &runtime.ThinkingDetails{ModelRef: "p/primary", Mode: "effort", Level: "low", CanCycle: capable}
+		if !capable {
+			primary.Mode, primary.Level = "unsupported", "unsupported"
+		}
+		for _, fallback := range []bool{false, true, false} {
+			modelRef := "primary"
+			if fallback {
+				modelRef = "fallback"
+			}
+			m.handleEvent(t.Context(), runtime.AgentInfo("agent", "p/"+modelRef, "", ""))
+			// The gap before TeamInfo must use the same handle capability.
+			handle.level = ""
+			m.handleKey(t.Context(), ui.Key{Typ: ui.KeyShiftTab})
+			if capable {
+				assert.Equal(t, effort.High, handle.level)
+			} else {
+				assert.Empty(t, handle.level)
+			}
+			details := runtime.AgentDetails{
+				Name: "agent", Provider: "p", ModelID: modelRef, ModelName: "Friendly " + modelRef,
+				ThinkingMode: primary.Mode, ThinkingLevel: primary.Level, CanCycleThinking: capable,
+			}
+			if fallback {
+				details.PrimaryThinking = primary
+				details.ThinkingMode, details.ThinkingLevel = "effort", "high"
+				if capable {
+					details.ThinkingMode, details.ThinkingLevel = "unsupported", "unsupported"
+				}
+				details.CanCycleThinking = !capable
+			}
+			m.handleEvent(t.Context(), runtime.TeamInfo([]runtime.AgentDetails{details}, "agent"))
+			handle.level = ""
+			m.handleKey(t.Context(), ui.Key{Typ: ui.KeyShiftTab})
+			if capable {
+				assert.Equal(t, effort.High, handle.level)
+			} else {
+				assert.Empty(t, handle.level)
+			}
+			assert.Equal(t, details.ThinkingLevel, m.status.ThinkingLevel, "keyboard action cannot rewrite F projection")
+			if fallback {
+				lines := strings.Join(ui.RenderStatus(m.status, 120), "\n")
+				assert.Contains(t, lines, "Friendly fallback")
+				assert.Contains(t, lines, "p("+details.ThinkingLevel+")")
+				assert.Contains(t, lines, "(primary: "+primary.Level+")")
+			}
+		}
+		m.handleEvent(t.Context(), runtime.AgentInfo("other-agent", m.status.Model, "", ""))
+		assert.Empty(t, m.status.ThinkingMode, "agent replacement invalidates reasoning even if model identity is unchanged")
+		assert.Nil(t, m.status.PrimaryThinking)
+	}
+}

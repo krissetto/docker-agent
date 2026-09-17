@@ -29,7 +29,7 @@ func TestInvisibleDialogDoesNotScheduleLifecycle(t *testing.T) {
 	dlg := &lifecycleDialog{view: "hidden"}
 	mgr.handleOpen(OpenDialogMsg{Model: dlg})
 	assert.Zero(t, r.ActiveCount())
-	assert.Nil(t, r.EnsureRunning())
+	assert.Nil(t, r.Continue())
 	mgr.handleClose()
 	assert.False(t, mgr.Open())
 	assert.Equal(t, 1, dlg.cleaned)

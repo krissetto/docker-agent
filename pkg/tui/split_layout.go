@@ -117,6 +117,27 @@ func (l splitLayout) Insert(source, target string, edge splitEdge) (splitLayout,
 	return splitLayout{root: insert(root)}, true
 }
 
+// Replace substitutes exactly one routing leaf without changing its geometry.
+func (l splitLayout) Replace(old, next string) (splitLayout, bool) {
+	if next == "" || !l.Contains(old) || l.Contains(next) {
+		return l, false
+	}
+	root := splitClone(l.root)
+	var replace func(*splitNode)
+	replace = func(node *splitNode) {
+		if node.first == nil {
+			if node.session == old {
+				node.session = next
+			}
+			return
+		}
+		replace(node.first)
+		replace(node.second)
+	}
+	replace(root)
+	return splitLayout{root: root}, true
+}
+
 func (l splitLayout) Remove(sessionID string) (splitLayout, bool) {
 	if !l.Contains(sessionID) || l.root.first == nil {
 		return l, false

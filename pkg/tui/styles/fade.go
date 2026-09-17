@@ -188,10 +188,8 @@ func fadeExtractColor(params ansi.Params, i int, fc *FadeContext) (ci fadeColorI
 		return fadeColorInfo{r: fc.defFgR, g: fc.defFgG, b: fc.defFgB, prefix: "38"}, 1
 	}
 
-	// Default bg (49) / default underline (59): already theme bg, just drop.
-	if p == 49 || p == 59 {
-		return fadeColorInfo{drop: true}, 1
-	}
+	// Default background/underline resets must pass through. Dropping them
+	// would leak a preceding explicit color into the rest of the pane.
 
 	return fadeColorInfo{}, 0
 }
@@ -203,17 +201,24 @@ func fadeExtractExtended(params ansi.Params, i int, prefix string) (ci fadeColor
 	}
 
 	colons := params[i].HasMore()
+	end := len(params)
+	if colons {
+		end = i + 1
+		for end < len(params) && params[end-1].HasMore() {
+			end++
+		}
+	}
 	kind := params[i+1].Param(0)
 
 	switch kind {
 	case 2: // X;2;R;G;B
-		remaining := len(params) - i
+		remaining := end - i
 		if remaining < 5 {
 			return fadeColorInfo{}, 0
 		}
 		start := i + 2
 		// ISO colon form may include an empty or explicit color-space slot.
-		if colons && remaining >= 6 && params[i+4].HasMore() {
+		if colons && remaining == 6 {
 			start++
 		}
 		r := float64(params[start].Param(0))
@@ -222,7 +227,7 @@ func fadeExtractExtended(params ansi.Params, i int, prefix string) (ci fadeColor
 		return fadeColorInfo{r: r, g: g, b: b, prefix: prefix, useColons: colons}, start + 3 - i
 
 	case 5: // X;5;N
-		if i+2 >= len(params) {
+		if i+2 >= end {
 			return fadeColorInfo{}, 0
 		}
 		r, g, b := indexedColorRGB(params[i+2].Param(0))
@@ -266,6 +271,17 @@ func fadeRewriteSGR(buf *strings.Builder, params ansi.Params, alpha float64, fc 
 				parts = append(parts, fadeFmtColor(ci.prefix, ir, ig, ib, ci.useColons))
 			}
 			i += n
+			continue
+		}
+
+		// Incomplete/unsupported extended colors remain opaque. Their channel
+		// parameters (especially zero) are not independent SGR reset codes.
+		if (p == 38 || p == 48 || p == 58) && !params[i].HasMore() {
+			var raw []string
+			for ; i < len(params); i++ {
+				raw = append(raw, strconv.Itoa(params[i].Param(0)))
+			}
+			parts = append(parts, strings.Join(raw, ";"))
 			continue
 		}
 

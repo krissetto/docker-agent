@@ -212,3 +212,29 @@ func TestNewSessionMsg_FileArgErrorsWithoutSpawning(t *testing.T) {
 	assert.Equal(t, notification.TypeError, note.Type)
 	assert.Contains(t, note.Text, "is not a directory")
 }
+
+func TestPrivateForkPreservesSelectedAgentBeforePersistence(t *testing.T) {
+	root := splitTestRoot(t)
+	store := session.NewInMemorySessionStore()
+	source := root.application.Session()
+	source.AgentName = "selected-agent"
+	source.AgentModelOverrides = map[string]string{"selected-agent": "selected-model"}
+	application := app.New(t.Context(), nil, source, runtime.SessionBinding{AgentName: source.AgentName, Model: "selected-model"}, app.WithRuntimeServices(storeRuntime{store: store}))
+	root.application = application
+	root.legacyPresentationOnly = true
+	root.supervisor.GetRunner("profile").App = application
+	_, cmd := root.handleForkSession()
+	result := cmd().(hostedLoadResult)
+	require.NoError(t, result.err)
+	root.finishHostedLoad(result)
+	fork := root.application.Session()
+	require.NotEqual(t, source.ID, fork.ID)
+	require.Equal(t, "selected-agent", fork.AgentName)
+	require.Equal(t, source.AgentModelOverrides, fork.AgentModelOverrides)
+	persisted, err := store.GetSession(t.Context(), fork.ID)
+	require.NoError(t, err)
+	require.Equal(t, "selected-agent", persisted.AgentName)
+	require.Equal(t, "selected-agent", source.AgentName)
+	require.Equal(t, "selected-model", source.AgentModelOverrides["selected-agent"])
+	require.Nil(t, root.application.SessionHandle(), "legacy presentation-only embedder never invents execution")
+}

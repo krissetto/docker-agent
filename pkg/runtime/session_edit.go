@@ -12,6 +12,8 @@ import (
 type SessionEditKind string
 
 const (
+	SessionEditResume         SessionEditKind = "resume"
+	SessionEditOpenView       SessionEditKind = "open_view"
 	SessionEditPendingMessage SessionEditKind = "pending_message"
 	SessionEditAttachment     SessionEditKind = "attachment"
 	SessionEditPolicy         SessionEditKind = "policy"
@@ -46,6 +48,28 @@ type SessionEdit struct {
 
 func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Session, error) {
 	d := h.driver
+	if edit.Kind == SessionEditResume || edit.Kind == SessionEditOpenView {
+		d.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
+		if d.r.lifetime().Err() != nil {
+			d.mu.Unlock()
+			return nil, ErrSessionClosed
+		}
+		if err := d.admitLocked(SessionOperationPost); err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
+		changed := edit.Kind == SessionEditResume && d.authorizeViewLocked()
+		snapshot := d.sess.Clone()
+		d.mu.Unlock()
+		if changed {
+			d.r.sessionDrivers.signalWork()
+		}
+		return snapshot, nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if err := ctx.Err(); err != nil {

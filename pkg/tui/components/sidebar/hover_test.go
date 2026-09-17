@@ -36,9 +36,15 @@ func hoverTickCommand(t *testing.T, cmd tea.Cmd) tea.Cmd {
 	return nil
 }
 
+// sidebarOwnerCommand commits registrations after a standalone fixture action.
+// A supplied command may already carry the owner's pending lease.
+func sidebarOwnerCommand(m *model, cmd tea.Cmd) tea.Cmd {
+	return tea.Batch(cmd, m.ar.Continue())
+}
+
 func settleSidebarHover(t *testing.T, m *model, cmd tea.Cmd) tea.Cmd {
 	t.Helper()
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	for range 40 {
 		if !m.hoverAnimation.IsActive() && !m.branchSpansRunning() {
 			return cmd
@@ -79,7 +85,7 @@ func TestHoverEntryExitElapsedAndNeutralIdentityParts(t *testing.T) {
 	_, cmd := m.Update(tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft + 4, Y: row})
 	initial := m.View()
 	require.Zero(t, m.hoverValues["node:child-full-id"].value)
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	require.NotNil(t, cmd)
 	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
 	require.True(t, ok)
@@ -101,8 +107,8 @@ func TestHoverEntryExitElapsedAndNeutralIdentityParts(t *testing.T) {
 	}
 	assert.Equal(t, settledGen, m.VisualGeneration())
 	assert.Zero(t, m.ar.ActiveCount())
-	exit := m.ClearSubagentHover()
-	require.NotNil(t, exit, "settled idle hover must start its exit via returned shared command")
+	exit := sidebarOwnerCommand(m, m.ClearSubagentHover())
+	require.NotNil(t, exit, "settled idle hover must start its exit via the owner command")
 	require.InDelta(t, 1, m.hoverValues["node:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
 	settleSidebarHover(t, m, exit)
 	assert.Empty(t, m.hoverValues)

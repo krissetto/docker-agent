@@ -6,24 +6,42 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 type panePointerTransaction struct {
-	source          string
-	startX, startY  int
-	layout          splitLayout
-	order           []string
-	bounds          splitRect
-	geometry        splitGeometry
-	active, reorder bool
-	target          string
-	edge            splitEdge
-	preview         splitRect
-	divider         *splitDivider
-	position        int
-	keyboard        bool
+	source                                  string
+	sourceGeneration                        uint64
+	startX, startY                          int
+	layout                                  splitLayout
+	order                                   []string
+	bounds                                  splitRect
+	geometry                                splitGeometry
+	active, reorder                         bool
+	target                                  string
+	edge                                    splitEdge
+	preview                                 splitRect
+	divider                                 *splitDivider
+	position                                int
+	keyboard                                bool
+	ghostX, ghostY                          int
+	ghostLabel                              string
+	ghostTheme                              uint64
+	ghostIdentity                           string
+	base                                    string
+	baseTheme, baseSidebar, baseAgentColors uint64
+	baseFocus                               string
+	baseBounds                              splitRect
+	baseWidth, baseHeight                   int
+	baseFrame                               string
+	baseStatuses                            map[string]runtime.SessionStatus
+	baseDimInactive                         bool
+	baseGenerations                         map[string]uint64
 }
 
 func (m *appModel) paneOrder() []string {
@@ -38,6 +56,13 @@ func (m *appModel) paneOrder() []string {
 }
 
 func (m *appModel) cancelPaneGesture() {
+	if m.hostedLoad != nil {
+		m.hostedLoad.cancel()
+		m.hostedLoad = nil
+	}
+	m.panePicker = nil
+	m.cancelPaneSource()
+	m.cancelPaneCatalog()
 	if m.paneHydration != nil {
 		m.paneHydration.cancel()
 		m.paneHydration = nil
@@ -62,8 +87,11 @@ func (m *appModel) validPaneGesture() bool {
 	if m.dialogMgr.Open() || m.leanMode || !slices.Equal(g.order, m.paneOrder()) {
 		return false
 	}
-	if g.source != "" && m.supervisor.GetRunner(g.source) == nil {
-		return false
+	if g.source != "" {
+		generation, exists := m.supervisor.RouteGeneration(g.source)
+		if !exists || generation != g.sourceGeneration {
+			return false
+		}
 	}
 	_, bounds, ok := m.measurePanes()
 	return ok && bounds == g.bounds && m.paneLayout().root == g.layout.root
@@ -79,13 +107,16 @@ func (m *appModel) beginPaneGesture(msg tea.MouseClickMsg) bool {
 		return false
 	}
 	if m.hitTestRegion(msg.Y) == regionTabBar {
-		source, ok := m.tabBar.TabBodyAt(msg.X-tabFrameOrigin(), msg.Y-m.contentHeight-1)
+		source, ok := m.tabBar.TabBodyAt(msg.X-tabFrameOrigin(), msg.Y-m.contentHeight-m.separatorHeight)
 		if !ok || m.supervisor == nil || m.supervisor.GetRunner(source) == nil {
 			return false
 		}
 		// Materialize the initial leaf so geometry/topology tokens are stable.
 		m.panes = m.paneLayout()
-		m.paneGesture = &panePointerTransaction{source: source, startX: msg.X, startY: msg.Y, layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
+		generation, _ := m.supervisor.RouteGeneration(source)
+		base := m.composePanes()
+		m.paneGesture = &panePointerTransaction{source: source, sourceGeneration: generation, startX: msg.X, startY: msg.Y, layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
+		m.cachePaneGestureBase(base)
 		return true
 	}
 	if m.panesEnabled() && !m.paneGeometry.Compact {
@@ -136,15 +167,15 @@ func (m *appModel) paneDrop(x, y int) (string, splitEdge, splitRect, bool) {
 	}
 	for _, id := range g.layout.Sessions() {
 		r, visible := g.geometry.Panes[id]
-		if !visible || id == g.source {
+		if !visible {
 			continue
 		}
 		edge, ok := nearestPaneEdge(r, x, y)
 		if !ok {
 			continue
 		}
-		next, ok := g.layout.Insert(g.source, id, edge)
-		if !ok || !m.supportsPaneCandidate(next, g.source) {
+		next, load, ok := m.paneSplitCandidate(g.layout, g.source, id, edge)
+		if !ok || !m.supportsPaneCandidate(next, load) {
 			return "", 0, splitRect{}, false
 		}
 		geometry := next.Compute(g.bounds, g.source, paneMinWidth, paneMinHeight)
@@ -162,6 +193,17 @@ func (m *appModel) movePaneGesture(msg tea.MouseMotionMsg) tea.Cmd {
 		return nil
 	}
 	g := m.paneGesture
+	if msg.X < 0 || msg.Y < 0 || msg.X >= m.width || msg.Y >= m.height {
+		m.cancelPaneGesture()
+		return nil
+	}
+	oldActive, oldReorder, oldTarget, oldEdge, oldPreview := g.active, g.reorder, g.target, g.edge, g.preview
+	oldX, oldY, oldLabel := g.ghostX, g.ghostY, g.ghostLabel
+	defer func() {
+		if oldActive != g.active || oldReorder != g.reorder || oldTarget != g.target || oldEdge != g.edge || oldPreview != g.preview || oldX != g.ghostX || oldY != g.ghostY || oldLabel != g.ghostLabel {
+			m.viewCacheValid = false
+		}
+	}()
 	if g.divider != nil {
 		position := msg.X
 		if g.divider.Axis == splitRows {
@@ -176,7 +218,7 @@ func (m *appModel) movePaneGesture(msg tea.MouseMotionMsg) tea.Cmd {
 	if !g.active {
 		return nil
 	}
-	m.viewCacheValid = false
+	m.updatePaneGhost(msg.X, msg.Y)
 	if m.hitTestRegion(msg.Y) == regionTabBar && msg.Y == g.startY {
 		if !g.reorder {
 			m.tabBar.BeginPointerPreview(g.startX - tabFrameOrigin())
@@ -234,7 +276,7 @@ func (m *appModel) releasePaneGesture(msg tea.MouseReleaseMsg) tea.Cmd {
 		return m.commitPaneDivider(position)
 	}
 	if !g.active {
-		source, hit := m.tabBar.TabBodyAt(msg.X-tabFrameOrigin(), msg.Y-m.contentHeight-1)
+		source, hit := m.tabBar.TabBodyAt(msg.X-tabFrameOrigin(), msg.Y-m.contentHeight-m.separatorHeight)
 		m.cancelPaneGesture()
 		if hit && source == g.source {
 			_, cmd := m.handleSwitchTab(source)
@@ -289,7 +331,7 @@ func (m *appModel) paneGestureLayer() *lipgloss.Layer {
 }
 
 func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
-	if m.paneHydration != nil && msg.String() == "esc" {
+	if (m.paneHydration != nil || m.paneSource != nil || m.paneCatalogRequest != nil || m.hostedLoad != nil) && msg.String() == "esc" {
 		m.cancelPaneGesture()
 		return nil, true
 	}
@@ -313,4 +355,82 @@ func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.previewPaneDivider(g.position + 1)
 	}
 	return nil, true
+}
+
+func (m *appModel) updatePaneGhost(x, y int) {
+	g := m.paneGesture
+	if g == nil || !g.active || g.source == "" {
+		return
+	}
+	name, node := m.tabAgentIdentity(messages.TabInfo{SessionID: g.source})
+	title := ""
+	if state := m.sessionStates[g.source]; state != nil {
+		title = state.SessionTitle()
+	}
+	identity := name + "\x00" + node + "\x00" + title
+	theme := styles.ThemeGeneration()
+	if g.ghostLabel == "" || g.ghostTheme != theme || g.ghostIdentity != identity {
+		g.ghostIdentity, g.ghostTheme = identity, theme
+		label := m.paneChoiceLabel(g.source)
+		g.ghostLabel = styles.BaseStyle.Background(styles.EditorBg).Render(" " + ansi.Truncate(label, max(0, min(38, m.width)-2), "…") + " ")
+	}
+	width := min(m.width, ansi.StringWidth(g.ghostLabel))
+	g.ghostX = max(0, min(x+2, m.width-width))
+	g.ghostY = max(0, min(y+1, m.height-1))
+	if g.ghostY == y && y > 0 {
+		g.ghostY = y - 1
+	}
+}
+
+func (m *appModel) paneGhostLayer() *lipgloss.Layer {
+	g := m.paneGesture
+	if g == nil || !g.active || g.reorder || g.divider != nil || g.ghostLabel == "" || m.dialogMgr.Open() || m.width <= 0 || m.height <= 0 {
+		return nil
+	}
+	if g.ghostTheme != styles.ThemeGeneration() {
+		g.ghostTheme = styles.ThemeGeneration()
+		g.ghostIdentity = m.paneChoiceLabel(g.source)
+		g.ghostLabel = styles.BaseStyle.Background(styles.EditorBg).Render(" " + ansi.Truncate(g.ghostIdentity, max(0, min(38, m.width)-2), "…") + " ")
+	}
+	return lipgloss.NewLayer(ansi.Truncate(g.ghostLabel, m.width, "")).X(g.ghostX).Y(g.ghostY)
+}
+
+func (m *appModel) paneGestureBaseValid() bool {
+	g := m.paneGesture
+	if g == nil || g.base == "" || g.baseTheme != styles.ThemeGeneration() || g.baseAgentColors != styles.AgentColorGeneration() || g.baseSidebar != sidebarVisualGeneration(m.chatPage) || g.baseFocus != m.paneFocus() || g.baseBounds != m.paneBounds || g.baseWidth != m.width || g.baseHeight != m.contentHeight || g.baseFrame != m.paneActivityFrame() || g.baseDimInactive != m.dimInactivePanes || !m.paneStatusesMatch(g.baseStatuses) || len(g.baseGenerations) != len(m.paneGeometry.Panes) {
+		return false
+	}
+	for id := range m.paneGeometry.Panes {
+		if g.baseGenerations[id] != chatVisualGeneration(m.chatPages[id]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *appModel) cachePaneGestureBase(view string) {
+	g := m.paneGesture
+	if g == nil {
+		return
+	}
+	g.base, g.baseTheme, g.baseSidebar = view, styles.ThemeGeneration(), sidebarVisualGeneration(m.chatPage)
+	g.baseAgentColors, g.baseFocus, g.baseBounds = styles.AgentColorGeneration(), m.paneFocus(), m.paneBounds
+	g.baseWidth, g.baseHeight, g.baseFrame = m.width, m.contentHeight, m.paneActivityFrame()
+	g.baseDimInactive = m.dimInactivePanes
+	if m.composingPaneStatuses != nil {
+		g.baseStatuses = m.composingPaneStatuses
+	} else {
+		g.baseStatuses = m.visiblePaneStatuses()
+	}
+	g.baseGenerations = make(map[string]uint64, len(m.paneGeometry.Panes))
+	for id := range m.paneGeometry.Panes {
+		g.baseGenerations[id] = chatVisualGeneration(m.chatPages[id])
+	}
+}
+
+func (m *appModel) paneActivityFrame() string {
+	if !m.hasRunningPane() {
+		return ""
+	}
+	return animation.Card.FrameAt(m.ar.Now())
 }

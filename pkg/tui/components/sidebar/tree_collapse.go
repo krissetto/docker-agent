@@ -17,6 +17,7 @@ type treeControl struct {
 	id    subagent.NodeID
 	x     int
 	whole bool
+	todos bool
 }
 
 func (m *model) canonicalTreeID() subagent.NodeID {
@@ -65,6 +66,10 @@ func (m *model) pruneCollapsedBranches() {
 }
 
 func (m *model) treeCounts() (total, active, attention int) {
+	if m.treeCountsValid {
+		return m.treeCountCache[0], m.treeCountCache[1], m.treeCountCache[2]
+	}
+	defer func() { m.treeCountCache = [3]int{total, active, attention}; m.treeCountsValid = true }()
 	add := func(n subagent.Node) {
 		total++
 		if isActiveSubagentState(n.State) {
@@ -142,6 +147,9 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 	}
 	contentY := y + m.scrollview.ScrollOffset()
 	row := contentY - m.treeSectionStart
+	if contentY == m.todoSummaryLine && m.todoSummaryLine >= 0 {
+		return treeControl{whole: true, todos: true}, true
+	}
 	if contentY == m.summaryLine && m.hasTreeContent() {
 		return treeControl{whole: true}, true
 	}
@@ -159,7 +167,11 @@ func (m *model) treeControlAt(x, y int) (treeControl, bool) {
 
 func (m *model) toggleTreeControl(control treeControl) tea.Cmd {
 	if control.whole {
-		m.treeCollapsed = !m.treeCollapsed
+		if control.todos {
+			m.todosCollapsed = !m.todosCollapsed
+		} else {
+			m.treeCollapsed = !m.treeCollapsed
+		}
 		m.invalidateCache()
 		return m.ReconcileLayout()
 	} else {
@@ -228,12 +240,4 @@ func (m *model) participantLine(name string, width int) string {
 		line = padRight(line, width-lipgloss.Width(reading)) + contextGaugeStyle(m.agentContextGaugeLevel(name), styles.MutedStyle).Render(reading)
 	}
 	return ansi.Truncate(line, width, "")
-}
-
-func descendantCount(nodes []subagent.NodeSnapshot) int {
-	count := 0
-	for _, node := range nodes {
-		count += 1 + descendantCount(node.Children)
-	}
-	return count
 }

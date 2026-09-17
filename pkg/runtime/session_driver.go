@@ -85,6 +85,7 @@ type sessionDriver struct {
 	mu                 sync.Mutex
 	sess               *session.Session
 	running            bool
+	viewDormant        bool
 	settling           bool
 	completionErr      error
 	persistenceFailure error
@@ -404,7 +405,7 @@ func (d *sessionDriver) DrainSteering() []QueuedMessage {
 
 func (d *sessionDriver) schedulePendingRetry() {
 	d.mu.Lock()
-	if !d.stopped && len(d.pending) != 0 {
+	if !d.stopped && !d.viewDormant && len(d.pending) != 0 {
 		d.retryRunning = true
 	}
 	d.mu.Unlock()
@@ -478,6 +479,9 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 				}
 			}
 			d.pending = append(d.pending, msg)
+			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
+				d.authorizeViewLocked()
+			}
 			d.mu.Unlock()
 			d.refreshAttention()
 			return true, nil
@@ -504,6 +508,9 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 				}
 			}
 			d.pending = append(d.pending, msg)
+			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
+				d.authorizeViewLocked()
+			}
 			d.mu.Unlock()
 			d.refreshAttention()
 			return true, nil
@@ -519,6 +526,9 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 			}
 		}
 		d.pending = append(d.pending, msg)
+		if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
+			d.authorizeViewLocked()
+		}
 		// Correlated non-retry input has crossed the durable Session/store commit
 		// point. Retry and empty-ID lifecycle notes exist only in the mailbox.
 		durable := msg.RequestID != "" && !msg.Retry
@@ -605,7 +615,7 @@ func (d *sessionDriver) WakePending() bool {
 func (d *sessionDriver) wakePending() error {
 	d.mu.Lock()
 	pending := len(d.pending) > 0
-	idle := !d.running && !d.starting && !d.settling && !d.stopped
+	idle := !d.running && !d.starting && !d.settling && !d.stopped && !d.viewDormant
 	d.mu.Unlock()
 	if !pending || !idle {
 		return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), Operation: "wake_pending"}
@@ -730,6 +740,16 @@ func (d *sessionDriver) OnSettled(fn func()) func() {
 		defer d.mu.Unlock()
 		delete(d.onSettled, id)
 	}
+}
+
+// authorizeViewLocked is called only at successful explicit admission.
+func (d *sessionDriver) authorizeViewLocked() bool {
+	if !d.viewDormant {
+		return false
+	}
+	d.viewDormant = false
+	d.events.Publish(d.sessionIDLocked(), &DormancyChangedEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "session_dormancy_changed", SessionID: d.sessionIDLocked(), Dormant: false})
+	return true
 }
 
 func (d *sessionDriver) TogglePause(ctx context.Context) (bool, error) {
@@ -946,7 +966,7 @@ type driverObservation struct {
 }
 
 func (d *sessionDriver) beginReclaimLocked() bool {
-	if d.reclaiming || d.stopped || d.reportRetry != nil || d.running || d.starting || d.settling || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
+	if d.reclaiming || d.stopped || d.viewDormant || d.reportRetry != nil || d.running || d.starting || d.settling || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
 		return false
 	}
 	d.reclaiming = true
@@ -1189,7 +1209,7 @@ func (d *sessionDriver) statusLocked() SessionStatus {
 		state = SessionStateQueued
 	}
 	status := SessionStatus{
-		State: state, Pending: len(d.pending), TurnID: d.activeRequestID, LastError: d.lastError,
+		State: state, Pending: len(d.pending), TurnID: d.activeRequestID, LastError: d.lastError, Dormant: d.viewDormant,
 		PauseArmed: d.pauseCh != nil, Paused: d.pauseCh != nil && (d.pausePublished == d.pauseGeneration || (!d.running && !d.starting && !d.wakeRunning)), PauseGeneration: d.pauseGeneration,
 	}
 	if d.sess != nil {
@@ -1385,6 +1405,12 @@ func (d *sessionDriver) tryStart(ctx context.Context) (context.Context, uint64, 
 // a running generation. Promotion failure leaves the FIFO intact and no
 // provider call can begin.
 func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
+	d.mu.Lock()
+	dormant := d.viewDormant
+	d.mu.Unlock()
+	if dormant {
+		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), Operation: "view_dormant"}
+	}
 	if d.r.sessionDrivers != nil {
 		d.r.sessionDrivers.runMu.Lock()
 		defer d.r.sessionDrivers.runMu.Unlock()
@@ -1393,7 +1419,7 @@ func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Co
 		}
 	}
 	d.mu.Lock()
-	if d.stopped || d.r.lifetime().Err() != nil {
+	if d.stopped || d.viewDormant || d.r.lifetime().Err() != nil {
 		id := d.sessionIDLocked()
 		d.mu.Unlock()
 		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: id, Operation: SessionOperationStart}
@@ -1547,6 +1573,10 @@ func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint
 }
 
 func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Context, uint64, bool) {
+	return d.finishRunContext(d.r.durabilityContext(), generation, runErr)
+}
+
+func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64, runErr string) (context.Context, uint64, bool) {
 	d.mu.Lock()
 	if generation != d.generation || generation <= d.settledGeneration || d.completionInFlight {
 		d.mu.Unlock()
@@ -1570,14 +1600,14 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 	var completionErr error
 	for _, observer := range d.r.observers {
 		if p, ok := observer.(*PersistenceObserver); ok {
-			if err := p.completionError(d.sessionID()); err != nil {
+			if err := p.completionErrorContext(ctx, d.sessionID()); err != nil {
 				completionErr = err
 				break
 			}
 		}
 	}
 	if completionErr == nil && d.r.subagents != nil {
-		completionErr = d.r.subagents.completeSessionTurn(d, turnID, runErr)
+		completionErr = d.r.subagents.completeSessionTurnContext(ctx, d, turnID, runErr)
 	}
 	if completionErr != nil {
 		d.mu.Lock()
@@ -1602,7 +1632,22 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 	d.settledGeneration = generation
 	d.completionErr = nil
 	d.persistenceFailure = nil
+	d.lastFailureKey = ""
 	d.resolveInteractionsLocked()
+	// Publication shares the durable settlement guard and precedes waiter release
+	// and successor promotion. The journal only queues events; it invokes no callbacks.
+	if turnID != "" {
+		outcome := TurnCompleted
+		if d.cancelling || d.stopped || d.r.lifetime().Err() != nil {
+			outcome = TurnCanceled
+		} else if runErr != "" {
+			outcome = TurnFailed
+		}
+		d.events.PublishForRequest(d.sessionIDLocked(), turnID, &TurnSettledEvent{
+			AgentContext: newAgentContext(d.AgentNameLocked()),
+			Type:         "turn_settled", SessionID: d.sessionIDLocked(), TurnID: turnID, Outcome: outcome,
+		})
+	}
 	d.completeTurnLocked(turnID)
 	if len(d.steering) != 0 {
 		d.pending = append(d.steering, d.pending...)
@@ -1826,16 +1871,23 @@ func (d *sessionDriver) cancelForPersistence(err error) {
 	d.persistenceFailure = err
 	d.publishPersistenceFailureLocked(err)
 	d.mu.Unlock()
-	if cancel != nil {
+	if cancel != nil && !session.IsTemporary(err) {
 		cancel()
 	}
 }
 
 func (d *sessionDriver) publishPersistenceFailureLocked(err error) {
 	key := "persistence:" + err.Error()
+	if session.IsTemporary(err) {
+		key = "persistence-retrying:" + d.activeRequestID
+	}
 	if d.lastFailureKey == key {
 		return
 	}
 	d.lastFailureKey = key
+	if session.IsTemporary(err) {
+		d.events.PublishForRequest(d.sessionIDLocked(), d.activeRequestID, Warning("Session storage is retrying; accepted work is retained and durable completion is waiting: "+err.Error(), d.AgentNameLocked()))
+		return
+	}
 	d.events.PublishForRequest(d.sessionIDLocked(), d.activeRequestID, ErrorForSession(d.sessionIDLocked(), "Session persistence failed; accepted work is retained and new turns are blocked until storage recovers: "+err.Error()))
 }

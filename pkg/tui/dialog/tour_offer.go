@@ -145,7 +145,7 @@ func (d *tourOfferDialog) content() (style lipgloss.Style, width int, header, bo
 			))
 	}
 
-	footer = d.RenderActions(contentWidth,
+	footer = d.RenderChoices(contentWidth,
 		Action{Label: "Never", Key: tea.KeyPressMsg{Code: 'd', Text: "d"}},
 		Action{Label: "Not now", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}},
 		Action{Label: "Take the tour", Default: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}},

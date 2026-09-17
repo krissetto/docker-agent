@@ -54,7 +54,34 @@ type PresentationVisibility interface {
 	SetPresentationVisible(visible bool) tea.Cmd
 }
 
+// PresentationSelection lets the shell clear a previous pane's selection without
+// changing its focus, reader position, inline draft, or execution state.
+type PresentationSelection interface {
+	ClearPresentationSelection()
+}
+
+// IsMessagesScrollbarDragging exposes only the existing transcript capture;
+// the root retains its page owner when the pointer crosses section boundaries.
+func (p *chatPage) IsMessagesScrollbarDragging() bool {
+	return p.messages.IsScrollbarDragging()
+}
+
+// CancelMessagesScrollbarDrag is a capture fence, not a mouse click/release
+// routed through other components. It never clears text selection.
+func (p *chatPage) CancelMessagesScrollbarDrag() {
+	if owner, ok := p.messages.(interface{ CancelScrollbarDrag() }); ok {
+		owner.CancelScrollbarDrag()
+	}
+}
+
+func (p *chatPage) ClearPresentationSelection() {
+	if owner, ok := p.messages.(interface{ ClearPresentationSelection() }); ok {
+		owner.ClearPresentationSelection()
+	}
+}
+
 var (
+	_ PresentationSelection  = (*chatPage)(nil)
 	_ SplitPresentation      = (*chatPage)(nil)
 	_ PresentationVisibility = (*chatPage)(nil)
 )
@@ -154,7 +181,29 @@ func (p *chatPage) TranscriptView() string {
 	if g := p.splitPresentation; g != nil {
 		sl.chatWidth, sl.chatHeight = g.Transcript.Width, g.Transcript.Height
 	}
-	return presentationView(p.messagesView(sl), sl.chatWidth, sl.chatHeight)
+	// Always obtain the current frame: streaming, selection and media can
+	// change raw output independently of the shell's visual generation.
+	raw := p.messagesView(sl)
+	return p.transcriptPresentation.render(raw, sl.chatWidth, sl.chatHeight)
+}
+
+// presentationCache holds only the last viewport, never a transcript history.
+// Byte equality deliberately replaces generation-based invalidation here.
+type presentationCache struct {
+	raw, rendered   string
+	width, height   int
+	themeGeneration uint64
+	valid           bool
+}
+
+func (c *presentationCache) render(raw string, width, height int) string {
+	generation := styles.ThemeGeneration()
+	if c.valid && c.raw == raw && c.width == width && c.height == height && c.themeGeneration == generation {
+		return c.rendered
+	}
+	rendered := presentationView(raw, width, height)
+	*c = presentationCache{raw: raw, rendered: rendered, width: width, height: height, themeGeneration: generation, valid: true}
+	return rendered
 }
 
 // SidebarView is content-only, matching Shell.Sidebar (not its handle).
@@ -259,4 +308,91 @@ func (p *chatPage) routeSplitMouseEvent(msg tea.Msg) tea.Cmd {
 	model, cmd := p.messages.Update(msg)
 	p.messages = model.(messages.Model)
 	return tea.Batch(hoverCmd, cmd)
+}
+
+// SidebarCacheStats reports work counters without rendering or acquiring leases.
+func (p *chatPage) SidebarCacheStats() (invalidations, renders uint64) {
+	if owner, ok := p.sidebar.(interface{ CacheStats() (uint64, uint64) }); ok {
+		return owner.CacheStats()
+	}
+	return 0, 0
+}
+
+// SplitSidebarPresentation keeps shell geometry independent of each session's
+// saved sidebar preferences. The root owns the lifetime of the copied override.
+type SplitSidebarPresentation interface {
+	SetSplitSidebarSettings(settings *SidebarSettings) tea.Cmd
+	SplitSidebarSettings() (SidebarSettings, bool)
+}
+
+func (p *chatPage) SetSplitSidebarSettings(settings *SidebarSettings) tea.Cmd {
+	if settings == nil {
+		if p.splitSidebarSettings == nil {
+			return nil
+		}
+		p.splitSidebarSettings = nil
+	} else {
+		if p.splitSidebarSettings != nil && *p.splitSidebarSettings == *settings {
+			return nil
+		}
+		copied := *settings
+		p.splitSidebarSettings = &copied
+	}
+	p.shellVisualGeneration++
+	return p.SetSize(p.width, p.height)
+}
+
+func (p *chatPage) SplitSidebarSettings() (SidebarSettings, bool) {
+	if p.splitSidebarSettings == nil {
+		return SidebarSettings{}, false
+	}
+	return *p.splitSidebarSettings, true
+}
+
+func (p *chatPage) presentationSidebarSettings() SidebarSettings {
+	if settings, ok := p.SplitSidebarSettings(); ok {
+		return settings
+	}
+	return p.GetSidebarSettings()
+}
+
+func (p *chatPage) setPresentationSidebarSettings(settings SidebarSettings) {
+	if p.splitSidebarSettings != nil {
+		*p.splitSidebarSettings = settings
+		return
+	}
+	p.SetSidebarSettings(settings)
+}
+
+func (p *chatPage) togglePresentationSidebar() {
+	settings := p.presentationSidebarSettings()
+	settings.Collapsed = !settings.Collapsed
+	if !settings.Collapsed && settings.PreferredWidth < sidebar.MinWidth {
+		settings.PreferredWidth = sidebar.DefaultWidth
+	}
+	p.setPresentationSidebarSettings(settings)
+}
+
+// CaptureSidebarPresentation copies only the currently painted, bounded sidebar.
+func CaptureSidebarPresentation(page Page) sidebar.PresentationSnapshot {
+	if p, ok := page.(*chatPage); ok && p.sidebarInteractive() {
+		if owner, ok := p.sidebar.(interface {
+			CapturePresentation() sidebar.PresentationSnapshot
+		}); ok {
+			return owner.CapturePresentation()
+		}
+	}
+	return sidebar.PresentationSnapshot{}
+}
+
+// TransitionSidebarFrom is called after the destination shell has been sized.
+func TransitionSidebarFrom(page Page, snapshot sidebar.PresentationSnapshot) tea.Cmd {
+	if p, ok := page.(*chatPage); ok && p.sidebarInteractive() {
+		if owner, ok := p.sidebar.(interface {
+			TransitionFrom(snapshot sidebar.PresentationSnapshot) tea.Cmd
+		}); ok {
+			return owner.TransitionFrom(snapshot)
+		}
+	}
+	return nil
 }

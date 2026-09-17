@@ -25,7 +25,9 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 	}
 	if control, ok := m.treeControlAt(x, y); ok {
 		key = "tree-summary"
-		if !control.whole {
+		if control.todos {
+			key = "todo-summary"
+		} else if !control.whole {
 			key = "node:" + string(control.id)
 		}
 	}
@@ -40,6 +42,8 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = "cost"
 	case ClickModel:
 		key = "model"
+	case ClickThinkingLevel:
+		key = "thinking-level"
 	case ClickQueuedMessage:
 		key = "queue:" + payload
 	case ClickRemoveQueuedMessage:
@@ -65,7 +69,7 @@ func (m *model) decoratePane(lines []string, width int) {
 		lines[m.workingDirRow] = m.directoryRow(width)
 	}
 	for row := m.modelStart; row < m.modelEnd; row++ {
-		lines[row] = m.hoverText(lines[row], "model")
+		lines[row] = m.modelRowView(width, row-m.modelStart)
 	}
 	if m.usageReadingLine >= 0 && m.usageReadingLine < len(lines) {
 		row := m.usageReadingLine
@@ -106,8 +110,15 @@ func (m *model) addBreathingRows(lines []string, boundaries []int) []string {
 	}
 	m.queueEnd = shiftEnd(m.queueEnd)
 	m.queueStart = shifted[m.queueStart]
+	if m.agentIdentityRow >= 0 {
+		m.agentIdentityRow = shifted[m.agentIdentityRow]
+	}
 	m.modelEnd = shiftEnd(m.modelEnd)
 	m.modelStart = shifted[m.modelStart]
+	if m.todoSummaryLine >= 0 {
+		m.todoSummaryLine = shifted[m.todoSummaryLine]
+		m.todoEnd = shiftEnd(m.todoEnd)
+	}
 	m.treeSectionStart = shifted[m.treeSectionStart]
 	m.summaryLine = shifted[m.summaryLine]
 	if m.workingDirRow >= 0 {

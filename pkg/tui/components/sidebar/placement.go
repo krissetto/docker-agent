@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -25,11 +24,21 @@ type placedRow struct {
 	target                                           bool
 	queueRemove                                      bool
 }
+type paddedPlacementRow struct {
+	text, padded string
+	alpha        float64
+	width        int
+}
+
 type placementState struct {
-	rows    []placedRow
-	elapsed time.Duration
-	running bool
-	width   int
+	rows         []placedRow
+	elapsed      time.Duration
+	running      bool
+	width        int
+	painted      map[int]placedRow
+	paintedCount int
+	crossSession bool
+	padded       []paddedPlacementRow
 }
 
 func (m *model) targetRows() []placedRow {
@@ -71,9 +80,16 @@ func (m *model) targetRows() []placedRow {
 				row.payload = meta.turnID
 				row.queueRemove = meta.first
 			}
+		case y == m.agentIdentityRow:
+			row.id = "active-agent"
 		case y >= m.modelStart && y < m.modelEnd:
 			row.id = fmt.Sprintf("model:%s:%d", m.activeAgentName(), y-m.modelStart)
 			row.action = ClickModel
+		case y == m.todoSummaryLine && m.todoSummaryLine >= 0:
+			row.id = "todo-summary"
+			row.controls = []treeControl{{x: width - 1, whole: true, todos: true}}
+		case y > m.todoSummaryLine && y < m.todoEnd && m.todoSummaryLine >= 0:
+			row.id = fmt.Sprintf("todo:%d", y-m.todoSummaryLine-1)
 		case y == m.summaryLine && m.hasTreeContent():
 			row.id = "tree-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true}}
@@ -125,6 +141,15 @@ func (m *model) ReconcileLayout() tea.Cmd {
 	if !m.reconcileDirty && !m.cacheDirty && m.placement != nil {
 		return nil
 	}
+	if !m.reconcileDirty && !m.layoutDirty && m.placement != nil {
+		if m.hoverOnlyDirty {
+			m.refreshPlacementHover()
+		} else {
+			m.refreshPlacementPresentation()
+		}
+		m.cacheDirty = false
+		return nil
+	}
 	counterCmd := tea.Batch(m.syncCounters(), m.syncBranchSpans())
 	target := m.targetRows()
 	m.reconcileDirty = false
@@ -135,6 +160,10 @@ func (m *model) ReconcileLayout() tea.Cmd {
 		m.preparePlacementViewport()
 		return counterCmd
 	}
+	if m.placement.crossSession {
+		m.preserveChangedRows(target)
+	}
+	m.placement.crossSession = false
 	current := m.placement
 	expandingTree := !m.treeCollapsed
 	if previousSummary, ok := findPlaced(current.rows, "tree-summary"); ok {
@@ -197,8 +226,12 @@ func (m *model) ReconcileLayout() tea.Cmd {
 	}
 	if !changed {
 		// Preserve elapsed interpolation while replacing only styled cell content.
+		previous := make(map[string]placedRow, len(current.rows))
+		for _, row := range current.rows {
+			previous[row.id] = row
+		}
 		for i := range rows {
-			if prior, ok := findPlaced(current.rows, rows[i].id); ok {
+			if prior, ok := previous[rows[i].id]; ok {
 				rows[i].fromY = prior.fromY
 				rows[i].fromAlpha = prior.fromAlpha
 			}
@@ -230,7 +263,6 @@ func (m *model) tickPlacement(tick animation.TickMsg) {
 	delta := after - before
 	changed := m.tickBranchSpans(delta)
 	if changed {
-		m.preparedTrees = nil
 		m.cacheDirty = true
 	}
 	if m.placement != nil && m.placement.running {
@@ -244,6 +276,7 @@ func (m *model) tickPlacement(tick animation.TickMsg) {
 		}
 		if p >= 1 {
 			m.placement.running = false
+			m.placement.rows = slices.DeleteFunc(m.placement.rows, func(row placedRow) bool { return !row.target })
 		}
 		changed = true
 	}
@@ -271,10 +304,13 @@ func (m *model) tickPlacement(tick animation.TickMsg) {
 }
 
 func (m *model) paintedRows() map[int]placedRow {
-	rows := make(map[int]placedRow)
 	if m.placement == nil {
-		return rows
+		return nil
 	}
+	if m.placement.painted != nil && m.placement.paintedCount == len(m.placement.rows) {
+		return m.placement.painted
+	}
+	rows := make(map[int]placedRow)
 	// Exiting rows paint first; target order wins collisions deterministically.
 	for _, target := range []bool{false, true} {
 		for _, row := range m.placement.rows {
@@ -287,10 +323,12 @@ func (m *model) paintedRows() map[int]placedRow {
 	// Persistent navigation cannot be covered while emerging children still round
 	// to the collapse anchor; paint and hit ownership use this same winner map.
 	for _, row := range m.placement.rows {
-		if row.target && row.alpha > 0 && (row.id == "tree-summary" || strings.HasPrefix(row.id, "parent:")) {
+		if row.target && row.alpha > 0 && (row.id == "tree-summary" || row.id == "todo-summary" || strings.HasPrefix(row.id, "parent:")) {
 			rows[int(math.Round(row.y))] = row
 		}
 	}
+	m.placement.painted = rows
+	m.placement.paintedCount = len(m.placement.rows)
 	return rows
 }
 
@@ -316,6 +354,9 @@ func (m *model) placementView() string {
 	offset := m.scrollview.ScrollOffset()
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	lines := make([]string, height)
+	if len(m.placement.padded) != height {
+		m.placement.padded = make([]paddedPlacementRow, height)
+	}
 	for i := range height {
 		row, ok := painted[offset+i]
 		text := ""
@@ -324,26 +365,37 @@ func (m *model) placementView() string {
 			if updated, found := fresh[row.id]; found {
 				text = updated
 			}
-			if row.id == "tree-summary" {
-				text = m.hoverText(m.treeSummary(width), "tree-summary")
+			if _, themed := fresh[row.id]; !themed {
+				text = m.placementText(row, width)
 			}
-			text = styles.FadeLine(text, row.alpha)
 		}
-		lines[i] = padRight(ansi.Truncate(text, width, ""), width)
+		cached := &m.placement.padded[i]
+		if cached.width != width || cached.text != text || cached.alpha != row.alpha {
+			*cached = paddedPlacementRow{
+				text: text, alpha: row.alpha, width: width,
+				padded: padRight(ansi.Truncate(styles.FadeLine(text, row.alpha), width, ""), width),
+			}
+		}
+		lines[i] = cached.padded
 	}
 	view := ""
 	if height > 0 {
-		viewport := scrollview.New(scrollview.WithGapWidth(m.layoutCfg.ScrollbarGap), scrollview.WithKeyMap(nil))
+		// Paint the same scrollbar that owns pointer capture, including its active
+		// thumb color on press/release without an offset change.
+		viewport := m.scrollview
 		viewport.SetSize(m.width-m.layoutCfg.PaddingLeft-m.layoutCfg.PaddingRight, height)
-		viewport.SetContent(make([]string, total), total)
+		viewport.SetContent(nil, total)
 		viewport.SetScrollOffset(offset)
 		view = viewport.ViewWithPaddedLines(lines)
+		if view == "" {
+			view = strings.Repeat("\n", height-1)
+		}
 	}
 	if m.footerHeight() > 0 {
-		if view != "" {
+		if height > 0 {
 			view += "\n"
 		}
-		view += m.footerView(m.contentWidth(false))
+		view += strings.Repeat("\n", m.footerGapHeight()) + m.footerView(m.contentWidth(false))
 	}
 	return view
 }
@@ -362,9 +414,12 @@ func (m *model) placementExtent() int {
 }
 
 func (m *model) preparePlacementViewport() {
+	if m.placement != nil {
+		m.placement.painted = nil
+	}
 	total := m.placementExtent()
 	m.scrollview.SetSize(m.width-m.layoutCfg.PaddingLeft-m.layoutCfg.PaddingRight, m.viewportHeight())
-	m.scrollview.SetContent(make([]string, total), total)
+	m.scrollview.SetContent(nil, total)
 }
 
 func (m *model) placementRowAt(x, y int) (placedRow, bool) {
@@ -389,6 +444,9 @@ func (m *model) placementClick(x, y int) (ClickResult, string) {
 	}
 	if row.action == ClickWorkingDir && m.directoryIconHit(col, m.contentWidth(m.cachedNeedsScrollbar)) {
 		return ClickOpenWorkingDir, m.WorkingDirectory()
+	}
+	if row.action == ClickModel {
+		return m.modelClick(col, modelPlacementRow(row.id), m.contentWidth(m.cachedNeedsScrollbar)), ""
 	}
 	if row.queueRemove && col == m.contentWidth(m.cachedNeedsScrollbar)-1 {
 		return ClickRemoveQueuedMessage, row.payload
@@ -426,4 +484,90 @@ func (m *model) placementControlAt(x, y int) (treeControl, bool) {
 		}
 	}
 	return treeControl{}, false
+}
+
+func modelPlacementRow(id string) int {
+	if strings.HasSuffix(id, ":1") {
+		return 1
+	}
+	return 0
+}
+
+// Presentation updates retain row identities, layout, prepared topology and counters.
+func (m *model) refreshPlacementPresentation() {
+	width := m.placement.width
+	lines := m.renderSections(width)
+	m.cachedLines = lines
+	for i := range m.placement.rows {
+		row := &m.placement.rows[i]
+		y := int(row.targetY)
+		if row.target && y >= 0 && y < len(lines) {
+			row.text = lines[y]
+			if strings.HasPrefix(row.id, "node:") {
+				row.controls = slices.Clone(m.treeControls[y-m.treeSectionStart])
+			}
+		}
+	}
+	m.placement.painted = nil
+}
+
+// Hover updates only styled rows. The complete section buffer, topology and hit
+// zones remain authoritative until a semantic reconciliation changes layout.
+func (m *model) refreshPlacementHover() {
+	width := m.placement.width
+	prepared, ok := m.preparedTrees[width]
+	if !ok {
+		m.refreshPlacementPresentation()
+		return
+	}
+	var queue []string
+	for key := range m.hoverValues {
+		if strings.HasPrefix(key, "queue:") || strings.HasPrefix(key, "queue-remove:") {
+			queue = strings.Split(m.queueSection(width), "\n")
+			break
+		}
+	}
+	// The last exit tick removes its hover entry, but must still clear the glyph.
+	if _, cached := m.sectionCache["queue"]; !cached && len(m.queuedMessages) > 0 && queue == nil {
+		queue = strings.Split(m.queueSection(width), "\n")
+	}
+	for i := range m.placement.rows {
+		row := &m.placement.rows[i]
+		if !row.target {
+			continue
+		}
+		y := int(row.targetY)
+		switch {
+		case row.action == ClickSubagent:
+			index := y - m.treeSectionStart
+			if item, found := prepared.rows[index]; found {
+				item = m.refreshPreparedTreeRow(item, index, width)
+				prepared.rows[index] = item
+				row.text, row.controls = item.text, item.controls
+			}
+		case row.action == ClickWorkingDir:
+			row.text = m.directoryRow(width)
+		case row.action == ClickSubagentParent:
+			row.text = ansi.Truncate(m.parentLine(), width, "…")
+		case row.action == ClickAgent:
+			indent := min(2, max(0, width-1))
+			row.text = strings.Repeat(" ", indent) + m.participantLine(row.payload, max(1, width-indent))
+		case y >= m.usageReadingLine && y < m.usageSectionEnd && m.usageReadingLine >= 0:
+			usage := strings.Split(m.sectionCache["usage"], "\n")
+			index := y - m.usageReadingLine
+			if index < len(usage) {
+				row.text = m.hoverText(usage[index], "cost")
+				if index == 0 {
+					cut := min(m.usageContextSegWidth, width)
+					row.text = m.hoverText(ansi.Cut(usage[0], 0, cut), "context") + m.hoverText(ansi.Cut(usage[0], cut, width), "cost")
+				}
+			}
+		case queue != nil && y >= m.queueStart && y < m.queueEnd:
+			row.text = queue[y-m.queueStart]
+		}
+		if y >= 0 && y < len(m.cachedLines) {
+			m.cachedLines[y] = row.text
+		}
+	}
+	m.placement.painted = nil
 }

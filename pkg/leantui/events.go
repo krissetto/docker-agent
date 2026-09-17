@@ -3,6 +3,7 @@ package leantui
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
@@ -11,7 +12,9 @@ import (
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
@@ -21,9 +24,17 @@ import (
 // handleEvent applies a single runtime event emitted by the App to the model,
 // updating the conversation, tool state, status footer, or busy state.
 func (m *model) handleEvent(ctx context.Context, ev any) {
+	sequence := uint64(0)
 	seed := false
 	shared := false
 	if bridged, ok := ev.(app.SessionEventMsg); ok {
+		if m.app != nil && !m.app.IsCurrentSessionEvent(bridged) {
+			return
+		}
+		if m.app != nil && m.app.Session() != nil && bridged.OriginSessionID != "" && bridged.OriginSessionID != m.app.Session().ID {
+			return
+		}
+		sequence = bridged.Sequence
 		seed = bridged.Seed
 		ev = bridged.Event
 		if bridged.Projection != nil {
@@ -35,7 +46,44 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	}
 	switch e := ev.(type) {
+	case *runtime.DormancyChangedEvent:
+		if m.app != nil && m.app.Session() != nil && e.SessionID == m.app.Session().ID {
+			m.runtimeStatus.Dormant = e.Dormant
+		}
+	case capabilityResult:
+		if m.app != nil && m.app.Session() != nil && e.sessionID == m.app.Session().ID && m.app.IsCurrentSessionEvent(e.identity) {
+			m.reportCapability(e.value, e.err)
+		}
+	case viewerBranch:
+		m.status.Branch = string(e)
+	case *runtime.TurnSettledEvent:
+		if !seed && sequence > m.soundSequence {
+			m.soundSequence = sequence
+			if m.soundEnabled && m.playSound != nil {
+				switch e.Outcome {
+				case runtime.TurnCompleted:
+					if !m.streamStarted.IsZero() && time.Since(m.streamStarted) >= m.soundThreshold {
+						m.playSound(ctx, sound.Success)
+					}
+				case runtime.TurnFailed:
+					m.playSound(ctx, sound.Failure)
+				}
+			}
+			m.streamStarted = time.Time{}
+		}
+		if e.Outcome == runtime.TurnCompleted {
+			m.addMajorEvent(messagebar.Event{Owner: e.SessionID, ID: e.TurnID, Kind: messagebar.CompletedTurn, Sequence: sequence, Replay: seed})
+		}
+	case *runtime.SubagentCreatedEvent:
+		m.addMajorEvent(messagebar.Event{Owner: e.SessionID, ID: string(e.NodeID) + "/" + e.ChildSessionID + "/" + e.CreatedAt.Format(time.RFC3339Nano), Kind: messagebar.SpawnedSubagent, Sequence: sequence, Replay: seed})
+
+	case speechDelta:
+		if e.generation == m.speechGeneration {
+			m.screen.Editor.Insert([]rune(e.text))
+		}
 	case *runtime.SubagentTreeEvent:
+		snapshot := e.Snapshot
+		m.subagentSnapshot = &snapshot
 		if m.inputReferences == nil {
 			m.inputReferences = subagentindex.New()
 		}
@@ -47,6 +95,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.sessionState.SetSessionTitle(e.Session.TitleSnapshot())
 		}
 	case *app.SessionResetEvent:
+		m.runtimeStatus = e.Snapshot.Status
 		m.lifecycle = lifecycle.FromSnapshot(e.Snapshot)
 		m.screen.Transcript.Clear()
 		m.inputReplay.Reset(e.Snapshot.Session)
@@ -77,7 +126,12 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			}
 			m.sessionState.SetPauseState(pause)
 		}
+		m.elicitations = nil
+		m.maxIterations = nil
 		for _, interaction := range e.Snapshot.Interactions {
+			if interaction.Kind != runtime.InteractionConfirmation {
+				m.handleEvent(ctx, interaction.Event)
+			}
 			if confirmation, ok := interaction.Event.(*runtime.ToolCallConfirmationEvent); ok {
 				if current := m.screen.Confirm; current == nil || current.SessionID != confirmation.SessionID || current.RequestID != confirmation.RequestID {
 					m.handleEvent(ctx, confirmation)
@@ -85,6 +139,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			}
 		}
 	case *runtime.InteractionResolvedEvent:
+		delete(m.elicitations, e.InteractionID)
+		delete(m.maxIterations, e.InteractionID)
 		if current := m.screen.Confirm; current != nil && current.SessionID == e.SessionID && current.RequestID == e.InteractionID {
 			m.screen.Confirm = nil
 		}
@@ -102,6 +158,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.ownedSkillStream = m.ownedSkillOperation != ""
 		m.busy = true
 		m.trackStreamStarted(e.SessionID)
+		if !seed {
+			m.streamStarted = time.Now()
+		}
 	case *runtime.PendingUserMessageAcceptedEvent:
 		if !shared {
 			m.lifecycle, _ = m.lifecycle.Apply(e)
@@ -217,12 +276,21 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.TokenUsageEvent:
 		m.setTokenUsage(e.SessionID, e.Usage)
 	case *runtime.AgentInfoEvent:
+		if m.status.Agent != e.AgentName || (e.Model != "" && e.Model != m.status.Model) {
+			m.status.Thinking = ""
+			m.status.PrimaryThinking = nil
+			m.status.ModelName = ""
+			m.status.ThinkingMode, m.status.ThinkingLevel = "", ""
+			m.status.ThinkingLevels = nil
+			m.status.CanCycleThinking = false
+		}
 		m.status.Agent = e.AgentName
 		if m.sessionState != nil {
 			m.sessionState.SetCurrentAgentName(e.AgentName)
 		}
 		if e.Model != "" {
 			m.status.Model = e.Model
+			m.status.Provider, _, _ = strings.Cut(e.Model, "/")
 		}
 		if e.ContextLimit > 0 {
 			m.status.ContextLimit = e.ContextLimit
@@ -235,9 +303,16 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 		m.handleSessionCompaction(ctx, e)
 	case *runtime.ErrorEvent:
+		m.priorityNoticeUntil = time.Now().Add(messagebar.DefaultLifetime)
 		m.screen.Transcript.FlushPending()
 		m.addNotice("✗ ", e.Error, ui.StError())
+	case *runtime.BudgetExceededEvent:
+		m.priorityNoticeUntil = time.Now().Add(messagebar.DefaultLifetime)
+		m.reportCapability(e, nil)
+	case *runtime.BudgetUsageEvent:
+		m.budgetUsage = e
 	case *runtime.WarningEvent:
+		m.priorityNoticeUntil = time.Now().Add(messagebar.DefaultLifetime)
 		m.addNotice("⚠ ", e.Message, ui.StWarning())
 	case *runtime.ShellOutputEvent:
 		output := e.Output
@@ -246,8 +321,23 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if e.Switching && e.ToAgent != "" {
 			m.addNotice("→ ", "Switching to "+e.ToAgent, ui.StMuted())
 		}
+	case *runtime.ElicitationRequestEvent:
+		if m.elicitations == nil {
+			m.elicitations = make(map[string]*runtime.ElicitationRequestEvent)
+		}
+		m.elicitations[e.RequestID] = e
+		m.reportCapability(e.Message, nil)
+		if e.URL != "" {
+			m.reportCapability("Open this authorization URL only if you trust the requesting server: "+e.URL, nil)
+		}
+		m.reportCapability(e.Schema, nil)
+		m.reportCapability("Reply: /respond "+e.RequestID+" <JSON object>; /respond "+e.RequestID+" cancel|decline. Required fields and defaults are shown in the schema; defaults are not silently accepted.", nil)
 	case *runtime.MaxIterationsReachedEvent:
-		m.addNotice("⚠ ", "Maximum iterations reached.", ui.StWarning())
+		if m.maxIterations == nil {
+			m.maxIterations = make(map[string]*runtime.MaxIterationsReachedEvent)
+		}
+		m.maxIterations[e.RequestID] = e
+		m.reportCapability("Maximum iterations reached. /respond "+e.RequestID+" continue|cancel", nil)
 	case *runtime.ModelFallbackEvent:
 		m.addNotice("⚠ ", "Model "+e.FailedModel+" failed, falling back to "+e.FallbackModel+".", ui.StWarning())
 	}
@@ -341,7 +431,55 @@ func (m *model) applyTeamInfo(ctx context.Context, e *runtime.TeamInfoEvent) {
 		case a.Model != "":
 			m.status.Model = a.Model
 		}
+		if a.ModelID != "" {
+			m.status.Model = a.ModelID
+			if a.Provider != "" && !strings.HasPrefix(a.ModelID, a.Provider+"/") {
+				m.status.Model = a.Provider + "/" + a.ModelID
+			}
+		}
+		m.status.ModelName = a.ModelName
+		m.status.Provider = a.Provider
 		m.status.Thinking = a.Thinking
+		m.status.ThinkingMode = a.ThinkingMode
+		m.status.ThinkingLevel = a.ThinkingLevel
+		m.status.ThinkingLevels = slices.Clone(a.ThinkingLevels)
+		m.status.CanCycleThinking = a.CanCycleThinking
+		m.status.PrimaryThinking = nil
+		if a.PrimaryThinking != nil {
+			m.status.PrimaryThinking = &ui.ThinkingStatus{
+				Mode:  a.PrimaryThinking.Mode,
+				Level: a.PrimaryThinking.Level,
+			}
+		}
 	}
 	m.refreshCommands(ctx)
+}
+
+func (m *model) addMajorEvent(event messagebar.Event) {
+	if event.Sequence == 0 || event.Owner == "" || event.ID == "" {
+		return
+	}
+	if m.app == nil || m.app.Session() == nil || event.Owner != m.app.Session().ID {
+		return
+	}
+	index := int(event.Kind - 1)
+	if index < 0 || index >= len(m.majorHighWater) || event.Sequence <= m.majorHighWater[index] {
+		return
+	}
+	m.majorHighWater[index] = event.Sequence
+	if event.Replay {
+		return
+	}
+	if m.majorEvents == nil {
+		m.majorEvents = &messagebar.Aggregator{}
+	}
+	m.majorEvents.Add(event, time.Now())
+}
+
+func (m *model) hasMajorNotice(now time.Time) bool {
+	if m.majorEvents == nil || m.app == nil || m.app.Session() == nil {
+		return false
+	}
+	_, active := m.majorEvents.Current(m.app.Session().ID, now)
+	return active
 }

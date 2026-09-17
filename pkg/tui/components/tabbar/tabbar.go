@@ -323,9 +323,6 @@ func (t *TabBar) SetWidth(width int) tea.Cmd {
 	}
 	t.reconcileScroll()
 	cmd := t.retargetSettlingDrop()
-	if t.hasTabMotion() {
-		return tea.Batch(cmd, t.ar.EnsureRunning())
-	}
 	return tea.Batch(cmd, t.syncIndicatorSub())
 }
 
@@ -347,9 +344,6 @@ func (t *TabBar) SetMaxTitleLength(n int) (cmd tea.Cmd) {
 		t.dragBounds = nil
 		t.reconcileScroll()
 		cmd = t.retargetSettlingDrop()
-	}
-	if t.hasTabMotion() {
-		return tea.Batch(cmd, t.ar.EnsureRunning())
 	}
 	return tea.Batch(cmd, t.syncIndicatorSub())
 }
@@ -408,9 +402,6 @@ func (t *TabBar) SetTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
 	cmds = append(cmds, t.retargetSettlingDrop())
 	if cmd := t.syncIndicatorSub(); cmd != nil {
 		cmds = append(cmds, cmd)
-	}
-	if t.hasTabMotion() {
-		cmds = append(cmds, t.ar.EnsureRunning())
 	}
 	return tea.Batch(cmds...)
 }
@@ -605,11 +596,7 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 		}
 		t.visualGeneration++
 		t.reconcileScroll()
-		if t.hasTabMotion() {
-			cmd = tea.Batch(cmd, t.ar.EnsureRunning())
-		} else {
-			cmd = tea.Batch(cmd, t.syncIndicatorSub())
-		}
+		cmd = tea.Batch(cmd, t.syncIndicatorSub())
 	}()
 	t.viewDirty = true
 	switch msg := msg.(type) {
@@ -829,11 +816,6 @@ func (t *TabBar) handleMouseMotion(x int) tea.Cmd {
 // handleMouseRelease completes a drag or falls back to a click.
 func (t *TabBar) handleMouseRelease(x int) (cmd tea.Cmd) {
 	defer t.recordVisualState()
-	defer func() {
-		if t.hasTabMotion() {
-			cmd = tea.Batch(cmd, t.ar.EnsureRunning())
-		}
-	}()
 	if !t.drag.active && !t.drag.pending {
 		return nil
 	}

@@ -1,6 +1,7 @@
 package messagebar
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,8 @@ func TestNoticeEntryExitAndIdleLease(t *testing.T) {
 	assert.Equal(t, strings.Repeat(" ", 80), ansi.Strip(m.View()))
 	assert.Zero(t, ar.ActiveCount())
 	cmd := m.SetMessage(Message{Text: "Press Esc again to cancel the response.", Severity: Warning})
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
 	require.NotNil(t, cmd)
 	assert.EqualValues(t, 1, ar.ActiveCount())
 	assert.Zero(t, m.alpha)
@@ -63,6 +66,8 @@ func TestNoticeEntryExitAndIdleLease(t *testing.T) {
 	assert.Nil(t, m.Update(tick))
 	assert.False(t, m.TakeVisualDirty(), "settled tick must not repaint")
 	cmd = m.ClearMessage()
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
 	require.NotNil(t, cmd)
 	assert.EqualValues(t, 1, ar.ActiveCount())
 	assert.Nil(t, m.ClearMessage(), "repeated clearing must not restart exit")
@@ -83,6 +88,8 @@ func TestReplacementReusesLeaseAndClearingDisablesActions(t *testing.T) {
 	m := NewWithRuntime(ar)
 	m.SetSize(80, 1)
 	cmd := m.SetMessage(Message{Text: "Old"})
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
 	assert.Nil(t, m.SetMessage(notice()))
 	assert.EqualValues(t, 1, ar.ActiveCount(), "replacement reuses the existing lease")
 	tick := acceptNoticeTick(t, ar, scheduler, cmd, fadeDuration)
@@ -91,6 +98,8 @@ func TestReplacementReusesLeaseAndClearingDisablesActions(t *testing.T) {
 	bounds := m.bounds[0]
 	m.SetFocused(true)
 	cmd = m.ClearMessage()
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
 	assert.False(t, m.HasActions())
 	assert.False(t, m.Focused())
 	_, hit := m.HitTest(bounds.start, 0)
@@ -109,6 +118,8 @@ func TestNoticeHideAndTeardownReleaseImmediately(t *testing.T) {
 	m := NewWithRuntime(ar)
 	m.SetSize(80, 1)
 	cmd := m.SetMessage(Message{Text: "Working"})
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
 	m.SetSize(80, 0)
 	assert.Zero(t, ar.ActiveCount())
 	assert.Empty(t, m.message.Text)
@@ -123,6 +134,47 @@ func TestNoticeHideAndTeardownReleaseImmediately(t *testing.T) {
 	assert.Zero(t, ar.ActiveCount())
 	assert.Empty(t, m.message.Text)
 	assert.Nil(t, ar.Continue())
+}
+
+func TestSettledPresentationObservesAppliedLocalState(t *testing.T) {
+	scheduler := &noticeScheduler{now: time.Unix(1, 0)}
+	ar := animation.NewRuntimeWithScheduler(scheduler)
+	m := NewWithRuntime(ar)
+	require.True(t, m.SettledPresentation(), "initial hidden row is settled")
+	m.SetSize(80, 1)
+	require.True(t, m.SettledPresentation(), "empty visible row is settled")
+	cmd := m.SetMessage(Message{Text: "Notice"})
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
+	require.NotNil(t, cmd)
+	m.TakeVisualDirty()
+	view := m.View()
+	require.False(t, m.SettledPresentation(), "entry is active before command execution")
+	require.Equal(t, math.Float64bits(0), math.Float64bits(m.alpha))
+	assert.Equal(t, view, m.View())
+	assert.False(t, m.TakeVisualDirty(), "observation must not mutate presentation")
+	tick := acceptNoticeTick(t, ar, scheduler, cmd, fadeDuration)
+	require.False(t, m.SettledPresentation(), "elapsed entry needs its component Tick")
+	require.Equal(t, math.Float64bits(0), math.Float64bits(m.alpha), "observation must not apply elapsed opacity")
+	m.Update(tick)
+	require.True(t, m.SettledPresentation(), "displayed hold is settled")
+	other := ar.Transition()
+	other.Start(time.Second, animation.Linear)
+	require.True(t, m.SettledPresentation(), "other runtime leases are irrelevant")
+	other.Cancel()
+	cmd = m.ClearMessage()
+	require.Nil(t, cmd)
+	cmd = ar.Continue()
+	require.NotNil(t, cmd)
+	require.False(t, m.SettledPresentation(), "exit is unsettled immediately")
+	tick = acceptNoticeTick(t, ar, scheduler, cmd, fadeDuration)
+	require.False(t, m.SettledPresentation(), "elapsed exit needs its component Tick")
+	m.Update(tick)
+	require.True(t, m.SettledPresentation(), "final empty row is settled")
+	assert.Empty(t, m.message.Text)
+	m.SetMessage(Message{Text: "Hidden during entry"})
+	m.SetSize(80, 0)
+	require.True(t, m.SettledPresentation(), "hiding clears and settles the row")
 }
 
 func TestSeverityUsesSemanticForeground(t *testing.T) {

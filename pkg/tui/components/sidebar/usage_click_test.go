@@ -237,12 +237,13 @@ func TestSidebar_HandleClickType_Usage_Collapsed_OwnLine(t *testing.T) {
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 	rowY := vm.titleSectionLines()
+	usageX := vm.ContentWidth - lipgloss.Width(vm.UsageSummary)
 
-	result, _ := sb.HandleClickType(paddingLeft+1, rowY)
+	result, _ := sb.HandleClickType(paddingLeft+usageX+1, rowY)
 	assert.Equal(t, ClickUsageContext, result, "click on the token/context segment should report ClickUsageContext")
 
 	dollarX := dollarOffset(t, vm.UsageSummary)
-	result, _ = sb.HandleClickType(paddingLeft+dollarX, rowY)
+	result, _ = sb.HandleClickType(paddingLeft+usageX+dollarX, rowY)
 	assert.Equal(t, ClickUsage, result, "click on the cost segment should report ClickUsage")
 }
 
@@ -271,14 +272,15 @@ func TestSidebar_HandleClickType_Usage_Collapsed_Capped(t *testing.T) {
 
 	paddingLeft := m.layoutCfg.PaddingLeft
 	rowY := vm.titleSectionLines()
+	usageX := vm.ContentWidth - lipgloss.Width(vm.UsageSummary)
 
 	cappedX := strings.Index(ansi.Strip(vm.UsageSummary), "⚠")
 	require.GreaterOrEqual(t, cappedX, 0)
-	result, _ := sb.HandleClickType(paddingLeft+cappedX, rowY)
+	result, _ := sb.HandleClickType(paddingLeft+usageX+cappedX, rowY)
 	assert.Equal(t, ClickUsageContext, result, "click on the ⚠ capped marker should report ClickUsageContext")
 
 	dollarX := dollarOffset(t, vm.UsageSummary)
-	result, _ = sb.HandleClickType(paddingLeft+dollarX, rowY)
+	result, _ = sb.HandleClickType(paddingLeft+usageX+dollarX, rowY)
 	assert.Equal(t, ClickUsage, result, "click on the cost segment should still report ClickUsage when capped")
 }
 

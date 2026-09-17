@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -25,15 +26,23 @@ import (
 // construction, it does not share catalog state across runtimes.
 type lazyModelStore struct {
 	once sync.Once
-	st   *modelsdev.Store
+	st   atomic.Pointer[modelsdev.Store]
 	err  error
 }
 
 func (l *lazyModelStore) load() (*modelsdev.Store, error) {
 	l.once.Do(func() {
-		l.st, l.err = modelsdev.NewStore(modelsdev.WithKnownProvider(provider.IsKnownProvider))
+		st, err := modelsdev.NewStore(modelsdev.WithKnownProvider(provider.IsKnownProvider))
+		l.err = err
+		l.st.Store(st)
 	})
-	return l.st, l.err
+	return l.st.Load(), l.err
+}
+
+// CachedSnapshot observes an already initialized store without running load.
+// A cold lazy store uses the immutable embedded catalog and performs no I/O.
+func (l *lazyModelStore) CachedSnapshot() *modelsdev.Database {
+	return l.st.Load().CachedSnapshot()
 }
 
 func (l *lazyModelStore) GetModel(ctx context.Context, id modelsdev.ID) (*modelsdev.Model, error) {

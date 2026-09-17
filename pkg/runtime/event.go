@@ -37,6 +37,45 @@ func newAgentContext(agentName string) AgentContext {
 	return AgentContext{AgentName: agentName, Timestamp: time.Now()}
 }
 
+// TurnOutcome distinguishes durable settlement from successful completion.
+type TurnOutcome string
+
+const (
+	TurnCompleted TurnOutcome = "completed"
+	TurnCanceled  TurnOutcome = "canceled"
+	TurnFailed    TurnOutcome = "failed"
+)
+
+// TurnSettledEvent is published only after the accepted turn's persistence and
+// child settlement succeed. StreamStopped, withdrawals and snapshots are not
+// settlement signals. Identity is (SessionID, TurnID), not a stream generation.
+type TurnSettledEvent struct {
+	AgentContext
+
+	Type      string      `json:"type"`
+	SessionID string      `json:"session_id"`
+	TurnID    string      `json:"turn_id"`
+	Outcome   TurnOutcome `json:"outcome"`
+}
+
+func (e *TurnSettledEvent) GetSessionID() string { return e.SessionID }
+
+// SubagentCreatedEvent records successful canonical child admission, never a
+// proposed tool call or a restored/imported tree snapshot. SessionID is the
+// parent journal owner; the child incarnation is (NodeID, ChildSessionID, CreatedAt).
+type SubagentCreatedEvent struct {
+	AgentContext
+
+	Type            string          `json:"type"`
+	SessionID       string          `json:"session_id"`
+	ParentSessionID string          `json:"parent_session_id"`
+	ChildSessionID  string          `json:"child_session_id"`
+	NodeID          subagent.NodeID `json:"node_id"`
+	CreatedAt       time.Time       `json:"created_at"`
+}
+
+func (e *SubagentCreatedEvent) GetSessionID() string { return e.SessionID }
+
 // PendingUserMessageAcceptedEvent is the canonical admission transition for an
 // input that is durable but excluded from model context until FIFO promotion.
 type PendingUserMessageAcceptedEvent struct {
@@ -690,6 +729,18 @@ func SubagentTree(snapshot subagent.Snapshot) Event {
 	}
 }
 
+// DormancyChangedEvent reports explicit authorization of a restored view.
+// Dormancy is independent of ordinary runtime pause and never persisted.
+type DormancyChangedEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Dormant   bool   `json:"dormant"`
+}
+
+func (e *DormancyChangedEvent) GetSessionID() string { return e.SessionID }
+
 // PausedEvent reports that the run loop has reached an iteration
 // boundary and is now blocked because /pause was toggled on. It is emitted
 // once the in-flight LLM request and its tool calls have finished — i.e. the
@@ -1049,12 +1100,34 @@ func AgentInfo(agentName, model, description, welcomeMessage string, contextLimi
 	}
 }
 
+// ThinkingDetails describes the primary binding targeted by reasoning controls.
+// It is separate from the active model, which may be a cooldown fallback.
+type ThinkingDetails struct {
+	ModelRef string   `json:"model_ref,omitempty"`
+	Mode     string   `json:"mode,omitempty"`
+	Level    string   `json:"level,omitempty"`
+	Levels   []string `json:"levels,omitempty"`
+	CanCycle bool     `json:"can_cycle,omitempty"`
+}
+
 // AgentDetails contains information about an agent for display in the sidebar
 type AgentDetails struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Provider    string `json:"provider"`
 	Model       string `json:"model"`
+	// ModelID is canonical provider model identity; ModelName is its display label.
+	ModelID   string `json:"model_id,omitempty"`
+	ModelName string `json:"model_name,omitempty"`
+	// ThinkingMode distinguishes default/off/adaptive/effort/tokens/unknown/unsupported.
+	// ThinkingLevel retains the actual effort tier or decimal token budget.
+	ThinkingMode     string   `json:"thinking_mode,omitempty"`
+	ThinkingLevel    string   `json:"thinking_level,omitempty"`
+	ThinkingLevels   []string `json:"thinking_levels,omitempty"`
+	CanCycleThinking bool     `json:"can_cycle_thinking,omitempty"`
+	// PrimaryThinking is present during fallback, even when primary reasoning
+	// is unsupported. Active-model Thinking fields never describe this target.
+	PrimaryThinking *ThinkingDetails `json:"primary_thinking,omitempty"`
 	// Thinking is a short label describing the model's current thinking-effort
 	// configuration: an effort level (e.g. "high"), "adaptive", a decimal token
 	// count for token-based budgets, or "off" when disabled. Empty when the

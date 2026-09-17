@@ -323,6 +323,25 @@ func (m *model) highlightLine(line string, startCol, endCol int) string {
 	return styleLineSegment(line, startCol, endCol, styles.SelectionStyle)
 }
 
+// ClearPresentationSelection forgets only transcript selection and capture.
+// Keep the copy generation monotonic so an already queued copy cannot act on a
+// later selection after the pane becomes active again.
+func (m *model) ClearPresentationSelection() {
+	oldIndex := m.selectedMessageIndex
+	visibleSelection := oldIndex >= 0 || m.selection.hasRange()
+	m.selectedMessageIndex = -1
+	m.selection = selectionState{pendingCopyID: m.selection.pendingCopyID + 1}
+	if oldIndex >= 0 {
+		m.invalidateItem(oldIndex)
+	}
+	// Cancelling capture and queued copies is unconditional, but an idle tab
+	// has no selection cells to repaint and must keep its warm transcript.
+	if visibleSelection {
+		m.renderDirty = true
+		m.visualGeneration++
+	}
+}
+
 // clearSelection resets the selection state
 func (m *model) clearSelection() {
 	m.selection.clear()

@@ -288,7 +288,7 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 
 	handled, _ := p.handleRuntimeEvent(runtime.AgentSwitching(true, "root", "researcher"))
 	require.True(t, handled)
-	layoutCmd := tea.Batch(rec.results[0].Cmd, p.reconcileSidebarLayout())
+	layoutCmd := tea.Batch(rec.results[0].Cmd, p.reconcileSidebarLayout(), p.ar.Continue())
 	var nextTick func(tea.Cmd) (animation.TickMsg, bool)
 	nextTick = func(cmd tea.Cmd) (animation.TickMsg, bool) {
 		if cmd == nil {
@@ -316,11 +316,11 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 		}
 		return nil
 	}
-	// The shared spinner owns the initial tick command returned by the hop.
+	// The page owner commits the shared spinner registration after the hop.
 	for step := 0; step < 30 && !strings.Contains(ansi.Strip(p.sidebar.View()), "researcher"); step++ {
 		layoutCmd = advance(layoutCmd)
 	}
-	require.Contains(t, ansi.Strip(p.sidebar.View()), "researcher", "hop relation enters through its original animation command")
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "researcher", "hop relation enters through its owner animation command")
 	require.Contains(t, ansi.Strip(p.sidebar.View()), "root")
 	require.Contains(t, ansi.Strip(p.sidebar.View()), "►")
 	require.Len(t, rec.results, 1)

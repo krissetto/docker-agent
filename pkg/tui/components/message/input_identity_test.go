@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -25,11 +26,20 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 		for _, width := range []int{1, 2, 3, 4, 8, 12, 28, 80} {
 			got := strings.Split(view.Render(width), "\n")
 			want := strings.Split(user.Render(width), "\n")
-			require.Equal(t, want[1:], got[1:], "agent body and ANSI background must exactly match USER: mode=%q width=%d", mode, width)
+			require.Equal(t, ansi.Strip(strings.Join(want[1:], "\n")), ansi.Strip(strings.Join(got[1:], "\n")), "agent body keeps USER text and layout: mode=%q width=%d", mode, width)
+			bodyStyle := styles.UserMessageStyle.Bold(false)
+			innerWidth := width - bodyStyle.GetHorizontalFrameSize()
+			// USER presentation trims terminal whitespace before layout; provenance
+			// retains the original bytes, including this fixture's trailing space.
+			content := strings.TrimRight(msg.Content, "\n\r\t ")
+			normal := bodyStyle.PaddingTop(0).Width(width).Render(actionRow(innerWidth, false, types.MessageCopyLabel) + "\n" + content)
+			require.Equal(t, input.Message.Content, msg.Content)
+			require.Equal(t, strings.Split(normal, "\n")[1:], got[1:], "only inherited bold changes; USER body colors, padding and ANSI remain exact")
 			assert.Equal(t, width, ansi.StringWidth(got[0]))
-			assert.Equal(t, firstCellANSI(want[0]), firstCellANSI(got[0]), "ordinary USER left border glyph and ANSI style are unchanged")
-			assert.NotContains(t, ansi.Strip(got[0]), "━", "identity row must not add a horizontal rule")
-			assert.NotContains(t, ansi.Strip(got[0]), "┏")
+			assert.True(t, strings.HasPrefix(ansi.Strip(got[0]), "┏"), "identity joins the USER left border")
+			if width >= 28 {
+				assert.Contains(t, ansi.Strip(got[0]), "━ worker (abcde) ━")
+			}
 			view.SetHovered(true)
 			assert.Equal(t, len(got), view.Height(width), "hover cannot change geometry")
 			view.SetHovered(false)
@@ -37,21 +47,79 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 	}
 }
 
-// Cutting a cell also retains subsequent zero-width escapes; stop at its glyph.
-func firstCellANSI(line string) string {
-	p := ansi.GetParser()
-	defer ansi.PutParser(p)
-	var state byte
-	for offset := 0; offset < len(line); {
-		_, width, n, next := ansi.DecodeSequence(line[offset:], state, p)
-		if n == 0 {
-			break
+func TestAgentBodyNormalWeightPreservesLiteralTextAndExplicitANSI(t *testing.T) {
+	const body = "Natural spaced prose cafe\u0301 界 **literal bold** " + "\x1b[1mintentional bold\x1b[22m normal again " + "\x1b]8;;https://example.invalid\x1b\\linked words\x1b]8;;\x1b\\"
+	input := session.UserMessage(body)
+	input.InputOrigin, input.SenderName = session.InputOriginAgent, "worker"
+	msg := types.Input(input)
+	view := New(animation.NewRuntime(), msg, nil)
+	for _, selected := range []bool{false, true} {
+		position := 0
+		msg.SessionPosition = &position
+		view.SetSelected(selected)
+		out := view.Render(160)
+		assert.Equal(t, body, msg.Content, "rendering does not rewrite source bytes")
+		assert.Contains(t, ansi.Strip(out), ansi.Strip(body), "natural spaces, graphemes and literal Markdown remain intact")
+		for _, word := range []string{"Natural", "**literal", "normal again", "linked words"} {
+			assert.False(t, boldAtText(t, out, word), "ordinary agent prose: %s", word)
 		}
-		offset += n
-		if width > 0 {
-			return line[:offset]
-		}
-		state = next
+		assert.True(t, boldAtText(t, out, "intentional bold"))
+		assert.Contains(t, out, "\x1b]8;;https://example.invalid\x1b\\")
 	}
-	return line
+	user := New(animation.NewRuntime(), types.User("Natural user prose"), nil)
+	assert.True(t, boldAtText(t, user.Render(80), "Natural"), "ordinary USER emphasis is unchanged")
+}
+
+// Decode paint attributes at a visible text cell rather than matching SGR bytes.
+func boldAtText(t *testing.T, rendered, text string) bool {
+	t.Helper()
+	for line := range strings.SplitSeq(rendered, "\n") {
+		plain := ansi.Strip(line)
+		offset := strings.Index(plain, text)
+		if offset < 0 {
+			continue
+		}
+		col := ansi.StringWidth(plain[:offset])
+		p := ansi.GetParser()
+		var state byte
+		bold := false
+		for x := 0; line != ""; {
+			seq, width, n, next := ansi.DecodeSequence(line, state, p)
+			if n == 0 {
+				break
+			}
+			if ansi.HasCsiPrefix(seq) && p.Command() == 'm' {
+				params := p.Params()
+				if len(params) == 0 {
+					bold = false
+				}
+				for i := 0; i < len(params); i++ {
+					switch params[i].Param(0) {
+					case 0, 22:
+						bold = false
+					case 1:
+						bold = true
+					case 38, 48, 58:
+						if i+1 < len(params) {
+							switch params[i+1].Param(0) {
+							case 2:
+								i += 4
+							case 5:
+								i += 2
+							}
+						}
+					}
+				}
+			}
+			if width > 0 && x+width > col {
+				ansi.PutParser(p)
+				return bold
+			}
+			x += width
+			state, line = next, line[n:]
+		}
+		ansi.PutParser(p)
+	}
+	t.Fatalf("missing painted text %q", text)
+	return false
 }

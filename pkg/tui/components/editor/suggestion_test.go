@@ -480,17 +480,20 @@ func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 	baseView := e.textarea.View()
 	result := e.applySuggestionOverlay(baseView)
 
-	// The result should contain all suggestion lines
+	// The old overflow contract extended one allocated row to three. A ghost
+	// preview now stays in its real viewport; accepting it still inserts every
+	// exact line into the canonical draft, with the cursor at the new end.
 	resultLines := strings.Split(result, "\n")
-
-	// With height=1, base view has 1 line, but result should have 3 lines
-	// because lipgloss canvas extends the output for overlay content
-	require.GreaterOrEqual(t, len(resultLines), 3, "result should have at least 3 lines for multi-line suggestion")
-
-	// Check that each suggestion line is present
+	require.Len(t, resultLines, 1, "preview cannot push the real cursor below the terminal")
 	assert.Contains(t, stripANSI(resultLines[0]), "Anything", "first line should contain merged text")
-	assert.Contains(t, stripANSI(resultLines[1]), "line2", "second line should contain line2")
-	assert.Contains(t, stripANSI(resultLines[2]), "line3", "third line should contain line3")
+	assert.Equal(t, "A", e.Value(), "preview must not edit the draft")
+	assert.Equal(t, 0, e.textarea.Line())
+	assert.Equal(t, 1, e.textarea.Column())
+	e.AcceptSuggestion()
+	assert.Equal(t, "Anything\nline2\nline3", e.Value())
+	assert.Equal(t, 2, e.textarea.Line())
+	assert.Equal(t, 5, e.textarea.Column())
+	assert.False(t, e.hasSuggestion)
 }
 
 // TestLongSuggestionWrapping verifies that long suggestions (without newlines)

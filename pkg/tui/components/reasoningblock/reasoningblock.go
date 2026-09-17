@@ -71,8 +71,10 @@ type renderCache struct {
 	themeGeneration  uint64
 	width            int      // width used for rendering
 	reasoningVersion int      // version of reasoning content when cached
-	lines            []string // all rendered lines (ANSI stripped)
+	lines            []string // last nonblank preview lines, independently owned
 	hasExtra         bool     // whether there's extra content beyond preview
+	truncated        bool     // more nonblank reasoning lines precede the preview
+	hasLines         bool     // preserves the empty-render versus absent-content distinction
 }
 
 type expandedToolView interface {
@@ -595,12 +597,35 @@ func (m *Model) ensureCache() *renderCache {
 		lines = strings.Split(clean, "\n")
 	}
 
+	// Only the collapsed preview consumes this cache. Expanded rendering uses
+	// canonical contentItems, so retaining the complete stripped document here
+	// needlessly duplicates every historical reasoning block. Clone the preview
+	// lines so substrings cannot keep that document's backing allocation alive.
+	hasExtra := len(m.toolEntries) > 0 || len(lines) > previewLines
+	preview := make([]string, 0, previewLines)
+	nonblank := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		nonblank++
+		if len(preview) == previewLines {
+			copy(preview, preview[1:])
+			preview = preview[:previewLines-1]
+		}
+		preview = append(preview, line)
+	}
+	for i := range preview {
+		preview[i] = strings.Clone(preview[i])
+	}
 	m.cache = &renderCache{
 		themeGeneration:  styles.ThemeGeneration(),
 		width:            contentWidth,
 		reasoningVersion: m.reasoningVersion,
-		lines:            lines,
-		hasExtra:         len(m.toolEntries) > 0 || len(lines) > previewLines,
+		lines:            preview,
+		hasExtra:         hasExtra,
+		truncated:        nonblank > previewLines,
+		hasLines:         len(lines) > 0,
 	}
 	return m.cache
 }
@@ -781,26 +806,12 @@ func (m *Model) renderReasoningChunk(text string) string {
 // and returns whether the content was truncated.
 func (m *Model) renderReasoningPreviewWithTruncationInfo() (string, bool) {
 	cache := m.ensureCache()
-	if len(cache.lines) == 0 {
+	if !cache.hasLines {
 		return "", false
 	}
 
-	// Filter empty lines for preview
-	var lines []string
-	for _, line := range cache.lines {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
-		}
-	}
-
-	// Take last N lines
-	start := 0
-	reasoningTruncated := false
-	if len(lines) > previewLines {
-		start = len(lines) - previewLines
-		reasoningTruncated = true
-	}
-	previewLinesContent := lines[start:]
+	previewLinesContent := cache.lines
+	reasoningTruncated := cache.truncated
 
 	// Style each line - dim the first line more if there's content above (truncated)
 	var styledLines []string

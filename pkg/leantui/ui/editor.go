@@ -211,27 +211,41 @@ func (e *Editor) HistoryNext() {
 func (e *Editor) Layout(termWidth int) (lines []string, curRow, curCol int) {
 	width := contentWidth(termWidth)
 	rows := e.wrapRows(width)
+	prompt := PromptText
+	continuation := Continuation
+	promptWidth := PromptWidth
+	if termWidth <= PromptWidth {
+		prompt, continuation, promptWidth = "", "", 0
+	}
 
 	if len(e.value) == 0 {
-		line := StAccent().Render(PromptText)
+		line := StAccent().Render(prompt)
 		if e.placeholder != "" {
 			line += StPlaceholder().Render(Truncate(e.placeholder, width))
 		}
-		return []string{line}, 0, PromptWidth
+		return []string{Truncate(line, termWidth)}, 0, promptWidth
 	}
 
-	lines = make([]string, len(rows))
+	lines = make([]string, 0, len(rows)+1)
 	for i, rs := range rows {
 		content := string(e.value[rs.start:rs.end])
 		if i == 0 {
-			lines[i] = StAccent().Render(PromptText) + content
+			lines = append(lines, Truncate(StAccent().Render(prompt)+content, termWidth))
 		} else {
-			lines[i] = Continuation + content
+			lines = append(lines, Truncate(continuation+content, termWidth))
 		}
 	}
 
 	row, col := e.cursorPos(rows)
-	return lines, row, col + PromptWidth
+	col += promptWidth
+	// A cursor after a full final row owns the following visual cell, not
+	// the last character's cell (and must not rely on terminal autowrap).
+	if col >= termWidth && row == len(lines)-1 {
+		lines = append(lines, continuation)
+		row++
+		col = promptWidth
+	}
+	return lines, row, min(col, max(0, termWidth-1))
 }
 
 func (e *Editor) wrapRows(width int) []rowSpan {
@@ -297,6 +311,9 @@ func (e *Editor) indexAt(rows []rowSpan, row, col int) int {
 }
 
 func contentWidth(termWidth int) int {
+	if termWidth <= PromptWidth {
+		return max(1, termWidth)
+	}
 	w := termWidth - PromptWidth
 	if w < 1 {
 		return 1

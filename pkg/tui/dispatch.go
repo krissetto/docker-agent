@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 )
@@ -27,12 +30,21 @@ import (
 
 // updateChatCmd forwards a message to the chat page and returns its cmd.
 func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
+	origin := m.paneFocus()
+	var generation uint64
+	if m.supervisor != nil {
+		generation, _ = m.supervisor.RouteGeneration(origin)
+	}
 	updated, cmd := m.chatPage.Update(msg)
+	cmd = stampThinkingCycleCommand(origin, generation, cmd)
 	m.chatPage = updated.(chat.Page)
 	if id := m.paneFocus(); id != "" {
 		m.chatPages[id] = m.chatPage
 	}
 	if m.panesEnabled() {
+		m.syncPaneSidebarSettings()
+	}
+	if m.panePresentationEnabled() {
 		if _, tick := msg.(animation.TickMsg); !tick {
 			cmd = tea.Batch(cmd, m.resizePanes())
 		}
@@ -42,9 +54,13 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
+	before := m.editor.Value()
 	updated, cmd := m.editor.Update(msg)
 	cmd = m.stampEditorSend(cmd)
 	m.editor = updated.(editor.Editor)
+	if before != m.editor.Value() && strings.HasPrefix(m.editor.Value(), "/panes ") && !strings.HasPrefix(before, "/panes ") && m.paneCatalogRequest == nil {
+		cmd = tea.Batch(cmd, core.CmdHandler(paneCatalogRefreshMsg{}))
+	}
 	if id := m.paneFocus(); id != "" {
 		m.editors[id] = m.editor
 	}
@@ -53,10 +69,24 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
-	if _, opening := msg.(dialog.OpenDialogMsg); opening {
-		m.cancelPaneGesture()
+	if opened, opening := msg.(dialog.OpenDialogMsg); opening {
+		m.cancelInteractionHint()
+		if m.panePicker == nil || m.panePicker.dialog != opened.Model {
+			m.panePicker = nil
+			m.cancelPaneGesture()
+		} else {
+			m.cancelPaneSource()
+		}
+		m.isDragging, m.isHoveringHandle = false, false
 		if m.tabBar != nil {
 			m.tabBar.CancelPointer()
+		}
+	}
+	switch msg.(type) {
+	case dialog.CloseDialogMsg, dialog.HideDialogMsg:
+		if m.panePicker != nil && m.dialogMgr.TopDialog() == m.panePicker.dialog && !m.panePicker.confirmed {
+			m.panePicker = nil
+			m.cancelPaneGesture()
 		}
 	}
 	updated, cmd := m.dialogMgr.Update(msg)

@@ -89,3 +89,53 @@ func TestRenderStatusFitsWidth(t *testing.T) {
 		assert.LessOrEqual(t, DisplayWidth(l), 80)
 	}
 }
+
+func TestReasoningModesRenderAuthoritativeLabelsWithoutExtraRows(t *testing.T) {
+	for _, mode := range []string{"auto", "default", "off", "adaptive", "effort", "tokens", "unknown", "unsupported"} {
+		t.Run(mode, func(t *testing.T) {
+			level := mode
+			if mode == "adaptive" || mode == "effort" {
+				level = "high"
+			}
+			if mode == "tokens" {
+				level = "4096"
+			}
+			lines := RenderStatus(StatusModel{Model: "provider/raw", ModelName: "Friendly model", Provider: "provider", ThinkingMode: mode, ThinkingLevel: level}, 100)
+			if len(lines) != 2 {
+				t.Fatalf("footer grew: %d rows", len(lines))
+			}
+			if !strings.Contains(strings.Join(lines, ""), "provider("+level+")") {
+				t.Fatalf("missing authoritative level: %v", lines)
+			}
+		})
+	}
+}
+
+func TestPrimaryReasoningStatusKeepsFallbackTruthAndTwoRows(t *testing.T) {
+	for _, primary := range []ThinkingStatus{
+		{Mode: "effort", Level: "high"},
+		{Mode: "unsupported"},
+		{},
+	} {
+		level := primary.Level
+		if level == "" {
+			level = primary.Mode
+		}
+		if level == "" {
+			level = "unknown"
+		}
+		status := StatusModel{Model: "p/fallback", ModelName: "Friendly fallback", Provider: "p", ThinkingMode: "effort", ThinkingLevel: "low", PrimaryThinking: &primary}
+		lines := RenderStatus(status, 120)
+		assert.Len(t, lines, 2)
+		assert.Contains(t, strings.Join(lines, "\n"), "Friendly fallback")
+		assert.Contains(t, strings.Join(lines, "\n"), "p(low)")
+		assert.Contains(t, strings.Join(lines, "\n"), "(primary: "+level+")")
+		for _, width := range []int{1, 12, 40} {
+			lines = RenderStatus(status, width)
+			assert.Len(t, lines, 2)
+			for _, line := range lines {
+				assert.LessOrEqual(t, DisplayWidth(line), width)
+			}
+		}
+	}
+}

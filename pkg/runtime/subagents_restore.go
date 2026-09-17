@@ -458,9 +458,53 @@ func (r *LocalRuntime) RestoreSubagentTree(ctx context.Context, sess *session.Se
 }
 
 func (m *subagentManager) canonicalSnapshot(ctx context.Context, root *session.Session, legacy subagent.Snapshot) (subagent.Snapshot, []session.ChildRecord, error) {
+	return m.canonicalSnapshotWithLimit(ctx, root, legacy, -1)
+}
+
+// canonicalSnapshotWithLimit bounds detached view hydration, including stopped
+// history, independently of driver residency. A negative limit retains general
+// Restore's existing behavior; view preparation always supplies a finite limit.
+func (m *subagentManager) canonicalSnapshotWithLimit(ctx context.Context, root *session.Session, legacy subagent.Snapshot, limit int) (subagent.Snapshot, []session.ChildRecord, error) {
+	capacityError := func() error {
+		return &SessionError{Kind: SessionErrorCapacity, SessionID: root.ID, Operation: "restore_tree", Reason: SessionErrorReasonLimit, Limit: limit}
+	}
+	if limit >= 0 {
+		if err := ctx.Err(); err != nil {
+			return subagent.Snapshot{}, nil, err
+		}
+		// Count before any recursive normalization, merge or construction. Check
+		// widths before copying them so malformed broad trees cannot grow work.
+		if limit == 0 || len(legacy.Nodes) > limit {
+			return subagent.Snapshot{}, nil, capacityError()
+		}
+		count := len(legacy.Nodes)
+		pending := append([]subagent.NodeSnapshot(nil), legacy.Nodes...)
+		for len(pending) != 0 {
+			if err := ctx.Err(); err != nil {
+				return subagent.Snapshot{}, nil, err
+			}
+			node := pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
+			if len(node.Children) > limit-count {
+				return subagent.Snapshot{}, nil, capacityError()
+			}
+			count += len(node.Children)
+			pending = append(pending, node.Children...)
+		}
+	}
+	// The storage API returns all records at once; bound processing immediately
+	// after that read, before allocating maps or recursively building the tree.
 	records, err := m.coordination().LoadChildren(ctx, root.ID)
 	if err != nil {
 		return subagent.Snapshot{}, nil, err
+	}
+	if limit >= 0 {
+		if err := ctx.Err(); err != nil {
+			return subagent.Snapshot{}, nil, err
+		}
+		if len(records) > limit-1 {
+			return subagent.Snapshot{}, nil, capacityError()
+		}
 	}
 	if len(records) == 0 {
 		return legacy, nil, nil
@@ -483,19 +527,39 @@ func (m *subagentManager) canonicalSnapshot(ctx context.Context, root *session.S
 	}
 	// A failed multi-row legacy migration is retryable: canonical rows win, but
 	// not-yet-adopted nodes remain in preflight and cannot silently disappear.
-	var mergeLegacy func([]subagent.NodeSnapshot)
-	mergeLegacy = func(nodes []subagent.NodeSnapshot) {
+	mergedCount := len(records) + 1 // include the canonical root and every record
+	var mergeLegacy func([]subagent.NodeSnapshot) error
+	mergeLegacy = func(nodes []subagent.NodeSnapshot) error {
 		for _, item := range nodes {
+			if limit >= 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if item.Node.ID != rootNode.ID && !known[item.Node.ID] {
+				if limit >= 0 && mergedCount >= limit {
+					return capacityError()
+				}
+				mergedCount++
 				children[item.Node.Parent] = append(children[item.Node.Parent], item.Node)
 				known[item.Node.ID] = true
 			}
-			mergeLegacy(item.Children)
+			if err := mergeLegacy(item.Children); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	mergeLegacy(legacy.Nodes)
+	if err := mergeLegacy(legacy.Nodes); err != nil {
+		return subagent.Snapshot{}, nil, err
+	}
 	var build func(subagent.Node, map[subagent.NodeID]bool) (subagent.NodeSnapshot, error)
 	build = func(node subagent.Node, seen map[subagent.NodeID]bool) (subagent.NodeSnapshot, error) {
+		if limit >= 0 {
+			if err := ctx.Err(); err != nil {
+				return subagent.NodeSnapshot{}, err
+			}
+		}
 		if seen[node.ID] {
 			return subagent.NodeSnapshot{}, errors.New("cyclic child records")
 		}

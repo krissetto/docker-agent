@@ -43,6 +43,8 @@ func TestTypedDelegationUsesUserStyle(t *testing.T) {
 	input.SenderName, input.SenderID = "director", "12345678-long-id"
 	actual := New(animation.NewRuntime(), types.Input(input), nil)
 	user := New(animation.NewRuntime(), types.User(input.Message.Content), nil)
-	assert.Equal(t, strings.Split(user.Render(100), "\n")[1:], strings.Split(actual.Render(100), "\n")[1:])
+	assert.Equal(t, strings.Split(stripANSI(user.Render(100)), "\n")[1:], strings.Split(stripANSI(actual.Render(100)), "\n")[1:])
 	assert.Contains(t, stripANSI(actual.Render(100)), "director (ref 12345)")
+	assert.False(t, boldAtText(t, actual.Render(100), "original delegation"))
+	assert.True(t, boldAtText(t, user.Render(100), "original delegation"))
 }

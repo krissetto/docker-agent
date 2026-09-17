@@ -9,12 +9,18 @@
 package tui_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -99,24 +105,92 @@ func TestCommandPalette_Opens(t *testing.T) {
 		WaitFor(tuitest.Absent(placeholder))
 }
 
-// TestGolden_Chat_BasicMath snapshots the full finished frame after the agent
-// answers, so unintended visual drift in the chat surface shows up as a diff.
-// Refresh the snapshot after an intentional UI change with:
-//
-//	go test ./e2e/tui/ -run TestGolden_Chat_BasicMath -tuitest.update
+// TestGolden_Chat_BasicMath captures the first canonical completed frame whose
+// currently visible presentation transitions have finished. The wrapper pins
+// output only; the real model and its three-second notice expiry keep running.
 func TestGolden_Chat_BasicMath(t *testing.T) {
-	// Hide the sidebar so the snapshot doesn't capture the machine-specific
-	// working directory and git branch, and pin the version so a release
-	// build's ldflags-injected version can't change the status bar. Both keep
-	// the golden portable.
-	d := newTUI(t, "testdata/basic.yaml", 120, 40,
-		tui.WithHideSidebar(),
-		tui.WithVersion("test"),
-	)
+	captured := make(chan tea.View, 1)
+	expired := make(chan struct{}, 1)
+	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, nil,
+		func(model tea.Model) tea.Model {
+			return &settledGoldenModel{inner: model, captured: captured, expired: expired}
+		}, tui.WithHideSidebar(), tui.WithVersion("test"))
 
-	d.Type("What's 2+2?").
-		Enter().
-		WaitFor(tuitest.Contains("2 + 2 equals 4.")).
-		WaitForStable(200 * time.Millisecond).
-		AssertGolden("chat_basic_math")
+	d.Type("What's 2+2?").Enter()
+	var snapshot tea.View
+	select {
+	case snapshot = <-captured:
+	case <-time.After(10 * time.Second):
+		t.Fatal("canonical completed notice never reached a settled presentation before test cancellation")
+	}
+	// Drain the event-loop barrier after captureModel has recorded the pinned
+	// wrapper View, rather than reading a frame between Update and recordFrame.
+	d.Send(settledGoldenBarrier{})
+	require.Len(t, strings.Split(snapshot.Content, "\n"), 40)
+	require.Equal(t, goldenCompletedTitle+" - docker agent", snapshot.WindowTitle, "canonical full title remains available without a pane header")
+	d.Assert(tuitest.ContainsAll("2 + 2 equals 4.", goldenCompletedTabLabel, "root · 1 turn completed"))
+	d.Assert(tuitest.Absent("Send to"))
+	d.AssertGolden("chat_basic_math")
+	// Pinning output must not suppress the underlying canonical expiry path.
+	select {
+	case <-expired:
+	case <-time.After(10 * time.Second):
+		t.Fatal("underlying summary expiry did not continue after golden capture")
+	}
+}
+
+const (
+	goldenCompletedTitle    = "Simple Math: Addition of 2 and 2"
+	goldenCompletedTabLabel = "Simple Math: Ad…"
+)
+
+type settledGoldenBarrier struct{}
+
+type settledGoldenModel struct {
+	inner          tea.Model
+	captured       chan<- tea.View
+	expired        chan<- struct{}
+	pinned         *tea.View
+	expiryObserved bool
+}
+
+func (m *settledGoldenModel) SetProgram(program *tea.Program) {
+	m.inner.(interface{ SetProgram(program *tea.Program) }).SetProgram(program)
+}
+
+func (m *settledGoldenModel) Shutdown()     { m.inner.(interface{ Shutdown() }).Shutdown() }
+func (m *settledGoldenModel) Init() tea.Cmd { return m.inner.Init() }
+func (m *settledGoldenModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, barrier := msg.(settledGoldenBarrier); barrier {
+		return m, nil
+	}
+	inner, cmd := m.inner.Update(msg)
+	m.inner = inner
+	view := inner.View()
+	plain := ansi.Strip(view.Content)
+	settled := inner.(interface{ SettledPresentation() bool }).SettledPresentation()
+	// The bounded tab no longer borrows a full-width pane heading. Verify
+	// the full canonical title through existing dependency/state seams and
+	// require the actual visible tab label separately; never widen the tab.
+	application := core.Resolve[*app.App](inner)
+	state := core.Resolve[*service.SessionState](inner)
+	canonicalTitle := application.Session() != nil && application.Session().TitleSnapshot() == goldenCompletedTitle && state.SessionTitle() == goldenCompletedTitle
+	if m.pinned == nil && settled && strings.Contains(plain, "2 + 2 equals 4.") &&
+		!strings.Contains(plain, "Send to") && strings.Contains(plain, "root · 1 turn completed") &&
+		canonicalTitle && view.WindowTitle == goldenCompletedTitle+" - docker agent" && strings.Contains(plain, goldenCompletedTabLabel) {
+		snapshot := view
+		m.pinned = &snapshot
+		m.captured <- snapshot
+	} else if m.pinned != nil && settled && !m.expiryObserved && !strings.Contains(plain, "root · 1 turn completed") {
+		m.expiryObserved = true
+		m.expired <- struct{}{}
+	}
+	return m, cmd
+}
+
+func (m *settledGoldenModel) View() tea.View {
+	if m.pinned != nil {
+		return *m.pinned
+	}
+	return m.inner.View()
 }

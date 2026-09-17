@@ -32,7 +32,7 @@ func newTransitionOwner(root *appModel) *transitionOwner {
 }
 
 func (m *transitionOwner) Init() tea.Cmd {
-	return m.transition.Start(4*animation.TickRate, animation.Linear)
+	return tea.Batch(m.transition.Start(4*animation.TickRate, animation.Linear), m.root.ar.Continue())
 }
 
 func (m *transitionOwner) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

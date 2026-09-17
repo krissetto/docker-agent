@@ -689,14 +689,9 @@ func TestElicitationDialog_SmallContent_NoScrollbar(t *testing.T) {
 	assert.False(t, dialog.scrollview.NeedsScrollbar(), "small dialogs should not need a scrollbar")
 }
 
-// TestElicitationDialog_OpensScrolledToTop pins the contract that a freshly
-// opened elicitation dialog (e.g. user_prompt) starts scrolled all the way
-// up so the user can read the question/message from the start, even when
-// the focused option/field would otherwise pull the viewport down.
-// TestElicitationDialog_TypingRevealsBelowFoldField pins that when the user
-// starts typing into a text field that lives below the fold (because the
-// dialog opens scrolled to the top with a long message), the input is
-// scrolled into view so the user can see what they are entering.
+// TestElicitationDialog_TypingRevealsBelowFoldField pins that initial focus
+// is visible, manual scrolling can reveal the question without snapping back,
+// and typing subsequently reveals the focused input again.
 func TestElicitationDialog_TypingRevealsBelowFoldField(t *testing.T) {
 	t.Parallel()
 
@@ -714,11 +709,19 @@ func TestElicitationDialog_TypingRevealsBelowFoldField(t *testing.T) {
 	_ = dialog.View()
 
 	require.True(t, dialog.scrollview.NeedsScrollbar(), "long message + field must require scrolling")
-	require.Equal(t, 0, dialog.scrollview.ScrollOffset(), "dialog must open scrolled to the top")
 	require.Len(t, dialog.fieldStarts, 1)
+	inputLine := dialog.fieldStarts[0] + dialog.fieldGeoms[0].labelHeight
+	require.Positive(t, dialog.BodyScrollOffset(), "initial preparation reveals the focused input below the question")
+	require.GreaterOrEqual(t, inputLine, dialog.BodyScrollOffset())
+	require.Less(t, inputLine, dialog.BodyScrollOffset()+dialog.scrollview.VisibleHeight())
+	require.Contains(t, ansi.Strip(dialog.View()), "Enter value")
 
-	// The text field's input line lives below the initial viewport.
-	inputLine := dialog.fieldStarts[0] + 1
+	// Deliberate scrolling to the question survives ordinary paint/preparation.
+	dialog.scrollview.ScrollToTop()
+	dialog.SetSize(80, 16)
+	dialog.View()
+	require.Zero(t, dialog.BodyScrollOffset(), "manual scroll remains until an input/focus event")
+	// The text field's input line lives below that manually selected viewport.
 	require.Greater(t, inputLine, dialog.scrollview.VisibleHeight()-1,
 		"test setup: the text field must initially be below the fold")
 
@@ -732,7 +735,7 @@ func TestElicitationDialog_TypingRevealsBelowFoldField(t *testing.T) {
 	assert.LessOrEqual(t, inputLine, visEnd, "input line must be visible after typing")
 }
 
-func TestElicitationDialog_OpensScrolledToTop(t *testing.T) {
+func TestElicitationDialog_OpensWithFocusedOptionVisible(t *testing.T) {
 	t.Parallel()
 
 	// Long question that, combined with many options, forces a scrollbar.
@@ -754,8 +757,19 @@ func TestElicitationDialog_OpensScrolledToTop(t *testing.T) {
 	_ = dialog.View()
 
 	require.True(t, dialog.scrollview.NeedsScrollbar(), "long question + many options must require scrolling")
-	assert.Equal(t, 0, dialog.scrollview.ScrollOffset(),
-		"dialog must open scrolled to the top so the user can read the question first")
+	first, last := dialog.focusRange()
+	require.Positive(t, dialog.BodyScrollOffset(), "initial preparation reveals the selected option")
+	require.GreaterOrEqual(t, first, dialog.BodyScrollOffset())
+	require.Less(t, last, dialog.BodyScrollOffset()+dialog.scrollview.VisibleHeight())
+	require.Contains(t, ansi.Strip(dialog.View()), "option-A")
+	dialog.scrollview.ScrollToTop()
+	dialog.SetSize(80, 18)
+	dialog.View()
+	require.Zero(t, dialog.BodyScrollOffset(), "manual question reading is not overridden by paint or unchanged size")
+	dialog.focusField(0)
+	dialog.View()
+	require.GreaterOrEqual(t, first, dialog.BodyScrollOffset())
+	require.Less(t, last, dialog.BodyScrollOffset()+dialog.scrollview.VisibleHeight(), "explicit focus reveals the option again")
 }
 
 // TestElicitationDialog_UserScrollUp_NotSnappedBack pins the contract that
@@ -848,24 +862,38 @@ func TestElicitationDialog_ResizeReanchorsFocus(t *testing.T) {
 		"ordinary re-render after the resize reanchor must not auto-scroll back to the focused field")
 }
 
-// TestElicitationDialog_ResizeFreeFormInput_NoJump pins that resizing a
-// free-form dialog (no schema fields, so nothing to reanchor to) neither
-// panics nor moves the user's scroll position.
-func TestElicitationDialog_ResizeFreeFormInput_NoJump(t *testing.T) {
+// TestElicitationDialog_ResizeFreeFormInput_ReanchorsOnce pins that initial
+// preparation and resizing reveal the free-form cursor, while subsequent
+// manual scrolling and ordinary renders do not snap back to it.
+func TestElicitationDialog_ResizeFreeFormInput_ReanchorsOnce(t *testing.T) {
 	t.Parallel()
 
 	longMessage := strings.Repeat("Long question line. ", 40)
 	dialog := NewElicitationDialog(longMessage, nil, nil, ElicitationRef{}).(*ElicitationDialog)
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 16})
-	_ = dialog.View()
+	for _, size := range [][2]int{{120, 16}, {20, 16}} {
+		_, _ = dialog.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		require.True(t, dialog.scrollview.NeedsScrollbar())
+		inputLine := len(dialog.layout().bodyLines) - 1
+		require.Positive(t, dialog.BodyScrollOffset())
+		require.GreaterOrEqual(t, inputLine, dialog.BodyScrollOffset())
+		require.Less(t, inputLine, dialog.BodyScrollOffset()+dialog.scrollview.VisibleHeight())
+		view := dialog.View()
+		x, y, width, height := dialog.BodyScrollBounds()
+		row, _ := dialog.Position()
+		inputY := y + inputLine - dialog.BodyScrollOffset()
+		lines := strings.Split(view, "\n")
+		require.Contains(t, ansi.Strip(lines[inputY-row]), "Type your")
+		require.Regexp(t, `\x1b\[[0-9;]*\b7(?:;[0-9;]*)?mT`, lines[inputY-row], "focused placeholder cursor is painted after resize")
+		require.Positive(t, width)
+		require.Less(t, inputY, y+height)
+		_, _ = dialog.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: inputY})
+		require.True(t, dialog.responseInput.Focused(), "painted response row retains its input hit target")
 
-	require.True(t, dialog.scrollview.NeedsScrollbar())
-	require.Equal(t, 0, dialog.scrollview.ScrollOffset(), "dialog must open scrolled to the top")
-
-	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 20, Height: 16})
-	_ = dialog.View()
-	assert.Equal(t, 0, dialog.scrollview.ScrollOffset(),
-		"resizing a free-form dialog must not move the scroll position")
+		dialog.scrollview.ScrollToTop()
+		dialog.SetSize(size[0], size[1])
+		dialog.View()
+		require.Zero(t, dialog.BodyScrollOffset(), "same-size preparation and rendering preserve manual scrolling")
+	}
 }
 
 // squashText strips ANSI sequences and removes all whitespace, so wrapped

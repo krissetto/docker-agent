@@ -146,6 +146,26 @@ func NewDatabaseStore(db *Database) *Store {
 	return &Store{db: db, fetch: fetchFromAPI}
 }
 
+// CachedSnapshot returns the catalog already held in memory, or the build-time
+// snapshot when no catalog has been loaded. It never reads disk or fetches data.
+// If a load owns the store lock, it returns the embedded snapshot rather than
+// waiting for that load's I/O. The returned database and all nested maps, slices,
+// and pointers are shared immutable data: callers must copy before modifying.
+func (s *Store) CachedSnapshot() *Database {
+	if s == nil || !s.mu.TryLock() {
+		return EmbeddedSnapshot()
+	}
+	db := s.db
+	if db == nil {
+		db = s.cacheDB
+	}
+	s.mu.Unlock()
+	if db == nil {
+		return EmbeddedSnapshot()
+	}
+	return db
+}
+
 // GetDatabase returns the models.dev database, fetching from cache or API as needed.
 func (s *Store) GetDatabase(ctx context.Context) (*Database, error) {
 	return s.getDatabase(ctx, true)
@@ -275,22 +295,40 @@ func (s *Store) GetModel(ctx context.Context, id ID) (*Model, error) {
 		return nil, err
 	}
 
-	model, exists := provider.Models[id.Model]
+	model, exists := lookupProviderModel(provider, id)
+	if !exists {
+		return nil, fmt.Errorf("model %q not found in provider %q", id.Model, id.Provider)
+	}
+	return model, nil
+}
 
-	// For amazon-bedrock, try stripping region/inference profile prefixes.
-	// Bedrock uses prefixes for cross-region inference profiles,
-	// but models.dev stores models without these prefixes.
+// LookupModel looks up a model without I/O, using the same matching rules as
+// Store.GetModel. The returned value is a shallow copy; its nested data belongs
+// to the immutable database and must not be modified.
+func (db *Database) LookupModel(id ID) (*Model, bool) {
+	if db == nil || !id.IsValid() {
+		return nil, false
+	}
+	provider, exists := db.Providers[id.Provider]
+	if !exists {
+		return nil, false
+	}
+	return lookupProviderModel(&provider, id)
+}
+
+func lookupProviderModel(provider *Provider, id ID) (*Model, bool) {
+	model, exists := provider.Models[id.Model]
+	// Bedrock cross-region inference profiles use prefixes absent from the
+	// catalog. Prefer an exact entry whenever the catalog contains one.
 	if !exists && id.Provider == "amazon-bedrock" {
 		if prefix, after, ok := strings.Cut(id.Model, "."); ok && bedrockRegionPrefixes[prefix] {
 			model, exists = provider.Models[after]
 		}
 	}
-
 	if !exists {
-		return nil, fmt.Errorf("model %q not found in provider %q", id.Model, id.Provider)
+		return nil, false
 	}
-
-	return &model, nil
+	return &model, true
 }
 
 // loadDatabase loads the database from the local cache file or

@@ -15,7 +15,7 @@ import (
 func newSQLiteStoreForTest(t *testing.T, path string) (Store, error) {
 	t.Helper()
 
-	db, err := sqliteutil.OpenDB(t.Context(), path)
+	db, err := sqliteutil.OpenDBWithImmediateTransactions(t.Context(), path)
 	if err != nil {
 		return nil, err
 	}

@@ -455,7 +455,7 @@ func TestSimple(t *testing.T) {
 	require.Equal(t, chat.MessageRoleAssistant, msgAdded.Message.Message.Role)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ModelID: "mock-model", ModelName: "mock-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -497,7 +497,7 @@ func TestMultipleContentChunks(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ModelID: "mock-model", ModelName: "mock-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Please greet me", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -541,7 +541,7 @@ func TestWithReasoning(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ModelID: "mock-model", ModelName: "mock-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -584,7 +584,7 @@ func TestMixedContentAndReasoning(t *testing.T) {
 	require.NotNil(t, msgAdded.Message)
 
 	expectedEvents := []Event{
-		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model"}}, "root"),
+		TeamInfo([]AgentDetails{{Name: "root", Provider: "test", Model: "mock-model", ModelID: "mock-model", ModelName: "mock-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"}}, "root"),
 		ToolsetInfo(0, false, "root"),
 		UserMessage("Hi there", sess.ID, nil, 0),
 		StreamStarted(sess.ID, "root"),
@@ -2284,8 +2284,8 @@ func TestEmitStartupInfo(t *testing.T) {
 	expectedEvents := []Event{
 		AgentInfo("startup-test-agent", "test/startup-model", "This is a startup test agent", "Welcome!"),
 		TeamInfo([]AgentDetails{
-			{Name: "startup-test-agent", Description: "This is a startup test agent", Provider: "test", Model: "startup-model"},
-			{Name: "other-agent", Description: "This is another agent", Provider: "test", Model: "startup-model"},
+			{Name: "startup-test-agent", Description: "This is a startup test agent", Provider: "test", Model: "startup-model", ModelID: "startup-model", ModelName: "startup-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"},
+			{Name: "other-agent", Description: "This is another agent", Provider: "test", Model: "startup-model", ModelID: "startup-model", ModelName: "startup-model", ThinkingMode: "unknown", ThinkingLevel: "unknown"},
 		}, "startup-test-agent"),
 		ToolsetInfo(0, false, "startup-test-agent"), // No tools configured
 	}

@@ -81,16 +81,14 @@ const (
 	dirPickerHorizPadding   = 2 // DialogStyle Padding(1, 2) horizontal
 	dirPickerVertPadding    = 1 // DialogStyle Padding(1, 2) vertical
 	dirPickerHorizChrome    = (dirPickerBorderWidth + dirPickerHorizPadding) * 2
-	dirPickerContentOffsetX = dirPickerBorderWidth + dirPickerHorizPadding
 	dirPickerContentOffsetY = dirPickerBorderWidth + dirPickerVertPadding
 
 	// Content rows above the list (pinned/recent sections):
 	// title(1) + titleGap(1) + tabs(1) + space(1) = 4
 	dirPickerHeaderRows = 4
 
-	// Additional content rows for browse section:
-	// filterInput(1) + space(1) = 2
-	dirPickerBrowseFilterRows = 2
+	// Additional content row for browse section: filter input.
+	dirPickerBrowseFilterRows = 1
 
 	// Content rows below the list: space(1) + helpKeys(1) = 2
 	dirPickerFooterRows = 2
@@ -619,9 +617,8 @@ func (d *workingDirPickerDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 // isStarClick returns true if the click X coordinate falls within the star prefix
 // column for the given entry index, and the entry supports pinning.
 func (d *workingDirPickerDialog) isStarClick(x, entryIdx int) bool {
-	_, dialogCol := d.Position()
-	starStartX := dialogCol + dirPickerContentOffsetX
-	starEndX := starStartX + dirPickerStarPrefixWidth
+	starStartX := d.bodyX
+	starEndX := min(starStartX+dirPickerStarPrefixWidth, d.bodyX+max(0, d.bodyWidth-d.bodyScroll.ReservedCols()))
 
 	if x < starStartX || x >= starEndX {
 		return false
@@ -647,20 +644,16 @@ func (d *workingDirPickerDialog) setSection(s dirSection) {
 
 // tabClickTarget returns the section index if the click is on a tab, or -1.
 func (d *workingDirPickerDialog) tabClickTarget(x, y int) int {
-	dialogRow, dialogCol := d.Position()
-	const rowsBeforeTabs = 2 // title(1) + titleGap(1)
-	tabY := dialogRow + dirPickerContentOffsetY + rowsBeforeTabs
-	if d.bodyScroll != nil {
-		tabY = d.bodyY - 1 - d.bodyHeaderGap
-		if d.section == sectionBrowse {
-			tabY--
-		}
-	}
-	if y != tabY {
+	tabY, visible := d.headerRow(1)
+	if !visible || y != tabY {
 		return -1
 	}
 
-	contentX := x - (dialogCol + dirPickerContentOffsetX)
+	contentX := x - d.bodyX
+	_, _, contentWidth := d.dialogSize()
+	if contentX < 0 || contentX >= min(contentWidth, d.bodyWidth-d.bodyScroll.ReservedCols()) {
+		return -1
+	}
 
 	for _, r := range d.tabRegions {
 		if contentX >= r.xStart && contentX < r.xEnd {
@@ -878,7 +871,7 @@ func (d *workingDirPickerDialog) renderTabs(width int) string {
 		}
 	}
 
-	line := strings.Join(parts, "")
+	line := ansi.Truncate(strings.Join(parts, ""), max(1, width), "")
 	return styles.BaseStyle.Width(width).Align(lipgloss.Center).Render(line)
 }
 

@@ -187,8 +187,10 @@ func TestCloseDialogByModelTopUsesExistingCloseLifecycle(t *testing.T) {
 	mgr.SetSize(80, 24)
 	target := &lifecycleDialog{view: "target"}
 	mgr.handleOpen(OpenDialogMsg{Model: target})
-	mgr.handleTick(advanceDialog(r, r.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 	_, cmd := mgr.Update(CloseDialogByModelMsg{Model: target})
+	require.Nil(t, cmd)
+	cmd = r.Continue()
 	require.NotNil(t, cmd)
 	require.True(t, mgr.Closing())
 	require.Zero(t, target.cleaned)

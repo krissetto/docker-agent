@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
@@ -325,7 +326,7 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 	}
 	tracked := m.ensureSessionLocked(parent, parentAgent, "")
 	id := m.tree.NewNodeID()
-	node := subagent.Node{ID: id, Parent: tracked.node, SessionID: child.ID, Agent: ref.Agent, Name: ref.Name, Description: ref.Description, State: subagent.NodeIdle}
+	node := subagent.Node{ID: id, Parent: tracked.node, SessionID: child.ID, Agent: ref.Agent, Name: ref.Name, Description: ref.Description, State: subagent.NodeIdle, CreatedAt: time.Now()}
 	node.Task, _ = subagent.PreviewText(task, subagent.PreviewLen)
 	record := session.ChildRecord{RootSessionID: m.rootSessionLocked(parent.ID), ParentSessionID: parent.ID, Node: node, Revision: 1}
 	rec := &childRecord{name: ref.DisplayName(), parentSession: parent.ID, parentAgentName: parentAgent, sessionID: child.ID, agent: target, state: subagent.NodeIdle, durable: record}
@@ -343,6 +344,19 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 		m.sessions[child.ID] = &sessionSubagents{node: id}
 		return nil
 	})
+	// Admission and registry activation have committed. Publish once to the
+	// parent's existing journal; restore/import never passes through this path.
+	if err == nil {
+		events := m.r.sessionEvents
+		if parentDriver, ok := m.r.sessionDrivers.Lookup(parent.ID); ok {
+			events = parentDriver.events
+		}
+		events.Publish(parent.ID, &SubagentCreatedEvent{
+			AgentContext: newAgentContext(parentAgent),
+			Type:         "subagent_created", SessionID: parent.ID, ParentSessionID: parent.ID,
+			ChildSessionID: child.ID, NodeID: id, CreatedAt: node.CreatedAt,
+		})
+	}
 	if err == nil && task != "" && m.r.TitleGenerator(m.ctx) != nil {
 		m.wg.Go(func() { m.startChildTitle(child, task) })
 	}

@@ -85,6 +85,89 @@ func (v *localSessionRuntimeView) ListSessions(ctx context.Context) ([]SessionCa
 	return out, nil
 }
 
+func (v *localSessionRuntimeView) ListSessionSummaries(ctx context.Context, options SessionSummaryOptions) ([]SessionSummaryEntry, error) {
+	store, ok := v.runtime.sessionStore.(session.ScopedSummaryStore)
+	if !ok {
+		return nil, UnsupportedSessionOperation("", "session_summaries")
+	}
+	rows, err := store.GetSessionSummariesWithScope(ctx, session.SummaryScope{IncludeChildren: options.IncludeChildren})
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]session.Summary, len(rows))
+	for _, row := range rows {
+		if row.ID == "" {
+			return nil, errors.New("session summary is missing canonical identity")
+		}
+		if _, duplicate := byID[row.ID]; duplicate {
+			return nil, errors.New("duplicate session summary identity")
+		}
+		byID[row.ID] = row
+	}
+	// Memoize metadata ancestry once; browsing never loads durable trees or
+	// transcripts. Durable child membership remains confirmation-time work.
+	routes := make(map[string]string, len(rows))
+	var route func(string, map[string]bool) string
+	route = func(id string, visiting map[string]bool) string {
+		if result, known := routes[id]; known {
+			return result
+		}
+		row, exists := byID[id]
+		if !exists {
+			return "persisted parent session is missing"
+		}
+		if visiting[id] {
+			return "persisted session ancestry has a cycle"
+		}
+		visiting[id] = true
+		defer delete(visiting, id)
+		result := ""
+		bound := row.Attributes[SessionAgentAttribute]
+		if bound == "" {
+			result = "session is not attachable"
+		} else if _, err := v.runtime.team.Agent(bound); err != nil {
+			result = "persisted session agent is unavailable"
+		} else if row.ParentID != "" {
+			result = route(row.ParentID, visiting)
+			if result == "" && row.Attributes["docker-agent.actor.source"] != "" && row.Attributes["docker-agent.actor.source"] != byID[row.ParentID].Attributes["docker-agent.actor.source"] {
+				result = "persisted child session source differs from root source"
+			}
+		}
+		routes[id] = result
+		return result
+	}
+	out := make([]SessionSummaryEntry, 0, len(rows))
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !options.IncludeChildren && row.ParentID != "" {
+			continue
+		}
+		bound := row.Attributes[SessionAgentAttribute]
+		entry := SessionSummaryEntry{SessionID: row.ID, ParentID: row.ParentID, Title: row.Title, AgentName: bound, Model: row.AgentModelOverrides[bound], Source: row.Attributes["docker-agent.actor.source"], CreatedAt: row.CreatedAt, UpdatedAt: row.CreatedAt.Format(time.RFC3339), Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir}
+		if driver, loaded := v.runtime.sessionDrivers.Lookup(row.ID); loaded {
+			// Reuse immutable owner binding without Snapshot, Observe, or lookup
+			// that could initialize providers or adopt stored work.
+			driver.mu.Lock()
+			if !driver.stopped && !driver.reclaiming {
+				entry.Loaded, entry.Loadable = true, true
+				entry.AgentName, entry.Model = driver.AgentNameLocked(), driver.modelRef
+			}
+			driver.mu.Unlock()
+		}
+		if !entry.Loaded {
+			entry.RouteError = route(row.ID, make(map[string]bool))
+			if entry.RouteError == "" {
+				entry.Loadable = row.ParentID == ""
+				entry.RequiresConfirmation = row.ParentID != ""
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
 	if found, err := v.SessionByID(sessionID); err == nil {
 		if handle, ok := found.(*sessionHandle); ok {
@@ -356,7 +439,7 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 	return SessionMetadata{SessionID: h.sessionID, AgentName: h.AgentName(), Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
 		AvailableModels: available, Durability: durability,
 		Compaction: true, TargetCompaction: true, ModelSwitching: modelSwitching, ContextInspection: true, LiveSessions: true, SessionEditing: true,
-		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: len(levels) > 0, Todos: true,
+		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: modelSwitching && len(levels) > 1, Todos: true,
 	}}
 }
 

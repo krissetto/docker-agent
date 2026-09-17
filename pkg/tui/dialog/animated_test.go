@@ -40,16 +40,16 @@ func TestAnimatedManagerCloseLifecycle(t *testing.T) {
 	mgr.SetSize(80, 24)
 	dlg := &lifecycleDialog{view: "abc\nx", row: 2, col: 3}
 	_, cmd := mgr.handleOpen(OpenDialogMsg{Model: dlg})
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd, "transition start only registers")
 	assert.True(t, mgr.Open())
 	assert.True(t, mgr.HasActiveDialog())
 	assert.Equal(t, int32(1), runtime.ActiveCount())
 
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration))
 	assert.False(t, mgr.stack[0].opening())
 
 	_, cmd = mgr.Update(CloseDialogMsg{})
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd, "transition start only registers")
 	assert.True(t, mgr.Open(), "closing entries remain rendered")
 	assert.True(t, mgr.Closing())
 	assert.False(t, mgr.HasActiveDialog())
@@ -78,7 +78,7 @@ func TestAnimatedManagerCloseLifecycle(t *testing.T) {
 	require.Len(t, dlg.updates, before+1)
 	assert.Equal(t, result, dlg.updates[before], "async results continue during close")
 
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration+dialogCloseDuration))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration+dialogCloseDuration))
 	assert.False(t, mgr.Open())
 	assert.Equal(t, 1, dlg.cleaned)
 	assert.Equal(t, int32(0), runtime.ActiveCount())
@@ -138,7 +138,7 @@ func TestAnimatedManagerPointerSuppressedOnlyDuringTransitions(t *testing.T) {
 	mgr.Update(tea.MouseWheelMsg{})
 	assert.Len(t, dlg.updates, baseline)
 
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration))
 	baseline = len(dlg.updates)
 	mgr.Update(tea.MouseWheelMsg{})
 	assert.Len(t, dlg.updates, baseline+1)
@@ -155,7 +155,7 @@ func TestAnimatedManagerHideReopenPreservesEntry(t *testing.T) {
 	dlg := &lifecycleDialog{view: "dialog"}
 	event := &struct{ ID int }{ID: 1}
 	mgr.handleOpen(OpenDialogMsg{Model: dlg, OriginatingEvent: event})
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration))
 
 	mgr.handleHide()
 	require.True(t, mgr.Closing())
@@ -273,18 +273,24 @@ func TestToolConfirmationManagerCompactBoundsAcrossOpenFrames(t *testing.T) {
 
 	targetWidth := lipgloss.Width(dialog.View())
 	targetHeight := lipgloss.Height(dialog.View())
-	require.Equal(t, 15, targetHeight, "static preview, policy explanation, six responsive actions and shared gaps fit the measured card")
+	choices := dialog.(*toolConfirmationDialog)
+	require.Len(t, choices.actionRows, 6, "each authorization policy has its own readable row")
+	// The former 15-row fixture packed all decisions into one button row.
+	// Preserve the content-sized contract rather than that obsolete packing:
+	// six vertical choices and their help must still occupy less than half
+	// the screen, with every animation frame centered at its final width.
+	require.Less(t, targetHeight, viewportHeight/2, "a short call remains compact with readable policy choices")
 	require.LessOrEqual(t, targetWidth, viewportWidth)
 	require.LessOrEqual(t, targetHeight, viewportHeight)
 	assertManagerFrameBounds(t, mgr, targetWidth, 1)
 
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration/2))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration/2))
 	intermediateHeight := mgr.stack[0].renderHeight
 	assert.Greater(t, intermediateHeight, 1)
 	assert.Less(t, intermediateHeight, targetHeight)
 	assertManagerFrameBounds(t, mgr, targetWidth, intermediateHeight)
 
-	mgr.handleTick(advanceDialog(runtime, runtime.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(runtime, runtime.Continue(), dialogOpenDuration))
 	assertManagerFrameBounds(t, mgr, targetWidth, targetHeight)
 }
 
@@ -301,7 +307,7 @@ func TestAnimatedDialogCloseReopenReversalKeepsWidth(t *testing.T) {
 	runtime := newDialogRuntime()
 	d := &lifecycleDialog{view: "0123456789\nabcdefghij\nABCDEFGHIJ"}
 	a, cmd := newAnimatedDialog(runtime, d, 80, 24)
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd, "transition start only registers")
 	assert.Equal(t, 10, a.renderWidth)
 
 	a.renderAlpha, a.renderHeight = 1, 3
@@ -347,13 +353,13 @@ func TestSharedDialogLifecycleFixtures(t *testing.T) {
 				dialog := fixture.new(runtime)
 				mgr := &manager{runtime: runtime, width: viewportWidth, height: viewportHeight}
 				_, openCmd := mgr.handleOpen(OpenDialogMsg{Model: dialog})
-				require.NotNil(t, openCmd)
+				require.Nil(t, openCmd, "opening registers with the owner")
 				require.Len(t, mgr.stack, 1)
 
 				fullView := dialog.View()
 				contentWidth, contentHeight := lipgloss.Width(fullView), lipgloss.Height(fullView)
 				animated := mgr.stack[0].animatedDialog
-				tickCmd := runtime.EnsureRunning()
+				tickCmd := runtime.Continue()
 				require.NotNil(t, tickCmd)
 				assert.Equal(t, min(contentWidth, viewportWidth), animated.targetWidth, "target width is measured from rendered content")
 				assert.Equal(t, min(contentHeight, viewportHeight), animated.targetHeight, "target height is measured from rendered content")
@@ -378,14 +384,16 @@ func TestSharedDialogLifecycleFixtures(t *testing.T) {
 
 				clampedWidth := max(2, animated.targetWidth-7)
 				clampedHeight := max(2, animated.targetHeight-3)
-				tickCmd = animated.retarget("viewport-test", clampedWidth, clampedHeight)
+				require.Nil(t, animated.retarget("viewport-test", clampedWidth, clampedHeight))
+				tickCmd = runtime.Continue()
 				require.NotNil(t, tickCmd)
 				finishSharedDialogTransition(t, runtime, &tickCmd, animated, clampedWidth, clampedHeight)
 				assert.Equal(t, min(contentWidth, clampedWidth), animated.renderWidth, "viewport retarget applies final width immediately")
 				assert.Equal(t, min(contentHeight, clampedHeight), animated.renderHeight, "viewport retarget clamps measured height")
 
 				closeWidth, closeHeight := animated.renderWidth, animated.renderHeight
-				tickCmd = animated.startClose(false)
+				require.Nil(t, animated.startClose(false))
+				tickCmd = runtime.Continue()
 				require.NotNil(t, tickCmd)
 				progress = tickSharedDialog(t, runtime, &tickCmd, animated, clampedWidth, clampedHeight)
 				eased = animation.EaseOutCubic(progress)
@@ -444,6 +452,8 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 	large := strings.Join([]string{"TOP─────────", "TITLE       ", "row one     ", "row two     ", "row three   ", "row four    ", "row five    ", "row six     ", "row seven   ", "row eight   ", "row nine    ", "BOTTOM──────"}, "\n")
 	d := &lifecycleDialog{view: small}
 	a, tickCmd := newAnimatedDialog(r, d, 80, 30)
+	require.Nil(t, tickCmd)
+	tickCmd = r.Continue()
 	require.Less(t, a.opacity(), 1.0, "initial opening retains its fade")
 	a.tick("open", 80, 30)
 	advance := func(duration time.Duration) {
@@ -457,7 +467,8 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 	advance(dialogOpenDuration)
 	require.InDelta(t, 1.0, a.opacity(), 0)
 	d.view = large
-	tickCmd = a.retarget("grow", 80, 30)
+	require.Nil(t, a.retarget("grow", 80, 30))
+	tickCmd = r.Continue()
 	require.NotNil(t, tickCmd)
 	require.True(t, a.resizing)
 	grown := []int{a.renderHeight}
@@ -474,7 +485,8 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 	}
 	require.Equal(t, 12, a.renderHeight)
 	d.view = small
-	tickCmd = a.retarget("shrink", 80, 30)
+	require.Nil(t, a.retarget("shrink", 80, 30))
+	tickCmd = r.Continue()
 	require.NotNil(t, tickCmd)
 	shrunk := []int{a.renderHeight}
 	for range 4 {
@@ -492,7 +504,8 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 		advance(animation.TickRate)
 	}
 	require.Equal(t, 4, a.renderHeight)
-	tickCmd = a.startClose(false)
+	require.Nil(t, a.startClose(false))
+	tickCmd = r.Continue()
 	require.NotNil(t, tickCmd)
 	require.False(t, a.resizing)
 	advance(animation.TickRate)
@@ -507,13 +520,16 @@ func TestResizeReversalSamplesCurrentBoundsWithoutReopeningFade(t *testing.T) {
 	r := newDialogRuntime()
 	d := &lifecycleDialog{view: strings.Repeat("wide row\n", 3) + "bottom"}
 	a, tickCmd := newAnimatedDialog(r, d, 40, 20)
+	require.Nil(t, tickCmd)
+	tickCmd = r.Continue()
 	for a.anim.Running() {
 		acceptedDialogTick(r, tickCmd)
 		a.tick("open", 40, 20)
 		tickCmd = r.Continue()
 	}
 	d.view = strings.Repeat("wide row\n", 15) + "bottom"
-	tickCmd = a.retarget("grow", 40, 20)
+	require.Nil(t, a.retarget("grow", 40, 20))
+	tickCmd = r.Continue()
 	for range 3 {
 		acceptedDialogTick(r, tickCmd)
 		a.tick("grow", 40, 20)
@@ -537,8 +553,8 @@ func TestResizeCompositionStaysBoundedAndSuppressesTransientActionHits(t *testin
 	mgr.SetSize(60, 20)
 	d := NewSnapshotsDialog([]int{1}).(*snapshotsDialog)
 	_, openCmd := mgr.handleOpen(OpenDialogMsg{Model: d})
-	require.NotNil(t, openCmd)
-	tickCmd := r.EnsureRunning()
+	require.Nil(t, openCmd, "opening registers with the owner")
+	tickCmd := r.Continue()
 	for mgr.stack[0].anim.Running() {
 		tick := acceptedDialogTick(r, tickCmd)
 		mgr.handleTick(tick)
@@ -546,7 +562,7 @@ func TestResizeCompositionStaysBoundedAndSuppressesTransientActionHits(t *testin
 	}
 	d.fileCounts = make([]int, 30)
 	_, updateCmd := mgr.Update(tea.WindowSizeMsg{Width: 16, Height: 8})
-	require.NotNil(t, updateCmd)
+	require.Nil(t, updateCmd, "resize registers with the owner")
 	entry := &mgr.stack[0]
 	require.True(t, entry.resizing)
 	require.True(t, mgr.pointerSuppressed())

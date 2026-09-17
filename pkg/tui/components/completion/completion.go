@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/junegunn/fzf/src/algo"
 	"github.com/junegunn/fzf/src/util"
 
@@ -137,18 +138,20 @@ type Manager interface {
 
 // manager represents an item completion component that manages completion state and UI
 type manager struct {
-	keyMap        completionKeyMap
-	width         int
-	height        int
-	editorBottom  int // height from screen bottom where editor ends (for popup positioning)
-	items         []Item
-	filteredItems []Item
-	query         string
-	selected      int
-	scrollOffset  int
-	visible       bool
-	matchMode     MatchMode
-	loading       bool // true when async loading is in progress
+	keyMap          completionKeyMap
+	width           int
+	height          int
+	sized           bool
+	editorBottomSet bool
+	editorBottom    int // height from screen bottom where editor ends (for popup positioning)
+	items           []Item
+	filteredItems   []Item
+	query           string
+	selected        int
+	scrollOffset    int
+	visible         bool
+	matchMode       MatchMode
+	loading         bool // true when async loading is in progress
 }
 
 // New creates a new  completion component
@@ -169,8 +172,7 @@ func (c *manager) Open() bool {
 func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		c.width = msg.Width
-		c.height = msg.Height
+		c.SetSize(msg.Width, msg.Height)
 		return c, nil
 
 	case QueryMsg:
@@ -316,16 +318,29 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (c *manager) SetSize(width, height int) tea.Cmd {
 	c.width = width
 	c.height = height
+	c.sized = true
 	return nil
 }
 
 func (c *manager) SetEditorBottom(height int) {
-	c.editorBottom = height
+	c.editorBottom = max(0, height)
+	c.editorBottomSet = true
 }
 
 func (c *manager) View() string {
 	if !c.visible {
 		return ""
+	}
+	box, innerWidth, count := c.viewport()
+	if innerWidth <= 0 || count <= 0 {
+		return ""
+	}
+	// Navigation and resize both keep the selected row inside the real popup.
+	start := min(c.scrollOffset, max(0, len(c.filteredItems)-count))
+	if c.selected < start {
+		start = c.selected
+	} else if c.selected >= start+count {
+		start = c.selected - count + 1
 	}
 
 	var lines []string
@@ -337,10 +352,10 @@ func (c *manager) View() string {
 			lines = append(lines, styles.CompletionNoResultsStyle.Render("No results"))
 		}
 	} else {
-		visibleStart := c.scrollOffset
-		visibleEnd := min(c.scrollOffset+maxItems, len(c.filteredItems))
+		visibleStart := start
+		visibleEnd := min(start+count, len(c.filteredItems))
 
-		maxLabelLen := c.labelColumnWidth()
+		maxLabelLen := min(c.labelColumnWidth(), max(0, innerWidth-2))
 
 		for i := visibleStart; i < visibleEnd; i++ {
 			item := c.filteredItems[i]
@@ -361,7 +376,8 @@ func (c *manager) View() string {
 			}
 
 			// Pad label to maxLabelLen so descriptions align
-			paddedLabel := item.Label + strings.Repeat(" ", maxLabelLen+1-lipgloss.Width(item.Label))
+			label := ansi.Truncate(completionSingleLine(item.Label), min(innerWidth, maxLabelLen+1), "…")
+			paddedLabel := label + strings.Repeat(" ", max(0, maxLabelLen+1-ansi.StringWidth(label)))
 			// Render the label and description as separate segments and join them
 			// rather than re-Render()-ing the whole line through itemStyle: that
 			// outer re-wrap mangles the ANSI reset already embedded by descStyle's
@@ -369,9 +385,10 @@ func (c *manager) View() string {
 			// Underline, which leaks the raw escape code as literal text).
 			line := itemStyle.Render(paddedLabel)
 			if item.Description != "" {
-				line = lipgloss.JoinHorizontal(lipgloss.Top, line, " ", descStyle.Render(item.Description))
+				line = lipgloss.JoinHorizontal(lipgloss.Top, line, " ", descStyle.Render(ansi.Truncate(completionSingleLine(item.Description), max(0, innerWidth-ansi.StringWidth(paddedLabel)-1), "…")))
 			}
-			if pad := (c.width - 6) - lipgloss.Width(line); pad > 0 {
+			line = ansi.Truncate(line, innerWidth, "")
+			if pad := innerWidth - lipgloss.Width(line); pad > 0 {
 				line += itemStyle.Render(strings.Repeat(" ", pad))
 			}
 
@@ -379,14 +396,48 @@ func (c *manager) View() string {
 		}
 	}
 
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], innerWidth, "")
+	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	return styles.CompletionBoxStyle.Render(content)
+	return box.Render(content)
+}
+
+func completionSingleLine(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func (c *manager) editorOffset() int {
+	if c.editorBottomSet {
+		return c.editorBottom
+	}
+	return 4
+}
+
+func (c *manager) popupX() int {
+	return min(styles.AppPadding, max(0, (c.width-1)/2))
+}
+
+func (c *manager) viewport() (lipgloss.Style, int, int) {
+	box := styles.CompletionBoxStyle
+	width := max(0, c.width-2*c.popupX())
+	rows := maxItems + box.GetVerticalFrameSize()
+	if c.sized || c.height > 0 {
+		rows = max(0, c.height-c.editorOffset()-1)
+	}
+	if width <= box.GetHorizontalFrameSize() {
+		box = box.Padding(0).Border(lipgloss.Border{})
+	}
+	if rows <= box.GetVerticalFrameSize() {
+		box = box.Border(lipgloss.Border{}).PaddingTop(0).PaddingBottom(0)
+	}
+	return box, max(0, width-box.GetHorizontalFrameSize()), min(maxItems, max(0, rows-box.GetVerticalFrameSize()))
 }
 
 func (c *manager) labelColumnWidth() int {
 	width := 0
 	for _, item := range c.items {
-		width = max(width, lipgloss.Width(item.Label))
+		width = max(width, lipgloss.Width(completionSingleLine(item.Label)))
 	}
 	return width
 }
@@ -397,14 +448,17 @@ func (c *manager) GetLayers() []*lipgloss.Layer {
 	}
 
 	view := c.View()
+	if view == "" {
+		return nil
+	}
 	viewHeight := lipgloss.Height(view)
 
 	// Use actual editor height if set, otherwise fall back to reasonable default
-	editorHeight := cmp.Or(c.editorBottom, 4)
+	editorHeight := c.editorOffset()
 	yPos := max(c.height-viewHeight-editorHeight-1, 0)
 
 	return []*lipgloss.Layer{
-		lipgloss.NewLayer(view).X(styles.AppPadding).Y(yPos),
+		lipgloss.NewLayer(view).X(c.popupX()).Y(yPos),
 	}
 }
 

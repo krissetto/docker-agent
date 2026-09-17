@@ -133,6 +133,37 @@ func (r *SessionTransport) ListSessions(ctx context.Context) ([]SessionCatalogEn
 	return out, nil
 }
 
+// ListSessionSummaries explicitly negotiates the metadata view. An older
+// server's transcript catalog is not accepted as a silent fallback.
+func (r *SessionTransport) ListSessionSummaries(ctx context.Context, options SessionSummaryOptions) ([]SessionSummaryEntry, error) {
+	var catalog struct {
+		Version  int                   `json:"version"`
+		View     string                `json:"view"`
+		Sessions []SessionSummaryEntry `json:"sessions"`
+	}
+	endpoint := "/api/sessions?view=summary&include_children=" + strconv.FormatBool(options.IncludeChildren)
+	if err := r.client.sessionJSON(ctx, http.MethodGet, endpoint, nil, &catalog); err != nil {
+		return nil, err
+	}
+	if catalog.Version != 1 || catalog.View != "summary" {
+		return nil, UnsupportedSessionOperation("", "session_summaries")
+	}
+	seen := make(map[string]struct{}, len(catalog.Sessions))
+	for _, row := range catalog.Sessions {
+		if row.SessionID == "" {
+			return nil, errors.New("session summary is missing canonical identity")
+		}
+		if _, duplicate := seen[row.SessionID]; duplicate {
+			return nil, errors.New("duplicate session summary identity")
+		}
+		seen[row.SessionID] = struct{}{}
+		if !options.IncludeChildren && row.ParentID != "" {
+			return nil, errors.New("session summary exceeds requested scope")
+		}
+	}
+	return catalog.Sessions, nil
+}
+
 func (r *SessionTransport) LoadSession(ctx context.Context, id string) (SessionHandle, *session.Session, error) {
 	handle, err := r.SessionByID(id)
 	if err != nil {
@@ -635,7 +666,11 @@ func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body,
 		}
 	}
 	u := *c.baseURL
-	u.Path = path.Join(u.Path, endpoint)
+	endpointPath, query, hasQuery := strings.Cut(endpoint, "?")
+	u.Path = path.Join(u.Path, endpointPath)
+	if hasQuery {
+		u.RawQuery = query
+	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -1078,4 +1113,96 @@ var (
 
 func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {
 	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
+}
+
+// PrepareSessionView holds only confirmed information on the client. The server
+// owns no reservation across HTTP requests; Commit revalidates and publishes in
+// one authenticated open_view request.
+func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (PreparedSessionView, error) {
+	var response struct {
+		Version int                     `json:"version"`
+		View    string                  `json:"view"`
+		Info    PreparedSessionViewInfo `json:"info"`
+	}
+	if err := r.client.sessionJSON(ctx, http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"?view=prepare-info", nil, &response); err != nil {
+		return nil, err
+	}
+	if response.Version != 1 || response.View != "prepare-info" {
+		return nil, UnsupportedSessionOperation(id, "prepare_view")
+	}
+	if response.Info.SessionID != id || response.Info.Session == nil || response.Info.Session.ID != id || response.Info.Binding.AgentName == "" || response.Info.WorkingDir != response.Info.Session.WorkingDir {
+		return nil, errors.New("invalid prepared session view identity")
+	}
+	child, cancel := context.WithCancel(ctx)
+	return &remotePreparedView{runtime: r, info: cloneSessionViewInfo(response.Info), ctx: func() context.Context { return child }, cancel: cancel}, nil
+}
+
+type remotePreparedView struct {
+	mu        sync.Mutex
+	runtime   *SessionTransport
+	info      PreparedSessionViewInfo
+	ctx       func() context.Context // immutable confirmed preparation lifetime
+	cancel    context.CancelFunc
+	terminal  bool
+	committed *CommittedSessionView
+}
+
+func (p *remotePreparedView) Info() PreparedSessionViewInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return cloneSessionViewInfo(p.info)
+}
+
+func (p *remotePreparedView) Abort() {
+	// Client preparation owns no server reservations. Cancellation is enough;
+	// Commit checks this lifetime and owns any in-flight request cleanup.
+	p.cancel()
+}
+
+func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.committed != nil {
+		return CommittedSessionView{SessionHandle: p.committed.SessionHandle, Info: cloneSessionViewInfo(p.committed.Info)}, nil
+	}
+	if p.terminal || p.ctx().Err() != nil {
+		return CommittedSessionView{}, context.Canceled
+	}
+	p.terminal = true
+	requestCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.ctx(), cancel)
+	defer stop()
+	defer cancel()
+	defer p.cancel()
+	var snapshot session.Session
+	if err := p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, "/api/sessions/"+url.PathEscape(p.info.SessionID), SessionEdit{Kind: SessionEditOpenView}, &snapshot); err != nil {
+		return CommittedSessionView{}, err
+	}
+	if snapshot.ID != p.info.SessionID || snapshot.ParentID != p.info.Session.ParentID {
+		return CommittedSessionView{}, errors.New("committed session view identity changed")
+	}
+	handle, err := p.runtime.SessionByID(snapshot.ID)
+	if err != nil {
+		return CommittedSessionView{}, err
+	}
+	if hydrator, ok := handle.(Hydrator); ok {
+		if err := hydrator.Hydrate(requestCtx); err != nil {
+			return CommittedSessionView{}, err
+		}
+	}
+	metadata := handle.Metadata()
+	info := cloneSessionViewInfo(p.info)
+	info.Session = &snapshot
+	info.Binding.AgentName, info.Binding.Model = metadata.AgentName, metadata.Model
+	info.WorkingDir = snapshot.WorkingDir
+	if info.Binding.AgentName == "" {
+		return CommittedSessionView{}, errors.New("committed session view binding is missing")
+	}
+	if info.Attach != nil {
+		info.Attach.Session = snapshot.Clone()
+		info.Attach.Agent = metadata.AgentName
+	}
+	result := CommittedSessionView{SessionHandle: handle, Info: info}
+	p.committed = &result
+	return CommittedSessionView{SessionHandle: handle, Info: cloneSessionViewInfo(info)}, nil
 }

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,8 +28,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
-	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -59,6 +60,7 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	// changes the store copy lacks (e.g. a mode downgrade) are persisted
 	// with the branch, not just patched in memory.
 	if current := m.application.Session(); current != nil {
+		newSess.AgentName = current.AgentName
 		newSess.HideToolResults = current.HideToolResults
 		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
 		// SetSafetyPolicy clears the toggle memory; restore the live one
@@ -71,44 +73,8 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
 	}
 
-	// Preserve sidebar settings across branch
-	sidebarSettings := m.chatPage.GetSidebarSettings()
-
-	activeID := m.supervisor.ActiveID()
-
-	// Update tuistate so the tab points to the branched session on re-launch.
-	if m.tuiStore != nil {
-		oldPersistedID := m.persistedSessionID(activeID)
-		if err := m.tuiStore.UpdateTabSessionID(ctx, oldPersistedID, newSess.ID); err != nil {
-			slog.WarnContext(ctx, "Failed to update tab session ID after branch", "error", err)
-		}
-	}
-	m.persistActiveTab(newSess.ID)
-
-	// Replace the session in the app and rebuild all per-session components.
-	m.application.ReplaceSession(ctx, newSess)
-	m.initSessionComponents(activeID, m.application, newSess)
-	m.dialogMgr.Cleanup()
-	m.dialogMgr = dialog.New(m.ar)
-	m.modelPickerGeneration++
-
-	// Restore sidebar settings
-	m.chatPage.SetSidebarSettings(sidebarSettings)
-
-	m.reapplyKeyboardEnhancements()
-
-	return m, tea.Batch(
-		tea.Sequence(
-			m.chatPage.Init(),
-			m.resizeAll(),
-			m.editor.Focus(),
-			core.CmdHandler(messages.SendMsg{
-				Content:     msg.Content,
-				Attachments: msg.Attachments,
-			}),
-		),
-		chat.WatchGitBranch(m.chatPage),
-	)
+	cmd := m.beginHostedLoad(newSess.ID, m.paneFocus(), &messages.SendMsg{Content: msg.Content, Attachments: msg.Attachments})
+	return m, cmd
 }
 
 func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
@@ -122,10 +88,6 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 
-	spawner := m.supervisor.Spawner()
-	if spawner == nil {
-		return m, notification.ErrorCmd("Session spawning not available")
-	}
 	ctx := m.ctx()
 
 	// Fork the session and clone all messages.
@@ -134,31 +96,15 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to fork session: %v", err))
 	}
 
+	// BranchSession intentionally omits transient agent delegation. A private
+	// user fork retains the selected canonical destination before persistence.
+	forkedSession.AgentName = currentSession.AgentName
 	if err := store.AddSession(ctx, forkedSession); err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save forked session: %v", err))
 	}
 
-	spawned, err := spawner(ctx, forkedSession.WorkingDir)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to create runtime for fork: %v", err))
-	}
-
-	spawned.App.ReplaceSession(ctx, forkedSession)
-	cleanup := spawned.Cleanup
-	if spawned.Ownership == RuntimeBorrowed {
-		cleanup = nil
-	}
-	if _, err := m.supervisor.AddSession(ctx, spawned.App, forkedSession, forkedSession.WorkingDir, cleanup); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to supervise forked session: %v", err))
-	}
-
-	if m.tuiStore != nil {
-		if err := m.tuiStore.AddTab(ctx, forkedSession.ID, forkedSession.WorkingDir); err != nil {
-			slog.WarnContext(ctx, "Failed to persist forked tab", "error", err)
-		}
-	}
-
-	return m.handleSwitchTab(forkedSession.ID)
+	cmd := m.beginHostedLoad(forkedSession.ID, "", nil)
+	return m, cmd
 }
 
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
@@ -176,35 +122,34 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 			return m, nil
 		}
 	}
-	store := m.application.SessionStore()
-
 	if currentSess != nil && currentSess.ID == sessionID {
 		return m, notification.InfoCmd("Session editing is not supported for this session")
-	} else {
-		sessions := m.application.SessionRuntime()
-		if loader, ok := sessions.(runtime.SessionLoader); ok {
-			handle, loaded, err := loader.LoadSession(m.ctx(), sessionID)
-			if err != nil {
-				return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
-			}
-			editor := handle
-			if err := editor.SetStarred(m.ctx(), !loaded.Starred); err != nil {
-				return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
-			}
-			return m, nil
-		}
-		if store == nil {
-			return m, notification.ErrorCmd("No session store configured")
-		}
-		sess, err := store.GetSession(m.ctx(), sessionID)
-		if err != nil {
-			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
-		}
-		if err := store.SetSessionStarred(m.ctx(), sessionID, !sess.Starred); err != nil {
-			return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
-		}
 	}
-	return m, nil
+	owner, ctx := m.supervisor, m.ctx()
+	return m, func() tea.Msg {
+		err := owner.WithSessionOwner(ctx, sessionID, func(ctx context.Context, resources supervisor.ViewOwnerResources) error {
+			handle, err := resources.Sessions.SessionByID(sessionID)
+			if err != nil {
+				loader, ok := resources.Sessions.(runtime.SessionLoader)
+				if !ok {
+					return err
+				}
+				handle, _, err = loader.LoadSession(ctx, sessionID)
+				if err != nil {
+					return err
+				}
+			}
+			snapshot, err := handle.Snapshot(ctx)
+			if err != nil {
+				return err
+			}
+			return handle.SetStarred(ctx, !snapshot.Starred)
+		})
+		if err != nil {
+			return notification.ErrorCmd("Failed to update session: " + err.Error())()
+		}
+		return nil
+	}
 }
 
 func (m *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
@@ -779,6 +724,60 @@ func (m *appModel) handleModelPickerRefreshed(msg messages.ModelPickerRefreshedM
 	)
 }
 
+// handleScopedThinkingCycle rejects a delayed footer action after its canonical
+// session, routing generation, agent, primary or displayed model has changed. Mutation
+// then uses the same synchronous canonical operation as Shift+Tab.
+func (m *appModel) handleScopedThinkingCycle(msg messages.CycleThinkingLevelMsg) (tea.Model, tea.Cmd) {
+	if m.application == nil || m.application.Session() == nil || m.supervisor == nil || msg.RouteGeneration == 0 ||
+		msg.SessionID != m.application.Session().ID || msg.AgentName != m.sessionState.CurrentAgentName() || msg.ModelRef != m.thinkingModelReference() {
+		return m, nil
+	}
+	displayed := ""
+	if m.sessionState.GetCurrentAgent().PrimaryThinking != nil {
+		displayed = m.thinkingDisplayReference()
+	}
+	if msg.DisplayedModelRef != displayed {
+		return m, nil
+	}
+	generation, exists := m.supervisor.RouteGeneration(m.paneFocus())
+	if !exists || generation != msg.RouteGeneration {
+		return m, nil
+	}
+	return m.handleCycleThinkingLevel()
+}
+
+// thinkingModelReference reads already-applied projection metadata only. A
+// configured alias may name the same canonical provider/model; an intervening
+// AgentInfo model change invalidates the old projection until TeamInfo arrives.
+func (m *appModel) thinkingModelReference() string {
+	display := m.thinkingDisplayReference()
+	details := m.sessionState.GetCurrentAgent()
+	canonical := details.ModelID
+	if details.Provider != "" {
+		canonical = details.Provider + "/" + canonical
+	}
+	if details.PrimaryThinking != nil && display == canonical {
+		return details.PrimaryThinking.ModelRef
+	}
+	return display
+}
+
+func (m *appModel) thinkingDisplayReference() string {
+	current := m.application.CurrentAgentModel(m.ctx())
+	details := m.sessionState.GetCurrentAgent()
+	if details.ModelID == "" {
+		return current
+	}
+	canonical := details.ModelID
+	if details.Provider != "" {
+		canonical = details.Provider + "/" + canonical
+	}
+	if current != "" && current != canonical && current != details.Model && current != details.Provider+"/"+details.Model {
+		return current
+	}
+	return canonical
+}
+
 // handleCycleThinkingLevel advances the current agent's thinking-effort level
 // (shift+tab). On success the new level is reflected in the sidebar via the
 // re-emitted agent info; only failures surface a notification.
@@ -1007,6 +1006,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		HideToolResults:       settings.HideToolResults,
 		RenderImages:          settings.GetRenderImages(),
 		ShowBanner:            settings.GetShowBanner(),
+		DimInactivePanes:      settings.GetDimInactivePanes(),
 		YOLO:                  settings.YOLO,
 		RestoreTabs:           settings.GetRestoreTabs(),
 		Snapshot:              settings.SnapshotsEnabled(),
@@ -1032,6 +1032,8 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
+	m.dimInactivePanes = preferences.DimInactivePanes
+	m.viewCacheValid = false
 	for _, page := range m.chatPages {
 		page.SetSendMode(m.sendMode)
 		page.SetInterruptMode(m.interruptMode)
@@ -1113,6 +1115,7 @@ func savePreferences(p messages.Preferences) error {
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
+		s.DimInactivePanes = boolPreference(p.DimInactivePanes, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
 		s.Sound = p.Sound
@@ -1381,4 +1384,27 @@ func (m *appModel) startShell() (tea.Model, tea.Cmd) {
 		cmd.Dir = runner.WorkingDir
 	}
 	return m, tea.ExecProcess(cmd, nil)
+}
+
+func (m *appModel) handleResumeSession(msg messages.ResumeSessionMsg) (tea.Model, tea.Cmd) {
+	return m.handleRoutedResume(m.paneFocus(), msg)
+}
+
+func (m *appModel) handleRoutedResume(origin string, msg messages.ResumeSessionMsg) (tea.Model, tea.Cmd) {
+	if m.supervisor == nil {
+		return m, nil
+	}
+	runner := m.supervisor.GetRunner(origin)
+	generation, exists := m.supervisor.RouteGeneration(origin)
+	if !exists || runner == nil || runner.App == nil || msg.RouteGeneration == 0 || generation != msg.RouteGeneration {
+		return m, nil
+	}
+	application := runner.App
+	if application.Session() == nil || (msg.SessionID != "" && msg.SessionID != application.Session().ID) {
+		return m, nil
+	}
+	if err := application.EditSession(m.ctx(), runtime.SessionEdit{Kind: runtime.SessionEditResume}); err != nil {
+		return m, notification.ErrorCmd("Cannot resume session: " + err.Error())
+	}
+	return m, nil
 }

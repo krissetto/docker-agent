@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -76,6 +77,7 @@ type App struct {
 	cancel                 context.CancelFunc
 	currentAgentModel      string                      // Tracks the current agent's model ID from AgentInfoEvent
 	exitAfterFirstResponse bool                        // Exit TUI after first assistant response completes
+	resolvedView           bool                        // canonical view acquisition already completed; Start must not restore again
 	readOnly               bool                        // When true, no new messages can be sent to the LLM
 	titleGenerating        atomic.Bool                 // True when title generation is in progress
 	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
@@ -191,14 +193,57 @@ func WithRuntimeServices(services Services) Opt {
 }
 
 func New(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, opts ...Opt) *App {
+	return newApp(ctx, sessions, sessionState{session: sess, binding: binding}, false, opts...)
+}
+
+// NewResolved attaches presentation to an already committed canonical owner.
+// It never hydrates, creates, restores or reconciles that owner's model binding.
+func NewResolved(ctx context.Context, sessions runtime.SessionRuntime, committed runtime.CommittedSessionView, opts ...Opt) (*App, error) {
+	info, handle := committed.Info, committed.SessionHandle
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if handle == nil || info.Session == nil || info.SessionID == "" || handle.ID() != info.SessionID || info.Session.ID != info.SessionID || info.Binding.AgentName == "" || handle.AgentName() != info.Binding.AgentName || info.WorkingDir != info.Session.WorkingDir {
+		return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: info.SessionID, Operation: "resolved_view"}
+	}
+	return newApp(ctx, sessions, sessionState{session: info.Session, handle: handle, binding: info.Binding}, true, opts...), nil
+}
+
+// NewResolvedFromTemplate carries only same-owner immutable presentation
+// configuration. It never replays queued input, contexts, buses or request state.
+func NewResolvedFromTemplate(ctx context.Context, sessions runtime.SessionRuntime, committed runtime.CommittedSessionView, template *App) (*App, error) {
+	if template == nil || sessions == nil || reflect.TypeOf(sessions) != reflect.TypeOf(template.sessions) || !reflect.TypeOf(sessions).Comparable() || sessions != template.sessions {
+		return nil, &runtime.SessionError{Kind: runtime.SessionErrorWrongSession, SessionID: committed.Info.SessionID, Operation: "resolved_view_template"}
+	}
+	options := []Opt{
+		WithRuntimeServices(template.runtime),
+		WithTitleGenerator(template.titleGen),
+		WithSnapshotController(template.snapshotController),
+	}
+	if committed.Info.Attach != nil {
+		attach := *committed.Info.Attach
+		if attach.Session != nil {
+			attach.Session = attach.Session.Clone()
+		}
+		options = append(options, WithSubagentAttach(attach))
+	}
+	if template.readOnly {
+		options = append(options, WithReadOnly())
+	}
+	if template.exitAfterFirstResponse {
+		options = append(options, WithExitAfterFirstResponse())
+	}
+	return NewResolved(ctx, sessions, committed, options...)
+}
+
+func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessionState, resolved bool, opts ...Opt) *App {
+	sess := initial.session
 	app := &App{
-		ctx:      func() context.Context { return context.WithoutCancel(ctx) },
-		runtime:  nil,
-		sessions: sessions,
-		currentState: sessionState{
-			session: sess,
-			binding: binding,
-		},
+		ctx:              func() context.Context { return context.WithoutCancel(ctx) },
+		runtime:          nil,
+		sessions:         sessions,
+		currentState:     initial,
+		resolvedView:     resolved,
 		events:           make(chan any, 128),
 		throttleDuration: 50 * time.Millisecond,
 	}
@@ -207,10 +252,13 @@ func New(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Ses
 		opt(app)
 	}
 	state := app.state()
-	if sessions != nil && sess != nil {
+	switch {
+	case resolved:
+		state = initial
+	case sessions != nil && sess != nil:
 		state.binding = app.resolvedSessionBinding(sess, state.binding)
 		state.handle, state.binding, state.err = resolveSessionHandle(ctx, sessions, sess, state.binding)
-	} else if sess != nil {
+	case sess != nil:
 		state.err = &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
 	app.replaceSessionState(state)
@@ -308,7 +356,7 @@ func (a *App) Start(ctx context.Context) {
 	a.startOnce.Do(func() {
 		a.initBus(ctx)
 		context.AfterFunc(ctx, a.stopBus)
-		if a.attachedSubagent == nil {
+		if a.attachedSubagent == nil && !a.resolvedView {
 			a.reloadSubagentTree(ctx)
 		}
 		// One event source for local runtimes: the session's canonical stream

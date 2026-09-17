@@ -43,6 +43,7 @@ const (
 	rowActiveAgents
 	rowTools
 	rowTodos
+	rowDimInactivePanes
 	rowSplitDiff
 	rowExpandThinking
 	rowHideToolResults
@@ -176,8 +177,8 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				}
 			}
 		}
-		// The tab bar sits immediately above the body viewport.
-		if msg.Y == y-1-d.bodyHeaderGap {
+		// Paint and pointer targets use the same adaptive shared header geometry.
+		if tabY, visible := d.headerRow(1); visible && msg.Y == tabY && msg.X >= x && msg.X < x+w-d.bodyScroll.ReservedCols() {
 			col := x
 			for i, label := range settingsTabLabels {
 				if msg.X >= col && msg.X < col+len(label)+2 {
@@ -316,6 +317,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.HideTools = !d.current.Layout.HideTools
 		case rowTodos:
 			d.current.Layout.HideTodos = !d.current.Layout.HideTodos
+		case rowDimInactivePanes:
+			d.current.DimInactivePanes = !d.current.DimInactivePanes
 		case rowSplitDiff:
 			d.current.SplitDiffView = !d.current.SplitDiffView
 		case rowExpandThinking:
@@ -429,12 +432,15 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	default:
 		local.renderAppearanceTab(content, inner)
 	}
-	body := strings.TrimLeft(content.Build(), "\n")
+	body := content.Build()
 	rows := make(map[int]int)
 	physicalLine := 0
 	for line := range strings.SplitSeq(ansi.Strip(body), "\n") {
 		for row, text := range local.rowText {
-			if line == text {
+			// JoinVertical pads every row to the widest content. Match the
+			// recorded label without that layout padding so shorter checkbox
+			// rows retain their mouse target and keyboard scroll anchor.
+			if strings.TrimRight(line, " ") == strings.TrimRight(text, " ") {
 				rows[row] = physicalLine
 			}
 		}
@@ -475,7 +481,7 @@ func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
 	if theme == "" {
 		theme = styles.DefaultThemeRef
 	}
-	content.AddSpace().AddContent(d.renderSelectorRow(rowTheme, "Theme", theme, inner))
+	content.AddContent(d.renderSelectorRow(rowTheme, "Theme", theme, inner))
 	if d.showVisuals {
 		preview := lipgloss.NewStyle().Width(inner).Align(lipgloss.Center).Render(renderLayoutPreview(d.current.Layout, inner))
 		content.AddSpace().AddContent(preview).AddSpace().
@@ -491,6 +497,7 @@ func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
 			AddContent(d.renderToggleRow(rowTodos, "Todos", !d.current.Layout.HideTodos))
 	}
 	content.AddSpace().
+		AddContent(d.renderToggleRow(rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)).
 		AddContent(d.renderToggleRow(rowSplitDiff, "Split diff view", d.current.SplitDiffView)).
 		AddContent(d.renderToggleRow(rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)).
 		AddContent(d.renderToggleRow(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)).
@@ -499,7 +506,7 @@ func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
 }
 
 func (d *settingsDialog) renderBehaviorTab(content *Content, inner int) {
-	content.AddSpace().AddContent(styles.MutedStyle.Render("While agent is working")).AddSpace()
+	content.AddContent(styles.MutedStyle.Render("While agent is working")).AddSpace()
 	for _, opt := range sendModeOptions {
 		content.AddContent(d.renderSendModeOption(opt))
 	}
@@ -518,8 +525,7 @@ func (d *settingsDialog) renderBehaviorTab(content *Content, inner int) {
 }
 
 func (d *settingsDialog) renderNotificationsTab(content *Content, inner int) {
-	content.AddSpace().
-		AddContent(d.renderToggleRow(rowSound, "Sound on task completion", d.current.Sound)).
+	content.AddContent(d.renderToggleRow(rowSound, "Sound on task completion", d.current.Sound)).
 		AddContent(d.renderStepperRow(rowSoundThreshold, "Sound threshold", d.current.SoundThreshold, "seconds", inner, !d.current.Sound)).
 		AddContent(d.renderToggleRow(rowWarnOnCacheMiss, "Warn when a turn misses the cache", d.current.WarnOnCacheMiss))
 }

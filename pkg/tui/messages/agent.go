@@ -45,4 +45,14 @@ type (
 	// SetThinkingLevelMsg sets the reasoning-effort level of the current
 	// agent's model (/effort command). An empty Level shows usage.
 	SetThinkingLevelMsg struct{ Level string }
+
+	// CycleThinkingLevelMsg is a projection-scoped footer action. The root
+	// stamps RouteGeneration at emission; components never guess generations.
+	CycleThinkingLevelMsg struct {
+		SessionID         string
+		AgentName         string
+		ModelRef          string
+		DisplayedModelRef string
+		RouteGeneration   uint64
+	}
 )

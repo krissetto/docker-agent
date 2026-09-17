@@ -87,7 +87,7 @@ func (s *InMemorySessionStore) AppendItem(ctx context.Context, sessionID, writeI
 }
 
 func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID string, item Item) (id int64, err error) {
-	defer func() { err = classifySQLiteError(err) }()
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
 	if sessionID == "" || writeID == "" {
 		return 0, ErrEmptyID
 	}
@@ -95,7 +95,7 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 	if err != nil {
 		return 0, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
 		return 0, err
 	}

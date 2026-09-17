@@ -132,12 +132,14 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	themeGeneration uint64
-	textarea        textarea.Model
-	hist            *history.History
-	width           int
-	height          int
-	working         bool
+	themeGeneration               uint64
+	textarea                      textarea.Model
+	hist                          *history.History
+	width                         int
+	height                        int
+	viewportWidth, viewportHeight int
+	viewportLimited               bool
+	working                       bool
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -277,17 +279,6 @@ func stripANSI(s string) string {
 	return ansiRegexp.ReplaceAllString(s, "")
 }
 
-// lineHasContent reports whether the rendered line has user input after the
-// prompt has been stripped.
-func lineHasContent(line, prompt string) bool {
-	plain := stripANSI(line)
-	if prompt != "" && strings.HasPrefix(plain, prompt) {
-		plain = strings.TrimPrefix(plain, prompt)
-	}
-
-	return strings.TrimSpace(plain) != ""
-}
-
 // extractLineText extracts the user input text from a rendered view line,
 // stripping ANSI codes and the prompt prefix.
 func extractLineText(line, prompt string) string {
@@ -306,12 +297,15 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 	ta.Prompt = e.textarea.Prompt
 	ta.ShowLineNumbers = e.textarea.ShowLineNumbers
 	ta.SetWidth(e.textarea.Width())
-	ta.SetHeight(100) // Large enough to see all wrapped lines
+	ta.SetHeight(max(1, e.textarea.Height())) // Preview owns only its allocated rows
 
 	// For the first line, we need to account for the cursor position.
 	// We do this by prefixing with spaces to simulate the existing text.
 	prefix := strings.Repeat(" ", startOffset)
 	ta.SetValue(prefix + text)
+	ta.MoveToBegin()
+	_ = ta.View()
+	ta.SetHeight(ta.Height())
 
 	view := ta.View()
 	viewLines := strings.Split(view, "\n")
@@ -345,84 +339,28 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 // cursor styling (reverse video) so it's visible inside the cursor block.
 // Multi-line suggestions are rendered across multiple visual lines.
 func (e *editor) applySuggestionOverlay(view string) string {
+	// Direct value/size changes can precede the first textarea Update. Repair
+	// the real viewport rather than placing a ghost on an unrelated visible row.
+	offset := e.textarea.ScrollYOffset()
+	e.fixViewportScroll()
+	if e.textarea.ScrollYOffset() != offset {
+		view = e.textarea.View()
+	}
 	lines := strings.Split(view, "\n")
-	value := e.textarea.Value()
 	promptWidth := runewidth.StringWidth(stripANSI(e.textarea.Prompt))
-
-	// Use LineInfo to get the actual cursor position within soft-wrapped lines
 	lineInfo := e.textarea.LineInfo()
-
-	// The cursor's column offset within the current visual line
-	textWidth := lineInfo.ColumnOffset
-
-	// Determine the target visual line for the overlay.
-	// For soft-wrapped text, we need to find where the cursor actually is.
-	var targetLine int
-
-	if strings.HasSuffix(value, "\n") {
-		// Cursor is on the line after the last content line.
-		// Find the first empty line after content.
-		contentLine := -1
-		for i := range slices.Backward(lines) {
-			if lineHasContent(lines[i], e.textarea.Prompt) {
-				contentLine = i
-				break
-			}
+	textWidth := lineInfo.CharOffset
+	// Use the same wrapping and scroll origin as the real textarea. Logical
+	// row counts (or the last nonblank rendered row) misplace a wrapped cursor.
+	targetLine := lineInfo.RowOffset - e.textarea.ScrollYOffset()
+	for i, line := range strings.Split(e.textarea.Value(), "\n") {
+		if i >= e.textarea.Line() {
+			break
 		}
-		if contentLine == -1 {
-			return view // No content found
-		}
-		// The cursor line is the one after the content line
-		targetLine = contentLine + 1
-		if targetLine >= len(lines) {
-			// Edge case: cursor line is beyond view (shouldn't happen normally)
-			targetLine = contentLine
-			textWidth = runewidth.StringWidth(extractLineText(lines[targetLine], e.textarea.Prompt))
-		}
-	} else {
-		// For normal text (including soft-wrapped), use the row offset from LineInfo
-		// to find the correct visual line within the viewport.
-		// LineInfo().RowOffset gives us how many visual rows down the cursor is
-		// from the start of the current logical line.
-
-		// First, find the last visual line with content
-		lastContentLine := -1
-		for i := range slices.Backward(lines) {
-			if lineHasContent(lines[i], e.textarea.Prompt) {
-				lastContentLine = i
-				break
-			}
-		}
-		if lastContentLine == -1 {
-			return view
-		}
-
-		// Calculate the target line based on the logical line's row offset
-		// For multi-line content, we need to account for previous lines
-		logicalLine := e.textarea.Line()
-		rowOffset := lineInfo.RowOffset
-
-		// Count how many visual lines come before the current logical line
-		visualLinesBeforeCursor := 0
-		valueLines := strings.Split(value, "\n")
-		for i := 0; i < logicalLine && i < len(valueLines); i++ {
-			lineWidth := runewidth.StringWidth(valueLines[i])
-			editorWidth := e.textarea.Width()
-			if editorWidth > 0 {
-				// Each logical line takes at least 1 visual line, plus extra for wrapping
-				visualLinesBeforeCursor += 1 + lineWidth/editorWidth
-			} else {
-				visualLinesBeforeCursor++
-			}
-		}
-
-		targetLine = visualLinesBeforeCursor + rowOffset
-
-		// Clamp to valid range
-		if targetLine >= len(lines) {
-			targetLine = lastContentLine
-		}
-		targetLine = max(targetLine, 0)
+		targetLine += wrappedLineCount([]rune(line), max(1, e.textarea.Width()))
+	}
+	if targetLine < 0 || targetLine >= len(lines) {
+		return view
 	}
 
 	// Use textarea's word-wrap logic to compute how the suggestion would be displayed.
@@ -442,9 +380,9 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		}
 
 		currentY := targetLine + i
-		// Note: We intentionally don't skip lines beyond the view; the
-		// output is extended to accommodate overlays positioned beyond
-		// the base view's boundaries.
+		if currentY >= len(lines) {
+			break
+		}
 
 		var xOffset int
 		if i == 0 {
@@ -488,10 +426,11 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	// consumers pinned to other lipgloss snapshots, e.g. Docker Sandboxes).
 	outLines := strings.Split(view, "\n")
 	for _, ov := range overlays {
-		for len(outLines) <= ov.y {
-			outLines = append(outLines, "")
+		if ov.x >= e.textarea.Width() {
+			continue
 		}
-		outLines[ov.y] = spliceLine(outLines[ov.y], ov.content, ov.x)
+		content := ansi.Truncate(ov.content, e.textarea.Width()-ov.x, "")
+		outLines[ov.y] = spliceLine(outLines[ov.y], content, ov.x)
 	}
 	return strings.Join(outLines, "\n")
 }
@@ -618,6 +557,7 @@ func (e *editor) AcceptSuggestion() tea.Cmd {
 	current := e.textarea.Value()
 	e.textarea.SetValue(current + e.suggestion)
 	e.textarea.MoveToEnd()
+	e.fixViewportScroll()
 
 	e.clearSuggestion()
 
@@ -733,7 +673,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		e.refreshTheme()
 		return e, nil
 	case tea.WindowSizeMsg:
-		e.textarea.SetWidth(msg.Width - 2)
+		e.width = max(1, msg.Width-2)
+		e.fixViewportScroll()
 		return e, nil
 
 	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
@@ -897,9 +838,13 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.textarea, _ = e.textarea.Update(msg)
 			value := e.textarea.Value()
 
-			// If textarea inserted a newline, just refresh and return
-			if value != prev && !isSend {
-				e.refreshSuggestion()
+			// A newline key never submits, including when the textarea refuses
+			// it at the logical-line limit. Only the configured send key may
+			// fall through to the submission path below.
+			if !isSend {
+				if value != prev {
+					e.refreshSuggestion()
+				}
 				return e, nil
 			}
 
@@ -1355,60 +1300,99 @@ func (e *editor) View() string {
 		view = e.applySuggestionOverlay(view)
 	}
 
-	if e.historySearch.active {
+	if e.historySearch.active && e.height > 1 {
 		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
 	}
 
-	return styles.RenderComposite(styles.EditorStyle.Width(e.width+styles.EditorStyle.GetHorizontalPadding()+styles.EditorStyle.GetHorizontalBorderSize()), view)
+	frame := e.Frame()
+	return styles.RenderComposite(frame.Width(e.width+frame.GetHorizontalPadding()+frame.GetHorizontalBorderSize()), view)
+}
+
+// ViewportLayout is an optional shell capability. Limits apply before textarea
+// sizing, so the shell never has to crop away the cursor to fit the terminal.
+type ViewportLayout interface {
+	SetViewportSize(width, height int)
+	Frame() lipgloss.Style
+}
+
+func (e *editor) SetViewportSize(width, height int) {
+	e.viewportLimited = true
+	e.viewportWidth, e.viewportHeight = max(1, width), max(1, height)
+}
+
+// Frame retains the themed editor surface, giving up decoration only when
+// necessary to leave a real text cell. The same frame supplies mouse offsets.
+func (e *editor) Frame() lipgloss.Style {
+	frame := styles.EditorStyle
+	if !e.viewportLimited {
+		return frame
+	}
+	if e.viewportWidth <= frame.GetHorizontalFrameSize() {
+		frame = frame.Margin(0).PaddingLeft(0).PaddingRight(0)
+	}
+	if e.viewportHeight <= frame.GetVerticalFrameSize() {
+		frame = frame.PaddingTop(0).PaddingBottom(0)
+	}
+	return frame
 }
 
 // SetSize sets the dimensions of the component
 func (e *editor) SetSize(width, height int) tea.Cmd {
-	oldWidth := e.textarea.Width()
-	oldHeight := e.textarea.Height()
-
-	e.width = width
+	if e.viewportLimited {
+		frame := e.Frame()
+		width = min(width, max(1, e.viewportWidth-frame.GetHorizontalFrameSize()))
+		height = min(height, max(1, e.viewportHeight-frame.GetVerticalFrameSize()))
+	}
+	e.width = max(width, 1)
 	e.height = max(height, 1)
 
-	e.textarea.SetWidth(max(width, 1))
-	e.searchInput.SetWidth(max(width, 1))
-	e.updateTextareaHeight()
-
-	if e.textarea.Width() != oldWidth && e.textarea.Height() == oldHeight {
-		e.fixViewportScroll()
-	}
+	e.searchInput.SetWidth(e.width)
+	// Even an unchanged allocation can follow changed content. Repair against
+	// the real wrapped rows rather than the viewport's padded end rows.
+	e.fixViewportScroll()
 
 	return nil
 }
 
-func (e *editor) updateTextareaHeight() {
+func (e *editor) textareaRows() int {
 	available := e.height
+	if available == 0 {
+		// Before the host's first allocation, retain the textarea's initial size.
+		available = e.textarea.Height()
+	}
 	if e.historySearch.active {
 		available--
 	}
+	return max(available, 1)
+}
 
-	available = max(available, 1)
-
-	oldHeight := e.textarea.Height()
-	e.textarea.SetHeight(available)
-	if e.textarea.Height() != oldHeight {
+func (e *editor) updateTextareaHeight() {
+	if e.textarea.Height() != e.textareaRows() {
 		e.fixViewportScroll()
 	}
 }
 
-// fixViewportScroll forces the textarea viewport to recalculate after a size
-// change, then restores the cursor to the same logical line and rune column.
+// fixViewportScroll adapts bubbles v2.2.1's public sizing API temporarily:
+// dynamic reflow clamps against real content, whereas SetHeight alone only
+// keeps the cursor visible against a viewport padded with extra end rows.
+// Restore the policy before any input: MaxHeight also limits logical newlines.
 func (e *editor) fixViewportScroll() {
-	savedRow := e.textarea.Line()
-	lineInfo := e.textarea.LineInfo()
-	savedCol := lineInfo.StartColumn + lineInfo.ColumnOffset
-
-	e.textarea.MoveToBegin()
-	for e.textarea.Line() < savedRow {
-		e.textarea.CursorEnd()
-		e.textarea.CursorDown()
+	width := e.width
+	if width == 0 {
+		// Unsized editors still use the initial, undecorated textarea width.
+		width = e.textarea.Width()
 	}
-	e.textarea.SetCursorColumn(savedCol)
+	rows := e.textareaRows()
+	dynamic, minHeight, maxHeight := e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight
+	e.textarea.DynamicHeight = true
+	e.textarea.MinHeight, e.textarea.MaxHeight = rows, rows
+	// Pass the requested outer width, not Width(), which excludes reserves.
+	e.textarea.SetWidth(width)
+	// A narrow rewrap can reposition against stale viewport content. Refresh
+	// it before the final cursor-visible positioning, without moving the cursor.
+	_ = e.textarea.View()
+	e.textarea.SetHeight(rows)
+	e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight = dynamic, minHeight, maxHeight
 }
 
 // ContentLineCount returns the number of visual rows occupied by the current
@@ -1474,6 +1458,18 @@ func wrappedLineCount(runes []rune, width int) int {
 	return len(lines)
 }
 
+// BannerHeightLimit is an optional shell capability. Set the available rows
+// before measuring BannerHeight; zero hides the banner without losing items.
+type BannerHeightLimit interface {
+	SetBannerMaxHeight(height int)
+}
+
+func (e *editor) SetBannerMaxHeight(height int) {
+	if e.banner != nil {
+		e.banner.SetMaxHeight(height)
+	}
+}
+
 // BannerHeight returns the current height of the attachment banner (0 if hidden)
 func (e *editor) BannerHeight() int {
 	if e.banner == nil {
@@ -1512,13 +1508,17 @@ func (e *editor) HasContextBar() bool {
 
 // GetSize returns the rendered dimensions including EditorStyle padding.
 func (e *editor) GetSize() (width, height int) {
-	return e.width + styles.EditorStyle.GetHorizontalFrameSize(),
-		e.height + styles.EditorStyle.GetVerticalFrameSize()
+	frame := e.Frame()
+	return e.width + frame.GetHorizontalFrameSize(),
+		e.height + frame.GetVerticalFrameSize()
 }
 
 // AttachmentAt returns preview information for the attachment rendered at the given X position.
 func (e *editor) AttachmentAt(x int) (AttachmentPreview, bool) {
-	return e.AttachmentAtPosition(x, contextBarMarginTop+1)
+	if e.banner == nil {
+		return AttachmentPreview{}, false
+	}
+	return e.AttachmentAtPosition(x, e.banner.summaryY())
 }
 
 // AttachmentAtPosition uses coordinates local to BannerView, including its margin.
@@ -1577,6 +1577,7 @@ func (e *editor) Value() string {
 // SetValue updates the editor content and moves cursor to end
 func (e *editor) SetValue(content string) {
 	e.textarea.SetValue(content)
+	e.fixViewportScroll()
 	e.textarea.MoveToEnd()
 	e.userTyped = content != ""
 	e.refreshSuggestion()

@@ -17,7 +17,7 @@ import (
 
 func settleTreePresentation(t *testing.T, m *model, cmd tea.Cmd) {
 	t.Helper()
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	for range 80 {
 		running := (m.placement != nil && m.placement.running) || m.branchSpansRunning()
 		for i := range m.treeCounters {
@@ -57,7 +57,7 @@ func TestWholeTreeAnimatedRevealRetargetAndPinnedFooter(t *testing.T) {
 	_, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.True(t, m.placement.running)
 	initial := m.placement.rows[len(m.placement.rows)-1].alpha
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	require.NotNil(t, cmd)
 	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
 	require.True(t, ok)
@@ -111,7 +111,8 @@ func TestHiddenPresentationUpdatesSnapWithoutStealingSharedClock(t *testing.T) {
 	t.Parallel()
 	m := newHoverSidebar(t)
 	other := m.ar.Subscribe()
-	original := other.Start()
+	require.Nil(t, other.Start())
+	original := m.ar.Continue()
 	require.NotNil(t, original)
 	require.Nil(t, m.SetPresentationActive(false))
 	assert.EqualValues(t, 1, m.ar.ActiveCount())
@@ -131,7 +132,8 @@ func TestHiddenPresentationUpdatesSnapWithoutStealingSharedClock(t *testing.T) {
 	require.Nil(t, m.SetPresentationActive(true))
 	assert.Zero(t, m.ar.ActiveCount(), "reactivation does not replay hidden changes")
 	cmd := m.SetQueuedMessages([]QueuedMessage{{ID: "hidden-a", Text: "hidden queued"}, {ID: "visible-b", Text: "new visible"}})
-	require.NotNil(t, cmd, "next foreground change returns its original shared Start command")
+	cmd = sidebarOwnerCommand(m, cmd)
+	require.NotNil(t, cmd, "next foreground change is committed by the owner")
 	settleTreePresentation(t, m, cmd)
 	assert.Contains(t, ansi.Strip(m.View()), "new visible")
 	assert.Zero(t, m.ar.ActiveCount())
@@ -236,7 +238,7 @@ func TestExpandingChildrenNeverCoverPersistentRecap(t *testing.T) {
 		}
 	}
 	check() // click/update frame before first accepted tick
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	for i := range 12 {
 		require.NotNil(t, cmd)
 		tick, ok := m.ar.Accept(cmd().(animation.TickMsg))

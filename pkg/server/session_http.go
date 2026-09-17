@@ -152,6 +152,7 @@ type sessionStatusDTO struct {
 	Pending         int                  `json:"pending"`
 	TurnID          string               `json:"turn_id,omitempty"`
 	LastError       string               `json:"last_error,omitempty"`
+	Dormant         bool                 `json:"dormant,omitempty"`
 	PauseArmed      bool                 `json:"pause_armed,omitempty"`
 	Paused          bool                 `json:"paused,omitempty"`
 	PauseGeneration uint64               `json:"pause_generation,omitempty"`
@@ -691,13 +692,25 @@ func (s *Server) cancelSession(c echo.Context) error {
 }
 
 func (s *Server) editCanonicalSession(c echo.Context) error {
-	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		return sessionHTTPError(err)
-	}
 	var edit runtime.SessionEdit
 	if err := decodeSessionJSON(c, &edit); err != nil {
 		return sessionRequestError("invalid request body")
+	}
+	if edit.Kind == runtime.SessionEditOpenView {
+		prepared, err := s.sm.PrepareSessionView(c.Request().Context(), c.Param("id"))
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		defer prepared.Abort()
+		committed, err := prepared.Commit(c.Request().Context())
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		return c.JSON(http.StatusOK, committed.Info.Session)
+	}
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
 	}
 	updated, err := handle.Edit(c.Request().Context(), edit)
 	if err != nil {
@@ -862,7 +875,7 @@ func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 	return sessionStatusDTO{
 		SessionID: status.SessionID, AgentName: status.AgentName, State: status.State, Pending: status.Pending, TurnID: status.TurnID, LastError: status.LastError,
-		PauseArmed: status.PauseArmed, Paused: status.Paused, PauseGeneration: status.PauseGeneration,
+		Dormant: status.Dormant, PauseArmed: status.PauseArmed, Paused: status.Paused, PauseGeneration: status.PauseGeneration,
 	}
 }
 

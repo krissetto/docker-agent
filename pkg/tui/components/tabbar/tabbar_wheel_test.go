@@ -133,7 +133,9 @@ func TestWheelSettlingHelpersDeliverInitialTick(t *testing.T) {
 			} else {
 				cmd = tb.beginSettlingDrop("b", 2, 20)
 			}
-			require.NotNil(t, cmd, "the first transition must deliver its scheduled command")
+			require.Nil(t, cmd, "component registers without scheduling")
+			cmd = tb.ar.Continue()
+			require.NotNil(t, cmd, "owner commits the first transition")
 			drainWheelSettleCommands(t, tb, cmd)
 		})
 	}
@@ -145,13 +147,15 @@ func TestWheelTickRetargetDeliversInitialTick(t *testing.T) {
 	tb.SetTabs(motionTabs(3, 0), 0)
 	tb.settlingDrop = &settlingDropState{sessionID: "b", currentX: 2, targetX: 2}
 	cmd := tb.Tick()
+	require.Nil(t, cmd)
+	cmd = tb.ar.Continue()
 	require.NotNil(t, cmd)
 	drainWheelSettleCommands(t, tb, cmd)
 }
 
 func drainWheelSettleCommands(t *testing.T, tb *TabBar, cmd tea.Cmd) {
 	t.Helper()
-	queue := []tea.Cmd{cmd}
+	queue := []tea.Cmd{cmd, tb.ar.Continue()}
 	for steps := 0; len(queue) > 0; steps++ {
 		require.Less(t, steps, 200, "settle commands must quiesce without rescuing their lease")
 		next := queue[0]

@@ -222,8 +222,7 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 		require.Equal(t, width, editorWidth, "editor reports its full outer width")
 		for _, component := range []struct{ name, view string }{
 			{"editor", root.editor.View()},
-			{"chat", root.chatPage.View()},
-			{"resize handle", root.renderResizeHandle(width)},
+			{"chat", paneClipped(root.composePanes(), root.width, root.contentHeight)},
 			{"root", root.View().Content},
 		} {
 			for line := range strings.SplitSeq(component.view, "\n") {
@@ -246,11 +245,11 @@ func TestExternalAttachmentBannerClickUsesExpandedCoordinates(t *testing.T) {
 	collapsed := root.editor.BannerHeight()
 	require.Equal(t, 3, collapsed)
 	// The summary's far-right chevron expands; it is not an attachment target.
-	_, _ = root.Update(tea.MouseClickMsg{X: root.width - 3, Y: root.editorTop() - collapsed + 2, Button: tea.MouseLeft})
+	_, _ = root.Update(tea.MouseClickMsg{X: root.width - 3, Y: root.composerLayout().bannerTop + 2, Button: tea.MouseLeft})
 	require.Equal(t, 4, root.editor.BannerHeight())
 	require.False(t, root.dialogMgr.Open())
 	_ = root.View()
-	bannerTop := root.editorTop() - root.editor.BannerHeight()
+	bannerTop := root.composerLayout().bannerTop
 	require.Equal(t, regionContextBar, root.hitTestRegion(bannerTop+3))
 	_, _ = root.Update(tea.MouseClickMsg{X: 2, Y: bannerTop + 3, Button: tea.MouseLeft})
 	require.True(t, root.dialogMgr.Open())

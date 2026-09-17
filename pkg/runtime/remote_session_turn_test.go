@@ -187,3 +187,24 @@ func TestRemoteChunkedSnapshotCancellationClosesTransport(t *testing.T) {
 		t.Fatal("snapshot cancellation leaked HTTP connection")
 	}
 }
+
+func TestRemoteCanonicalEventsMatchLocalEnvelope(t *testing.T) {
+	client, err := NewClient("http://localhost")
+	require.NoError(t, err)
+	for _, event := range []Event{
+		&TurnSettledEvent{Type: "turn_settled", SessionID: "owner", TurnID: "accepted", Outcome: TurnCompleted},
+		&TurnSettledEvent{Type: "turn_settled", SessionID: "owner", TurnID: "accepted", Outcome: TurnCanceled},
+		&TurnSettledEvent{Type: "turn_settled", SessionID: "owner", TurnID: "accepted", Outcome: TurnFailed},
+		&SubagentCreatedEvent{Type: "subagent_created", SessionID: "owner", ParentSessionID: "owner", ChildSessionID: "child", NodeID: "node", CreatedAt: time.Unix(123, 0).UTC()},
+	} {
+		local := sessionEnvelope("owner", SequencedSessionEvent{Sequence: 42, RequestID: "accepted", Event: event})
+		payload, err := json.Marshal(event)
+		require.NoError(t, err)
+		remote, err := client.decodeSessionEnvelope(remoteSessionEnvelope{
+			Version: local.Version, SessionID: local.SessionID, TurnID: local.TurnID,
+			Sequence: local.Sequence, TranscriptPosition: local.TranscriptPosition, Event: payload,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, local, remote, "typed remote transport must preserve the canonical event and envelope")
+	}
+}

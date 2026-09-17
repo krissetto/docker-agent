@@ -11,6 +11,8 @@ type KeyType int
 
 const (
 	KeyNone KeyType = iota
+	KeyBackgroundDark
+	KeyBackgroundLight
 	KeyRune
 	KeyPaste
 	KeyEnter
@@ -53,13 +55,46 @@ var (
 // InputParser turns raw terminal bytes into key events. It is stateful only to
 // reassemble bracketed-paste payloads, which may span several reads.
 type InputParser struct {
+	control []byte
 	inPaste bool
 	paste   []rune
 }
 
 func (p *InputParser) Feed(b []byte) []Key {
+	if len(p.control) > 0 {
+		b = append(p.control, b...)
+		p.control = nil
+	}
 	var out []Key
 	for len(b) > 0 {
+		if !p.inPaste {
+			if index := bytes.Index(b, []byte("\x1b]")); index >= 0 && (!bytes.Contains(b, pasteStart) || index < bytes.Index(b, pasteStart)) {
+				out = append(out, parseChunk(b[:index])...)
+				b = b[index:]
+				end, consumed := -1, 0
+				for i := 2; i < len(b); i++ {
+					if b[i] == 7 {
+						end, consumed = i, i+1
+						break
+					}
+					if b[i] == 27 && i+1 < len(b) && b[i+1] == '\\' {
+						end, consumed = i, i+2
+						break
+					}
+				}
+				if end < 0 {
+					if len(b) < 4096 {
+						p.control = append([]byte(nil), b...)
+					}
+					return out
+				}
+				if key, ok := backgroundColorKey(string(b[2:end])); ok {
+					out = append(out, key)
+				}
+				b = b[consumed:]
+				continue
+			}
+		}
 		if p.inPaste {
 			idx := bytes.Index(b, pasteEnd)
 			if idx < 0 {
@@ -226,6 +261,13 @@ func parseCSI(b []byte) (int, Key) {
 	}
 
 	switch final {
+	case 'n':
+		if params == "?997;1" {
+			return consumed, Key{Typ: KeyBackgroundDark}
+		}
+		if params == "?997;2" {
+			return consumed, Key{Typ: KeyBackgroundLight}
+		}
 	case 'A':
 		if modifier() == "3" {
 			return consumed, Key{Typ: KeyAltUp}
@@ -309,4 +351,30 @@ func parseCSI(b []byte) (int, Key) {
 		}
 	}
 	return consumed, Key{Typ: KeyNone}
+}
+
+func backgroundColorKey(report string) (Key, bool) {
+	value, ok := strings.CutPrefix(report, "11;rgb:")
+	if !ok {
+		return Key{}, false
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) != 3 {
+		return Key{}, false
+	}
+	var rgb [3]float64
+	for i, part := range parts {
+		if part == "" || len(part) > 4 {
+			return Key{}, false
+		}
+		number, err := strconv.ParseUint(part, 16, 16)
+		if err != nil {
+			return Key{}, false
+		}
+		rgb[i] = float64(number) / float64((uint64(1)<<(4*len(part)))-1)
+	}
+	if 0.299*rgb[0]+0.587*rgb[1]+0.114*rgb[2] < 0.5 {
+		return Key{Typ: KeyBackgroundDark}, true
+	}
+	return Key{Typ: KeyBackgroundLight}, true
 }

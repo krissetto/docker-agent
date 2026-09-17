@@ -323,3 +323,35 @@ func TestRemoteInputEventsPreserveTypedMetadataAndInputIdentity(t *testing.T) {
 		assert.Contains(t, string(data), `"input_mode":"steer"`)
 	}
 }
+
+func TestSessionSummaryCatalogRemoteRejectsLegacyAndInvalidIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "legacy", payload: `{"version":1,"sessions":[{"session_id":"root","messages":[{"content":"legacy transcript"}]}]}`},
+		{name: "duplicate", payload: `{"version":1,"view":"summary","sessions":[{"session_id":"same"},{"session_id":"same"}]}`},
+		{name: "missing", payload: `{"version":1,"view":"summary","sessions":[{}]}`},
+		{name: "wrong-scope", payload: `{"version":1,"view":"summary","sessions":[{"session_id":"child","parent_id":"root"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/api/sessions", r.URL.Path)
+				assert.Equal(t, "summary", r.URL.Query().Get("view"))
+				assert.Equal(t, "false", r.URL.Query().Get("include_children"))
+				fmt.Fprint(w, tc.payload)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
+			require.NoError(t, err)
+			transport, err := NewSessionTransport(client)
+			require.NoError(t, err)
+			_, err = transport.ListSessionSummaries(t.Context(), SessionSummaryOptions{})
+			require.Error(t, err)
+			assert.Equal(t, 1, calls, "no transcript or per-ID compatibility fallback")
+		})
+	}
+}

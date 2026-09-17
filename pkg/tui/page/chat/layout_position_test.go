@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // newLayoutTestPage builds a chatPage large enough for the vertical sidebar
@@ -353,7 +354,36 @@ func assertActiveSidebarLayout(t *testing.T, p *chatPage) {
 	plain := ansi.Strip(view)
 	assert.Contains(t, plain, "gpt-4")
 	assert.Contains(t, plain, "openai")
-	assert.NotContains(t, plain, "root", "current agent is not rendered as its own descendant")
+	sidebarView := p.sidebar.View()
+	sidebarLines := strings.Split(ansi.Strip(sidebarView), "\n")
+	require.NotEmpty(t, sidebarLines)
+	identityRow := renderedLineContaining(t, sidebarView, "root")
+	usageRow := renderedLineContaining(t, sidebarView, "$0.00")
+	modelRow := renderedLineContaining(t, sidebarView, "gpt-4")
+	providerRow := renderedLineContaining(t, sidebarView, "openai (high)")
+	assert.Less(t, usageRow, identityRow, "complete usage block precedes canonical identity")
+	assert.Equal(t, "root", strings.TrimSpace(sidebarLines[identityRow]))
+	assert.Equal(t, identityRow+1, modelRow, "identity sits immediately above the active model")
+	assert.Equal(t, modelRow+1, providerRow, "provider/reasoning follows model without an extra row")
+	assert.Equal(t, 1, strings.Count(strings.Join(sidebarLines[:len(sidebarLines)-1], "\n"), "root"), "one canonical identity, never a duplicate own-agent descendant")
+	assert.NotContains(t, strings.Join(sidebarLines[providerRow+1:], "\n"), "root", "current agent is excluded from its own descendant tree")
+	assert.NotContains(t, sidebarLines[len(sidebarLines)-1], "root", "canonical identity is no longer pinned to the footer")
+	assert.NotContains(t, sidebarLines[len(sidebarLines)-1], "gpt-4", "model discovery belongs near usage, not the footer")
+	identityANSI := strings.Split(sidebarView, "\n")[identityRow]
+	assert.Contains(t, identityANSI, styles.AgentIdentityStyle("root", false).Render("root"), "actual canonical identity retains its agent color")
+	for _, target := range []struct {
+		row   int
+		label string
+		click sidebar.ClickResult
+	}{{identityRow, "root", sidebar.ClickNone}, {modelRow, "gpt-4", sidebar.ClickModel}} {
+		prefix, _, found := strings.Cut(sidebarLines[target.row], target.label)
+		require.True(t, found)
+		click, payload := p.sidebar.HandleClickType(ansi.StringWidth(prefix), target.row)
+		assert.Equal(t, target.click, click, "actual rendered cell owns the expected action")
+		if target.click == sidebar.ClickNone {
+			assert.Empty(t, payload, "passive identity cannot become an agent-switch target")
+		}
+	}
 	assert.NotContains(t, plain, "0 total", "empty descendant tree has no recap row or control")
 	assert.NotContains(t, plain, "Eff high")
 	assert.NotContains(t, plain, "idle")

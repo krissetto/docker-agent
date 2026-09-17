@@ -1526,33 +1526,92 @@ func (r *LocalRuntime) getEffectiveModelID(ctx context.Context, a *agent.Agent) 
 func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails {
 	agentsInfo := r.team.AgentsInfo(ctx)
 	details := make([]AgentDetails, len(agentsInfo))
+	db := cachedModelDatabase(r.modelsStore)
 	for i, info := range agentsInfo {
 		providerName := info.Provider
 		modelName := info.Model
 		var thinking string
+		var display AgentDetails
+		display.ModelID = modelName
+		display.ModelName = modelName
+		display.ThinkingMode = "unknown"
+		display.ThinkingLevel = "unknown"
 
 		// Get the agent to access fallbacks and the effective thinking level.
 		if a, err := r.team.Agent(info.Name); err == nil && a != nil {
+			models := a.EffectiveModels(ctx)
+			var effective provider.Provider
+			usingFallback := false
+			if len(models) > 0 {
+				effective = models[0]
+			}
 			// Check if this agent has an active fallback cooldown
 			cooldownState := r.fallback.cooldowns.Get(info.Name)
 			if cooldownState != nil {
 				fallbacks := a.FallbackModels()
 				if cooldownState.fallbackIndex >= 0 && cooldownState.fallbackIndex < len(fallbacks) {
-					fb := fallbacks[cooldownState.fallbackIndex].ID()
+					effective = fallbacks[cooldownState.fallbackIndex]
+					usingFallback = true
+					fb := effective.ID()
 					providerName = fb.Provider
 					modelName = fb.Model
 				}
 			}
+			if effective != nil {
+				cfg := effective.BaseConfig().ModelConfig
+				// Some providers expose identity only through ID, leaving their
+				// base config empty. Never erase the roster/fallback identity.
+				if cfg.Provider != "" {
+					providerName = cfg.Provider
+				} else {
+					cfg.Provider = providerName
+				}
+				// Cycling changes the primary session binding, not a cooldown
+				// fallback. Do not advertise an action on the fallback's tiers.
+				projectModelDisplay(&display, cfg, db, r.SupportsModelSwitching() && !usingFallback)
+				if display.ModelID == "" {
+					display.ModelID = effective.ID().Model
+					display.ModelName = display.ModelID
+					if m, ok := db.LookupModel(modelsdev.NewID(providerName, display.ModelID)); ok && strings.TrimSpace(m.Name) != "" {
+						display.ModelName = m.Name
+					}
+				}
+			}
+			if usingFallback {
+				primary := AgentDetails{ThinkingMode: "unknown", ThinkingLevel: "unknown"}
+				if len(models) > 0 {
+					cfg := models[0].BaseConfig().ModelConfig
+					primary.Provider = cfg.Provider
+					if primary.Provider == "" {
+						primary.Provider = models[0].ID().Provider
+					}
+					projectModelDisplay(&primary, cfg, db, r.SupportsModelSwitching())
+					if primary.ModelID == "" {
+						primary.ModelID = models[0].ID().Model
+					}
+				}
+				control := primary.ThinkingControl()
+				display.PrimaryThinking = &control
+			}
+			// Preserve the legacy label's primary-model semantics. New display
+			// fields above describe the actual effective (including fallback) model.
 			thinking = r.agentThinkingLabel(ctx, a)
 		}
 
 		details[i] = AgentDetails{
-			Name:        info.Name,
-			Description: info.Description,
-			Provider:    providerName,
-			Model:       modelName,
-			Thinking:    thinking,
-			Commands:    info.Commands,
+			Name:             info.Name,
+			Description:      info.Description,
+			Provider:         providerName,
+			Model:            modelName,
+			Thinking:         thinking,
+			ModelID:          display.ModelID,
+			ModelName:        display.ModelName,
+			ThinkingMode:     display.ThinkingMode,
+			ThinkingLevel:    display.ThinkingLevel,
+			ThinkingLevels:   display.ThinkingLevels,
+			CanCycleThinking: display.CanCycleThinking,
+			PrimaryThinking:  display.PrimaryThinking,
+			Commands:         info.Commands,
 		}
 	}
 	return details
@@ -1570,8 +1629,9 @@ func (r *LocalRuntime) agentThinkingLabel(ctx context.Context, a *agent.Agent) s
 		return ""
 	}
 	cfg := models[0].BaseConfig().ModelConfig
-	// Only models that can actually reason get a thinking line.
-	if !r.modelSupportsThinking(ctx, &cfg) {
+	var display AgentDetails
+	projectModelDisplay(&display, cfg, cachedModelDatabase(r.modelsStore), r.SupportsModelSwitching())
+	if display.ThinkingMode == "unsupported" || display.ThinkingMode == "unknown" {
 		return ""
 	}
 	budget := cfg.ThinkingBudget
@@ -1625,14 +1685,14 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 			p.setDrainContext(ctx)
 		}
 	}
-	if r.lifecycleCancel != nil {
-		r.lifecycleCancel()
+	if r.sessionDrivers != nil {
+		r.sessionDrivers.closeAdmission()
 	}
 	if r.subagents != nil {
 		r.subagents.closeAdmission()
 	}
-	if r.sessionDrivers != nil {
-		r.sessionDrivers.closeAdmission()
+	if r.lifecycleCancel != nil {
+		r.lifecycleCancel()
 	}
 	if err := r.shutdownStartupTools(ctx); err != nil {
 		return err

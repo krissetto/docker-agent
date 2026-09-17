@@ -25,7 +25,8 @@ func saveTestSettings(layout messages.LayoutSettings, mode messages.SendMode) er
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
-		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		DimInactivePanes: settings.GetDimInactivePanes(),
+		YOLO:             settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		CacheStablePrompts: settings.CacheStablePromptsEnabled(), WarnOnCacheMiss: settings.CacheMissWarningsEnabled(),
 		Lean: settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
 		Sound: settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
@@ -299,4 +300,16 @@ func TestSavePreferences_ActiveAgentsOnlyRoundTrip(t *testing.T) {
 	cfg, err = userconfig.Load()
 	require.NoError(t, err)
 	assert.Nil(t, cfg.GetSettings().Layout, "the default (off) filter is not written out")
+}
+
+func TestDimInactivePanesPreferenceRoundTrip(t *testing.T) {
+	setupSettingsConfigTest(t)
+	require.True(t, userconfig.Get().GetDimInactivePanes())
+	preferences := messages.Preferences{DimInactivePanes: false}
+	require.NoError(t, savePreferences(preferences))
+	require.False(t, userconfig.Get().GetDimInactivePanes())
+	preferences.DimInactivePanes = true
+	require.NoError(t, savePreferences(preferences))
+	require.True(t, userconfig.Get().GetDimInactivePanes())
+	require.Nil(t, userconfig.Get().DimInactivePanes)
 }

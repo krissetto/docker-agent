@@ -30,8 +30,12 @@ func TestReadOnlyScrollDialogUsesIntrinsicContentHeight(t *testing.T) {
 
 	view := d.View()
 	require.NotEmpty(t, view)
-	assert.Equal(t, 3+dialogChrome+1, lipgloss.Height(view),
-		"chrome wraps the intrinsic header and one content row without a redundant Close footer")
+	require.Equal(t, 1, d.bodyTitleGap)
+	require.Equal(t, 1, d.bodyHeaderGap)
+	require.Equal(t, 1, d.bodyHeight)
+	require.Zero(t, d.bodyFooterGap)
+	assert.Equal(t, 2+d.bodyTitleGap+d.bodyHeaderGap+dialogChrome+1, lipgloss.Height(view),
+		"chrome wraps title, separator, shared gaps and one content row without a redundant Close footer")
 	row, _ := d.Position()
 	assert.Equal(t, (40-lipgloss.Height(view))/2, row,
 		"short content must be centered by its rendered intrinsic height")

@@ -619,3 +619,58 @@ func assertToolActionsNotUnderlined(t *testing.T, view string) {
 		}
 	}
 }
+
+func TestToolConfirmationDialogVerticalDecisionsAndTruthfulHelp(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(165, 47)
+	view := ansi.Strip(d.View())
+	labels := []string{"No ↵", "Yes, once", "Always allow tool", "Balanced mode", "Allow all tools", "Reject with reason"}
+	lastRow := -1
+	for _, label := range labels {
+		y, _, found := locateInView(d, label)
+		require.True(t, found, "full choice label must be visible: %s", label)
+		assert.Greater(t, y, lastRow, "choices must occupy distinct vertical rows")
+		lastRow = y
+	}
+	assert.Contains(t, view, "↑/↓ choose")
+	assert.Contains(t, view, "Enter confirm")
+	assert.Contains(t, view, "shortcut/click applies")
+	assert.Contains(t, view, "Esc denies")
+	assert.NotContains(t, view, "Close")
+}
+
+func TestToolConfirmationDialogVerticalNavigationThenDismissDeniesOnce(t *testing.T) {
+	for _, closeControl := range []bool{false, true} {
+		event := newConfirmationEvent(nil)
+		event.SessionID, event.RequestID = "session", "request"
+		d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+		d.SetSize(30, 12)
+		for range 4 {
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+			assert.Nil(t, cmd)
+		}
+		selected, ok := d.SelectedActionKey()
+		require.True(t, ok)
+		assert.Equal(t, 'A', selected.Code)
+		var cmd tea.Cmd
+		if closeControl {
+			view := d.View()
+			row, col := d.Position()
+			x, y, ok := closeControlCell(lipgloss.Width(view), lipgloss.Height(view))
+			require.True(t, ok)
+			_, cmd = d.Update(tea.MouseClickMsg{X: col + x, Y: row + y, Button: tea.MouseLeft})
+		} else {
+			_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+		}
+		msgs := collectMsgs(cmd)
+		response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
+		require.True(t, ok)
+		assert.Equal(t, "session", response.SessionID)
+		assert.Equal(t, "request", response.Response.InteractionID)
+		assert.Equal(t, runtime.ResumeReject(""), response.Response.Resume)
+		assert.True(t, hasMsg[CloseDialogMsg](msgs))
+		assert.Nil(t, d.CancelDialogCmd())
+		_, duplicate := d.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+		assert.Nil(t, duplicate)
+	}
+}

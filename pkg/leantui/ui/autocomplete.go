@@ -110,15 +110,18 @@ func (a *Autocomplete) Completion(cmd Command) string {
 
 // Render returns the popup rows (top to bottom) for the given width.
 func (a *Autocomplete) Render(width int) []string {
-	if !a.Active || len(a.matches) == 0 {
+	return a.RenderRows(width, autocompleteMaxRows)
+}
+
+// RenderRows keeps the selected completion visible in the shell's row budget.
+func (a *Autocomplete) RenderRows(width, height int) []string {
+	if !a.Active || len(a.matches) == 0 || width <= 0 || height <= 0 {
 		return nil
 	}
 
-	start := 0
-	if a.selected >= autocompleteMaxRows {
-		start = a.selected - autocompleteMaxRows + 1
-	}
-	end := min(start+autocompleteMaxRows, len(a.matches))
+	height = min(height, autocompleteMaxRows)
+	start := max(0, a.selected-height+1)
+	end := min(start+height, len(a.matches))
 
 	nameWidth := 0
 	for _, c := range a.matches {
@@ -131,8 +134,8 @@ func (a *Autocomplete) Render(width int) []string {
 	var rows []string
 	for i := start; i < end; i++ {
 		c := a.matches[i]
-		name := PadRight("/"+a.scopePrefix+c.Name, nameWidth)
-		line := " " + name + "  " + c.Desc
+		name := PadRight(strings.Join(strings.Fields("/"+a.scopePrefix+c.Name), " "), nameWidth)
+		line := " " + name + "  " + strings.Join(strings.Fields(c.Desc), " ")
 		line = Truncate(line, width)
 		if i == a.selected {
 			rows = append(rows, lipglossSelected(line, width))

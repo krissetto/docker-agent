@@ -63,7 +63,7 @@ func newPlacementSidebar(t *testing.T, collapsed bool) *model {
 	return m
 }
 
-// Execute only the caller's original Start/Continue command, including Bubble Tea batches.
+// Execute the owner's original Continue command, including Bubble Tea batches.
 func placementTickMessage(t *testing.T, cmd tea.Cmd) animation.TickMsg {
 	t.Helper()
 	require.NotNil(t, cmd, "the production tick lease must not be lost")
@@ -91,7 +91,7 @@ func placementTickMessage(t *testing.T, cmd tea.Cmd) animation.TickMsg {
 
 func advancePlacement(t *testing.T, m *model, cmd tea.Cmd) tea.Cmd {
 	t.Helper()
-	tick, ok := m.ar.Accept(placementTickMessage(t, cmd))
+	tick, ok := m.ar.Accept(placementTickMessage(t, sidebarOwnerCommand(m, cmd)))
 	require.True(t, ok, "original tick lease remains valid across retargets")
 	_, updateCmd := m.Update(tick)
 	require.Nil(t, updateCmd, "fanout must not create another timer")
@@ -150,7 +150,7 @@ func assertPlacementPaintAndHits(t *testing.T, m *model) string {
 	assert.Equal(t, strings.Repeat(" ", m.layoutCfg.PaddingLeft)+m.footerView(m.contentWidth(false))+strings.Repeat(" ", m.layoutCfg.PaddingRight), footer, "pill is pinned to the content's right edge")
 	for col := range m.width {
 		action, _ := m.HandleClickType(col, m.height-1)
-		assert.Equal(t, ClickNone, action, "footer is passive")
+		assert.Equal(t, ClickNone, action, "agent identity and footer pills are passive")
 	}
 	return footer
 }
@@ -160,9 +160,9 @@ func TestPlacementQueueCanonicalArrivalDrainAndRetarget(t *testing.T) {
 	for _, collapsed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("tree-collapsed=%t", collapsed), func(t *testing.T) {
 			m := newPlacementSidebar(t, collapsed)
-			initialModel := requirePlaced(t, m, "model:root:0")
+			initialModel := requirePlaced(t, m, "tree-summary")
 			queue := []QueuedMessage{{ID: "queue-a", Text: "same text"}, {ID: "queue-b", Text: "same text"}}
-			cmd := m.SetQueuedMessages(queue)
+			cmd := sidebarOwnerCommand(m, m.SetQueuedMessages(queue))
 			require.NotNil(t, cmd)
 			require.EqualValues(t, 1, m.ar.ActiveCount())
 			a, b := requirePlaced(t, m, "queue:queue-a:0"), requirePlaced(t, m, "queue:queue-b:0")
@@ -171,14 +171,14 @@ func TestPlacementQueueCanonicalArrivalDrainAndRetarget(t *testing.T) {
 			assert.Equal(t, "- same text", strings.TrimSpace(ansi.Strip(b.text)))
 			assert.InDelta(t, a.targetY+1, b.targetY, 0)
 			assert.Zero(t, a.alpha)
-			modelRow := requirePlaced(t, m, "model:root:0")
+			modelRow := requirePlaced(t, m, "tree-summary")
 			assert.InDelta(t, initialModel.y, modelRow.y, 0)
-			assert.Greater(t, modelRow.targetY, initialModel.y, "queue repositions the model, not just the tree")
+			assert.Greater(t, modelRow.targetY, initialModel.y, "queue repositions the scrolling tree while model remains pinned")
 			assert.Greater(t, modelRow.targetY, b.targetY+1, "queue has breathing space below")
 			assert.Greater(t, a.targetY, float64(m.usageSectionEnd), "queue has breathing space above")
 
 			cmd = advancePlacement(t, m, cmd)
-			moving := requirePlaced(t, m, "model:root:0")
+			moving := requirePlaced(t, m, "tree-summary")
 			want := initialModel.y + (modelRow.targetY-initialModel.y)*animation.EaseOutCubic(float64(50*time.Millisecond)/float64(350*time.Millisecond))
 			assert.InDelta(t, want, moving.y, 1e-9)
 			assert.Nil(t, m.SetQueuedMessages(queue), "identical queue does not rearm")
@@ -189,7 +189,7 @@ func TestPlacementQueueCanonicalArrivalDrainAndRetarget(t *testing.T) {
 			assert.Equal(t, ClickNone, a.action)
 			assert.Empty(t, a.controls)
 			assert.InDelta(t, beforeB.y, requirePlaced(t, m, "queue:queue-b:0").fromY, 0)
-			assert.InDelta(t, moving.y, requirePlaced(t, m, "model:root:0").fromY, 0)
+			assert.InDelta(t, moving.y, requirePlaced(t, m, "tree-summary").fromY, 0)
 			cmd = advancePlacement(t, m, cmd)
 			beforeB = requirePlaced(t, m, "queue:queue-b:0")
 			assert.Nil(t, m.SetQueuedMessages(queue), "rapid reversal does not replace the timer")
@@ -209,7 +209,7 @@ func TestPlacementQueueCanonicalArrivalDrainAndRetarget(t *testing.T) {
 			assert.Equal(t, 2, strings.Count(ansi.Strip(m.View()), "same text"))
 			settlePlacement(t, m, m.SetQueuedMessages(nil))
 			assert.NotContains(t, ansi.Strip(m.View()), "same text")
-			assert.InDelta(t, initialModel.y, requirePlaced(t, m, "model:root:0").y, 0)
+			assert.InDelta(t, initialModel.y, requirePlaced(t, m, "tree-summary").y, 0)
 			assert.Zero(t, m.ar.ActiveCount())
 		})
 	}
@@ -222,7 +222,7 @@ func TestPlacementResizeScrollAndMovingCanonicalHover(t *testing.T) {
 	for i := range queue {
 		queue[i] = QueuedMessage{ID: fmt.Sprintf("q-%d", i), Text: fmt.Sprintf("queued-%d", i)}
 	}
-	cmd := m.SetQueuedMessages(queue)
+	cmd := sidebarOwnerCommand(m, m.SetQueuedMessages(queue))
 	cmd = advancePlacement(t, m, cmd)
 	before := requirePlaced(t, m, "node:turn-b")
 	assert.Nil(t, m.SetSize(32, 10))
@@ -258,12 +258,12 @@ func TestPlacementUsageWrapAndColorOnlyUpdatesDoNotRetarget(t *testing.T) {
 	m.SetTokenUsage(&runtime.TokenUsageEvent{SessionID: "placement", AgentContext: runtime.AgentContext{AgentName: "root"}, Usage: &runtime.Usage{ContextLength: 900000, ContextLimit: 1000000, Cost: 12345}})
 	m.SetTokenUsage(&runtime.TokenUsageEvent{SessionID: "other", AgentContext: runtime.AgentContext{AgentName: "root"}, Usage: &runtime.Usage{Cost: 42}})
 	settlePlacement(t, m, m.ReconcileLayout())
-	before := requirePlaced(t, m, "model:root:0")
+	before := requirePlaced(t, m, "tree-summary")
 	usageHeight := m.usageSectionEnd - m.usageReadingLine
-	cmd := m.SetSize(24, 30)
+	cmd := sidebarOwnerCommand(m, m.SetSize(24, 30))
 	require.NotNil(t, cmd)
 	assert.Greater(t, m.usageSectionEnd-m.usageReadingLine, usageHeight, "actual usage wrapping reflows subsequent sections")
-	assert.Greater(t, requirePlaced(t, m, "model:root:0").targetY, before.targetY)
+	assert.Greater(t, requirePlaced(t, m, "tree-summary").targetY, before.targetY)
 	cmd = advancePlacement(t, m, cmd)
 	elapsed := m.placement.elapsed
 	rows := slices.Clone(m.placement.rows)
@@ -276,7 +276,7 @@ func TestPlacementUsageWrapAndColorOnlyUpdatesDoNotRetarget(t *testing.T) {
 		assert.InDelta(t, old.targetY, row.targetY, 0)
 	}
 	settlePlacement(t, m, cmd)
-	row := requirePlaced(t, m, "model:root:0")
+	row := requirePlaced(t, m, "tree-summary")
 	motion := tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft, Y: int(row.y)}
 	_, cmd = m.Update(motion)
 	settlePlacement(t, m, cmd)

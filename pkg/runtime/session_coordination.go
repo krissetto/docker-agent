@@ -40,6 +40,10 @@ func (m *subagentManager) admitDurableChild(parent, child *session.Session, reco
 }
 
 func (m *subagentManager) completeSessionTurn(d *sessionDriver, turnID, runErr string) error {
+	return m.completeSessionTurnContext(m.r.durabilityContext(), d, turnID, runErr)
+}
+
+func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *sessionDriver, turnID, runErr string) error {
 	sess := d.session()
 	if sess == nil || !sess.AsyncSubagent {
 		return nil
@@ -94,14 +98,14 @@ func (m *subagentManager) completeSessionTurn(d *sessionDriver, turnID, runErr s
 		if report.ID != "" {
 			commit.Reports = []session.ChildReport{report}
 		}
-		ctx, cancel := context.WithTimeout(m.r.durabilityContext(), defaultSubagentPersistenceTimeout)
+		ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+		defer cancel()
 		err := m.coordination().CommitChild(ctx, commit)
-		cancel()
 		if err == nil {
 			record.Revision++
 		}
 		if errors.Is(err, session.ErrRevisionConflict) {
-			records, loadErr := m.coordination().LoadChildren(m.r.lifetime(), record.RootSessionID)
+			records, loadErr := m.coordination().LoadChildren(ctx, record.RootSessionID)
 			if loadErr != nil {
 				return loadErr
 			}
@@ -140,6 +144,10 @@ func (g *sessionDriverRegistry) deliverReports(d *sessionDriver) bool {
 		return false
 	}
 	d.mu.Lock()
+	if d.viewDormant {
+		d.mu.Unlock()
+		return false
+	}
 	retry := d.reportRetry
 	d.mu.Unlock()
 	if retry != nil {
@@ -181,6 +189,10 @@ func (d *sessionDriver) acceptReport(ctx context.Context, report session.ChildRe
 	}
 	d.r.subagents.mu.Unlock()
 	d.mu.Lock()
+	if d.viewDormant {
+		d.mu.Unlock()
+		return nil
+	}
 	acceptance, err := store.AcceptReport(ctx, d.sessionIDLocked(), report.ID, nil)
 	if err != nil {
 		d.mu.Unlock()

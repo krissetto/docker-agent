@@ -162,6 +162,7 @@ type Preferences struct {
 	HideToolResults       bool
 	RenderImages          bool
 	ShowBanner            bool
+	DimInactivePanes      bool
 	YOLO                  bool
 	RestoreTabs           bool
 	Snapshot              bool

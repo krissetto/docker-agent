@@ -49,7 +49,8 @@ func TestPlacedSidebarReusesSharedViewportFadeAndKeepsFooter(t *testing.T) {
 		for i := range height {
 			assertFadeCells(t, expected[i], strings.TrimPrefix(actual[i], strings.Repeat(" ", m.layoutCfg.PaddingLeft)))
 		}
-		assert.Equal(t, strings.Repeat(" ", m.layoutCfg.PaddingLeft)+m.footerView(m.contentWidth(false)), actual[height], "pinned pill remains byte-exact/unfaded")
+		assert.Equal(t, strings.Repeat(" ", m.layoutCfg.PaddingLeft)+m.footerView(m.contentWidth(false)), actual[m.height-1], "pinned pill remains byte-exact/unfaded")
+		assert.Empty(t, strings.TrimSpace(ansi.Strip(actual[height])), "reserved footer breathing row stays blank/unfaded")
 		before := m.View()
 		generation := m.VisualGeneration()
 		assert.Equal(t, before, m.View(), "warm frame stable")

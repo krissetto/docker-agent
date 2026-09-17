@@ -194,3 +194,40 @@ func TestSessionCompactionDrivesGaugeState(t *testing.T) {
 	assert.NotContains(t, out, "compacting…")
 	assert.Contains(t, out, "90%")
 }
+
+func TestLeanFriendlyModelAndCanonicalReasoningProjection(t *testing.T) {
+	m := bareModel(80)
+	m.handleEvent(t.Context(), runtime.TeamInfo([]runtime.AgentDetails{{
+		Name: "coder", Provider: "anthropic", Model: "configured-alias", ModelID: "claude-sonnet", ModelName: "Claude Sonnet",
+		ThinkingMode: "adaptive", ThinkingLevel: "high", ThinkingLevels: []string{"low", "high"}, CanCycleThinking: true,
+	}}, "coder"))
+	assert.Equal(t, "anthropic/claude-sonnet", m.status.Model, "display name does not replace canonical identity")
+	assert.Equal(t, "Claude Sonnet", m.status.ModelName)
+	assert.Equal(t, "adaptive", m.status.ThinkingMode)
+	lines := strings.Join(ui.RenderStatus(m.status, 100), "\n")
+	assert.Contains(t, lines, "Claude Sonnet")
+	assert.Contains(t, lines, "anthropic(high)")
+	assert.NotContains(t, lines, "configured-alias")
+	m.handleEvent(t.Context(), runtime.AgentInfo("coder", "anthropic/claude-sonnet", "", ""))
+	assert.Equal(t, "Claude Sonnet", m.status.ModelName, "same-model raw info retains canonical projection")
+	m.handleEvent(t.Context(), runtime.AgentInfo("coder", "other/new-model", "", ""))
+	assert.Empty(t, m.status.ModelName, "different canonical model cannot retain stale friendly name")
+}
+
+func TestPrimaryReasoningMapsToOwnedDisplayOnlyStatus(t *testing.T) {
+	m := bareModel(120)
+	primary := &runtime.ThinkingDetails{ModelRef: "openai/gpt-5", Mode: "effort", Level: "high", Levels: []string{"low", "high"}, CanCycle: true}
+	m.handleEvent(t.Context(), runtime.TeamInfo([]runtime.AgentDetails{{
+		Name: "coder", Provider: "openai", ModelID: "gpt-4o", ModelName: "GPT-4o",
+		ThinkingMode: "unsupported", ThinkingLevel: "unsupported", PrimaryThinking: primary,
+	}}, "coder"))
+	assert.Equal(t, &ui.ThinkingStatus{Mode: "effort", Level: "high"}, m.status.PrimaryThinking)
+	primary.Mode, primary.Level = "off", "off"
+	assert.Equal(t, &ui.ThinkingStatus{Mode: "effort", Level: "high"}, m.status.PrimaryThinking, "event mutation cannot alter the owned status projection")
+	lines := strings.Join(ui.RenderStatus(m.status, 120), "\n")
+	assert.Contains(t, lines, "GPT-4o")
+	assert.Contains(t, lines, "openai(unsupported)")
+	assert.Contains(t, lines, "(primary: high)")
+	m.handleEvent(t.Context(), runtime.AgentInfo("coder", "openai/replacement", "", ""))
+	assert.Nil(t, m.status.PrimaryThinking)
+}

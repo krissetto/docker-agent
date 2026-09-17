@@ -123,11 +123,19 @@ func (p *PersistenceObserver) flushLocked(ctx context.Context, j *sessionPersist
 }
 
 func (p *PersistenceObserver) completionError(id string) error {
+	return p.completionErrorContext(p.durabilityContext(), id)
+}
+
+func (p *PersistenceObserver) completionErrorContext(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+	defer cancel()
+	return p.flushContext(ctx, id)
+}
+
+func (p *PersistenceObserver) flushContext(ctx context.Context, id string) error {
 	j := p.journal(id)
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	ctx, cancel := context.WithTimeout(p.durabilityContext(), defaultSubagentPersistenceTimeout)
-	defer cancel()
 	return p.flushLocked(ctx, j)
 }
 

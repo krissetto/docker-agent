@@ -24,7 +24,7 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 		return nil
 	}
 
-	registry := newControlPlaneSessions(sessions)
+	registry := newControlPlaneSessions(sessions, f)
 	sm := server.NewSessionManager(ctx, nil, store, 0, &f.runConfig,
 		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
 		server.WithSessionRuntime(registry),

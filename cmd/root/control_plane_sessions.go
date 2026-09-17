@@ -2,11 +2,13 @@ package root
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	viewhost "github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
 type controlPlaneRuntime struct {
@@ -68,6 +70,7 @@ func (r *controlPlaneRuntime) waitDrain(ctx context.Context) error {
 // the registration. Handle Release remains unobservable through this interface.
 type controlPlaneSessions struct {
 	primary *controlPlaneRuntime
+	host    *runExecFlags
 
 	mu     sync.RWMutex
 	nextID uint64
@@ -83,8 +86,12 @@ var _ interface {
 	runtime.SafetyDefaults
 } = (*controlPlaneSessions)(nil)
 
-func newControlPlaneSessions(primary runtime.SessionRuntime) *controlPlaneSessions {
-	return &controlPlaneSessions{primary: newControlPlaneRuntime(0, primary), owners: map[string]*controlPlaneRuntime{}}
+func newControlPlaneSessions(primary runtime.SessionRuntime, host ...*runExecFlags) *controlPlaneSessions {
+	c := &controlPlaneSessions{primary: newControlPlaneRuntime(0, primary), owners: map[string]*controlPlaneRuntime{}}
+	if len(host) != 0 {
+		c.host = host[0]
+	}
+	return c
 }
 
 // Add returns an idempotent unregister callback. It removes the registration
@@ -165,6 +172,40 @@ func (c *controlPlaneSessions) CreateSession(ctx context.Context, sess *session.
 	if sess == nil {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, Operation: "create_session"}
 	}
+	if c.host != nil && c.host.sessionViewHost != nil {
+		var handle runtime.SessionHandle
+		use := func(ctx context.Context, resources viewhost.ViewOwnerResources) error {
+			var err error
+			handle, err = resources.Sessions.CreateSession(ctx, sess, binding)
+			return err
+		}
+		var err error
+		if binding.ParentSessionID != "" {
+			err = c.host.sessionViewHost.WithSessionOwner(ctx, binding.ParentSessionID, use)
+		} else {
+			var stored *session.Session
+			if c.host.sessionViewStore != nil {
+				stored, err = c.host.sessionViewStore.GetSession(ctx, sess.ID)
+				if err != nil && !errors.Is(err, session.ErrNotFound) {
+					return nil, err
+				}
+			}
+			if stored != nil {
+				err = c.host.sessionViewHost.WithSessionOwner(ctx, sess.ID, use)
+			} else {
+				if sess.WorkingDir == "" {
+					sess.WorkingDir = c.host.sessionViewWorkingDir
+				}
+				// Detached fresh HTTP templates are not persisted yet. Their
+				// request binding is authoritative; archived IDs use the host's
+				// confirmed source/ancestry resolver instead.
+				identity := c.host.freshViewOwnerIdentity(sess)
+				identity.RootBinding = binding
+				err = c.host.sessionViewHost.WithSessionOwnerIdentity(ctx, identity, use)
+			}
+		}
+		return handle, err
+	}
 	id := sess.ID
 	if binding.ParentSessionID != "" {
 		id = binding.ParentSessionID
@@ -213,6 +254,15 @@ func (c *controlPlaneSessions) InspectSessionTree(ctx context.Context, rootSessi
 func (c *controlPlaneSessions) RestoreSessionTree(ctx context.Context, root *session.Session) error {
 	if root == nil {
 		return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, Operation: "restore_tree"}
+	}
+	if c.host != nil && c.host.sessionViewHost != nil {
+		return c.host.sessionViewHost.WithSessionOwner(ctx, root.ID, func(ctx context.Context, resources viewhost.ViewOwnerResources) error {
+			restorer, ok := resources.Sessions.(runtime.TreeRestorer)
+			if !ok {
+				return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: root.ID, Operation: "restore_child_tree"}
+			}
+			return restorer.RestoreSessionTree(ctx, root)
+		})
 	}
 	owner, release := c.owner(root.ID)
 	defer release()

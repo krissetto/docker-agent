@@ -164,7 +164,9 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 	}
 	messageCountBefore := len(sess.OwnMessages())
 	contents := make([]string, 0, len(steered))
+	quietOnly := true
 	for i, sm := range steered {
+		quietOnly = quietOnly && r.quietCoordinationInput(sess, sm)
 		if sm.Retry {
 			continue
 		}
@@ -179,11 +181,12 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 		}
 	}
 	if len(contents) == 0 {
-		return steerResult{drained: true, messageCountBefore: messageCountBefore}
+		return steerResult{drained: true, messageCountBefore: messageCountBefore, quietOnly: quietOnly}
 	}
 	stop, stopMsg, ctxMsgs := r.executeUserSteeringMessagesSubmitHooks(ctx, sess, a, contents, events)
 	return steerResult{
 		drained:            true,
+		quietOnly:          quietOnly,
 		messageCountBefore: messageCountBefore,
 		stop:               stop,
 		stopMsg:            stopMsg,
@@ -197,6 +200,7 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 // (a terminating stop and/or a transient context message to thread into
 // the steered turn).
 type steerResult struct {
+	quietOnly          bool
 	drained            bool
 	messageCountBefore int
 	stop               bool
@@ -472,6 +476,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sessionStartSources:    sessionStart.sources,
 	}
 
+	if input, ok := r.initialTurnInput(sess); ok {
+		ls.consumeTurnInput(r.quietCoordinationInput(sess, input))
+	}
+
 	// Emit team information
 	sink.Emit(TeamInfo(r.agentDetailsFromTeam(ctx), a.Name()))
 
@@ -668,6 +676,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 				return
 			}
 			ls.userPromptMsgs = sr.contextMsgs
+			ls.consumeTurnInput(sr.quietOnly)
 			r.compactIfNeeded(ctx, sess, a, contextLimit, sr.messageCountBefore, sink)
 		}
 
@@ -738,6 +747,10 @@ type loopState struct {
 	// empty-response warning would otherwise imply. Reset on agent switch
 	// so it never carries across agents.
 	prevTurnMadeToolCalls bool
+	// Only a turn consisting entirely of child notifications may stop quietly
+	// without prior tool work. An unanswered user/task input always wins.
+	turnInputSeen         bool
+	quietCoordinationTurn bool
 }
 
 // emptyTurnWarning classifies an empty assistant turn (no content, no tool
@@ -749,15 +762,17 @@ type loopState struct {
 //     answer is the previous assistant message, so a UI warning would be noise.
 //     Only "stop" qualifies: a "length" finish after tool calls means the reply
 //     was truncated by the output token limit and must still warn.
+//   - benign: a report-only accepted turn can consume a child notification
+//     without a reply. Mixed user/task input never qualifies.
 //   - reasoning-only: thinking-mode models (e.g. Qwen3 via
 //     openai_chatcompletions) that stream only reasoning tokens and then stop
 //     or hit the output token limit, leaving visible content empty (see #3145).
 //   - otherwise: an empty response with no evidence of its cause.
 //
 // Refusals are handled separately by the caller and never reach here.
-func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID string, reason chat.FinishReason) string {
+func emptyTurnWarning(res streamResult, quietStopAllowed bool, modelID string, reason chat.FinishReason) string {
 	switch {
-	case reason == chat.FinishReasonStop && prevTurnMadeToolCalls:
+	case reason == chat.FinishReasonStop && quietStopAllowed:
 		return ""
 	case strings.TrimSpace(res.ReasoningContent) != "":
 		return fmt.Sprintf(
@@ -974,11 +989,11 @@ func (r *LocalRuntime) runTurn(
 		if reason == "" {
 			reason = chat.FinishReasonNull
 		}
-		warning := emptyTurnWarning(res, ls.prevTurnMadeToolCalls, modelID.String(), reason)
+		warning := emptyTurnWarning(res, ls.prevTurnMadeToolCalls || ls.quietCoordinationTurn, modelID.String(), reason)
 		if warning == "" {
-			// Benign trailing stop after tool work: log at debug for
+			// Benign stop after tool work or a child notification: log at debug for
 			// traceability without alarming the user or noising up WARN logs.
-			slog.DebugContext(ctx, "Empty trailing turn after tool calls (benign natural stop)",
+			slog.DebugContext(ctx, "Empty turn after tool work or child notification (benign natural stop)",
 				"agent", a.Name(), "model", modelID.String(),
 				"finish_reason", string(reason), "session_id", sess.ID)
 		} else {
@@ -1033,7 +1048,11 @@ func (r *LocalRuntime) runTurn(
 	// classify a trailing empty turn as a benign post-tool stop rather than
 	// a rate-limit / token-cap event. Set after processToolCalls so it
 	// reflects the turn just completed.
-	ls.prevTurnMadeToolCalls = len(res.Calls) > 0
+	// An interrupted stream has not completed a new model turn. Keep prior
+	// tool work through notification steering; user/task input resets it below.
+	if !res.Steered {
+		ls.prevTurnMadeToolCalls = len(res.Calls) > 0
+	}
 
 	// Record per-toolset model override for the next LLM turn.
 	ls.toolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
@@ -1048,6 +1067,7 @@ func (r *LocalRuntime) runTurn(
 			return turnExit
 		}
 		ls.userPromptMsgs = sr.contextMsgs
+		ls.consumeTurnInput(sr.quietOnly)
 		r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
 		endReason = turnEndReasonSteered
 		return turnContinue
@@ -1141,6 +1161,7 @@ func (r *LocalRuntime) runTurn(
 				return turnExit
 			}
 			ls.userPromptMsgs = sr.contextMsgs
+			ls.consumeTurnInput(sr.quietOnly)
 			r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
 			endReason = turnEndReasonSteered
 			return turnContinue
@@ -1166,6 +1187,7 @@ func (r *LocalRuntime) runTurn(
 					return turnExit
 				}
 				ls.userPromptMsgs = ctxMsgs
+				ls.consumeTurnInput(false)
 				r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
 				endReason = turnEndReasonContinue
 				return turnContinue // re-enter the loop for a new turn

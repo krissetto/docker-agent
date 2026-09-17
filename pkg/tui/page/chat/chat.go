@@ -218,11 +218,12 @@ type chatPage struct {
 	lastSidebarClick sidebarClick
 
 	// State
-	working        bool
-	leanMode       bool
-	hideSidebar    bool
-	layoutSettings msgtypes.LayoutSettings
-	sendMode       msgtypes.SendMode
+	working              bool
+	leanMode             bool
+	hideSidebar          bool
+	layoutSettings       msgtypes.LayoutSettings
+	splitSidebarSettings *SidebarSettings
+	sendMode             msgtypes.SendMode
 
 	msgCancel       context.CancelFunc
 	cancel          context.CancelFunc
@@ -299,9 +300,10 @@ type chatPage struct {
 	// arrives) that would otherwise leave mouse hit-testing offset.
 	appliedLayout sidebarLayout
 
-	splitPresentation     *SplitPresentationGeometry
-	presentationHidden    bool
-	shellVisualGeneration uint64
+	splitPresentation      *SplitPresentationGeometry
+	transcriptPresentation presentationCache
+	presentationHidden     bool
+	shellVisualGeneration  uint64
 }
 
 // sidebarHidden reports whether the sidebar should be omitted entirely from
@@ -333,7 +335,7 @@ func (p *chatPage) computeSidebarLayoutForSize(width, height int) sidebarLayout 
 
 	var mode sidebarLayoutMode
 	switch {
-	case sideBySide && width >= minWindowWidth && !p.sidebar.IsCollapsed():
+	case sideBySide && width >= minWindowWidth && !p.presentationSidebarSettings().Collapsed:
 		mode = sidebarVertical
 	case sideBySide && width >= minWindowWidth:
 		mode = sidebarCollapsed
@@ -350,7 +352,7 @@ func (p *chatPage) computeSidebarLayoutForSize(width, height int) sidebarLayout 
 
 	switch mode {
 	case sidebarVertical:
-		l.sidebarWidth = p.sidebar.ClampWidth(p.sidebar.GetPreferredWidth(), innerWidth)
+		l.sidebarWidth = p.sidebar.ClampWidth(p.presentationSidebarSettings().PreferredWidth, innerWidth)
 		l.chatWidth = max(1, innerWidth-l.sidebarWidth)
 		if l.sidebarOnLeft {
 			l.sidebarStartX = 0
@@ -681,6 +683,19 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// through the returned command or via TakeRoutedTimers); only this
 	// update's timers may be collected after it.
 	p.pendingTimers = nil
+	if p.IsMessagesScrollbarDragging() {
+		switch msg.(type) {
+		case tea.MouseMotionMsg, tea.MouseReleaseMsg:
+			// Pointer capture precedes sidebar/split hit testing, including when
+			// the root routes coordinates outside this page's rectangle.
+			model, cmd := p.messages.Update(msg)
+			p.messages = model.(messages.Model)
+			if _, motion := msg.(tea.MouseMotionMsg); motion {
+				cmd = tea.Batch(cmd, p.sidebar.ClearSubagentHover())
+			}
+			return p, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := p.SetSize(msg.Width, msg.Height)
@@ -980,7 +995,7 @@ func (p *chatPage) renderSidebarHandle(height int) string {
 	}
 
 	glyph := collapseGlyph
-	if p.sidebar.IsCollapsed() {
+	if p.presentationSidebarSettings().Collapsed {
 		glyph = expandGlyph
 	}
 	lines[0] = styles.MutedStyle.Render(glyph)
@@ -1598,7 +1613,7 @@ func (p *chatPage) PointerTargetsMessages(x, y int) bool {
 		return !p.presentationHidden && g.Transcript.contains(x, y)
 	}
 	sl := p.computeSidebarLayout()
-	return !sl.isInBand(y) && (sl.mode != sidebarVertical || p.sidebar.IsCollapsed() || !sl.isInSidebar(x-styles.AppPadding))
+	return !sl.isInBand(y) && (sl.mode != sidebarVertical || p.presentationSidebarSettings().Collapsed || !sl.isInSidebar(x-styles.AppPadding))
 }
 
 // handleSidebarClickType checks what was clicked in the sidebar area.
@@ -1642,7 +1657,7 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 		x, y = m.X, m.Y
 	}
 	adjustedX := x - styles.AppPadding
-	inSidebar := sl.mode == sidebarVertical && !p.sidebar.IsCollapsed() && sl.isInSidebar(adjustedX)
+	inSidebar := sl.mode == sidebarVertical && !p.presentationSidebarSettings().Collapsed && sl.isInSidebar(adjustedX)
 	inBand := !p.hideSidebar && !p.leanMode && sl.isInBand(y) && adjustedX >= 0 && adjustedX < sl.innerWidth
 	if inSidebar || inBand {
 		model, cmd := p.sidebar.Update(msg)

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/subagent"
 )
@@ -17,7 +18,21 @@ type counterPresentation struct {
 	running             bool
 }
 
+type preparedTreeRow struct {
+	node     subagent.Node
+	guides   string
+	branch   bool
+	text     string
+	controls []treeControl
+	hover    hoverValue
+	span     branchSpans
+	hovered  bool
+	frame    string
+}
+
 type preparedTree struct {
+	rootCount int
+	rows      map[int]preparedTreeRow
 	lines     []string
 	bodyStart int
 	nodes     []subagent.NodeID
@@ -73,9 +88,10 @@ func (m *model) subagentsInfo(width int) string {
 		m.preparedTrees = make(map[int]preparedTree)
 	}
 	prepared, ok := m.preparedTrees[width]
-	if !ok {
+	if !ok || prepared.rootCount != len(m.subagentNodes) {
+		m.treeCountsValid = false
 		text := m.prepareTreeInfo(width)
-		prepared = preparedTree{bodyStart: m.subagentRowOffset, nodes: append([]subagent.NodeID(nil), m.subagentLineNodes...), controls: m.treeControls, agents: m.transferAgentLines}
+		prepared = preparedTree{rootCount: len(m.subagentNodes), rows: m.preparingRows, bodyStart: m.subagentRowOffset, nodes: append([]subagent.NodeID(nil), m.subagentLineNodes...), controls: m.treeControls, agents: m.transferAgentLines}
 		if text != "" {
 			prepared.lines = strings.Split(text, "\n")
 		}
@@ -93,6 +109,26 @@ func (m *model) subagentsInfo(width int) string {
 		return ""
 	}
 	lines := append([]string(nil), prepared.lines...)
+	indent := min(2, max(0, width-1))
+	if !m.treeCollapsed {
+		for row, item := range prepared.rows {
+			item = m.refreshPreparedTreeRow(item, row, width)
+			prepared.rows[row] = item
+			lines[row] = item.text
+			if len(item.controls) > 0 {
+				m.treeControls[row] = item.controls
+			}
+		}
+		for row, name := range prepared.agents {
+			lines[row] = strings.Repeat(" ", indent) + m.participantLine(name, max(1, width-indent))
+		}
+		if pres, ok := m.visibleTransfer(); ok && len(lines) > 0 {
+			lines[len(lines)-1] = m.renderTransferRelation(pres, width)
+		}
+	}
+	if m.parentAgent != "" {
+		lines[0] = ansi.Truncate(m.parentLine(), width, "…")
+	}
 	if m.hasTreeContent() {
 		summaryRow := 0
 		if m.parentAgent != "" {
@@ -111,11 +147,7 @@ func (m *model) subagentsInfo(width int) string {
 	}
 	lines = lines[:end]
 	m.subagentLineNodes = append(m.subagentLineNodes, prepared.nodes[:min(len(prepared.nodes), visible)]...)
-	for row, controls := range prepared.controls {
-		if row < end {
-			m.treeControls[row] = controls
-		}
-	}
+
 	for row, name := range prepared.agents {
 		if row < end {
 			m.transferAgentLines[row] = name
@@ -149,6 +181,9 @@ func (m *model) CancelPresentation() {
 		}
 	}
 	m.presentationSub.Stop()
+	if m.placement != nil {
+		m.placement.painted = nil
+	}
 	if changed {
 		m.cacheDirty, m.layoutDirty = true, true
 		m.visualGeneration++
@@ -180,4 +215,27 @@ func (m *model) SetPresentationActive(active bool) tea.Cmd {
 		cmds = append(cmds, state.spinner.Init())
 	}
 	return tea.Batch(cmds...)
+}
+
+// Reuse immutable row styling until its own presentation channels change. The
+// controls are replaced together with the text so pointer geometry stays exact.
+func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) preparedTreeRow {
+	hover, span := m.hoverValues["node:"+string(item.node.ID)], m.branchSpans[item.node.ID]
+	hovered := m.hoveredSubagent == item.node.ID
+	frame := ""
+	if isActiveSubagentState(item.node.State) {
+		frame = m.subagentSpinner.RawFrame() + m.spinner.RawFrame()
+	}
+	if item.text != "" && item.hover == hover && item.span == span && item.hovered == hovered && item.frame == frame {
+		return item
+	}
+	indent := min(2, max(0, width-1))
+	delete(m.treeControls, row)
+	item.text = strings.Repeat(" ", indent) + m.subagentRow(item.node, item.guides, max(1, width-indent), row, item.branch)
+	for i := range m.treeControls[row] {
+		m.treeControls[row][i].x += indent
+	}
+	item.controls = m.treeControls[row]
+	item.hover, item.span, item.hovered, item.frame = hover, span, hovered, frame
+	return item
 }

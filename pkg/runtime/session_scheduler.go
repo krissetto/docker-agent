@@ -62,6 +62,12 @@ func (g *sessionDriverRegistry) schedule() {
 		g.mu.Unlock()
 		pendingWork := false
 		for _, d := range drivers {
+			d.mu.Lock()
+			dormant := d.viewDormant
+			d.mu.Unlock()
+			if dormant {
+				continue
+			}
 			pendingWork = g.deliverReports(d) || pendingWork
 			d.mu.Lock()
 			completion := d.settling && d.completionErr != nil && !d.stopped

@@ -27,8 +27,13 @@ func feedbackMessages(cmd tea.Cmd) []tea.Msg {
 	return []tea.Msg{msg}
 }
 
+func feedbackOwnerCommand(tb *TabBar, cmd tea.Cmd) tea.Cmd {
+	return tea.Batch(cmd, tb.ar.Continue())
+}
+
 func finishFeedback(t *testing.T, tb *TabBar, cmd tea.Cmd) {
 	t.Helper()
+	cmd = feedbackOwnerCommand(tb, cmd)
 	for cmd != nil {
 		for _, msg := range feedbackMessages(cmd) {
 			if tick, ok := msg.(animation.TickMsg); ok {
@@ -41,7 +46,7 @@ func finishFeedback(t *testing.T, tb *TabBar, cmd tea.Cmd) {
 	}
 }
 
-func TestPlusFeedbackFinishesFromOriginalClickCommand(t *testing.T) {
+func TestPlusFeedbackFinishesFromOwnerCommittedClickCommand(t *testing.T) {
 	t.Parallel()
 	for _, release := range []bool{false, true} {
 		tb := New(newMotionRuntime(), 8)
@@ -50,7 +55,7 @@ func TestPlusFeedbackFinishesFromOriginalClickCommand(t *testing.T) {
 		x := plusZone(tb).startX + 1
 		finishFeedback(t, tb, tb.Update(tea.MouseMotionMsg{X: x}))
 		hover := tb.View()
-		cmd := tb.Update(tea.MouseClickMsg{X: x, Button: tea.MouseLeft})
+		cmd := feedbackOwnerCommand(tb, tb.Update(tea.MouseClickMsg{X: x, Button: tea.MouseLeft}))
 		clicked := tb.View()
 		require.NotEqual(t, hover, clicked, "feedback starts before executing spawn")
 		require.True(t, tb.IsAnimating())
@@ -68,7 +73,7 @@ func TestPlusFeedbackFinishesFromOriginalClickCommand(t *testing.T) {
 					spawned++
 				case animation.TickMsg:
 					_, accepted := tb.ar.Accept(msg)
-					require.True(t, accepted, "Start command must not be superseded by EnsureRunning")
+					require.True(t, accepted, "owner command must retain its lease")
 					require.Empty(t, feedbackMessages(tb.Tick()))
 					frames[tb.View()] = true
 				}
@@ -158,7 +163,7 @@ func TestPlusHoverEnterReverseExitAndPulseUseCurrentTarget(t *testing.T) {
 	tb.SetTabs(motionTabs(1, 0), 0)
 	normal := tb.View()
 	x := plusZone(tb).startX + 1
-	cmd := tb.Update(tea.MouseMotionMsg{X: x})
+	cmd := feedbackOwnerCommand(tb, tb.Update(tea.MouseMotionMsg{X: x}))
 	require.Equal(t, normal, tb.View(), "entry starts from original fraction")
 	msgs := feedbackMessages(cmd)
 	require.Len(t, msgs, 1)
@@ -203,7 +208,7 @@ func TestPlusHoverThemeSwitchRebasesCurrentFraction(t *testing.T) {
 	tb.SetWidth(60)
 	tb.SetTabs(motionTabs(1, 0), 0)
 	x := plusZone(tb).startX + 1
-	msgs := feedbackMessages(tb.Update(tea.MouseMotionMsg{X: x}))
+	msgs := feedbackMessages(feedbackOwnerCommand(tb, tb.Update(tea.MouseMotionMsg{X: x})))
 	require.Len(t, msgs, 1)
 	tick, ok := msgs[0].(animation.TickMsg)
 	require.True(t, ok)

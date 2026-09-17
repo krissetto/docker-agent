@@ -23,19 +23,23 @@ func TestActualProgramSessionTitleSingleHintDoubleRenameScopedClicks(t *testing.
 	root.chatPage.Init()
 	root.resizeAll()
 	model := &shellProgramModel{root: root}
+	bounds := root.paneShell.Sidebar
 	program := startTestProgram(t, root, model, tea.WithOutput(&cacheProgramWriter{}))
 	frame := sidebarProgramSnapshot(t, program)
-	x, y := sidebarProgramPoint(t, frame.content, "profile")
-	// Use the sidebar occurrence, not the tab title.
+	// The pane header repeats the session title. Target only the measured
+	// sidebar rectangle, not the first textual occurrence in the full frame.
+	x, y := -1, -1
 	for row, line := range strings.Split(ansi.Strip(frame.content), "\n") {
-		if row >= frame.tabY {
-			break
+		if row < bounds.Y || row >= bounds.Y+bounds.Height {
+			continue
 		}
-		if prefix, _, ok := strings.Cut(line, "profile"); ok {
-			x, y = ansi.StringWidth(prefix), row
+		segment := ansi.Cut(line, bounds.X, bounds.X+bounds.Width)
+		if prefix, _, ok := strings.Cut(segment, "profile"); ok {
+			x, y = bounds.X+ansi.StringWidth(prefix)+2, row
 			break
 		}
 	}
+	require.GreaterOrEqual(t, x, 0)
 	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	require.Eventually(t, func() bool {
 		s := sidebarProgramSnapshot(t, program)
@@ -47,6 +51,7 @@ func TestActualProgramSessionTitleSingleHintDoubleRenameScopedClicks(t *testing.
 	require.Eventually(t, func() bool {
 		return strings.Contains(ansi.Strip(sidebarProgramSnapshot(t, program).content), "Double-click to rename the session")
 	}, time.Second, time.Millisecond, "unrelated click resets double-click scope")
+	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	program.Send(tea.KeyPressMsg{Code: 'Z', Text: "Z"})
 	require.Eventually(t, func() bool {
@@ -117,7 +122,7 @@ func TestActualProgramQueueRemoveUsesExactCanonicalIDAndEvent(t *testing.T) {
 				return (!clearHint || s.active == 0) && strings.Contains(strings.Split(ansi.Strip(s.content), "\n")[y], "×")
 			}, time.Second, time.Millisecond)
 			if !clearHint {
-				require.Contains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "Double-click to edit queued message", "remove remains actionable while the informational notice is active")
+				require.NotContains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "Double-click to edit queued message", "new pointer action cancels the shared reminder")
 			}
 			row := strings.Split(ansi.Strip(sidebarProgramSnapshot(t, program).content), "\n")[y]
 			index := strings.LastIndex(row, "×")

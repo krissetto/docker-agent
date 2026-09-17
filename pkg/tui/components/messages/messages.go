@@ -692,8 +692,10 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 }
 
 func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
-	if updated, cmd := m.handleScrollviewUpdate(msg); cmd != nil {
-		return updated, cmd
+	if m.scrollview.IsDragging() {
+		// An owned release is consumed even when no command is produced.
+		// Never turn a scrollbar gesture into a text copy or URL click.
+		return m.handleScrollviewUpdate(msg)
 	}
 
 	if msg.Button == tea.MouseLeft && m.selection.mouseButtonDown {
@@ -2941,6 +2943,15 @@ func (m *model) isMouseOnScrollbar(x, y int) bool {
 
 func (m *model) IsScrollbarDragging() bool {
 	return m.scrollview.IsDragging()
+}
+
+// CancelScrollbarDrag releases only pointer capture, preserving the viewport,
+// selection, pending copy identity and transcript caches.
+func (m *model) CancelScrollbarDrag() {
+	if m.scrollview.IsDragging() {
+		_, _ = m.scrollview.UpdateMouse(tea.MouseReleaseMsg{Button: tea.MouseLeft})
+		m.visualGeneration++
+	}
 }
 
 // IsSelecting returns true while a text-selection drag is in progress. The

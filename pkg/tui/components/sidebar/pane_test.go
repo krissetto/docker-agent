@@ -20,7 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-func TestContinuousPaneOrderNoHeadingsOrOldSpacing(t *testing.T) {
+func TestContinuousPaneOrderWithRecapsAndBoundedSpacing(t *testing.T) {
 	t.Parallel()
 	m := newVisibilityTestSidebar(t).model
 	m.sessionTitle = "Title"
@@ -46,9 +46,30 @@ func TestContinuousPaneOrderNoHeadingsOrOldSpacing(t *testing.T) {
 	assert.NotContains(t, plain, "YOLO", "pills belong only to pinned footer")
 	assert.Contains(t, m.footerView(50), "YOLO")
 	assert.Equal(t, 5, m.usageReadingLine)
-	assert.Empty(t, lines[m.modelStart-1])
+	assert.Equal(t, m.modelStart+2, m.modelEnd, "model and provider occupy distinct rows next to usage")
 	assert.Empty(t, m.subagentHoverZone, "empty descendants do not render recap")
 	assert.Equal(t, "/full/path/project", m.WorkingDirectory())
+
+	// Section recaps replace decorative headings; populated sections have an
+	// explicit separator and share the same two-cell body indentation.
+	m.SetSubagentTree(collapseFixture())
+	require.NoError(t, m.SetTodos(makeTodos(1)))
+	lines = m.renderSections(50)
+	require.Contains(t, ansi.Strip(lines[m.summaryLine]), "subagents")
+	require.Greater(t, m.todoSummaryLine, m.summaryLine)
+	assert.Empty(t, lines[m.todoSummaryLine-1], "tree and todos are separated even without old section padding")
+	assert.Contains(t, ansi.Strip(lines[m.todoSummaryLine]), "1/1 todos")
+	assert.Contains(t, ansi.Strip(lines[m.todoSummaryLine]), "⌄")
+	for row := range m.subagentHoverZone {
+		assert.True(t, strings.HasPrefix(ansi.Strip(lines[row]), "  "), "tree results are indented under the recap")
+	}
+	for row := m.todoSummaryLine + 1; row < m.todoEnd; row++ {
+		assert.True(t, strings.HasPrefix(ansi.Strip(lines[row]), "  "), "every wrapped todo row is indented")
+	}
+	for _, line := range lines {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 50)
+	}
+	assert.NotContains(t, ansi.Strip(strings.Join(lines, "\n")), "\n\n\n", "recaps do not restore oversized legacy padding")
 }
 
 func TestPaneRegionsSharedHoverCellsAndNoopMotion(t *testing.T) {
@@ -213,38 +234,28 @@ func TestCollapsedPaneYoloAndModelHoverClickParity(t *testing.T) {
 	t.Parallel()
 	m := newVisibilityTestSidebar(t).model
 	m.SetMode(ModeCollapsed)
-	m.SetSize(60, 20)
+	m.SetSize(120, 20)
 	m.sessionState.SetYoloMode(true)
 	m.workingDirectory = "/absolute/workspace"
 	m.gitBranchName = "branch"
-	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	lines := strings.Split(ansi.Strip(m.View()), "\n")
-	require.Len(t, lines, vm.LineCount())
-	var directory, branch, yolo, modelRow, provider int
-	for y, line := range lines {
-		if strings.Contains(line, "workspace") {
-			directory = y
-		}
-		if strings.Contains(line, "branch") {
-			branch = y
-		}
-		if strings.Contains(line, "YOLO") {
-			yolo = y
-		}
-		if strings.TrimSpace(line) == "gpt-4" {
-			modelRow = y
-		}
-		if strings.TrimSpace(line) == "openai" {
-			provider = y
-		}
+	require.Len(t, lines, 2)
+	for _, text := range []string{"workspace", "branch", "YOLO", "openai"} {
+		require.Contains(t, lines[1], text)
 	}
-	assert.Equal(t, directory+1, branch)
-	assert.Equal(t, len(lines)-1, yolo, "pill footer is final own band row")
-	assert.Equal(t, modelRow+1, provider)
-	for _, y := range []int{modelRow, provider} {
-		result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft, y)
+	require.Contains(t, lines[0], "gpt-4")
+	require.NotContains(t, lines[1], "gpt-4")
+	for _, text := range []string{"gpt-4", "openai"} {
+		y := 1
+		if text == "gpt-4" {
+			y = 0
+		}
+		prefix, _, found := strings.Cut(lines[y], text)
+		require.True(t, found)
+		x := ansi.StringWidth(prefix)
+		result, _ := m.HandleClickType(x, y)
 		assert.Equal(t, ClickModel, result)
-		m.Update(tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft, Y: y})
+		m.Update(tea.MouseMotionMsg{X: x, Y: y})
 		assert.Equal(t, ClickModel, m.hoveredRegion)
 	}
 }
@@ -255,7 +266,12 @@ func TestPaneBreathingRowsYieldToSmallHeights(t *testing.T) {
 	m.SetSize(50, 30)
 	roomy := m.renderSections(49)
 	require.Empty(t, roomy[m.usageReadingLine-1])
-	require.Empty(t, roomy[m.modelStart-1])
+	require.Empty(t, roomy[m.agentIdentityRow-1], "identity/model block has breathing room below usage")
+	require.Equal(t, m.usageSectionEnd+1, m.agentIdentityRow, "exactly one affordable row separates usage from identity")
+	require.Equal(t, "root", ansi.Strip(roomy[m.agentIdentityRow]))
+	require.Equal(t, m.agentIdentityRow+1, m.modelStart, "model immediately follows canonical identity")
+	require.Contains(t, ansi.Strip(roomy[m.modelStart]), "gpt-4")
+	require.Contains(t, ansi.Strip(roomy[m.modelStart+1]), "openai")
 	assert.Empty(t, m.subagentHoverZone, "empty tree contributes no summary or spacer")
 	m.SetSize(50, 5)
 	compact := m.renderSections(49)
@@ -266,6 +282,11 @@ func TestPaneBreathingRowsYieldToSmallHeights(t *testing.T) {
 		assert.Contains(t, ansi.Strip(compact[row]), name)
 	}
 	assert.Contains(t, ansi.Strip(compact[m.usageReadingLine]), "$0.00")
+	assert.Equal(t, m.usageSectionEnd, m.agentIdentityRow, "small viewports omit the breathing row, not identity")
+	assert.Equal(t, "root", ansi.Strip(compact[m.agentIdentityRow]))
+	assert.Equal(t, m.agentIdentityRow+1, m.modelStart)
+	assert.Contains(t, ansi.Strip(compact[m.modelStart]), "gpt-4")
+	assert.Contains(t, ansi.Strip(compact[m.modelStart+1]), "openai")
 }
 
 func TestBreathingRowsStableAcrossWarmAnimationFrames(t *testing.T) {

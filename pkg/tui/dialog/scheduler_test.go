@@ -31,7 +31,9 @@ func advanceDialog(r *animation.Runtime, cmd tea.Cmd, target time.Duration) anim
 	var msg animation.TickMsg
 	for r.Now() < target {
 		msg = acceptedDialogTick(r, cmd)
-		cmd = r.Continue()
+		if r.Now() < target {
+			cmd = r.Continue()
+		}
 	}
 	return msg
 }

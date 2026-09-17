@@ -18,15 +18,16 @@ import (
 )
 
 // New creates a new SQLite session store backed by a file at path. If
-// migrations fail (other than a version mismatch or a filesystem open
-// failure) the existing database is moved aside to <path>.bak and a fresh
-// one is created.
+// opening a corrupt database fails, it is moved aside to <path>.bak and a
+// fresh one is created. Migration failures never reset an existing database.
 func New(ctx context.Context, path string) (session.Store, error) {
 	store, err := open(ctx, path)
 	if err != nil {
-		// Don't attempt recovery for version mismatch - the user needs to upgrade,
-		// not silently lose their data by starting fresh.
-		if errors.Is(err, session.ErrNewerDatabase) {
+		// A migration failure can reflect valid history that needs attention,
+		// not a corrupt file. Its transaction rolled back; preserve the source
+		// for a later retry rather than silently resetting it. A version mismatch
+		// likewise requires an upgrade, not a fresh database.
+		if errors.Is(err, session.ErrNewerDatabase) || errors.Is(err, session.ErrMigrationFailed) {
 			return nil, err
 		}
 
@@ -72,7 +73,7 @@ func New(ctx context.Context, path string) (session.Store, error) {
 
 // open opens the database and runs migrations
 func open(ctx context.Context, path string) (*session.SQLiteSessionStore, error) {
-	db, err := sqliteutil.OpenDB(ctx, path)
+	db, err := sqliteutil.OpenDBWithImmediateTransactions(ctx, path)
 	if err != nil {
 		return nil, err
 	}

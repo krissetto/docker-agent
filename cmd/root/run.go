@@ -43,6 +43,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/recorder"
+	viewhost "github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 	"github.com/docker/docker-agent/pkg/worktree"
@@ -147,6 +149,14 @@ type runExecFlags struct {
 	// control-plane clients can observe and drive every tab of the run — not
 	// just the sessions of the shared runtime. Nil when --listen is off.
 	listenSessions *controlPlaneSessions
+
+	// One lifecycle host and source/auth scope serve every UI and control-plane
+	// admission in this run. Execution remains in its existing runtime owners.
+	sessionViewHost       *viewhost.Supervisor
+	sessionViewScope      *viewhost.ViewOwnerScope
+	sessionViewSource     string
+	sessionViewWorkingDir string
+	sessionViewStore      session.Store
 }
 
 func newRunCmd() *cobra.Command {
@@ -521,6 +531,12 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	binding := sessionSessionBinding(ctx, rt, sess)
+	spawner := b.Spawner(rt, sessions)
+	if err := f.configureSessionViewHost(ctx, b, rt, sessions, sess, spawner, cleanup); err != nil {
+		return err
+	}
+	defer f.sessionViewHost.Shutdown()
+	cleanup = f.sessionViewHost.Shutdown
 
 	if err := f.startSessionCoordinator(ctx, out, sessions, rt.SessionStore(), sess); err != nil {
 		return err
@@ -542,13 +558,13 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	var rec *recorder.Recorder
-	tuiOptions := f.tuiOpts(args)
+	tuiOptions := append(f.tuiOpts(args), tui.WithSupervisor(f.sessionViewHost))
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
 		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
 	}
 	runErr := func() error {
 		if f.lean {
-			return f.runLeanTUI(ctx, rt, sessions, sess, binding, cleanup, args, opts...)
+			return f.runLeanTUI(ctx, rt, sessions, sess, binding, spawner, cleanup, args, opts...)
 		}
 		if cassettePath != "" {
 			// Record keystrokes and clicks alongside the model traffic so a
@@ -557,9 +573,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sessions, sess, binding, b.Spawner(rt, sessions), cleanup, tuiOptions, wrap, opts...)
+			return runTUIWrapped(ctx, rt, sessions, sess, binding, spawner, cleanup, tuiOptions, wrap, opts...)
 		}
-		return runTUI(ctx, rt, sessions, sess, binding, b.Spawner(rt, sessions), cleanup, tuiOptions, opts...)
+		return runTUI(ctx, rt, sessions, sess, binding, spawner, cleanup, tuiOptions, opts...)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)
@@ -1146,10 +1162,9 @@ func withTitleGenerator(ctx context.Context, services app.Services, opts []app.O
 // --lean is set. Unlike the full TUI it renders to the normal terminal buffer
 // (no alternate screen) and sends the first/queued messages itself rather than
 // through the App's bubbletea command pipeline.
-func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, cleanup func(), args []string, opts ...app.Opt) error {
+func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, spawner tui.SessionSpawner, cleanup func(), args []string, opts ...app.Opt) error {
 	opts = withTitleGenerator(ctx, rt, opts)
 	a := app.New(ctx, sessions, sess, binding, opts...)
-	a.Start(ctx)
 
 	firstMessage, err := readInitialMessage(args)
 	if err != nil {
@@ -1172,8 +1187,38 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions
 	}
 	renderImages := userconfig.Get().GetRenderImages() && tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout)
 	showBanner := userconfig.Get().GetShowBanner()
+	var tabStore leantui.TabStore
+	if ts, err := tuistate.New(ctx); err != nil {
+		slog.WarnContext(ctx, "Failed to open TUI state store, tabs won't persist", "error", err)
+	} else {
+		tabStore = ts
+		defer func() {
+			if err := ts.Close(); err != nil {
+				slog.WarnContext(ctx, "Failed to close TUI state store", "error", err)
+			}
+		}()
+	}
+	restoreSession := leanSessionRestorer(spawner, rt.SessionStore(), a)
+	if f.sessionViewHost != nil {
+		restoreSession = func(ctx context.Context, id, _ string) (*app.App, func(), error) {
+			if id == a.Session().ID {
+				return a, nil, nil
+			}
+			restored, err := f.restoreHostedSession(ctx, id)
+			return restored, nil, err
+		}
+	}
+	spawnSession := leanSessionSpawner(spawner, rt.SessionStore())
+	if f.sessionViewHost != nil {
+		spawnSession = leanSessionSpawner(spawner, rt.SessionStore(), f.restoreHostedSession)
+	}
 	return leantui.Run(ctx, leantui.Config{
 		App:                    a,
+		SessionViews:           f.sessionViewHost,
+		TabStore:               tabStore,
+		RestoreTabs:            userconfig.Get().GetRestoreTabs(),
+		RestoreSession:         restoreSession,
+		SpawnSession:           spawnSession,
 		WorkingDir:             wd,
 		Cleanup:                cleanup,
 		FirstMessage:           firstMessage,
@@ -1184,6 +1229,140 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt app.Services, sessions
 		RenderImages:           &renderImages,
 		ShowBanner:             &showBanner,
 	})
+}
+
+// leanSessionSpawner adapts the canonical host spawner without sharing a
+// directory-dependent runtime across workspaces. A source requests the same
+// persisted branch used by the full TUI; it is never modified by this adapter.
+func leanSessionSpawner(spawner tui.SessionSpawner, store session.Store, restore ...func(context.Context, string) (*app.App, error)) func(context.Context, string, *session.Session) (*app.App, func(), error) {
+	return func(ctx context.Context, workingDir string, source *session.Session) (*app.App, func(), error) {
+		if spawner == nil {
+			return nil, nil, fmt.Errorf("session spawning not available: %w", runtime.ErrUnsupported)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		var fork *session.Session
+		if source != nil {
+			if store == nil {
+				return nil, nil, errors.New("no session store configured")
+			}
+			var err error
+			fork, err = session.BranchSession(source, len(source.MessagesSnapshot()))
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to fork session: %w", err)
+			}
+			// BranchSession drops transient delegation identity, including
+			// AgentName. This top-level fork retains the selected agent so
+			// its persisted model override binds to the same agent, not the
+			// runtime's default. The new branch is not yet shared.
+			fork.AgentName = source.AgentName
+			fork.SetAttribute(runtime.SessionAgentAttribute, source.AgentName)
+			if err := store.AddSession(ctx, fork); err != nil {
+				return nil, nil, fmt.Errorf("failed to save forked session: %w", err)
+			}
+			if len(restore) != 0 {
+				application, err := restore[0](ctx, fork.ID)
+				return application, nil, err
+			}
+			workingDir = fork.WorkingDir
+		}
+		spawned, err := spawner(ctx, workingDir)
+		return leanBindSpawnedSession(ctx, spawned, err, fork)
+	}
+}
+
+// leanSessionRestorer hydrates one selected persisted tab. Merely installing
+// this callback does not load sessions, start Apps, or create runtimes.
+func leanSessionRestorer(spawner tui.SessionSpawner, store session.Store, initial *app.App) func(context.Context, string, string) (*app.App, func(), error) {
+	return func(ctx context.Context, sessionID, workingDir string) (*app.App, func(), error) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if initial != nil && initial.Session() != nil && initial.Session().ID == sessionID {
+			return initial, nil, nil
+		}
+		if spawner == nil {
+			return nil, nil, fmt.Errorf("session restoring not available: %w", runtime.ErrUnsupported)
+		}
+		if store == nil {
+			return nil, nil, errors.New("no session store configured")
+		}
+		sess, err := store.GetSession(ctx, sessionID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load restored session: %w", err)
+		}
+		if sess == nil || sess.ID != sessionID {
+			return nil, nil, errors.New("session store returned a different restored session")
+		}
+		// The session's recorded workspace wins over stale tab metadata.
+		// Never reinterpret missing provenance as the process workspace.
+		workingDir = cmp.Or(sess.WorkingDir, workingDir)
+		if strings.TrimSpace(workingDir) == "" {
+			return nil, nil, session.ErrWorkingDirUnavailable
+		}
+		workingDir, err = session.CaptureLocalWorkingDir(workingDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		info, err := os.Stat(workingDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("restored session working directory: %w", err)
+		}
+		if !info.IsDir() {
+			return nil, nil, errors.New("restored session working directory is not a directory")
+		}
+		// GetSession returns the store snapshot, not a running session owner.
+		// Pin legacy tab provenance before creating its immutable handle.
+		sess.WorkingDir = workingDir
+		if sess.AgentName == "" {
+			sess.AgentName = sess.AttributesSnapshot()[runtime.SessionAgentAttribute]
+		}
+		spawned, err := spawner(ctx, workingDir)
+		if sess.AgentName == "" && spawned.App != nil {
+			sess.AgentName = spawned.App.Binding().AgentName
+		}
+		return leanBindSpawnedSession(ctx, spawned, err, sess)
+	}
+}
+
+// leanBindSpawnedSession is the shared admission/ownership boundary for fresh,
+// forked, and restored lean viewers. The caller owns presentation lifecycle;
+// only a genuinely owned runtime receives a shutdown callback.
+func leanBindSpawnedSession(ctx context.Context, spawned tui.SpawnedSession, spawnErr error, target *session.Session) (*app.App, func(), error) {
+	var cleanup func()
+	if spawned.Ownership == tui.RuntimeOwned && spawned.Cleanup != nil {
+		cleanup = sync.OnceFunc(spawned.Cleanup)
+	}
+	fail := func(err error) (*app.App, func(), error) {
+		if spawned.App != nil {
+			spawned.App.Close()
+		}
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, nil, err
+	}
+	if spawnErr != nil {
+		return fail(spawnErr)
+	}
+	if spawned.App == nil {
+		return fail(errors.New("session spawner returned no app"))
+	}
+	if target != nil {
+		spawned.App.ReplaceSession(ctx, target)
+	}
+	// ReplaceSession has no error return. Do not admit an App whose
+	// immutable handle failed to bind the requested session or agent.
+	sess := spawned.App.Session()
+	handle := spawned.App.SessionHandle()
+	if sess == nil || handle == nil || handle.ID() != sess.ID || (target != nil && (sess.ID != target.ID || handle.AgentName() != target.AgentName)) {
+		return fail(errors.New("failed to bind spawned session"))
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	return spawned.App, cleanup, nil
 }
 
 func (f *runExecFlags) buildAppOpts(args []string) ([]app.Opt, error) {
@@ -1329,14 +1508,14 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, services 
 			return tui.SpawnedSession{}, err
 		}
 		if sameWorkingDir(workingDir, f.runConfig.WorkingDir) {
-			return f.spawnBorrowedSession(spawnCtx, services, sessions, workingDir), nil
+			return f.spawnBorrowedSession(spawnCtx, services, sessions, workingDir)
 		}
 		return f.spawnOwnedSession(spawnCtx, agentSource, services.SessionStore(), workingDir)
 	}
 }
 
 // spawnBorrowedSession opens a fresh session on the shared session registry.
-func (f *runExecFlags) spawnBorrowedSession(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, workingDir string) tui.SpawnedSession {
+func (f *runExecFlags) spawnBorrowedSession(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, workingDir string) (tui.SpawnedSession, error) {
 	agentName := services.CurrentAgentInfo(ctx).Name
 	spawnReq := f.createSessionRequest(workingDir)
 	spawnReq.AgentName = agentName
@@ -1349,14 +1528,56 @@ func (f *runExecFlags) spawnBorrowedSession(ctx context.Context, services app.Se
 	)
 	binding := sessionSessionBinding(ctx, services, newSess)
 	opts := withTitleGenerator(ctx, services, []app.Opt{app.WithRuntimeServices(services)})
+	if f.sessionViewHost != nil {
+		resources := viewhost.ViewOwnerResources{Services: services, Sessions: sessions, NewApp: resolvedViewBuilder(sessions, opts)}
+		if err := f.sessionViewHost.RegisterSessionOwner(f.freshViewOwnerIdentity(newSess), resources, false); err != nil {
+			return tui.SpawnedSession{}, err
+		}
+	}
 	a := app.New(ctx, sessions, newSess, binding, opts...)
-	return tui.SpawnedSession{App: a, Session: newSess, Ownership: tui.RuntimeBorrowed}
+	return tui.SpawnedSession{App: a, Session: newSess, Ownership: tui.RuntimeBorrowed}, nil
 }
 
-// spawnOwnedSession loads the team again rooted at workingDir and opens the
-// session on a runtime of its own. The returned Cleanup shuts that runtime
-// down and stops its toolsets when the tab closes or is replaced.
+// ownedSessionResources is one workspace-bound runtime, before any session is
+// admitted or the runtime is exposed to the control plane. Ownership admission
+// decides when Activate may publish it and when Cleanup may release it.
+type ownedSessionResources struct {
+	services *runtime.LocalRuntime
+	sessions runtime.SessionRuntime
+	team     *team.Team
+	agent    *agent.Agent
+	opts     []app.Opt
+	activate func() error
+	cleanup  func()
+}
+
+// spawnOwnedSession retains the ordinary fresh-session behavior on top of the
+// same private resource construction used by host-owned view acquisition.
 func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config.Source, store session.Store, workingDir string) (tui.SpawnedSession, error) {
+	resources, err := f.buildOwnedSessionResources(ctx, agentSource, store, workingDir)
+	if err != nil {
+		return tui.SpawnedSession{}, err
+	}
+	spawnReq := f.createSessionRequest(workingDir)
+	spawnReq.AgentName = resources.agent.Name()
+	newSess := session.New(f.buildSessionOpts(resources.agent, resources.team, spawnReq)...)
+	cleanup := resources.cleanup
+	if f.sessionViewHost != nil {
+		if err := f.sessionViewHost.RegisterSessionOwner(f.freshViewOwnerIdentity(newSess), resources.viewResources(), false); err != nil {
+			resources.cleanup()
+			return tui.SpawnedSession{}, err
+		}
+		cleanup = f.sessionViewHost.SessionOwnerCleanup(resources.sessions)
+	}
+	if err := resources.activate(); err != nil {
+		cleanup()
+		return tui.SpawnedSession{}, err
+	}
+	a := app.New(ctx, resources.sessions, newSess, sessionSessionBinding(ctx, resources.services, newSess), resources.opts...)
+	return tui.SpawnedSession{App: a, Session: newSess, Ownership: tui.RuntimeOwned, Cleanup: cleanup}, nil
+}
+
+func (f *runExecFlags) buildOwnedSessionResources(ctx context.Context, agentSource config.Source, store session.Store, workingDir string) (*ownedSessionResources, error) {
 	runConfigCopy := f.runConfig.Clone()
 	runConfigCopy.WorkingDir = workingDir
 
@@ -1366,14 +1587,21 @@ func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config
 	loadReq.RunConfig = runConfigCopy
 	loadResult, err := f.loadAgentFrom(ctx, loadReq)
 	if err != nil {
-		return tui.SpawnedSession{}, err
+		return nil, err
 	}
+	return f.buildLoadedSessionResources(ctx, loadResult, runConfigCopy, store)
+}
+
+// buildLoadedSessionResources binds tools already constructed for this workspace
+// and runtime hooks to the same immutable config, without admitting a session.
+func (f *runExecFlags) buildLoadedSessionResources(ctx context.Context, loadResult *teamloader.LoadResult, runConfigCopy *config.RuntimeConfig, store session.Store) (*ownedSessionResources, error) {
+	workingDir := runConfigCopy.WorkingDir
 	t := loadResult.Team
 
 	agt, err := t.AgentOrDefault(f.agentName)
 	if err != nil {
 		stopToolSets(ctx, t)
-		return tui.SpawnedSession{}, err
+		return nil, err
 	}
 	if f.globalPermissions != nil && !f.globalPermissions.IsEmpty() {
 		t.SetPermissions(permissions.Merge(t.Permissions(), f.globalPermissions))
@@ -1385,32 +1613,48 @@ func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config
 	rtOpts, ctrl, err := f.snapshotRuntimeOpts()
 	if err != nil {
 		stopToolSets(ctx, t)
-		return tui.SpawnedSession{}, err
+		return nil, err
 	}
 	localRt, err := runtime.New(ctx, t, append(f.runtimeOpts(loadResult, runConfigCopy, store, agt.Name()), rtOpts...)...)
 	if err != nil {
 		stopToolSets(ctx, t)
-		return tui.SpawnedSession{}, fmt.Errorf("creating runtime: %w", err)
+		return nil, fmt.Errorf("creating runtime: %w", err)
 	}
 	supervisor := runtime.NewSessionRuntimeSupervisor(localRt)
+	sessions := supervisor.Runtime()
+	var publicationMu sync.Mutex
+	closed, published := false, false
 	unregister := func(context.Context) error { return nil }
-	if f.listenSessions != nil {
-		unregister = f.listenSessions.Add(supervisor.Runtime())
+	activate := func() error {
+		publicationMu.Lock()
+		defer publicationMu.Unlock()
+		if closed {
+			return runtime.ErrSessionClosed
+		}
+		if !published {
+			if f.listenSessions != nil {
+				unregister = f.listenSessions.Add(sessions)
+			}
+			published = true
+		}
+		return nil
 	}
-
-	spawnReq := f.createSessionRequest(workingDir)
-	spawnReq.AgentName = agt.Name()
-	newSess := session.New(f.buildSessionOpts(agt, t, spawnReq)...)
 
 	opts := withTitleGenerator(ctx, localRt, []app.Opt{app.WithRuntimeServices(localRt)})
 	if ctrl != nil {
 		opts = append(opts, app.WithSnapshotController(ctrl))
 	}
-	a := app.New(ctx, supervisor.Runtime(), newSess, sessionSessionBinding(ctx, localRt, newSess), opts...)
+	if f.sessionReadOnly {
+		opts = append(opts, app.WithReadOnly())
+	}
 
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
+			publicationMu.Lock()
+			closed = true
+			unregister := unregister
+			publicationMu.Unlock()
 			unregisterCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			if err := unregister(unregisterCtx); err != nil {
 				slog.ErrorContext(ctx, "Timed out draining spawned session runtime registration", "working_dir", workingDir, "error", err)
@@ -1433,7 +1677,15 @@ func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config
 			}
 		})
 	}
-	return tui.SpawnedSession{App: a, Session: newSess, Ownership: tui.RuntimeOwned, Cleanup: cleanup}, nil
+	return &ownedSessionResources{
+		services: localRt,
+		sessions: sessions,
+		team:     t,
+		agent:    agt,
+		opts:     opts,
+		activate: activate,
+		cleanup:  cleanup,
+	}, nil
 }
 
 // sameWorkingDir reports whether two directories resolve to the same path;

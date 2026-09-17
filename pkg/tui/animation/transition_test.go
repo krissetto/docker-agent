@@ -40,7 +40,8 @@ func TestTransition_BasicLifecycle(t *testing.T) {
 		assert.False(t, tr.Running())
 		assert.InDelta(t, 0.0, tr.Value(), 1e-9)
 
-		cmd := tr.Start(10*TickRate, Linear)
+		require.Nil(t, tr.Start(10*TickRate, Linear))
+		cmd := ar.Continue()
 		assert.True(t, tr.Running())
 		assert.Equal(t, int32(1), ar.ActiveCount())
 
@@ -59,7 +60,8 @@ func TestTransition_Cancel(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(20*TickRate, Linear)
+		require.Nil(t, tr.Start(20*TickRate, Linear))
+		cmd := ar.Continue()
 		require.True(t, tr.Running())
 
 		for range 5 {
@@ -87,7 +89,8 @@ func TestTransition_Restart(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(10*TickRate, Linear)
+		require.Nil(t, tr.Start(10*TickRate, Linear))
+		cmd := ar.Continue()
 		for range 5 {
 			tickTransition(t, &cmd, &tr)
 		}
@@ -106,7 +109,8 @@ func TestTransition_Lerp(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(4*TickRate, Linear)
+		require.Nil(t, tr.Start(4*TickRate, Linear))
+		cmd := ar.Continue()
 
 		assert.Equal(t, 0, tr.Lerp(0, 100))
 
@@ -129,7 +133,8 @@ func TestTransition_LerpReverse(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(2*TickRate, Linear)
+		require.Nil(t, tr.Start(2*TickRate, Linear))
+		cmd := ar.Continue()
 
 		assert.Equal(t, 200, tr.Lerp(200, 0))
 
@@ -182,7 +187,8 @@ func TestTransition_EaseOutCubic_Integration(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(10*TickRate, EaseOutCubic)
+		require.Nil(t, tr.Start(10*TickRate, EaseOutCubic))
+		cmd := ar.Continue()
 
 		// Values should increase monotonically and ease out.
 		prev := 0.0
@@ -211,7 +217,8 @@ func TestTransition_ZeroTicks(t *testing.T) {
 		t.Helper()
 		ar := NewRuntime()
 		tr := ar.Transition()
-		cmd := tr.Start(0*TickRate, Linear)
+		require.Nil(t, tr.Start(0*TickRate, Linear))
+		cmd := ar.Continue()
 		assert.True(t, tr.Running())
 
 		tickTransition(t, &cmd, &tr)

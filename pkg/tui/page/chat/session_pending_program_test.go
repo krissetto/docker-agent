@@ -82,8 +82,9 @@ type teaPageModel struct {
 	frame *lockedBuffer
 }
 
-func (m teaPageModel) Init() tea.Cmd { return nil }
-func (m teaPageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m teaPageModel) Init() tea.Cmd { return tea.Batch(m.page.Init(), m.page.ar.Continue()) }
+func (m teaPageModel) Update(msg tea.Msg) (nextModel tea.Model, nextCmd tea.Cmd) {
+	defer func() { nextCmd = tea.Batch(nextCmd, m.page.ar.Continue()) }()
 	if tick, ok := msg.(animation.TickMsg); ok {
 		accepted, current := m.page.ar.Accept(tick)
 		if !current {
@@ -91,7 +92,7 @@ func (m teaPageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		updated, cmd := m.page.Update(accepted)
 		m.page = updated.(*chatPage)
-		return m, tea.Batch(cmd, m.page.ar.Continue())
+		return m, cmd
 	}
 
 	if probe, ok := msg.(pendingQueueProbe); ok {
@@ -263,7 +264,12 @@ func TestActualProgramSettlingRunAutomaticallyDispatchesQueuedFIFO(t *testing.T)
 	}
 	require.Eventually(t, func() bool {
 		status, statusErr := a.SessionHandle().Status(t.Context())
-		return statusErr == nil && status.State == runtime.SessionStateSettled && status.Pending == 0
+		// Backend settlement precedes the sidebar's finite queue-exit fade.
+		// Wait for that presentation boundary too before counting the whole
+		// page: a fading queue copy is not a duplicate transcript admission.
+		sidebar := ansi.Strip(frame.SidebarString())
+		return statusErr == nil && status.State == runtime.SessionStateSettled && status.Pending == 0 &&
+			!strings.Contains(sidebar, "B queued") && !strings.Contains(sidebar, "C queued")
 	}, 5*time.Second, time.Millisecond)
 	assert.Equal(t, 3, provider.count(), "A, B, and C each invoke the provider exactly once")
 	view := ansi.Strip(frame.String())

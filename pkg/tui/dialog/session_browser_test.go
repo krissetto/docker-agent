@@ -6,15 +6,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 func TestSessionBrowserNavigation(t *testing.T) {
@@ -231,8 +234,7 @@ func TestSessionBrowserMouseClickSelectsSession(t *testing.T) {
 	require.Equal(t, 0, d.selected)
 
 	// Get the dialog position to calculate where to click
-	dialogRow, _ := d.Position()
-	listStartY := dialogRow + sessionBrowserListStartY
+	listStartY := sessionBrowserRenderedRow(t, d, "Session 1")
 
 	// Single-click on the second session (line index 1)
 	clickMsg := tea.MouseClickMsg{
@@ -274,8 +276,7 @@ func TestSessionBrowserDoubleClickOpensSession(t *testing.T) {
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
 
-	dialogRow, _ := d.Position()
-	listStartY := dialogRow + sessionBrowserListStartY
+	listStartY := sessionBrowserRenderedRow(t, d, "Session 1")
 
 	// First click selects
 	clickMsg := tea.MouseClickMsg{
@@ -292,6 +293,9 @@ func TestSessionBrowserDoubleClickOpensSession(t *testing.T) {
 	d = updated.(*sessionBrowserDialog)
 	require.Equal(t, 1, d.selected, "selection should stay on double-clicked session")
 	require.NotNil(t, cmd, "double-click should produce a command to load the session")
+	response, ok := firstMsgOfType[messages.LoadSessionMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	require.Equal(t, "sess-2", response.SessionID, "double-click loads exactly the painted session")
 }
 
 func TestSessionBrowserClickOutsideListIgnored(t *testing.T) {
@@ -603,8 +607,7 @@ func TestSessionBrowserHeaderRowsNotSelectable(t *testing.T) {
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
 
-	dialogRow, _ := d.Position()
-	listStartY := dialogRow + sessionBrowserListStartY
+	listStartY := sessionBrowserRenderedRow(t, d, sessionBrowserHeaderWorkspace)
 
 	// Row 0 is the "This workspace" header: clicking it must not change the
 	// selection or produce a command.
@@ -651,16 +654,79 @@ func TestSessionBrowserNavigationSkipsHeaders(t *testing.T) {
 	require.Equal(t, 0, d.selected)
 }
 
-func TestSessionBrowserPreparedOriginMatchesFirstPositionAndRenderedRows(t *testing.T) {
-	d := NewSessionBrowserDialog([]session.Summary{{ID: "one", Title: "First"}, {ID: "two", Title: "Second"}}, "").(*sessionBrowserDialog)
-	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
-	bodyX, bodyY, bodyWidth, bodyHeight := d.BodyScrollBounds()
-	require.Positive(t, bodyX)
-	require.Positive(t, bodyWidth)
-	require.Positive(t, bodyHeight)
-	row, _ := d.Position()
-	require.Equal(t, row+sessionBrowserListStartY, bodyY, "prepared body origin must match the first reported card position")
+// sessionBrowserRenderedRow derives pointer coordinates from painted content,
+// independently of the base's prepared hit geometry.
+func sessionBrowserRenderedRow(t *testing.T, d *sessionBrowserDialog, text string) int {
+	t.Helper()
 	view := d.View()
-	require.Equal(t, (d.Height()-lipgloss.Height(view))/2, row)
-	require.Equal(t, row+sessionBrowserListStartY, bodyY)
+	row, _ := d.Position()
+	for i, line := range strings.Split(ansi.Strip(view), "\n") {
+		if strings.Contains(line, text) {
+			return row + i
+		}
+	}
+	t.Fatalf("rendered session-browser row %q not found in\n%s", text, ansi.Strip(view))
+	return -1
+}
+
+func TestSessionBrowserPreparedOriginMatchesFirstPositionAndRenderedRows(t *testing.T) {
+	d := NewSessionBrowserDialog([]session.Summary{{ID: "one", Title: "First", NumMessages: 71}, {ID: "two", Title: "Second", NumMessages: 72}}, "").(*sessionBrowserDialog)
+	for _, size := range [][2]int{{100, 50}, {40, 12}, {24, 6}, {100, 50}} {
+		d.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		bodyX, bodyY, bodyWidth, bodyHeight := d.BodyScrollBounds()
+		require.Positive(t, bodyX)
+		require.Positive(t, bodyWidth)
+		require.Positive(t, bodyHeight)
+		row, _ := d.Position()
+		view := d.View()
+		require.Equal(t, (d.Height()-lipgloss.Height(view))/2, row)
+		require.Equal(t, sessionBrowserRenderedRow(t, d, "(71"), bodyY, "prepared origin matches the actual first session, not a historical chrome offset")
+		require.Equal(t, 0, d.mouseYToSessionIndex(bodyY))
+		// The unique count prefix survives clipping in the one-row tiny body.
+		// Exercise actual selection and outside-column rejection there too.
+		d.selected = 1
+		for _, x := range []int{bodyX - 1, bodyX + bodyWidth} {
+			_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: bodyY})
+			require.Nil(t, cmd)
+			require.Equal(t, 1, d.selected, "outside-column clicks cannot select the first painted row")
+		}
+		_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: bodyX, Y: bodyY})
+		require.Nil(t, cmd)
+		require.Zero(t, d.selected, "click selects the independently located first row even in a tiny body")
+		d.lastClickTime = time.Time{}
+		for y := row; y < bodyY; y++ {
+			require.Equal(t, -1, d.mouseYToSessionIndex(y), "title, input, separator and shared gaps never select sessions")
+		}
+		if bodyHeight > 1 {
+			secondY := sessionBrowserRenderedRow(t, d, "(72")
+			require.Equal(t, bodyY+1, secondY)
+			require.Equal(t, 1, d.mouseYToSessionIndex(secondY))
+			for _, x := range []int{bodyX - 1, bodyX + bodyWidth} {
+				_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: secondY})
+				require.Nil(t, cmd)
+				require.Zero(t, d.selected, "outside-column clicks cannot select the painted row")
+			}
+			_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: bodyX, Y: secondY})
+			require.Nil(t, cmd)
+			require.Equal(t, 1, d.selected)
+			d.selected = 0
+			d.lastClickTime = time.Time{}
+		}
+	}
+}
+
+func TestSessionBrowserUnpreparedPointerHasNoSessionTarget(t *testing.T) {
+	d := NewSessionBrowserDialog([]session.Summary{{ID: "one", Title: "First"}, {ID: "two", Title: "Second"}}, "").(*sessionBrowserDialog)
+	x, y, width, height := d.BodyScrollBounds()
+	require.Zero(t, x)
+	require.Zero(t, y)
+	require.Zero(t, width)
+	require.Zero(t, height)
+	for _, y := range []int{-1, 0, 1, 6, 7, 24} {
+		require.Equal(t, -1, d.mouseYToSessionIndex(y))
+	}
+	_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 1, Y: 1})
+	require.Nil(t, cmd)
+	require.Zero(t, d.selected)
+	require.True(t, d.lastClickTime.IsZero(), "unprepared pointer cannot arm a double click")
 }

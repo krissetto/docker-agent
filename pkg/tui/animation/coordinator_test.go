@@ -15,53 +15,73 @@ func runTick(t *testing.T, cmd func() any) TickMsg {
 	return msg
 }
 
-func resetLegacyRuntime(t *testing.T) {
-	t.Helper()
-	legacyRuntime = NewRuntime()
-	t.Cleanup(func() { legacyRuntime = NewRuntime() })
-}
+func TestExplicitSubscriptionOwnerAcceptsDeliveredTicks(t *testing.T) {
+	ar := NewRuntime()
+	t.Cleanup(ar.Stop)
+	sub := ar.Subscribe()
+	require.Nil(t, sub.Start(), "subscription registers without scheduling")
+	require.True(t, sub.IsActive())
+	require.EqualValues(t, 1, ar.ActiveCount())
+	require.False(t, ar.tickScheduled)
 
-func TestLegacyFacadeContinuesOnDeliveredTickWithoutAccept(t *testing.T) {
-	resetLegacyRuntime(t)
-
-	first := StartTickIfFirst()
-	require.NotNil(t, first)
-	require.True(t, HasActive())
-
-	firstTick := runTick(t, func() any { return first() })
-	assert.Equal(t, 1, firstTick.Frame)
-	assert.True(t, IsCurrentGen(firstTick))
-
-	second := StartTick()
-	require.NotNil(t, second, "legacy delivery must release the lease without Runtime.Accept")
-	secondTick := runTick(t, func() any { return second() })
-	assert.Equal(t, 2, secondTick.Frame)
-	assert.True(t, IsCurrentGen(secondTick))
-
-	Unregister()
-	assert.False(t, HasActive())
-	assert.Nil(t, StartTick())
-}
-
-func TestLegacyIsCurrentGenIsPureAndRejectsStaleTicks(t *testing.T) {
-	resetLegacyRuntime(t)
-
-	first := StartTickIfFirst()
+	first := ar.Continue()
 	require.NotNil(t, first)
 	firstTick := runTick(t, func() any { return first() })
-	assert.True(t, IsCurrentGen(firstTick))
-	assert.True(t, IsCurrentGen(firstTick), "generation checks are side-effect-free")
+	require.Zero(t, ar.Now(), "delivery alone cannot advance the owner clock")
+	require.Nil(t, ar.Continue(), "delivery alone cannot release the owner lease")
+	accepted, ok := ar.Accept(firstTick)
+	require.True(t, ok)
+	assert.Equal(t, 1, accepted.Frame)
 
-	second := StartTick()
-	require.NotNil(t, second, "generation checks must not interfere with re-arming")
-	Unregister()
-	assert.False(t, IsCurrentGen(runTick(t, func() any { return second() })), "stopped chain is stale")
+	second := ar.Continue()
+	require.NotNil(t, second, "owner acceptance permits the next frame")
+	accepted, ok = ar.Accept(runTick(t, func() any { return second() }))
+	require.True(t, ok)
+	assert.Equal(t, 2, accepted.Frame)
+
+	queued := ar.Continue()
+	require.NotNil(t, queued)
+	sub.Stop()
+	assert.False(t, ar.HasActive())
+	assert.Nil(t, ar.Continue())
+	_, ok = ar.Accept(runTick(t, func() any { return queued() }))
+	assert.False(t, ok, "stopped owner rejects its queued tick")
+}
+
+func TestUnboundSubscriptionRejectsStartAndCanBindAfterward(t *testing.T) {
+	ar := NewRuntime()
+	t.Cleanup(ar.Stop)
+	var sub Subscription
+	require.NotPanics(t, sub.Stop, "idle cleanup needs no runtime")
+	require.False(t, sub.IsActive())
+	require.Panics(t, func() { sub.Start() }, "starting requires an explicit owner")
+	require.False(t, sub.IsActive(), "failed start must not mutate subscription state")
+	require.Zero(t, ar.ActiveCount(), "unbound start cannot register with another runtime")
+	require.NotPanics(t, sub.Stop, "cleanup after rejected start remains safe")
+
+	sub.SetRuntime(ar)
+	require.Nil(t, sub.Start())
+	require.True(t, sub.IsActive())
+	require.EqualValues(t, 1, ar.ActiveCount())
+	require.Nil(t, sub.Start(), "repeated start does not duplicate registration")
+	require.EqualValues(t, 1, ar.ActiveCount())
+	cmd := ar.Continue()
+	require.NotNil(t, cmd, "binding after rejection produces a functioning owner lease")
+	_, accepted := ar.Accept(runTick(t, func() any { return cmd() }))
+	require.True(t, accepted)
+	require.Positive(t, ar.Now())
+	sub.Stop()
+	sub.Stop()
+	require.False(t, sub.IsActive())
+	require.Zero(t, ar.ActiveCount())
+	require.Nil(t, ar.Continue())
 }
 
 func TestAcceptedTickCopiesShareDirtyMarker(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	tick := runTick(t, func() any { return sub.Start()() })
+	require.Nil(t, sub.Start())
+	tick := runTick(t, func() any { return ar.Continue()() })
 	accepted, ok := ar.Accept(tick)
 	require.True(t, ok)
 	acceptedCopy := accepted
@@ -76,7 +96,8 @@ func TestAcceptedTickCopiesShareDirtyMarker(t *testing.T) {
 func TestRejectedTickCannotBecomeDirty(t *testing.T) {
 	first, second := NewRuntime(), NewRuntime()
 	sub := first.Subscribe()
-	tick := runTick(t, func() any { return sub.Start()() })
+	require.Nil(t, sub.Start())
+	tick := runTick(t, func() any { return first.Continue()() })
 	rejected, ok := second.Accept(tick)
 	assert.False(t, ok)
 	rejected.MarkDirty()
@@ -87,8 +108,10 @@ func TestRejectedTickCannotBecomeDirty(t *testing.T) {
 func TestRuntimeIsolationAndOwnerToken(t *testing.T) {
 	first, second := NewRuntime(), NewRuntime()
 	firstSub, secondSub := first.Subscribe(), second.Subscribe()
-	firstCmd := firstSub.Start()
-	secondCmd := secondSub.Start()
+	require.Nil(t, firstSub.Start())
+	firstCmd := first.Continue()
+	require.Nil(t, secondSub.Start())
+	secondCmd := second.Continue()
 	require.NotNil(t, firstCmd)
 	require.NotNil(t, secondCmd)
 
@@ -108,7 +131,9 @@ func TestRuntimeIsolationAndOwnerToken(t *testing.T) {
 func TestRuntimeStopDoesNotAffectAnotherRuntime(t *testing.T) {
 	first, second := NewRuntime(), NewRuntime()
 	firstSub, secondSub := first.Subscribe(), second.Subscribe()
-	firstCmd, secondCmd := firstSub.Start(), secondSub.Start()
+	require.Nil(t, firstSub.Start())
+	require.Nil(t, secondSub.Start())
+	firstCmd, secondCmd := first.Continue(), second.Continue()
 	firstSub.Stop()
 	assert.False(t, first.HasActive())
 	assert.True(t, second.HasActive())
@@ -124,7 +149,8 @@ func TestRuntimeStopDoesNotAffectAnotherRuntime(t *testing.T) {
 func TestRuntimeAcceptOnlyOnce(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	tick := runTick(t, func() any { return sub.Start()() })
+	require.Nil(t, sub.Start())
+	tick := runTick(t, func() any { return ar.Continue()() })
 	_, ok := ar.Accept(tick)
 	require.True(t, ok)
 	elapsed := ar.Now()
@@ -137,7 +163,8 @@ func TestRuntimeAcceptOnlyOnce(t *testing.T) {
 func TestRuntimeTransitionUsesOwnedClock(t *testing.T) {
 	ar := NewRuntime()
 	transition := ar.Transition()
-	cmd := transition.Start(TickRate, Linear)
+	require.Nil(t, transition.Start(TickRate, Linear))
+	cmd := ar.Continue()
 	tick := runTick(t, func() any { return cmd() })
 	_, ok := ar.Accept(tick)
 	require.True(t, ok)
@@ -146,11 +173,14 @@ func TestRuntimeTransitionUsesOwnedClock(t *testing.T) {
 	assert.Equal(t, int32(0), ar.ActiveCount())
 }
 
-func TestTickOwnerIsImmutableAcrossRecovery(t *testing.T) {
+func TestTickOwnerIsImmutableAcrossRestart(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	staleCmd := sub.Start()
-	freshCmd := ar.EnsureRunning()
+	require.Nil(t, sub.Start())
+	staleCmd := ar.Continue()
+	sub.Stop()
+	require.Nil(t, sub.Start())
+	freshCmd := ar.Continue()
 	stale := runTick(t, func() any { return staleCmd() })
 	fresh := runTick(t, func() any { return freshCmd() })
 	_, ok := ar.Accept(stale)
@@ -163,7 +193,8 @@ func TestTickOwnerIsImmutableAcrossRecovery(t *testing.T) {
 func TestRuntimeStopInvalidatesQueuedTickAndQuiesces(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	queued := sub.Start()
+	require.Nil(t, sub.Start())
+	queued := ar.Continue()
 	require.NotNil(t, queued)
 
 	ar.Stop()
@@ -178,7 +209,8 @@ func TestRuntimeStopInvalidatesQueuedTickAndQuiesces(t *testing.T) {
 func TestExactlyOneContinuationPerAcceptedTick(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	first := sub.Start()
+	require.Nil(t, sub.Start())
+	first := ar.Continue()
 	_, accepted := ar.Accept(runTick(t, func() any { return first() }))
 	require.True(t, accepted)
 
@@ -218,7 +250,8 @@ func TestRuntimeNowAdvancesByDeliveredTime(t *testing.T) {
 func TestRuntimeRestartExcludesIdleTime(t *testing.T) {
 	ar := NewRuntime()
 	sub := ar.Subscribe()
-	first := runTick(t, func() any { return sub.Start()() })
+	require.Nil(t, sub.Start())
+	first := runTick(t, func() any { return ar.Continue()() })
 	_, ok := ar.Accept(first)
 	require.True(t, ok)
 	before := ar.Now()
@@ -226,7 +259,8 @@ func TestRuntimeRestartExcludesIdleTime(t *testing.T) {
 	// A new lease's first tick must use its own timer baseline, not the
 	// previous animation's last delivery before the idle period.
 	require.True(t, ar.lastDeliveredAt.IsZero())
-	sub.Start()
+	require.Nil(t, sub.Start())
+	require.NotNil(t, ar.Continue())
 	started := first.deliveredAt.Add(time.Hour)
 	next := TickMsg{
 		runtimeIdentity: ar.runtimeIdentity, generation: ar.generation,

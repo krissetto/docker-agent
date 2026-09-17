@@ -76,7 +76,7 @@ func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 
 	case key.Matches(msg, p.keyMap.ToggleSidebar):
-		p.sidebar.ToggleCollapsed()
+		p.togglePresentationSidebar()
 		cmd := p.SetSize(p.width, p.height)
 		return p, tea.Batch(cmd, core.CmdHandler(msgtypes.ToggleSidebarMsg{}))
 	}
@@ -132,7 +132,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 	switch target {
 	case TargetSidebarToggle:
 		if msg.Button == tea.MouseLeft {
-			p.sidebar.ToggleCollapsed()
+			p.togglePresentationSidebar()
 			cmd := p.SetSize(p.width, p.height)
 			return p, tea.Batch(cmd, core.CmdHandler(msgtypes.ToggleSidebarMsg{}))
 		}
@@ -141,7 +141,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 		if msg.Button == tea.MouseLeft {
 			p.isDraggingSidebar = true
 			p.sidebarDragStartX = msg.X
-			p.sidebarDragStartWidth = p.sidebar.GetPreferredWidth()
+			p.sidebarDragStartWidth = p.presentationSidebarSettings().PreferredWidth
 			p.sidebarDragMoved = false
 			return p, nil
 		}
@@ -173,6 +173,12 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 	case TargetSidebarWorkingDir:
 		if msg.Button == tea.MouseLeft {
 			return p, copyWorkingDirToClipboard(p.sidebar.WorkingDirectory())
+		}
+
+	case TargetSidebarThinkingLevel:
+		if msg.Button == tea.MouseLeft {
+			cmd := p.cycleThinkingLevelCmd(sessionID)
+			return p, cmd
 		}
 
 	case TargetSidebarModel:
@@ -400,7 +406,7 @@ func (p *chatPage) wheelTarget(x, y int) wheelTarget {
 		return wheelTargetNone
 	}
 	sl := p.computeSidebarLayout()
-	if sl.mode == sidebarVertical && !p.sidebar.IsCollapsed() {
+	if sl.mode == sidebarVertical && !p.presentationSidebarSettings().Collapsed {
 		adjustedX := x - styles.AppPadding
 		if sl.isInSidebar(adjustedX) {
 			return wheelTargetSidebar
@@ -420,28 +426,48 @@ func (p *chatPage) handleSidebarResize(x int) tea.Cmd {
 	}
 	newWidth := p.sidebarDragStartWidth + delta
 
-	// Auto-collapse if dragged below minimum
+	settings := p.presentationSidebarSettings()
+	// Auto-collapse if dragged below minimum, preserving saved preferences
+	// when the shell owns a split-layout override.
 	if newWidth < sidebar.MinWidth {
-		if !p.sidebar.IsCollapsed() {
-			// Set preferredWidth to 0 so expanding resets to default
-			p.sidebar.SetPreferredWidth(0)
-			p.sidebar.SetCollapsed(true)
+		if !settings.Collapsed {
+			settings.PreferredWidth = 0
+			settings.Collapsed = true
+			p.setPresentationSidebarSettings(settings)
 			return tea.Batch(p.SetSize(p.width, p.height), core.CmdHandler(msgtypes.ToggleSidebarMsg{}))
 		}
 		return nil
 	}
 
-	// Auto-expand if dragged back above minimum
 	var cmds []tea.Cmd
-	if p.sidebar.IsCollapsed() {
-		p.sidebar.SetCollapsed(false)
+	if settings.Collapsed {
+		settings.Collapsed = false
 		cmds = append(cmds, core.CmdHandler(msgtypes.ToggleSidebarMsg{}))
 	}
-
 	newWidth = p.sidebar.ClampWidth(newWidth, innerWidth)
-	if newWidth != p.sidebar.GetPreferredWidth() {
-		p.sidebar.SetPreferredWidth(newWidth)
+	changed := settings != p.presentationSidebarSettings() || newWidth != settings.PreferredWidth
+	settings.PreferredWidth = newWidth
+	if changed {
+		p.setPresentationSidebarSettings(settings)
 		cmds = append(cmds, p.SetSize(p.width, p.height))
 	}
 	return tea.Batch(cmds...)
+}
+
+func (p *chatPage) cycleThinkingLevelCmd(sessionID string) tea.Cmd {
+	owner, ok := p.sidebar.(interface {
+		ThinkingTarget() (string, string, bool)
+	})
+	if !ok || sessionID == "" {
+		return nil
+	}
+	agentName, modelRef, enabled := owner.ThinkingTarget()
+	if !enabled || agentName == "" || modelRef == "" {
+		return nil
+	}
+	msg := msgtypes.CycleThinkingLevelMsg{SessionID: sessionID, AgentName: agentName, ModelRef: modelRef}
+	if display, ok := p.sidebar.(interface{ ThinkingDisplayReference() string }); ok {
+		msg.DisplayedModelRef = display.ThinkingDisplayReference()
+	}
+	return core.CmdHandler(msg)
 }

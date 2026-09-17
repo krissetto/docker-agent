@@ -382,14 +382,14 @@ func TestFadeLineCtx_UnderlineColorInterpolated(t *testing.T) {
 	assert.Contains(t, result, "4;")
 }
 
-func TestFadeLineCtx_DefaultUnderlineColorDropped(t *testing.T) {
+func TestFadeLineCtx_DefaultUnderlineColorPreserved(t *testing.T) {
 	fc := testFadeContext()
 	styled := "\x1b[38;2;200;100;50;59mtext\x1b[m"
 
 	result := FadeLineCtx(styled, 0.5, fc)
 	stripped := ansi.Strip(result)
 	assert.Equal(t, "text", stripped)
-	assert.NotContains(t, result, "59")
+	assert.Contains(t, result, "59", "reset must retire any preceding explicit underline color")
 }
 
 // --- test helpers ---

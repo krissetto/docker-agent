@@ -20,6 +20,10 @@ const (
 // RenderUserLines renders a submitted user message as committed scrollback,
 // echoing it with the same prompt marker used by the input box.
 func RenderUserLines(text string, width int) []string {
+	return renderUserLines(text, width, nil)
+}
+
+func renderUserLines(text string, width int, input *types.Message) []string {
 	if width < 1 {
 		width = 1
 	}
@@ -28,6 +32,9 @@ func RenderUserLines(text string, width int) []string {
 	textStyle := lipgloss.NewStyle().Foreground(styles.AgentBadgeFg)
 	content := strings.Join(RenderUserLinesWith(text, innerWidth, textStyle.Bold(true), textStyle), "\n")
 	lines := splitRenderedLines(styles.RenderComposite(boxStyle, content), width)
+	if input != nil {
+		lines = strings.Split(agentidentity.Border(strings.Join(lines, "\n"), input.InputReference, width, boxStyle), "\n")
+	}
 	if len(lines) > 0 {
 		lines[0] = seqPromptStart + lines[0] + seqOutputStart
 	}
@@ -40,8 +47,7 @@ func RenderInputLines(msg *types.Message, width int) []string {
 	}
 	width = max(width, 1)
 	if msg.Type == types.MessageTypeAgentInput {
-		lines := RenderUserLines(msg.Content, width)
-		return strings.Split(agentidentity.Border(strings.Join(lines, "\n"), msg.InputReference, width, StUserBox(width)), "\n")
+		return renderUserLines(msg.Content, width, msg)
 	}
 	innerWidth := max(width-StToolBox(width).GetHorizontalFrameSize(), 1)
 	return splitRenderedLines(renderToolBox(subagenttool.RenderInput(msg, innerWidth), width), width)

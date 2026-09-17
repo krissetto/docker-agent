@@ -62,19 +62,35 @@ func HoverProgress(line string, startCol, endCol int, ref lifecycle.InputReferen
 	return ansi.Cut(line, 0, startCol) + segment + ansi.Cut(line, endCol, ansi.StringWidth(line))
 }
 
-// Border insets an identity in the ordinary USER padding row without a top rule.
+// Border embeds the identity in the top border without changing the body rows.
+// Callers own body rendering and any shell-integration markers around the result.
 func Border(rendered string, ref lifecycle.InputReference, width int, messageStyle lipgloss.Style) string {
 	lines := strings.Split(rendered, "\n")
-	if len(lines) == 0 || width < 1 {
+	if width < 1 {
 		return rendered
 	}
-	leftWidth := min(width, messageStyle.GetBorderLeftSize())
-	left := ansi.Cut(lines[0], 0, leftWidth)
-	innerWidth := max(0, width-leftWidth)
-	inset := min(messageStyle.GetPaddingLeft(), innerWidth)
-	label := Label(ref, max(0, innerWidth-inset-messageStyle.GetPaddingRight()))
+	border := messageStyle.GetBorderStyle()
+	if border.Top == "" {
+		border = lipgloss.NormalBorder()
+	}
 	surface := lipgloss.NewStyle().Foreground(messageStyle.GetForeground()).Background(messageStyle.GetBackground())
-	lines[0] = left + styles.RenderComposite(surface, strings.Repeat(" ", inset)+label+strings.Repeat(" ", max(0, innerWidth-inset-ansi.StringWidth(label))))
+	ruleStyle := surface.Foreground(messageStyle.GetBorderLeftForeground())
+	if messageStyle.GetBorderLeftSize() == 0 {
+		ruleStyle = surface.Foreground(styles.BorderPrimary)
+	}
+	left := ""
+	if messageStyle.GetBorderLeftSize() > 0 {
+		left = ruleStyle.Render(border.TopLeft)
+	}
+	innerWidth := max(0, width-ansi.StringWidth(left))
+	lead := ansi.Truncate(border.Top+" ", innerWidth, "")
+	label := Label(ref, max(0, innerWidth-ansi.StringWidth(lead)-2))
+	tailWidth := max(0, innerWidth-ansi.StringWidth(lead)-ansi.StringWidth(label))
+	tail := strings.Repeat(border.Top, tailWidth)
+	if label != "" && tailWidth > 0 {
+		tail = " " + strings.Repeat(border.Top, tailWidth-1)
+	}
+	lines[0] = left + styles.RenderComposite(surface, ruleStyle.Render(lead)+label+ruleStyle.Render(tail))
 	return strings.Join(lines, "\n")
 }
 

@@ -52,8 +52,8 @@ func rootMouseHelp() []help.Section {
 		{ID: "mouse.chrome", Title: "Application chrome \u2014 mouse", Entries: []help.Entry{
 			{ID: "nd.chrome.mouse.contextbar.toggle.contextbar", Keys: []string{"left click"}, Description: "Toggle contextbar", Condition: "contextbar hit target visible"},
 			{ID: "nd.chrome.mouse.attachment.contextbar.preview.attachment", Keys: []string{"left click"}, Description: "Preview attachment", Condition: "attachment contextbar hit target visible"},
+			{ID: "nd.chrome.mouse.composer.divider.resize.editor", Keys: []string{"drag separator"}, Description: "Resize editor directly", Condition: "full layout separator above tabs; no modal or text selection"},
 			{ID: "nd.chrome.mouse.composer.focus.and.place.cursor", Keys: []string{"left click"}, Description: "Focus and place cursor", Condition: "composer hit target visible"},
-			{ID: "nd.chrome.mouse.composer.divider.resize.editor", Keys: []string{"drag"}, Description: "Resize editor", Condition: "composer divider hit target visible"},
 			{ID: "nd.chrome.mouse.messagebar.action.execute.action", Keys: []string{"left click"}, Description: "Execute action", Condition: "messagebar action hit target visible"},
 			{ID: "nd.chrome.mouse.notification.dismiss.notification", Keys: []string{"click"}, Description: "Dismiss notification", Condition: "notification \u00d7 hit target visible"},
 			{ID: "nd.chrome.mouse.notification.body.copy.notification", Keys: []string{"click"}, Description: "Copy notification", Condition: "notification body hit target visible"},

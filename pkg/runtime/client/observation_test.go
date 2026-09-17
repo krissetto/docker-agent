@@ -401,3 +401,44 @@ func TestAttachRejectsTreeObservation(t *testing.T) {
 	require.ErrorAs(t, sink.errors[0], &treeErr)
 	assert.Empty(t, sink.resets)
 }
+
+func TestCanonicalEventsRespectSnapshotReplayAndReattachBarriers(t *testing.T) {
+	settled := func(sequence uint64) runtime.SessionEvent {
+		return runtime.SessionEvent{
+			SessionID: "owner", TurnID: "accepted", Sequence: sequence,
+			Event: &runtime.TurnSettledEvent{SessionID: "owner", TurnID: "accepted", Outcome: runtime.TurnCompleted},
+		}
+	}
+	created := runtime.SessionEvent{
+		SessionID: "owner", TurnID: "accepted", Sequence: 9,
+		Event: &runtime.SubagentCreatedEvent{SessionID: "owner", ParentSessionID: "owner", ChildSessionID: "child", NodeID: "node"},
+	}
+	live := make(chan runtime.SessionEvent, 3)
+	live <- settled(7) // replay/live overlap
+	live <- settled(8) // event published after the observation boundary
+	live <- created
+	close(live)
+	sink := &recordingSink{}
+	first := projectObservation(t.Context(), sink, obs(6, []runtime.SessionEvent{settled(5), settled(6), settled(7)}, live), nil)
+	assert.Equal(t, []uint64{6}, sink.resets)
+	assert.Equal(t, []uint64{7, 8, 9}, sink.applied)
+	assert.Equal(t, uint64(9), first.cursor)
+	reconnected := make(chan runtime.SessionEvent, 1)
+	reconnected <- settled(10)
+	close(reconnected)
+	second := projectObservation(t.Context(), sink, obs(10, []runtime.SessionEvent{settled(8), created, settled(10)}, reconnected), &first.cursor)
+	assert.Equal(t, []uint64{6}, sink.resets, "reattach preserves the prior projection rather than reseeding business events")
+	assert.Equal(t, []uint64{7, 8, 9, 10}, sink.applied)
+	assert.Equal(t, uint64(10), second.cursor)
+	gap := make(chan runtime.SessionEvent, 1)
+	gap <- runtime.SessionEvent{Gap: true}
+	close(gap)
+	result := projectObservation(t.Context(), sink, obs(10, nil, gap), &second.cursor)
+	assert.True(t, result.gap)
+	fresh := make(chan runtime.SessionEvent, 1)
+	fresh <- settled(12)
+	close(fresh)
+	projectObservation(t.Context(), sink, obs(11, []runtime.SessionEvent{settled(11)}, fresh), nil)
+	assert.Equal(t, []uint64{6, 11}, sink.resets)
+	assert.Equal(t, []uint64{7, 8, 9, 10, 12}, sink.applied, "gap baseline is not recounted")
+}

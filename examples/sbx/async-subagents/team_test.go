@@ -127,7 +127,7 @@ func TestLauncher(t *testing.T) {
 		if editable {
 			require.NoError(t, os.WriteFile(filepath.Join(workspace, "hackerspace.yaml"), []byte("agents: {}"), 0o600))
 		}
-		cmd := exec.Command("sh", path, "--model", "openai/example", "--dry-run")
+		cmd := exec.CommandContext(t.Context(), "sh", path, "--model", "openai/example", "--dry-run")
 		cmd.Dir = workspace
 		cmd.Env = append(os.Environ(), "DOCKER_AGENT_AUTO_UPDATE=1")
 		out, err := cmd.CombinedOutput()
@@ -136,12 +136,12 @@ func TestLauncher(t *testing.T) {
 		if editable {
 			configDir = workspace
 		}
-		expected := []string{"0", "run", filepath.Join(configDir, "hackerspace.yaml"),
+		expected := []string{
+			"0", "run", filepath.Join(configDir, "hackerspace.yaml"),
 			"--working-dir", workspace,
-			"--data-dir", filepath.Join(workspace, ".docker-agent-try", "data"),
-			"--config-dir", filepath.Join(workspace, ".docker-agent-try", "config"),
-			"--cache-dir", filepath.Join(workspace, ".docker-agent-try", "cache"),
-			"--model", "openai/example", "--dry-run"}
+			"--model", "openai/example", "--dry-run",
+		}
 		assert.Equal(t, expected, strings.Split(strings.TrimSpace(string(out)), "\n"))
+		assert.NoDirExists(t, filepath.Join(workspace, ".docker-agent-try"))
 	}
 }

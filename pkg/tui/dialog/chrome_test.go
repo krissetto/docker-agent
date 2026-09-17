@@ -561,3 +561,66 @@ func TestBodyActionGapIsDeliberateAndReclaimedWhenEmptyOrTiny(t *testing.T) {
 		require.Zero(t, b.bodyFooterGap)
 	}
 }
+
+func TestSharedTitleHeaderSpacingNormalizesCallerMargins(t *testing.T) {
+	for _, header := range []string{"Title\nTabs\nFilter", "Title\n\nTabs\nFilter\n\n", "Title\n  \nTabs\nFilter\n\x1b[31m  \x1b[0m"} {
+		headers, footers := bodyChrome(header, "Apply\n\n", 12)
+		require.Equal(t, []string{"Title", "", "Tabs", "Filter", ""}, headers)
+		require.Equal(t, []string{"Apply"}, footers)
+		compact, _ := bodyChrome(header, "Apply", 5)
+		require.Equal(t, []string{"Title", "Tabs", "Filter"}, compact, "spacing yields before header controls")
+		tiny, _ := bodyChrome(header, "Apply", 3)
+		require.Equal(t, []string{"Title"}, tiny)
+	}
+}
+
+func TestSharedHeaderRowsMatchPaintAndDoNotTargetHiddenControls(t *testing.T) {
+	for _, height := range []int{20, 7, 5, 3} {
+		b := BaseDialog{}
+		b.SetSize(40, height)
+		footer := b.RenderActionKeys(34, "enter", "Apply")
+		b.PrepareScrollableBody(styles.DialogStyle, 40, "Title\nTabs\nFilter", "Body", footer)
+		view := b.RenderScrollableBody(styles.DialogStyle, 40, "Title\nTabs\nFilter", "Body", footer)
+		row, _ := b.CenterDialog(view)
+		lines := strings.Split(ansi.Strip(view), "\n")
+		for index, label := range []string{"Title", "Tabs", "Filter"} {
+			y, visible := b.headerRow(index)
+			if visible {
+				require.GreaterOrEqual(t, y-row, 0)
+				require.Less(t, y-row, len(lines))
+				require.Contains(t, lines[y-row], label)
+			} else {
+				require.NotContains(t, ansi.Strip(view), label)
+			}
+		}
+		require.LessOrEqual(t, lipgloss.Height(view), height)
+	}
+}
+
+func TestSharedChromePreservesMeaningfulBodyBlankRows(t *testing.T) {
+	b := BaseDialog{}
+	b.SetSize(40, 20)
+	body := "\nFirst\n\nLast\n"
+	footer := b.RenderActionKeys(34, "enter", "Apply")
+	b.PrepareScrollableBody(styles.DialogStyle, 40, "Title\n\n", body, footer)
+	view := b.RenderScrollableBody(styles.DialogStyle, 40, "Title\n\n", body, footer)
+	row, col := b.CenterDialog(view)
+	require.Equal(t, 5, b.bodyHeight)
+	require.Equal(t, 1, b.bodyHeaderGap)
+	require.Equal(t, 1, b.bodyFooterGap)
+	lines := strings.Split(ansi.Strip(view), "\n")
+	for i, want := range []string{"", "First", "", "Last", ""} {
+		line := lines[b.bodyY-row+i]
+		cells := []rune(line)
+		got := strings.TrimSpace(string(cells[b.bodyX-col : b.bodyX-col+10]))
+		require.Equal(t, want, got)
+	}
+}
+
+func TestSharedTitleRemainsOneBoundedHeaderRow(t *testing.T) {
+	for _, width := range []int{1, 2, 8, 24} {
+		title := RenderTitle("Select Working Directory 界", width, styles.DialogTitleStyle)
+		require.LessOrEqual(t, lipgloss.Width(title), width)
+		require.Equal(t, 1, lipgloss.Height(title))
+	}
+}

@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -658,5 +659,100 @@ func TestSettingsSelectedSectionUsesColorOnly(t *testing.T) {
 			assert.Contains(t, ansi.Strip(view), label)
 		}
 		assert.Equal(t, tab, d.tab, "render preserves the selected section")
+	}
+}
+
+func TestSettingsDialogDimInactivePanesApplyAndCancel(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		prefs := messages.Preferences{DimInactivePanes: enabled}
+		d := NewSettingsDialog(prefs, false).(*settingsDialog)
+		d.SetSize(100, 40)
+		d.selected[tabAppearance] = rowDimInactivePanes
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+		assert.Nil(t, cmd, "dimming is staged until Save, not a layout preview")
+		assert.Equal(t, !enabled, d.current.DimInactivePanes)
+		assert.Equal(t, enabled, d.original.DimInactivePanes)
+		assert.Contains(t, ansi.Strip(d.View()), "Dim inactive panes")
+		applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(d.apply()))
+		require.True(t, ok)
+		assert.Equal(t, !enabled, applied.Preferences.DimInactivePanes)
+
+		cancelled := collectMsgs(d.cancel())
+		assert.True(t, hasMsg[CloseDialogMsg](cancelled))
+		assert.False(t, hasMsg[messages.ApplySettingsMsg](cancelled))
+		assert.False(t, hasMsg[messages.PreviewLayoutMsg](cancelled))
+	}
+}
+
+func TestSettingsDialogDimInactivePanesMouseToggle(t *testing.T) {
+	d := NewSettingsDialog(messages.Preferences{DimInactivePanes: true}, false).(*settingsDialog)
+	d.SetSize(100, 40)
+	x, y, _, _ := d.BodyScrollBounds()
+	line, ok := d.rowLines[rowDimInactivePanes]
+	require.True(t, ok)
+	_, cmd := d.Update(tea.MouseClickMsg{X: x + 4, Y: y + line - d.BodyScrollOffset(), Button: tea.MouseLeft})
+	assert.Nil(t, cmd)
+	assert.Equal(t, rowDimInactivePanes, d.selected[tabAppearance])
+	assert.False(t, d.current.DimInactivePanes)
+}
+
+func TestSettingsSharedHeaderTabsUseVisibleRowsOnly(t *testing.T) {
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	for _, size := range [][2]int{{100, 40}, {40, 12}, {24, 6}, {8, 3}, {100, 40}} {
+		d.tab = tabAppearance
+		d.SetSize(size[0], size[1])
+		view := d.View()
+		tabY, visible := d.headerRow(1)
+		x, y, _, _ := d.BodyScrollBounds()
+		if !visible {
+			_, _ = d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y - 1})
+			require.Equal(t, tabAppearance, d.tab, "hidden tab controls cannot handle a title-row click")
+			continue
+		}
+		row, _ := d.Position()
+		lines := strings.Split(ansi.Strip(view), "\n")
+		require.Contains(t, lines[tabY-row], settingsTabLabels[0])
+		if size[1] >= 12 {
+			titleY, titleVisible := d.headerRow(0)
+			require.True(t, titleVisible)
+			require.Equal(t, titleY+2, tabY)
+		}
+		// Click the first cell of the next tab, not a fixed historical row.
+		targetX := x + len(settingsTabLabels[0]) + 3
+		_, _, width, _ := d.BodyScrollBounds()
+		if targetX < x+width-d.bodyScroll.ReservedCols() {
+			_, _ = d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: targetX, Y: tabY})
+			require.Equal(t, tabBehavior, d.tab)
+		}
+	}
+}
+
+func TestSettingsStructuralLeadingGapOwnedOnlyBySharedHeader(t *testing.T) {
+	for _, tab := range []int{tabAppearance, tabBehavior, tabNotifications} {
+		for _, size := range [][2]int{{100, 30}, {45, 12}, {20, 6}, {100, 30}} {
+			d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+			d.tab = tab
+			d.SetSize(size[0], size[1])
+			_, _, body, _, _ := d.bodyParts()
+			bodyLines := strings.Split(ansi.Strip(body), "\n")
+			require.NotEmpty(t, strings.TrimSpace(bodyLines[0]), "generated body starts with content, never padded structural space")
+			if tab == tabAppearance || tab == tabBehavior {
+				require.Empty(t, strings.TrimSpace(bodyLines[1]), "meaningful gap after first body content is preserved")
+			}
+			if tab == tabAppearance {
+				require.Zero(t, d.rowLines[rowTheme], "first control hit anchor has no generated leading spacer")
+			}
+			view := d.View()
+			row, _ := d.Position()
+			lines := strings.Split(ansi.Strip(view), "\n")
+			if tabY, visible := d.headerRow(1); visible {
+				require.Equal(t, 1, d.bodyHeaderGap)
+				require.Equal(t, tabY+2, d.bodyY, "exactly one shared gap between tabs and body")
+				require.Empty(t, strings.Trim(strings.TrimSpace(lines[tabY-row+1]), "│ "))
+			}
+			if size[1] == 30 {
+				require.Contains(t, lines[d.bodyY-row], strings.TrimSpace(bodyLines[0]), "first body row is painted at the shared hit origin")
+			}
+		}
 	}
 }

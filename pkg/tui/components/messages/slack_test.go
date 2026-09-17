@@ -259,7 +259,8 @@ func slackTick(t *testing.T, elapsed time.Duration) animation.TickMsg {
 	t.Helper()
 	ar := animation.NewRuntimeWithScheduler(slackScheduler{elapsed: elapsed})
 	sub := ar.Subscribe()
-	tick, ok := ar.Accept(sub.Start()().(animation.TickMsg))
+	require.Nil(t, sub.Start())
+	tick, ok := ar.Accept(ar.Continue()().(animation.TickMsg))
 	require.True(t, ok)
 	sub.Stop()
 	return tick

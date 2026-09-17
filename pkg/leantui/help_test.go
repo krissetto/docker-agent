@@ -44,7 +44,7 @@ func TestLeanHelpCategoriesAndWidth(t *testing.T) {
 		"Independent lean app only", "/help: show this help", "Type / for the available command list",
 		"LF / Ctrl+J and CR / Ctrl+M decode as Enter", "Shift+Enter: insert newline",
 		"! prefix", "No app-level selection", "withdraw all eligible pending messages",
-		"This replaces the draft", "no double-Esc guard", "current model/runtime supports it",
+		"This replaces the draft", "follows interrupt-confirmation", "current model/runtime supports it",
 		"including Enter, Ctrl+C and Ctrl+D, are ignored", "CSI / SS3", "Kitty",
 	} {
 		assert.Contains(t, text, claim)

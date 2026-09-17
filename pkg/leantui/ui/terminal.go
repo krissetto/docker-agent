@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	"charm.land/lipgloss/v2"
@@ -61,6 +62,7 @@ func NewTerminal(in, out *os.File) (*Terminal, error) {
 	t.writeString(ansi.PushKittyKeyboard(ansi.KittyDisambiguateEscapeCodes))
 	t.flush()
 	t.startResizeWatcher()
+	t.SetThemeReporting(true)
 
 	return t, nil
 }
@@ -161,6 +163,7 @@ func (t *Terminal) flush() {
 // Restore tears the terminal back down: it disables bracketed paste, cancels
 // the reader, restores the saved terminal state and stops watching for resizes.
 func (t *Terminal) Restore() {
+	t.SetThemeReporting(false)
 	t.writeString(seqDisableBracketedPaste)
 	t.writeString(ansi.PopKittyKeyboard(1))
 	t.writeString(seqShowCursor)
@@ -172,4 +175,49 @@ func (t *Terminal) Restore() {
 	_ = t.reader.Close()
 
 	_ = term.Restore(int(t.in.Fd()), t.prevState)
+}
+
+// RunExternal yields terminal input and cooked output to an explicit user
+// command. The caller must stop its key reader before entering this method.
+func (t *Terminal) RunExternal(command *exec.Cmd) (err error) {
+	t.SetThemeReporting(false)
+	t.writeString(seqDisableBracketedPaste)
+	t.writeString(ansi.PopKittyKeyboard(1))
+	t.writeString(seqShowCursor)
+	t.flush()
+	_ = t.reader.Close()
+	defer func() {
+		_, rawErr := term.MakeRaw(int(t.in.Fd()))
+		reader, readerErr := cancelreader.NewReader(t.in)
+		if readerErr == nil {
+			t.reader = reader
+		}
+		t.SetThemeReporting(true)
+		t.writeString(seqEnableBracketedPaste)
+		t.writeString(ansi.PushKittyKeyboard(ansi.KittyDisambiguateEscapeCodes))
+		t.flush()
+		if err == nil {
+			if rawErr != nil {
+				err = rawErr
+			} else {
+				err = readerErr
+			}
+		}
+	}()
+	if err := term.Restore(int(t.in.Fd()), t.prevState); err != nil {
+		return err
+	}
+	command.Stdin, command.Stdout, command.Stderr = t.in, t.out, t.out
+	return command.Run()
+}
+
+// SetThemeReporting uses the existing terminal reader for OSC background replies
+// and DEC 2031 light/dark notifications; no independent reader or watcher.
+func (t *Terminal) SetThemeReporting(enabled bool) {
+	if enabled {
+		t.writeString("\x1b[?2031h\x1b]11;?\x1b\\")
+	} else {
+		t.writeString("\x1b[?2031l")
+	}
+	t.flush()
 }

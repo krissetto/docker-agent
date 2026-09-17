@@ -10,9 +10,13 @@ import (
 // SessionRuntimeEventMsg shares the App-owned presentation head and exact
 // seed provenance with each routed page.
 type SessionRuntimeEventMsg struct {
-	Event      runtime.Event
-	Seed       bool
-	Projection *lifecycle.Projection
+	Event           runtime.Event
+	Seed            bool
+	Projection      *lifecycle.Projection
+	OriginSessionID string
+	TurnID          string
+	Epoch           uint64
+	Sequence        uint64
 }
 
 // RoutedMsg wraps a message with a session ID for routing.
@@ -45,6 +49,12 @@ type CloseTabMsg struct {
 type OpenSubagentMsg struct {
 	NodeID string // The subagent's tree node id
 }
+
+// ShowSubagentSessionsMsg opens a searchable list of canonical subagent sessions.
+type ShowSubagentSessionsMsg struct{}
+
+// ReturnToPreviousSessionMsg returns to the previous still-open view, without closing it.
+type ReturnToPreviousSessionMsg struct{}
 
 // ReorderTabMsg requests moving a tab from one position to another.
 type ReorderTabMsg struct {

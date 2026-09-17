@@ -20,11 +20,11 @@ func (s *SQLiteSessionStore) LoadTodos(ctx context.Context, sessionID string) ([
 		return []Todo{}, nil
 	}
 	if err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	var todos []Todo
 	if err := json.Unmarshal([]byte(data), &todos); err != nil {
-		return nil, fmt.Errorf("unmarshaling session todos: %w", err)
+		return nil, fmt.Errorf("unmarshaling session todos: %w", classifySQLiteContextError(ctx, err))
 	}
 	if todos == nil {
 		todos = []Todo{}
@@ -38,33 +38,33 @@ func (s *SQLiteSessionStore) SaveTodos(ctx context.Context, sessionID string, to
 	}
 	data, err := json.Marshal(todos)
 	if err != nil {
-		return fmt.Errorf("marshaling session todos: %w", err)
+		return fmt.Errorf("marshaling session todos: %w", classifySQLiteContextError(ctx, err))
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO session_todos (session_id, todos) VALUES (?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET todos = excluded.todos`, sessionID, string(data)); err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 func (s *SQLiteSessionStore) MutateTodos(ctx context.Context, sessionID string, fn func([]Todo) ([]Todo, error)) ([]Todo, error) {
 	if sessionID == "" {
 		return nil, ErrEmptyID
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var data string
@@ -73,25 +73,25 @@ func (s *SQLiteSessionStore) MutateTodos(ctx context.Context, sessionID string, 
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	var items []Todo
 	if err := json.Unmarshal([]byte(data), &items); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	items, err = fn(items)
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	encoded, err := json.Marshal(items)
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_todos (session_id, todos) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET todos=excluded.todos`, sessionID, string(encoded)); err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	return items, nil
 }

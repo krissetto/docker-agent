@@ -7,43 +7,31 @@ import (
 	"errors"
 )
 
-func (s *SQLiteSessionStore) AdmitChild(ctx context.Context, a ChildAdmission) (err error) {
-	defer func() { err = classifySQLiteError(err) }()
-	child, record, err := prepareAdmission(a)
+func (s *SQLiteSessionStore) AdmitChild(ctx context.Context, a ChildAdmission) error {
+	return s.admitChildren(ctx, []ChildAdmission{a}, true)
+}
+
+func (s *SQLiteSessionStore) AdmitChildren(ctx context.Context, admissions []ChildAdmission) error {
+	return s.admitChildren(ctx, admissions, false)
+}
+
+func (s *SQLiteSessionStore) admitChildren(ctx context.Context, admissions []ChildAdmission, allowCreate bool) (err error) {
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
+	if len(admissions) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	prepared, err := prepareAdmissions(admissions)
 	if err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	old, err := loadChildRecord(ctx, tx, child.ID)
-	if err == nil {
-		if old.RootSessionID == record.RootSessionID && old.ParentSessionID == record.ParentSessionID && old.Node.ID == record.Node.ID && old.Node.Agent == record.Node.Agent && old.Node.Parent == record.Node.Parent {
-			return nil
-		}
-		return ErrAlreadyExists
-	}
-	if !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	for _, id := range []string{record.RootSessionID, record.ParentSessionID} {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		} else if err != nil {
-			return err
-		}
-	}
-	var collision int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM child_records WHERE root_session_id = ? AND json_extract(record, '$.Node.id') = ?`, record.RootSessionID, record.Node.ID).Scan(&collision)
-	if err == nil {
-		return ErrAlreadyExists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 	lookup := func(id string) (*Session, error) {
 		sess, err := scanSession(tx.QueryRowContext(ctx, "SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id))
 		if errors.Is(err, sql.ErrNoRows) {
@@ -51,41 +39,76 @@ func (s *SQLiteSessionStore) AdmitChild(ctx context.Context, a ChildAdmission) (
 		}
 		return sess, err
 	}
-	existing, err := lookup(child.ID)
-	switch {
-	case err == nil:
+	// Existence and ancestry are read inside the same transaction as every
+	// write. Production handles acquire the writer lock before these reads, so
+	// a concurrent delete cannot invalidate the admission snapshot.
+	for i := range prepared {
+		entry := &prepared[i]
+		child, record := entry.child, entry.record
+		existing, err := lookup(child.ID)
+		if errors.Is(err, ErrNotFound) && allowCreate {
+			if err := validateNewChild(child); err != nil {
+				return err
+			}
+			entry.createChild = true
+			existing = child
+		} else if err != nil {
+			return err
+		}
 		if err := validateChildAdoption(existing, child, record, lookup); err != nil {
 			return err
 		}
-	case errors.Is(err, ErrNotFound):
-		if err := validateNewChild(child); err != nil {
+		old, err := loadChildRecord(ctx, tx, child.ID)
+		if err == nil {
+			if !sameChildIdentity(old, record) || entry.createChild {
+				return ErrAlreadyExists
+			}
+			entry.recordExists = true
+		} else if !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		if err := s.upsertSessionRowTx(ctx, tx, child); err != nil {
+		var collision int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM child_records WHERE root_session_id = ? AND json_extract(record, '$.Node.id') = ? AND session_id != ?`, record.RootSessionID, record.Node.ID, child.ID).Scan(&collision)
+		if err == nil {
+			return ErrAlreadyExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, entry := range prepared {
+		if err := s.admitChildTx(ctx, tx, entry); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteSessionStore) admitChildTx(ctx context.Context, tx *sql.Tx, entry preparedChildAdmission) error {
+	child, record := entry.child, entry.record
+	if entry.createChild {
+		if err := s.upsertSessionRowTx(ctx, tx, child); err != nil {
+			return classifySQLiteContextError(ctx, err)
 		}
 		for position, item := range child.Messages {
 			if err := s.addItemTx(ctx, tx, child.ID, position, item); err != nil {
-				return err
+				return classifySQLiteContextError(ctx, err)
 			}
 		}
-	default:
-		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO session_items(session_id, position, item_type, subsession_id)
       SELECT ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'subsession', ?
       WHERE NOT EXISTS (SELECT 1 FROM session_items WHERE session_id = ? AND item_type = 'subsession' AND subsession_id = ?)`, record.ParentSessionID, record.ParentSessionID, child.ID, record.ParentSessionID, child.ID); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
-
-	data, err := json.Marshal(record)
-	if err != nil {
-		return err
+	if entry.recordExists {
+		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO child_records(session_id, root_session_id, parent_session_id, revision, record) VALUES (?, ?, ?, ?, ?)`, child.ID, record.RootSessionID, record.ParentSessionID, record.Revision, string(data)); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := tx.ExecContext(ctx, `INSERT INTO child_records(session_id, root_session_id, parent_session_id, revision, record) VALUES (?, ?, ?, ?, ?)`, child.ID, record.RootSessionID, record.ParentSessionID, record.Revision, entry.recordJSON)
+	return classifySQLiteContextError(ctx, err)
 }
 
 func loadChildRecord(ctx context.Context, q querier, id string) (ChildRecord, error) {
@@ -103,8 +126,8 @@ func loadChildRecord(ctx context.Context, q querier, id string) (ChildRecord, er
 }
 
 func (s *SQLiteSessionStore) CommitChild(ctx context.Context, c ChildCommit) (err error) {
-	defer func() { err = classifySQLiteError(err) }()
-	tx, err := s.db.BeginTx(ctx, nil)
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
 		return err
 	}
@@ -151,44 +174,44 @@ func (s *SQLiteSessionStore) CommitChild(ctx context.Context, c ChildCommit) (er
 func (s *SQLiteSessionStore) LoadChildren(ctx context.Context, root string) ([]ChildRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT record FROM child_records WHERE root_session_id = ? ORDER BY rowid`, root)
 	if err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer rows.Close()
 	var records []ChildRecord
 	for rows.Next() {
 		var data string
 		if err := rows.Scan(&data); err != nil {
-			return nil, err
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		var record ChildRecord
 		if err := json.Unmarshal([]byte(data), &record); err != nil {
-			return nil, err
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		records = append(records, record)
 	}
-	return records, classifySQLiteError(rows.Err())
+	return records, classifySQLiteContextError(ctx, rows.Err())
 }
 
 func (s *SQLiteSessionStore) PendingReports(ctx context.Context, parent string) ([]ChildReport, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, parent_session_id, child_session_id, turn_id, revision, content FROM child_reports WHERE parent_session_id = ? AND message_id IS NULL ORDER BY rowid`, parent)
 	if err != nil {
-		return nil, classifySQLiteError(err)
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer rows.Close()
 	var reports []ChildReport
 	for rows.Next() {
 		var report ChildReport
 		if err := rows.Scan(&report.ID, &report.ParentSessionID, &report.ChildSessionID, &report.TurnID, &report.Revision, &report.Content); err != nil {
-			return nil, err
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		reports = append(reports, report)
 	}
-	return reports, classifySQLiteError(rows.Err())
+	return reports, classifySQLiteContextError(ctx, rows.Err())
 }
 
 func (s *SQLiteSessionStore) AcceptReport(ctx context.Context, parent, id string, message *Message) (acceptance ReportAcceptance, err error) {
-	defer func() { err = classifySQLiteError(err) }()
-	tx, err := s.db.BeginTx(ctx, nil)
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
 		return ReportAcceptance{}, err
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -186,4 +187,88 @@ func TestAppliedActiveTabAlwaysFollowsEditorSurface(t *testing.T) { //nolint:par
 	ApplyTheme(theme)
 	assert.Equal(t, EditorBg, TabActiveBg)
 	assert.Equal(t, "#abcdef", CurrentTheme().Colors.TabActiveBg, "legacy config value remains intact")
+}
+
+func TestPureBaseThemeVariantsCompleteAndContrasting(t *testing.T) {
+	t.Parallel()
+	variants := []struct{ ref, name, background string }{
+		{"black-cyan", "Black Cyan", "#000000"},
+		{"black-amber", "Black Amber", "#000000"},
+		{"black-violet", "Black Violet", "#000000"},
+		{"white-cobalt", "White Cobalt", "#FFFFFF"},
+		{"white-teal", "White Teal", "#FFFFFF"},
+		{"white-rose", "White Rose", "#FFFFFF"},
+	}
+	require.Len(t, variants, 6)
+	refs, err := listBuiltinThemeRefs()
+	require.NoError(t, err)
+	counts, accents := map[string]int{}, map[string]bool{}
+	registeredVariants := 0
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "black-") || strings.HasPrefix(ref, "white-") {
+			registeredVariants++
+		}
+	}
+	require.Equal(t, 6, registeredVariants)
+	for _, variant := range variants {
+		require.Contains(t, refs, variant.ref)
+		data, err := builtinThemes.ReadFile("themes/" + variant.ref + ".yaml")
+		require.NoError(t, err)
+		var raw Theme
+		require.NoError(t, yaml.Unmarshal(data, &raw))
+		require.Equal(t, variant.name, raw.Name)
+		require.Equal(t, variant.background, raw.Colors.Background)
+		require.Equal(t, variant.background, raw.Colors.ShellBg)
+		require.Equal(t, variant.background, raw.Colors.TabBg)
+		counts[raw.Colors.Background]++
+		require.False(t, accents[raw.Colors.Accent], "variants have distinct accents")
+		accents[raw.Colors.Accent] = true
+		colors := reflect.ValueOf(raw.Colors)
+		for _, field := range semanticColorFields {
+			require.NotEmpty(t, colors.FieldByName(field).String(), "%s/%s", variant.ref, field)
+		}
+		require.GreaterOrEqual(t, len(raw.Colors.AgentHues), 8)
+		for _, pair := range [][2]string{{raw.Colors.SelectedFg, raw.Colors.Selected}, {raw.Colors.TextPrimary, raw.Colors.CardBg}, {raw.Colors.Accent, raw.Colors.Background}} {
+			ratio, ok := contrastRatioHex(pair[0], pair[1])
+			require.True(t, ok)
+			require.GreaterOrEqual(t, ratio, 4.5, "%s foreground/background selection and content readability", variant.ref)
+		}
+	}
+	require.Equal(t, 3, counts["#000000"])
+	require.Equal(t, 3, counts["#FFFFFF"])
+}
+
+func TestPureBaseThemeRenderedDimIdentitySelectionAndDialog(t *testing.T) {
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	for _, ref := range []string{"black-cyan", "black-amber", "black-violet", "white-cobalt", "white-teal", "white-rose"} {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+		focused := BaseStyle.Background(EditorBg).Render("Send to reviewer · ready")
+		fc := NewFadeContext()
+		inactive := FadeLineCtx(focused, 0.62, &fc)
+		require.Equal(t, ansi.Strip(focused), ansi.Strip(inactive))
+		require.NotEqual(t, focused, inactive)
+		fg := lipgloss.Color(theme.Colors.TextPrimary)
+		r, g, b := ColorToRGB(fg)
+		ir, ig, ib := fc.interpolate(r*255, g*255, b*255, 0.62)
+		renderedR, renderedG, renderedB := extractFirstFgRGB(inactive)
+		require.Equal(t, [3]int{ir, ig, ib}, [3]int{renderedR, renderedG, renderedB}, "ANSI rendered main foreground is the contrast-tested color")
+		require.GreaterOrEqual(t, contrastRatio(RGBToColor(float64(ir)/255, float64(ig)/255, float64(ib)/255), Background), 4.5, "%s inactive body text remains readable on exact base", ref)
+		// Header surfaces use the same primary text. Test the actually
+		// transformed RGB against the transformed elevated surface as well.
+		hr, hg, hb := ColorToRGB(CardBg)
+		dr, dg, db := fc.interpolate(hr*255, hg*255, hb*255, 0.62)
+		require.GreaterOrEqual(t, contrastRatio(RGBToColor(float64(ir)/255, float64(ig)/255, float64(ib)/255), RGBToColor(float64(dr)/255, float64(dg)/255, float64(db)/255)), 4.5, "%s dimmed primary header text retains contrast on its dimmed surface", ref)
+		modelStyle := BaseStyle
+		require.GreaterOrEqual(t, contrastRatio(modelStyle.GetForeground(), Background), 3.0)
+		require.NotEmpty(t, AgentIdentityStyle("reviewer", false).Render("reviewer"))
+		selection := SelectionStyle.Render("selected λ界")
+		require.GreaterOrEqual(t, contrastRatio(SelectionStyle.GetForeground(), SelectionStyle.GetBackground()), 7.0, "%s actual applied selection style must remain readable", ref)
+		sr, sg, sb := extractFirstFgRGB(selection)
+		require.Equal(t, strings.ToLower(theme.Colors.TextPrimary), RGBToHex(float64(sr)/255, float64(sg)/255, float64(sb)/255), "selection uses effective primary foreground, not an unreachable YAML promise")
+		require.Equal(t, "selected λ界", ansi.Strip(selection))
+		t.Logf("%s focused=%q inactive=%q model=%q selection=%q", ref, focused, inactive, modelStyle.Render("Friendly Model provider (high)"), selection)
+	}
 }

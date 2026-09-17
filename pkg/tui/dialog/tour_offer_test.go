@@ -110,3 +110,29 @@ func TestTourOfferDialogBodyUsesReservedScrollbarWidth(t *testing.T) {
 		assert.LessOrEqual(t, lipgloss.Width(view), 120)
 	}
 }
+
+func TestTourOfferDialogUsesVerticalPolicyChoices(t *testing.T) {
+	d := NewTourOfferDialog(false).(*tourOfferDialog)
+	d.SetSize(100, 40)
+	view := ansi.Strip(d.View())
+	rows := make(map[string]int)
+	for row, line := range strings.Split(view, "\n") {
+		for _, label := range []string{"Never", "Not now", "Take the tour"} {
+			if strings.Contains(line, label) {
+				rows[label] = row
+			}
+		}
+	}
+	require.Len(t, rows, 3)
+	assert.Less(t, rows["Never"], rows["Not now"])
+	assert.Less(t, rows["Not now"], rows["Take the tour"])
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	assert.Nil(t, cmd)
+	key, ok := d.SelectedActionKey()
+	require.True(t, ok)
+	assert.Equal(t, 'n', key.Code)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	result, ok := findMsg[TourOfferResultMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.Equal(t, TourOfferLater, result.Choice)
+}

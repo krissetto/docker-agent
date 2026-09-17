@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,28 @@ import (
 
 func (s *Server) sessionCatalog(c echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store")
+	if c.QueryParam("view") == "summary" {
+		includeChildren := false
+		if raw := c.QueryParam("include_children"); raw != "" {
+			var err error
+			includeChildren, err = strconv.ParseBool(raw)
+			if err != nil {
+				return sessionRequestError("invalid include_children scope")
+			}
+		}
+		if c.QueryParam("active") != "" {
+			return sessionRequestError("active filter is unsupported for summary view")
+		}
+		rows, err := s.sm.ListSessionSummaries(c.Request().Context(), runtime.SessionSummaryOptions{IncludeChildren: includeChildren})
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		return c.JSON(http.StatusOK, struct {
+			Version  int                           `json:"version"`
+			View     string                        `json:"view"`
+			Sessions []runtime.SessionSummaryEntry `json:"sessions"`
+		}{Version: 1, View: "summary", Sessions: rows})
+	}
 	return s.sessionCatalogResponse(c)
 }
 
@@ -330,6 +353,20 @@ func catalogEntryFromSession(sess *session.Session) sessionResourceDTO {
 }
 
 func (s *Server) getCanonicalSession(c echo.Context) error {
+	if views, present := c.QueryParams()["view"]; present {
+		if len(views) != 1 || views[0] != "prepare-info" {
+			return sessionRequestError("unknown session view")
+		}
+		info, err := s.sm.ConfirmedSessionViewInfo(c.Request().Context(), c.Param("id"))
+		if err != nil {
+			return sessionHTTPError(err)
+		}
+		return c.JSON(http.StatusOK, struct {
+			Version int                             `json:"version"`
+			View    string                          `json:"view"`
+			Info    runtime.PreparedSessionViewInfo `json:"info"`
+		}{Version: 1, View: "prepare-info", Info: info})
+	}
 	sess, err := s.sm.GetSession(c.Request().Context(), c.Param("id"))
 	if err != nil {
 		return sessionHTTPError(err)

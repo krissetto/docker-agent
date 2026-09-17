@@ -1,148 +1,132 @@
 package sidebar
 
 import (
-	"fmt"
 	"strings"
 
-	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// CollapsedViewModel holds the computed layout decisions for collapsed mode.
-// This is a pure data structure - rendering is handled by separate view functions.
-// Computing this once avoids duplicating the layout logic between CollapsedHeight and collapsedView.
+// CollapsedViewModel holds the content of the compact horizontal sidebar.
+// Rendering and hit testing share the same bounded two-row layout.
 type CollapsedViewModel struct {
 	TitleWithStar    string
 	WorkingIndicator string
 	WorkingDir       string
 	Branch           string
 	Yolo             string
+	AgentIdentity    string
 	ModelInfo        string
+	Thinking         string
+	CanCycleThinking bool
 	UsageSummary     string
-	// InfoLine is the compact agents/tools/todos summary shown when the
-	// sidebar renders as a horizontal band.
-	InfoLine string
+	InfoLine         string
 
-	// Layout decisions computed from the data
 	TitleAndIndicatorOnOneLine bool
 	WdAndUsageOnOneLine        bool
 	ContentWidth               int
 }
 
-// LineCount returns the number of lines needed to render this layout.
+type collapsedSpan struct {
+	text   string
+	x, y   int
+	action ClickResult
+}
+
+func collapsedSingleLine(text string) string {
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(text)
+}
+
+// spans reserves the right-hand usage summary before fitting optional metadata.
+// Long and multiline titles or model descriptions can never grow the band.
+func (vm CollapsedViewModel) spans() []collapsedSpan {
+	width := max(0, vm.ContentWidth)
+	var spans []collapsedSpan
+	appendSpan := func(text string, x, y, budget int, action ClickResult) int {
+		text = ansi.Truncate(collapsedSingleLine(text), max(0, budget), "…")
+		if text == "" {
+			return x
+		}
+		spans = append(spans, collapsedSpan{text: text, x: x, y: y, action: action})
+		return x + ansi.StringWidth(text)
+	}
+	modelLines := strings.Split(vm.ModelInfo, "\n")
+	modelName, provider := "", ""
+	if len(modelLines) > 0 {
+		modelName = modelLines[0]
+	}
+	if len(modelLines) > 1 {
+		provider = modelLines[1]
+	}
+	// Compact mode spends its two rows on distinct model and provider lines.
+	// Workspace/status extras yield before these controls or canonical identity.
+	modelName = ansi.Truncate(collapsedSingleLine(modelName), width/2, "…")
+	titleBudget := width
+	if modelName != "" {
+		titleBudget = max(0, width-ansi.StringWidth(modelName)-2)
+	}
+	appendSpan(vm.TitleWithStar, 0, 0, titleBudget, ClickTitle)
+	appendSpan(modelName, width-ansi.StringWidth(modelName), 0, ansi.StringWidth(modelName), ClickModel)
+
+	pill := ansi.Truncate(collapsedSingleLine(vm.Yolo), width, "…")
+	usageBudget := width
+	if pill != "" {
+		usageBudget = max(0, width-ansi.StringWidth(pill)-1)
+	}
+	usage := ansi.Truncate(collapsedSingleLine(vm.UsageSummary), usageBudget, "…")
+	rightWidth := ansi.StringWidth(usage)
+	if pill != "" {
+		rightWidth += ansi.StringWidth(pill)
+		if usage != "" {
+			rightWidth++
+		}
+	}
+	leftBudget := width
+	if rightWidth > 0 {
+		leftBudget = max(0, width-rightWidth-2)
+	}
+	x := appendSpan(vm.AgentIdentity, 0, 1, leftBudget, ClickNone)
+	if x > 0 {
+		x += 2
+	}
+	modelX := x
+	for _, span := range modelFooterSpans(provider, vm.Thinking, vm.CanCycleThinking, max(0, leftBudget-modelX)) {
+		x = appendSpan(span.text, modelX+span.x, 1, leftBudget-modelX-span.x, span.action)
+	}
+	for _, part := range []struct {
+		text   string
+		action ClickResult
+	}{
+		{vm.WorkingDir, ClickWorkingDir},
+		{vm.Branch, ClickNone},
+	} {
+		if part.text == "" || x >= leftBudget {
+			continue
+		}
+		if x > 0 {
+			x += 2
+		}
+		x = appendSpan(part.text, x, 1, leftBudget-x, part.action)
+	}
+	appendSpan(usage, width-rightWidth, 1, ansi.StringWidth(usage), ClickUsage)
+	appendSpan(pill, width-ansi.StringWidth(pill), 1, ansi.StringWidth(pill), ClickNone)
+	return spans
+}
+
 func (vm CollapsedViewModel) LineCount() int {
-	lines := vm.titleSectionLines()
-
-	// Path + usage metadata row. The two share one line only when both are
-	// present and fit; a missing part (e.g. hidden session path or hidden
-	// usage) is skipped so the row never renders blank.
-	switch {
-	case vm.WorkingDir != "" && vm.UsageSummary != "" && vm.WdAndUsageOnOneLine:
-		lines++
-	default:
-		if vm.WorkingDir != "" {
-			lines += linesNeeded(lipgloss.Width(vm.WorkingDir), vm.ContentWidth)
-		}
-		if vm.UsageSummary != "" {
-			lines += linesNeeded(lipgloss.Width(vm.UsageSummary), vm.ContentWidth)
-		}
+	lines := 1
+	for _, span := range vm.spans() {
+		lines = max(lines, span.y+1)
 	}
-
-	lines += linesNeededOptional(vm.Branch, vm.ContentWidth)
-	lines += linesNeededOptional(vm.Yolo, vm.ContentWidth)
-	if vm.ModelInfo != "" {
-		lines += len(strings.Split(vm.ModelInfo, "\n"))
-	}
-
-	if vm.InfoLine != "" {
-		lines += linesNeeded(lipgloss.Width(vm.InfoLine), vm.ContentWidth)
-	}
-
 	return lines
 }
 
-// titleSectionLines returns the number of rendered lines consumed by the
-// title (and optional working indicator) section.
-func (vm CollapsedViewModel) titleSectionLines() int {
-	switch {
-	case vm.TitleAndIndicatorOnOneLine:
-		return 1
-	case vm.WorkingIndicator == "":
-		return linesNeeded(lipgloss.Width(vm.TitleWithStar), vm.ContentWidth)
-	default:
-		return linesNeeded(lipgloss.Width(vm.TitleWithStar), vm.ContentWidth) +
-			linesNeeded(lipgloss.Width(vm.WorkingIndicator), vm.ContentWidth)
-	}
-}
+func (CollapsedViewModel) titleSectionLines() int { return 1 }
 
-// RenderCollapsedView renders the collapsed sidebar from a CollapsedViewModel.
-// This is a pure function that takes data and returns a string.
+// RenderCollapsedView clips each semantic span before composing either row.
 func RenderCollapsedView(vm CollapsedViewModel) string {
-	var lines []string
-
-	// Title line(s)
-	switch {
-	case vm.TitleAndIndicatorOnOneLine:
-		if vm.WorkingIndicator == "" {
-			lines = append(lines, vm.TitleWithStar)
-		} else {
-			gap := vm.ContentWidth - lipgloss.Width(vm.TitleWithStar) - lipgloss.Width(vm.WorkingIndicator)
-			lines = append(lines, fmt.Sprintf("%s%*s%s", vm.TitleWithStar, gap, "", vm.WorkingIndicator))
-		}
-	case vm.WorkingIndicator == "":
-		// No working indicator but title wraps - just output title (lipgloss will wrap)
-		lines = append(lines, vm.TitleWithStar)
-	default:
-		// Title and working indicator on separate lines
-		lines = append(lines, vm.TitleWithStar, vm.WorkingIndicator)
-	}
-
-	// Working directory + usage line(s). WorkingDir arrives pre-styled
-	// (accent block + primary text) to match the vertical Session tab.
-	// The two share one line only when both are present and fit; a missing
-	// part (e.g. hidden session path or hidden usage) is skipped so the row
-	// never renders blank. Mirrors LineCount.
-	switch {
-	case vm.WorkingDir != "" && vm.UsageSummary != "" && vm.WdAndUsageOnOneLine:
-		gap := vm.ContentWidth - lipgloss.Width(vm.WorkingDir) - lipgloss.Width(vm.UsageSummary)
-		lines = append(lines, fmt.Sprintf("%s%*s%s", vm.WorkingDir, gap, "", vm.UsageSummary))
-	default:
-		if vm.WorkingDir != "" {
-			lines = append(lines, vm.WorkingDir)
-			if vm.Branch != "" {
-				lines = append(lines, vm.Branch)
-			}
-		}
-
-		if vm.UsageSummary != "" {
-			lines = append(lines, vm.UsageSummary)
-		}
-	}
-
-	if vm.ModelInfo != "" {
-		lines = append(lines, vm.ModelInfo)
-	}
-	if vm.InfoLine != "" {
-		lines = append(lines, vm.InfoLine)
-	}
-
-	if vm.Yolo != "" {
-		lines = append(lines, strings.Repeat(" ", max(0, vm.ContentWidth-lipgloss.Width(vm.Yolo)))+vm.Yolo)
+	lines := make([]string, vm.LineCount())
+	for _, span := range vm.spans() {
+		lines[span.y] += strings.Repeat(" ", max(0, span.x-ansi.StringWidth(lines[span.y]))) + span.text
 	}
 	return strings.Join(lines, "\n")
-}
-
-// linesNeeded calculates how many lines are needed to display text of given width
-// within a container of contentWidth. Returns at least 1 line.
-func linesNeeded(textWidth, contentWidth int) int {
-	if contentWidth <= 0 || textWidth <= 0 {
-		return 1
-	}
-	return max(1, (textWidth+contentWidth-1)/contentWidth)
-}
-
-func linesNeededOptional(text string, width int) int {
-	if text == "" {
-		return 0
-	}
-	return linesNeeded(lipgloss.Width(text), width)
 }

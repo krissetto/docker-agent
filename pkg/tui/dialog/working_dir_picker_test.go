@@ -3,8 +3,11 @@ package dialog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,5 +52,46 @@ func TestWorkingDirectorySelectedSectionUsesColorOnly(t *testing.T) {
 		require.Contains(t, view, "Recent")
 		require.Contains(t, view, "Pinned")
 		require.Equal(t, section, d.section, "render preserves the selected section")
+	}
+}
+
+func TestWorkingDirectorySharedHeaderSpacingAndTabHitGeometry(t *testing.T) {
+	root := t.TempDir()
+	d := NewWorkingDirPickerDialog(t.Context(), []string{root + "/recent"}, []string{root + "/pinned"}, nil, root).(*workingDirPickerDialog)
+	for _, size := range [][2]int{{120, 40}, {40, 12}, {24, 6}, {8, 3}, {1, 1}, {120, 40}} {
+		for _, section := range dirPickerSectionOrder {
+			d.setSection(section)
+			d.SetSize(size[0], size[1])
+			view := d.View()
+			row, col := d.Position()
+			require.LessOrEqual(t, lipgloss.Width(view), size[0])
+			require.LessOrEqual(t, lipgloss.Height(view), size[1])
+			tabY, visible := d.headerRow(1)
+			if !visible {
+				for y := row; y < row+lipgloss.Height(view); y++ {
+					require.Equal(t, -1, d.tabClickTarget(d.bodyX, y))
+				}
+				continue
+			}
+			lines := strings.Split(ansi.Strip(view), "\n")
+			require.Contains(t, lines[tabY-row], "Browse")
+			if size[1] >= 12 {
+				titleY, titleVisible := d.headerRow(0)
+				require.True(t, titleVisible)
+				require.Equal(t, titleY+2, tabY, "one shared blank row separates title and tabs")
+				require.Empty(t, strings.Trim(strings.TrimSpace(lines[titleY-row+1]), "│ "))
+			}
+			for _, region := range d.tabRegions {
+				x := d.bodyX + region.xStart
+				if x >= d.bodyX+d.bodyWidth-d.bodyScroll.ReservedCols() {
+					continue
+				}
+				require.Equal(t, int(region.section), d.tabClickTarget(x, tabY))
+				require.Equal(t, -1, d.tabClickTarget(x, tabY-1))
+				require.Equal(t, -1, d.tabClickTarget(x, tabY+1))
+			}
+			require.Equal(t, -1, d.tabClickTarget(col, tabY), "border is not a tab")
+			require.Equal(t, -1, d.tabClickTarget(col+lipgloss.Width(view), tabY))
+		}
 	}
 }

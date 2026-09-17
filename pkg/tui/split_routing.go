@@ -117,3 +117,43 @@ func stampSendCommand(id string, generation uint64, cmd tea.Cmd) tea.Cmd {
 		return result
 	}
 }
+
+// Stamp only the footer thinking action, preserving all unrelated command and
+// framework results. Origin/generation are captured before the page Update.
+func stampThinkingCycleCommand(origin string, generation uint64, cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		result := cmd()
+		switch msg := result.(type) {
+		case messages.ResumeSessionMsg:
+			msg.RouteGeneration = generation
+			return messages.RoutedMsg{SessionID: origin, RouteGeneration: generation, Inner: msg}
+		case messages.CycleThinkingLevelMsg:
+			msg.RouteGeneration = generation
+			return messages.RoutedMsg{SessionID: origin, RouteGeneration: generation, Inner: msg}
+		case tea.BatchMsg:
+			cmds := make([]tea.Cmd, len(msg))
+			for i, child := range msg {
+				cmds[i] = stampThinkingCycleCommand(origin, generation, child)
+			}
+			if batch := tea.Batch(cmds...); batch != nil {
+				return batch()
+			}
+			return nil
+		}
+		if reflect.TypeOf(result) == paneSequenceType {
+			children := reflect.ValueOf(result).Convert(paneCommandsType).Interface().([]tea.Cmd)
+			cmds := make([]tea.Cmd, len(children))
+			for i, child := range children {
+				cmds[i] = stampThinkingCycleCommand(origin, generation, child)
+			}
+			if sequence := tea.Sequence(cmds...); sequence != nil {
+				return sequence()
+			}
+			return nil
+		}
+		return result
+	}
+}

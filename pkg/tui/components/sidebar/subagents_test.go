@@ -192,7 +192,7 @@ func TestSubagentSpinnerLifecycle(t *testing.T) {
 
 	m := newSubagentTestModel(t)
 
-	cmd := m.SetSubagentTree(subagentSnapshot())
+	cmd := sidebarOwnerCommand(m, m.SetSubagentTree(subagentSnapshot()))
 	assert.NotNil(t, cmd, "running subagents start the spinner")
 	assert.True(t, m.subagentSpinnerOn)
 
@@ -482,11 +482,11 @@ func TestSubagentsInfoRendersBranchGuides(t *testing.T) {
 	assert.Contains(t, find("reviewer"), "└ reviewer", "last sibling gets an elbow")
 	assert.NotContains(t, find("reviewer"), "reviewer ○")
 
-	assert.True(t, strings.HasPrefix(find("planner"), "planner"),
-		"top-level rows start with the agent name: %q", find("planner"))
-	assert.True(t, strings.HasPrefix(find("reviewer"), "└ reviewer"),
+	assert.True(t, strings.HasPrefix(find("planner"), "  planner"),
+		"top-level rows indent the agent name under the recap: %q", find("planner"))
+	assert.True(t, strings.HasPrefix(find("reviewer"), "  └ reviewer"),
 		"guides start under the parent name: %q", find("reviewer"))
-	assert.True(t, strings.HasPrefix(find("tester"), "│ └ tester"),
+	assert.True(t, strings.HasPrefix(find("tester"), "  │ └ tester"),
 		"rails inherit the parent-name origin: %q", find("tester"))
 }
 

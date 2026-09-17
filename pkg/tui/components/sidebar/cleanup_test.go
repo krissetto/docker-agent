@@ -63,6 +63,10 @@ func TestCleanSidebarLayoutAndCanonicalRoot(t *testing.T) {
 		return -1
 	}
 	assert.Equal(t, row("workspace")+1, row("feature/cleanup"))
+	assert.Greater(t, row("Current display"), row("$0.00"))
+	assert.Equal(t, row("worker")+1, row("Current display"))
+	assert.Greater(t, row("worker"), row("$0.00"))
+	assert.NotContains(t, lines[len(lines)-1], "worker")
 	assert.Equal(t, row("Current display")+1, row("fallback"))
 	assert.Less(t, row("Session title"), row("$0.00"))
 	assert.NotContains(t, second, "root")
@@ -217,7 +221,7 @@ func TestSidebarWarmCacheThemeColorsAndLayout(t *testing.T) {
 			cells := sidebarCells(line)
 			cellX := lipgloss.Width(text[:offset])
 			require.Less(t, cellX, len(cells))
-			expected := styles.TabPrimaryStyle.GetForeground()
+			expected := styles.BaseStyle.GetForeground()
 			if needle == "provider" {
 				expected = styles.MutedStyle.GetForeground()
 			}
@@ -252,28 +256,26 @@ func TestActiveModelDisplayLocalAndRemoteFallback(t *testing.T) {
 	}
 }
 
-func TestCollapsedBranchStaysDirectlyBelowWorkspace(t *testing.T) {
+func TestCollapsedBranchSharesWorkspaceRow(t *testing.T) {
 	t.Parallel()
 	m := newVisibilityTestSidebar(t).model
 	m.SetMode(ModeCollapsed)
-	m.SetSize(60, 20)
+	m.SetSize(120, 20)
 	m.workingDirectory = "/parent/workspace"
 	m.gitBranchName = "branch-name"
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
-	view := ansi.Strip(RenderCollapsedView(vm))
-	lines := strings.Split(view, "\n")
-	require.Len(t, lines, vm.LineCount())
-	for i, line := range lines {
-		if !strings.Contains(line, "workspace") {
-			continue
-		}
-		require.Less(t, i+1, len(lines))
-		assert.Equal(t, "branch-name", strings.TrimSpace(lines[i+1]))
-		result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft, i)
-		assert.Equal(t, ClickWorkingDir, result)
-		result, _ = m.HandleClickType(m.layoutCfg.PaddingLeft, i+1)
-		assert.Equal(t, ClickNone, result)
-		return
-	}
-	t.Fatal("workspace not rendered")
+	lines := strings.Split(ansi.Strip(RenderCollapsedView(vm)), "\n")
+	require.Len(t, lines, 2)
+	require.Contains(t, lines[1], "workspace")
+	require.Contains(t, lines[1], "branch-name")
+	directoryPrefix, _, found := strings.Cut(lines[1], "workspace")
+	require.True(t, found)
+	directoryX := ansi.StringWidth(directoryPrefix)
+	result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft+directoryX, 1)
+	assert.Equal(t, ClickWorkingDir, result)
+	branchPrefix, _, found := strings.Cut(lines[1], "branch-name")
+	require.True(t, found)
+	branchX := ansi.StringWidth(branchPrefix)
+	result, _ = m.HandleClickType(m.layoutCfg.PaddingLeft+branchX, 1)
+	assert.Equal(t, ClickNone, result)
 }

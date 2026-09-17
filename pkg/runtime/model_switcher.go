@@ -34,6 +34,10 @@ type ModelChoice struct {
 	Provider string `json:"provider,omitempty"`
 	// Model is the specific model name (e.g., "gpt-4o", "claude-sonnet-4-0")
 	Model string `json:"model,omitempty"`
+	// ModelID is the canonical model ID, distinct from a configured display alias.
+	ModelID string `json:"model_id,omitempty"`
+	// ModelName is the friendly catalog name, falling back to the canonical ID.
+	ModelName string `json:"model_name,omitempty"`
 	// IsDefault indicates this is the agent's configured default model
 	IsDefault bool `json:"is_default,omitempty"`
 	// IsCurrent indicates this is the currently active model for the agent
@@ -130,6 +134,8 @@ func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []
 			Ref:       ref,
 			Provider:  prov,
 			Model:     name,
+			ModelID:   name,
+			ModelName: name,
 			IsCurrent: isCurrent,
 			IsCustom:  true,
 		})
@@ -145,6 +151,8 @@ func DecorateModelChoices(models []ModelChoice, currentRef string, customRefs []
 			Ref:       currentRef,
 			Provider:  prov,
 			Model:     name,
+			ModelID:   name,
+			ModelName: name,
 			IsCurrent: true,
 			IsCustom:  true,
 		})
@@ -540,6 +548,8 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 			Ref:       name,
 			Provider:  cfg.Provider,
 			Model:     cfg.DisplayOrModel(),
+			ModelID:   cfg.Model,
+			ModelName: cfg.Model,
 			IsDefault: name == currentAgentDefault,
 		}
 		// Best-effort lookup of pricing / context information from models.dev.
@@ -691,6 +701,8 @@ func (r *LocalRuntime) buildCatalogChoices(ctx context.Context) []ModelChoice {
 				Ref:       ref,
 				Provider:  dockerAgentProvider,
 				Model:     modelID,
+				ModelID:   modelID,
+				ModelName: modelID,
 				IsCatalog: true,
 			}
 			applyCatalogMetadata(&choice, &model)
@@ -726,15 +738,12 @@ func mapModelsDevProvider(providerID string) (string, bool) {
 	return "", false
 }
 
-// populateCatalogMetadata fetches models.dev metadata for the given
-// provider/model pair and copies it onto choice. It silently does
-// nothing when the lookup fails or when the runtime has no models store.
-func (r *LocalRuntime) populateCatalogMetadata(ctx context.Context, choice *ModelChoice, providerID, modelID string) {
-	if r.modelsStore == nil {
-		return
-	}
-	m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(providerID, modelID))
-	if err == nil {
+// populateCatalogMetadata copies already cached models.dev metadata for a
+// provider/model pair. It never loads the store or initiates catalog I/O.
+func (r *LocalRuntime) populateCatalogMetadata(_ context.Context, choice *ModelChoice, providerID, modelID string) {
+	choice.ModelID = modelID
+	choice.ModelName = modelID
+	if m, ok := cachedModelDatabase(r.modelsStore).LookupModel(modelsdev.NewID(providerID, modelID)); ok {
 		applyCatalogMetadata(choice, m)
 	}
 }
@@ -744,6 +753,9 @@ func (r *LocalRuntime) populateCatalogMetadata(ctx context.Context, choice *Mode
 func applyCatalogMetadata(choice *ModelChoice, m *modelsdev.Model) {
 	if m == nil {
 		return
+	}
+	if strings.TrimSpace(m.Name) != "" {
+		choice.ModelName = m.Name
 	}
 	choice.Family = m.Family
 	if m.Cost != nil {

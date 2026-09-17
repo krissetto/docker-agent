@@ -75,6 +75,7 @@ type messageModel struct {
 	selected bool
 	hovered  bool
 	expanded bool
+	ar       *animation.Runtime
 	spinner  spinner.Spinner
 
 	// renderCache memoizes the output of Render(width) keyed by the inputs
@@ -156,20 +157,46 @@ type renderCache struct {
 
 // New creates a new message view
 func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
+	if ar == nil {
+		panic("message: nil animation runtime")
+	}
 	imageScanOffset := -1
 	if msg != nil && msg.Type == types.MessageTypeAssistant {
 		refs := tuiimage.MarkdownReferences(msg.Content)
 		imageScanOffset = nextUnresolvedImageOpener(msg.Content, 0, refs)
 	}
-	return &messageModel{
+	mv := &messageModel{
 		message:         msg,
 		previous:        previous,
 		width:           80, // Default width
 		height:          1,  // Will be calculated
 		focused:         false,
 		imageScanOffset: imageScanOffset,
-		spinner:         spinner.New(ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle),
+		ar:              ar,
 	}
+	mv.syncSpinner()
+	return mv
+}
+
+// Static history needs neither pre-rendered spinner frames nor a subscription.
+// Pending messages retain the same spinner instance across visibility changes.
+func (mv *messageModel) syncSpinner() {
+	msg := mv.message
+	needed := msg != nil && (msg.Type == types.MessageTypeSpinner || msg.Type == types.MessageTypeLoading ||
+		(msg.Type == types.MessageTypeAssistant && msg.Content == "" && len(msg.AssistantMedia) == 0))
+	if needed {
+		mv.ensureSpinner()
+	} else if mv.spinner != nil {
+		mv.spinner.Stop()
+		mv.spinner = nil
+	}
+}
+
+func (mv *messageModel) ensureSpinner() spinner.Spinner {
+	if mv.spinner == nil {
+		mv.spinner = spinner.New(mv.ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle)
+	}
+	return mv.spinner
 }
 
 // Bubble Tea Model methods
@@ -178,7 +205,7 @@ func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
 func (mv *messageModel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
-		cmds = append(cmds, mv.spinner.Init())
+		cmds = append(cmds, mv.ensureSpinner().Init())
 	}
 	if cmd := mv.loadMarkdownImages(mv.message); cmd != nil {
 		cmds = append(cmds, cmd)
@@ -201,10 +228,10 @@ func (mv *messageModel) SetMessage(msg *types.Message) tea.Cmd {
 		mv.mdRenderer.Reset()
 	}
 	mv.message = msg
+	mv.syncSpinner()
+	// Historical/committed content already has an immutable owner. Seed the
+	// mutable buffer only if AppendContent actually resumes this message.
 	mv.contentBuf.Reset()
-	if msg != nil {
-		mv.contentBuf.WriteString(msg.Content)
-	}
 	mv.imageScanOffset = -1
 	mv.renderCache.valid = false
 	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.InputOrigin == session.InputOriginAgent {
@@ -219,12 +246,18 @@ func (mv *messageModel) AppendContent(content string) tea.Cmd {
 	if content == "" || mv.message == nil {
 		return nil
 	}
+	if mv.finalized {
+		mv.finalized = false
+		refs := tuiimage.MarkdownReferences(mv.message.Content)
+		mv.imageScanOffset = nextUnresolvedImageOpener(mv.message.Content, 0, refs)
+	}
 	if mv.contentBuf.Len() == 0 && mv.message.Content != "" {
 		mv.contentBuf.WriteString(mv.message.Content)
 	}
 	oldLen := mv.contentBuf.Len()
 	mv.contentBuf.WriteString(content)
 	mv.message.Content = mv.contentBuf.String()
+	mv.syncSpinner()
 	mv.renderCache.valid = false
 	// Keep only an offset into canonical content. The one-byte lookback finds an
 	// opener split as "!" then "[" without retaining or duplicating streamed text.
@@ -356,7 +389,7 @@ func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return mv, func() tea.Msg { return markdownImageRenderedMsg{} }
 	}
 	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
-		s, cmd := mv.spinner.Update(msg)
+		s, cmd := mv.ensureSpinner().Update(msg)
 		mv.spinner = s.(spinner.Spinner)
 		return mv, cmd
 	}
@@ -550,16 +583,21 @@ func (mv *messageModel) render(width int) string {
 	switch msg.Type {
 	case types.MessageTypeSpinner:
 		if msg.Content == "" {
-			return mv.spinner.View() // top-level: keep the playful spinner
+			return mv.ensureSpinner().View() // top-level: keep the playful spinner
 		}
 		// Delegated stream: animated glyph + per-agent-colored "parent → child".
-		glyph := styles.SpinnerDotsAccentStyle.MarginLeft(2).Render(mv.spinner.RawFrame())
+		glyph := styles.SpinnerDotsAccentStyle.MarginLeft(2).Render(mv.ensureSpinner().RawFrame())
 		return glyph + " " + styles.AgentAccentStyleFor(msg.Sender).Render(msg.Content)
 	case types.MessageTypeUser, types.MessageTypeAgentInput:
 		// Choose style based on selection state
 		messageStyle := styles.UserMessageStyle
 		if mv.selected && msg.SessionPosition != nil {
 			messageStyle = styles.SelectedUserMessageStyle
+		}
+		if msg.Type == types.MessageTypeAgentInput {
+			// Agent prose uses the USER surface, not the user's bold emphasis.
+			// Keep literal content and any explicit ANSI emphasis unchanged.
+			messageStyle = messageStyle.Bold(false)
 		}
 
 		formatUserContent := func(c string) string {
@@ -604,7 +642,7 @@ func (mv *messageModel) render(width int) string {
 		return rendered
 	case types.MessageTypeAssistant:
 		if msg.Content == "" && len(msg.AssistantMedia) == 0 {
-			return mv.spinner.View()
+			return mv.ensureSpinner().View()
 		}
 
 		messageStyle := styles.AssistantMessageStyle
@@ -699,7 +737,7 @@ func (mv *messageModel) render(width int) string {
 		return styles.ErrorMessageStyle.Width(width - 1).Render(content)
 	case types.MessageTypeLoading:
 		// Show spinner with the loading description, truncated to fit width
-		spinnerView := mv.spinner.View()
+		spinnerView := mv.ensureSpinner().View()
 		spinnerWidth := ansi.StringWidth(spinnerView) + 1 // +1 for space separator
 		maxDescWidth := width - spinnerWidth
 		description := msg.Content
@@ -949,7 +987,7 @@ func (mv *messageModel) CodeBlocks() []markdown.CodeBlock {
 // StopAnimation stops the spinner animation and unregisters from the animation coordinator.
 // This must be called when the view is removed from the UI to avoid leaked animation subscriptions.
 func (mv *messageModel) StopAnimation() {
-	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
+	if mv.spinner != nil {
 		mv.spinner.Stop()
 	}
 }
@@ -958,7 +996,7 @@ func (mv *messageModel) StopAnimation() {
 // Unlike Init, it never starts or retries markdown image loading.
 func (mv *messageModel) ResumeAnimation() tea.Cmd {
 	if mv.message.Type == types.MessageTypeSpinner || mv.message.Type == types.MessageTypeLoading {
-		return mv.spinner.Init()
+		return mv.ensureSpinner().Init()
 	}
 	return nil
 }
@@ -996,6 +1034,9 @@ func (mv *messageModel) Finalize() {
 		return
 	}
 	mv.renderCache = renderCache{}
+	// This releases only the builder's ownership. Streamed canonical Content
+	// may still alias its backing allocation, which must remain intact.
+	mv.contentBuf.Reset()
 	mv.streamLines = assistantStreamLines{}
 	mv.segmentCodeBlocks = nil
 	mv.imageScanOffset = -1

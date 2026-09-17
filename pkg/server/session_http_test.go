@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -467,7 +468,9 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 			}
 			if strings.HasPrefix(line, "data: ") {
 				var message map[string]any
-				if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &message); err != nil {
+				decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(strings.TrimPrefix(line, "data: "))))
+				decoder.UseNumber()
+				if err := decoder.Decode(&message); err != nil {
 					return nil, err
 				}
 				return message, nil
@@ -479,6 +482,13 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 		require.NoError(t, readErr)
 		return message
 	}
+	sequenceOf := func(envelope map[string]any) uint64 {
+		number, ok := envelope["sequence"].(json.Number)
+		require.True(t, ok, "canonical sequence must be an integer")
+		sequence, err := strconv.ParseUint(number.String(), 10, 64)
+		require.NoError(t, err)
+		return sequence
+	}
 	assert.Equal(t, "snapshot", readMessage()["type"])
 	assert.Equal(t, "ready", readMessage()["type"])
 
@@ -489,19 +499,39 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	require.NoError(t, err)
 	defer submit.Body.Close()
 	require.Equal(t, http.StatusAccepted, submit.StatusCode)
+	var firstSubmission sessionSubmissionDTO
+	require.NoError(t, json.NewDecoder(submit.Body).Decode(&firstSubmission))
 
-	var lastSequence float64
+	var lastSequence uint64
 	for {
 		message := readMessage()
 		envelope, _ := message["envelope"].(map[string]any)
-		sequence, _ := envelope["sequence"].(float64)
+		sequence := sequenceOf(envelope)
 		assert.Greater(t, sequence, lastSequence)
 		lastSequence = sequence
+		assert.Equal(t, metadata.SessionID, envelope["session_id"])
+		assert.Equal(t, firstSubmission.TurnID, envelope["turn_id"])
 		event, _ := envelope["event"].(map[string]any)
 		if event["type"] == "stream_stopped" {
 			break
 		}
 	}
+	// StreamStopped remains delivered first. Durable settlement is the exact
+	// next canonical event, not an idle observation or a new execution turn.
+	settlement := readMessage()
+	settledEnvelope, ok := settlement["envelope"].(map[string]any)
+	require.True(t, ok)
+	settledSequence := sequenceOf(settledEnvelope)
+	assert.Equal(t, lastSequence+1, settledSequence)
+	lastSequence = settledSequence
+	assert.Equal(t, metadata.SessionID, settledEnvelope["session_id"])
+	assert.Equal(t, firstSubmission.TurnID, settledEnvelope["turn_id"])
+	settledEvent, ok := settledEnvelope["event"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "turn_settled", settledEvent["type"])
+	assert.Equal(t, metadata.SessionID, settledEvent["session_id"])
+	assert.Equal(t, firstSubmission.TurnID, settledEvent["turn_id"])
+	assert.Equal(t, string(runtime.TurnCompleted), settledEvent["outcome"])
 	require.Eventually(t, func() bool {
 		handle, lookupErr := owner.Runtime().SessionByID(metadata.SessionID)
 		if lookupErr != nil {
@@ -555,7 +585,7 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 			message = readMessage()
 		}
 		envelope, _ := message["envelope"].(map[string]any)
-		sequence, _ := envelope["sequence"].(float64)
+		sequence := sequenceOf(envelope)
 		assert.Greater(t, sequence, lastSequence)
 		lastSequence = sequence
 		assert.Equal(t, secondSubmission.TurnID, envelope["turn_id"])

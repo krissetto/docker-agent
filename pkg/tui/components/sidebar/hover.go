@@ -29,6 +29,8 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 		delete(m.sectionCache, "queue")
 	}
 	m.hoverTarget = key
+	m.invalidateHover()
+	m.syncBranchHover()
 	if m.hoverValues == nil {
 		m.hoverValues = make(map[string]hoverValue)
 	}
@@ -82,7 +84,7 @@ func (m *model) tickHover(tick animation.TickMsg) {
 	}
 	if changed {
 		delete(m.sectionCache, "queue")
-		m.invalidateAnimation()
+		m.invalidateHover()
 		tick.MarkDirty()
 	}
 }
@@ -116,6 +118,14 @@ func (m *model) CancelHover() {
 	changed := len(m.hoverValues) > 0 || m.hoverTarget != "" || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent || m.hoveredTreeRow != -1
 	m.cancelHover()
 	if changed {
-		m.invalidateAnimation()
+		m.invalidateHover()
 	}
+}
+
+// Pointer styling leaves semantic rows and section geometry unchanged. Do not
+// mask an already pending spinner/data refresh with this narrower invalidation.
+func (m *model) invalidateHover() {
+	onlyHover := !m.cacheDirty || m.hoverOnlyDirty
+	m.invalidateAnimation()
+	m.hoverOnlyDirty = onlyHover
 }

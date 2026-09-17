@@ -70,7 +70,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						}
 						require.GreaterOrEqual(t, labelLine, 0)
 						if origin == session.InputOriginAgent {
-							assert.NotContains(t, ansi.Strip(lines[labelLine]), "━", "identity keeps the ordinary USER left border without a top rule")
+							assert.Contains(t, ansi.Strip(lines[labelLine]), "━ Worker 界 (a1b2c) ━", "identity is integrated in the USER border")
 						}
 						for x := col; x < col+ansi.StringWidth("Worker 界 (a1b2c)"); x++ {
 							id, ok := m.SubagentNodeAt(7+x, 3+labelLine)
@@ -188,4 +188,38 @@ func TestInputIdentityToolWrappedLabelMatchesCanonicalColorAndHitCells(t *testin
 		assert.Positive(t, hits)
 		assert.NotContains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "hidden tool body")
 	}
+}
+
+func TestAgentBorderTinyResizeHitCellsExcludeRuleAndBody(t *testing.T) {
+	index := subagentindex.New()
+	index.Reset(subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "abcde-canonical-node", SessionID: "child-session", Agent: "worker", Name: "Cafe\u0301 界"}}}})
+	m := newModel(animation.NewRuntime(), 80, 40, &service.SessionState{}, index)
+	t.Cleanup(m.StopAnimations)
+	input := session.UserMessage("Natural spaced prose cafe\u0301 界 **literal**")
+	input.InputOrigin, input.SenderID, input.SenderName = session.InputOriginAgent, "child-session", "worker"
+	m.AddInputMessage(input, 0)
+	for _, width := range []int{80, 4, 8, 12, 28, 80} {
+		m.SetSize(width, 40)
+		m.SetPosition(7, 3)
+		m.ensureAllItemsRendered()
+		m.scrollOffset, m.userHasScrolled = 0, true
+		m.scrollview.SetScrollOffset(0)
+		m.View()
+		for y, line := range m.renderedLines {
+			for x := range m.contentWidth() {
+				expected := false
+				for _, span := range extractOSC8Links(line) {
+					if span.url == agentidentity.Link && x >= span.startCol && x < span.endCol {
+						expected = y == 0
+					}
+				}
+				id, ok := m.SubagentNodeAt(7+x, 3+y)
+				assert.Equal(t, expected, ok, "width=%d cell=(%d,%d)", width, x, y)
+				if ok {
+					assert.Equal(t, subagent.NodeID("abcde-canonical-node"), id)
+				}
+			}
+		}
+	}
+	assert.Equal(t, input.Message.Content, m.messages[0].Content)
 }

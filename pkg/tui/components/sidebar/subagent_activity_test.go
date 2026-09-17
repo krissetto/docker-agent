@@ -41,7 +41,8 @@ func TestCanonicalRootSpinnerLeaseAndIdleUnregister(t *testing.T) {
 			assert.False(t, m.subagentSpinnerOn, "current agent is excluded from descendant rows")
 			assert.Zero(t, ar.ActiveCount())
 			snap.Nodes[0].Children = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "running-child", Agent: "helper", State: subagent.NodeRunning}}}
-			cmd = m.SetSubagentTree(snap)
+			require.Nil(t, m.SetSubagentTree(snap))
+			cmd = ar.Continue()
 			require.NotNil(t, cmd)
 			require.True(t, m.subagentSpinnerOn)
 			before := m.View()

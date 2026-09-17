@@ -9,8 +9,6 @@ import (
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 type blockKind int
 
 type PendingUserKind int
@@ -171,8 +169,8 @@ func (t *Transcript) FinishTool(id string, result ToolResult, sessionState servi
 
 // Lines renders everything that scrolls: finalized blocks, the in-progress
 // streamed block, running tool calls, and user messages waiting to be accepted
-// by the runtime. A blank line separates each entry. The spinner is shown only
-// while busy with nothing yet streaming.
+// by the runtime. A blank line separates each entry. Activity belongs to the
+// session-local composer header, never to the scrolling transcript.
 func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
 	var lines []string
 	for _, b := range t.blocks {
@@ -187,9 +185,6 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 		lines = append(lines, RenderToolWithState(tv, width, spinnerFrame, sessionState)...)
 		lines = append(lines, "")
 	})
-	if busy && t.pending == nil && t.toolz.Empty() {
-		lines = append(lines, spinnerLine(spinnerFrame), "")
-	}
 	for _, msg := range pendingUsers {
 		lines = append(lines, RenderPendingUserLines(msg, width)...)
 		lines = append(lines, "")
@@ -229,11 +224,6 @@ func (t *Transcript) pendingLines(width int) []string {
 	}
 }
 
-func spinnerLine(frame int) string {
-	f := spinnerFrames[frame%len(spinnerFrames)]
-	return StAccent().Render(f) + " " + StMuted().Render("Working…")
-}
-
 func (t *Transcript) AddInputBlock(render func(int) []string) {
 	t.blocks = append(t.blocks, &block{render: render, input: true})
 }
@@ -243,5 +233,13 @@ func (t *Transcript) InvalidateInputBlocks() {
 		if b.input {
 			b.cached = false
 		}
+	}
+}
+
+// InvalidateCaches re-renders presentation after shared preferences/theme change
+// without replacing the transcript, pending blocks, tool state, or draft.
+func (t *Transcript) InvalidateCaches() {
+	for _, block := range t.blocks {
+		block.cached = false
 	}
 }

@@ -118,7 +118,8 @@ func TestAnimationFastPathTracksSpinnerFrame(t *testing.T) {
 
 	// Advance the spinner until its frame changes, as the 14 FPS tick does.
 	prev := m.spinner.RawFrame()
-	cmd := m.spinner.Init()
+	require.Nil(t, m.spinner.Init())
+	cmd := m.ar.Continue()
 	require.NotNil(t, cmd)
 	var msg animation.TickMsg
 	for m.spinner.RawFrame() == prev {

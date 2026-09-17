@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -59,14 +61,44 @@ func WithEventObserver(o EventObserver) Opt {
 
 func (r *LocalRuntime) observeRunStart(ctx context.Context, sess *session.Session) {
 	for _, obs := range r.observers {
-		obs.OnRunStart(ctx, sess)
 		if persistence, ok := obs.(*PersistenceObserver); ok {
-			if err := persistence.pendingError(sess.ID); err != nil {
+			attemptCtx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+			obs.OnRunStart(attemptCtx, sess)
+			err := persistence.pendingError(sess.ID)
+			attemptExpired := errors.Is(err, context.DeadlineExceeded) && attemptCtx.Err() != nil
+			cancel()
+			delay := subagentPersistenceRetryBase
+			retry := func() (error, bool) {
+				retryCtx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+				defer cancel()
+				err := persistence.flushContext(retryCtx, sess.ID)
+				return err, errors.Is(err, context.DeadlineExceeded) && retryCtx.Err() != nil
+			}
+			for err != nil {
+				// A local attempt deadline is retryable only while the owning run
+				// is still alive. Never launch the provider before this FIFO drains.
+				if attemptExpired && ctx.Err() == nil {
+					err = &session.TemporaryError{Err: err}
+				}
 				if d, found := r.sessionDrivers.Lookup(sess.ID); found {
 					d.cancelForPersistence(err)
 				}
+				if !session.IsTemporary(err) || ctx.Err() != nil {
+					break
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				delay = min(2*delay, time.Second)
+				err, attemptExpired = retry()
 			}
+			continue
 		}
+		obs.OnRunStart(ctx, sess)
 	}
 }
 

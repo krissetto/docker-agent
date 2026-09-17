@@ -55,31 +55,44 @@ func (c *commandCompletion) MatchMode() completion.MatchMode {
 
 // ArgumentItems implements ArgumentCompleter: it looks up the command whose
 // SlashCommand is the first token of line and, if it exposes a
-// CompleteArgument provider, maps its candidates to completion items. The
-// full command line ("/cmd label") is used as Value so selecting an item
+// CompleteArgument or CompleteArgumentFor provider, maps its candidates to
+// completion items. Contextual providers own filtering and relevance order;
+// their items are pinned so concise labels are not filtered a second time
+// against the complete multi-argument input.
+// The full command line ("/cmd value") is used as Value so selecting an item
 // replaces the editor content wholesale — this tolerates argument values
 // containing spaces, which a word-based splice would not.
 func (c *commandCompletion) ArgumentItems(line string) ([]completion.Item, bool) {
-	slashCommand, _, _ := strings.Cut(line, " ")
+	slashCommand, argument, _ := strings.Cut(line, " ")
 
 	for _, cat := range c.categories {
 		for _, cmd := range cat.Commands {
-			if cmd.SlashCommand != slashCommand || cmd.CompleteArgument == nil {
+			if cmd.SlashCommand != slashCommand || (cmd.CompleteArgument == nil && cmd.CompleteArgumentFor == nil) {
 				continue
 			}
 
-			candidates := cmd.CompleteArgument()
+			var candidates []commands.ArgumentCandidate
+			if cmd.CompleteArgumentFor != nil {
+				candidates = cmd.CompleteArgumentFor(argument)
+			} else {
+				candidates = cmd.CompleteArgument()
+			}
 			items := make([]completion.Item, 0, len(candidates))
 			for _, candidate := range candidates {
 				description := candidate.Description
 				if candidate.Disabled {
 					description = strings.TrimSpace(description + " (not restartable)")
 				}
+				value := candidate.Value
+				if value == "" {
+					value = candidate.Label
+				}
 				items = append(items, completion.Item{
 					Label:       candidate.Label,
 					Description: description,
-					Value:       cmd.SlashCommand + " " + candidate.Label,
+					Value:       cmd.SlashCommand + " " + value,
 					Disabled:    candidate.Disabled,
+					Pinned:      cmd.CompleteArgumentFor != nil,
 				})
 			}
 			return items, true

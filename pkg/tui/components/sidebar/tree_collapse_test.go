@@ -431,9 +431,9 @@ func TestRepeatedTrailingChevronWithRunningSharedClock(t *testing.T) {
 			m.rootSessionID = "collapse"
 			snap := collapseFixture()
 			snap.Nodes[0].Children[0].Node.State = subagent.NodeRunning
-			chain := m.SetSubagentTree(snap)
+			chain := sidebarOwnerCommand(m, m.SetSubagentTree(snap))
 			m.ReconcileLayout()
-			require.NotNil(t, chain, "first running tree node owns the shared tick command")
+			require.NotNil(t, chain, "owner commits the first running tree node")
 			for range 40 {
 				if !m.placement.running && !m.countersRunning() {
 					break
@@ -515,10 +515,15 @@ func TestRepeatedTrailingChevronWithRunningSharedClock(t *testing.T) {
 			snap.Nodes[0].Children[0].Node.State = subagent.NodeIdle
 			snap.Nodes[0].Children[0].Children[0].Node.State = subagent.NodeIdle
 			m.SetSubagentTree(snap)
-			if fresh := m.ReconcileLayout(); fresh != nil {
-				chain = fresh
-			}
-			settleTreePresentation(t, m, chain)
+			require.Nil(t, m.ReconcileLayout(), "counter fade only registers with the owner")
+			// Stopping the last spinner invalidates its queued tick before the
+			// counter fade registers. The owner commits a new lease for that fade;
+			// queued delivery of the old spinner command must remain rejected.
+			fresh := m.ar.Continue()
+			require.NotNil(t, fresh, "owner schedules the newly registered counter fade")
+			_, accepted := m.ar.Accept(chain().(animation.TickMsg))
+			require.False(t, accepted, "idle spinner's queued lease is stale")
+			settleTreePresentation(t, m, fresh)
 			assert.Zero(t, m.ar.ActiveCount(), "counter fadeout and idle descendants release all leases")
 		})
 	}
@@ -598,7 +603,7 @@ func TestWholeExpandDoesNotReuseStaleBranchHoverIndex(t *testing.T) {
 	m.CancelPresentation()
 	settleTreePresentation(t, m, m.toggleTreeControl(treeControl{whole: true}))
 	cmd := m.toggleTreeControl(treeControl{whole: true})
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	for range 10 {
 		for _, row := range m.placement.rows {
 			if row.target && strings.HasPrefix(row.id, "node:") {
@@ -633,7 +638,7 @@ func TestCountAndNewIDSpansShareElapsedReveal(t *testing.T) {
 	span := m.branchSpans[id]
 	require.Zero(t, span.value)
 	require.Zero(t, span.idValue)
-	cmd = hoverTickCommand(t, cmd)
+	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	require.NotNil(t, cmd)
 	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
 	require.True(t, ok)

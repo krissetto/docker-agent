@@ -128,6 +128,7 @@ type helpProgramState struct {
 	tabs                         int
 	contentHeight                int
 	sidebarView                  string
+	sidebarBounds                splitRect
 	sidebarCollapsed             bool
 	focus                        FocusedPanel
 }
@@ -180,7 +181,7 @@ func (m *helpProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		activeID := m.root.supervisor.ActiveID()
 		generation, _ := m.root.supervisor.RouteGeneration(activeID)
-		query.reply <- helpProgramState{activeID: activeID, routeGeneration: generation, sentOrigins: append([]messages.RoutedMsg(nil), m.sentOrigins...), contentHeight: m.root.contentHeight, sidebarView: sidebarView, savedFirst: savedFirst, sent: append([]messages.SendMsg(nil), m.sent...), commits: append([]messagelist.InlineEditCommittedMsg(nil), m.commits...), topView: topView, content: m.root.View().Content, tabs: m.root.supervisor.Count(), doc: m.root.helpDocument(), draft: m.root.editor.Value(), top: m.root.dialogMgr.TopDialog(), layers: len(m.root.dialogMgr.GetLayers()), inline: m.root.chatPage.IsInlineEditing(), title: m.root.chatPage.IsTitleEditing(), closing: m.root.dialogMgr.Closing(), sidebarCollapsed: m.root.chatPage.GetSidebarSettings().Collapsed, focus: m.root.focusedPanel}
+		query.reply <- helpProgramState{activeID: activeID, routeGeneration: generation, sentOrigins: append([]messages.RoutedMsg(nil), m.sentOrigins...), contentHeight: m.root.contentHeight, sidebarView: sidebarView, sidebarBounds: paneRect(m.root.paneShell.Sidebar), savedFirst: savedFirst, sent: append([]messages.SendMsg(nil), m.sent...), commits: append([]messagelist.InlineEditCommittedMsg(nil), m.commits...), topView: topView, content: m.root.View().Content, tabs: m.root.supervisor.Count(), doc: m.root.helpDocument(), draft: m.root.editor.Value(), top: m.root.dialogMgr.TopDialog(), layers: len(m.root.dialogMgr.GetLayers()), inline: m.root.chatPage.IsInlineEditing(), title: m.root.chatPage.IsTitleEditing(), closing: m.root.dialogMgr.Closing(), sidebarCollapsed: m.root.chatPage.GetSidebarSettings().Collapsed, focus: m.root.focusedPanel}
 		return m, nil
 	}
 	_, cmd := m.root.Update(msg)
@@ -345,13 +346,10 @@ func TestActualProgramLocalEditsKeepDangerousTabKeysAndPasteLocal(t *testing.T) 
 				}, time.Second, time.Millisecond, "rendered sidebar title must be present")
 				require.Contains(t, ansi.Strip(frame.sidebarView), title, "target belongs to sidebar, not tab strip")
 				x, y, matches := -1, -1, 0
-				for row, line := range strings.Split(ansi.Strip(frame.content), "\n") {
-					if row >= frame.contentHeight {
-						break
-					}
+				for row, line := range strings.Split(ansi.Strip(frame.sidebarView), "\n") {
 					if before, _, ok := strings.Cut(line, title); ok {
 						// Aim inside the title, away from its leading star hit zone.
-						x, y = ansi.StringWidth(before)+ansi.StringWidth(title)/2, row
+						x, y = frame.sidebarBounds.X+ansi.StringWidth(before)+ansi.StringWidth(title)/2, frame.sidebarBounds.Y+row
 						matches++
 					}
 				}
@@ -363,6 +361,7 @@ func TestActualProgramLocalEditsKeepDangerousTabKeysAndPasteLocal(t *testing.T) 
 					state := helpProgramSnapshot(t, program)
 					return !state.title && strings.Contains(ansi.Strip(state.content), "Double-click to rename the session")
 				}, time.Second, time.Millisecond, "first real mouse click proves the canonical title route")
+				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				require.Eventually(t, func() bool { return helpProgramSnapshot(t, program).title }, time.Second, time.Millisecond)
 			}

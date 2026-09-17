@@ -12,14 +12,31 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
+// ThinkingStatus is the display-only reasoning projection for the primary
+// binding when the active model is a fallback. Actions stay outside the UI.
+type ThinkingStatus struct {
+	Mode  string
+	Level string
+}
+
 // StatusModel is the snapshot of run state shown in the footer.
 type StatusModel struct {
+	Dormant    bool
+	Active     bool
+	Pending    int
 	WorkingDir string
 	Branch     string
 
-	Agent    string
-	Model    string
-	Thinking string
+	Agent            string
+	Model            string
+	Thinking         string
+	ModelName        string
+	Provider         string
+	ThinkingMode     string
+	ThinkingLevel    string
+	ThinkingLevels   []string
+	CanCycleThinking bool
+	PrimaryThinking  *ThinkingStatus
 
 	ContextLength int64
 	ContextLimit  int64
@@ -47,17 +64,51 @@ func RenderStatus(d StatusModel, width int) []string {
 
 	right1 := ""
 	if d.Agent != "" {
-		right1 = StAccent().Render(d.Agent)
+		right1 = styles.AgentIdentityStyle(d.Agent, false).Render(d.Agent)
+	}
+
+	switch {
+	case d.Dormant:
+		left1 = StWarning().Render("Restored · paused · /resume")
+		if d.Pending > 0 {
+			left1 += StMuted().Render(fmt.Sprintf(" · %d accepted inputs queued", d.Pending))
+		}
+	case d.Active:
+		right1 += StMuted().Render(" · active")
+	case d.Agent != "":
+		right1 += StMuted().Render(" · ready")
 	}
 
 	left2 := RenderContext(d)
 
 	var rightParts []string
-	if d.Model != "" {
+	if d.ModelName != "" {
+		rightParts = append(rightParts, d.ModelName)
+	} else if d.Model != "" {
 		rightParts = append(rightParts, d.Model)
 	}
-	if d.Thinking != "" {
+	if d.ThinkingMode != "" {
+		level := d.ThinkingLevel
+		if level == "" {
+			level = d.ThinkingMode
+		}
+		if d.Provider != "" {
+			rightParts = append(rightParts, d.Provider+"("+level+")")
+		} else {
+			rightParts = append(rightParts, level)
+		}
+	} else if d.Thinking != "" {
 		rightParts = append(rightParts, d.Thinking)
+	}
+	if d.PrimaryThinking != nil {
+		level := d.PrimaryThinking.Level
+		if level == "" {
+			level = d.PrimaryThinking.Mode
+		}
+		if level == "" {
+			level = "unknown"
+		}
+		rightParts = append(rightParts, "(primary: "+level+")")
 	}
 	right2 := StMuted().Render(strings.Join(rightParts, " · "))
 
@@ -117,6 +168,9 @@ func contextStyle(pct, threshold float64) lipgloss.Style {
 
 // ComposeLine right-aligns right within width, truncating left if necessary.
 func ComposeLine(left, right string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	lw := DisplayWidth(left)
 	rw := DisplayWidth(right)
 	if rw > width {
@@ -126,7 +180,7 @@ func ComposeLine(left, right string, width int) string {
 		left = Truncate(left, max(0, width-rw-1))
 		lw = DisplayWidth(left)
 	}
-	gap := max(1, width-lw-rw)
+	gap := max(0, width-lw-rw)
 	return left + strings.Repeat(" ", gap) + right
 }
 

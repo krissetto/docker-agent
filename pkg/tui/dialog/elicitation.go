@@ -378,8 +378,12 @@ func (d *ElicitationDialog) focusField(idx int) {
 }
 
 // ensureFocusVisible scrolls so that the focused field's active rows stay
-// in view. No-op before the first View() populates fieldStarts.
+// in view. No-op before layout preparation populates the body viewport.
 func (d *ElicitationDialog) ensureFocusVisible() {
+	if d.hasFreeFormInput() {
+		d.EnsureBodyLineVisible(len(d.layout().bodyLines) - 1)
+		return
+	}
 	if start, end := d.focusRange(); start >= 0 {
 		d.scrollview.EnsureRangeVisible(start, end)
 	}
@@ -885,7 +889,7 @@ func SetTextInputCursorAtCell(input *textinput.Model, cell int) {
 }
 
 func (d *ElicitationDialog) SetSize(width, height int) tea.Cmd {
-	d.reanchorFocus = d.Width() > 0 && (width != d.Width() || height != d.Height())
+	d.reanchorFocus = d.bodyPreparationCount == 0 || width != d.Width() || height != d.Height()
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.prepareLayout()
 	return cmd

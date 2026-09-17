@@ -17,6 +17,18 @@ import (
 // OpenDB opens a SQLite database with recommended pragmas for concurrency and foreign key support.
 // It configures the connection pool for serialized writes (MaxOpenConns=1).
 func OpenDB(ctx context.Context, path string) (*sql.DB, error) {
+	return openDB(ctx, path, false)
+}
+
+// OpenDBWithImmediateTransactions opens a database whose writable transactions
+// acquire SQLite's writer lock before reading. Use it for read-then-write stores:
+// a deferred snapshot cannot be upgraded after another handle commits, even with
+// a busy timeout. Read-only transactions and other OpenDB clients are unchanged.
+func OpenDBWithImmediateTransactions(ctx context.Context, path string) (*sql.DB, error) {
+	return openDB(ctx, path, true)
+}
+
+func openDB(ctx context.Context, path string, immediate bool) (*sql.DB, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create database directory %q: %w", dir, err)
@@ -26,18 +38,54 @@ func OpenDB(ctx context.Context, path string) (*sql.DB, error) {
 	// _pragma=busy_timeout(5000): Wait up to 5 seconds if database is locked
 	// _pragma=journal_mode(...): WAL outside sandboxes, DELETE inside (see journalMode)
 	// _pragma=foreign_keys(1): Enable foreign key constraints (critical for ON DELETE CASCADE)
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(" + journalMode() + ")&_pragma=foreign_keys(1)"
+	busyTimeout := "5000"
+	if immediate {
+		// SQLite does not promptly interrupt its native busy handler. Session
+		// writes retry only BEGIN acquisition in Go, with a context-aware bound.
+		busyTimeout = "50"
+	}
+	dsn := path + "?_pragma=busy_timeout(" + busyTimeout + ")&_pragma=journal_mode(" + journalMode() + ")&_pragma=foreign_keys(1)"
+	if immediate {
+		dsn += "&_txlock=immediate"
+	}
 
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
+	// Only connection configuration is retried, before any schema or user
+	// migration runs. Each failed handle is closed; Ping applies only the
+	// idempotent DSN pragmas above. Other OpenDB clients retain their policy.
+	started := time.Now()
+	for {
+		db, err := openConfiguredDB(ctx, dsn)
+		if err == nil {
+			return db, nil
+		}
+		if immediate && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if IsCantOpenError(err) {
 			return nil, DiagnoseDBOpenError(path, err)
 		}
+		remaining := 5*time.Second - time.Since(started)
+		if !immediate || !IsTransientError(err) || remaining <= 0 {
+			return nil, err
+		}
+		timer := time.NewTimer(min(25*time.Millisecond, remaining))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func openConfiguredDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
 		return nil, err
 	}
 
-	// Configure connection pool to serialize writes (SQLite limitation)
-	// This prevents "database is locked" errors from concurrent writes
+	// Serialize writes within this pool; independent handles still contend for
+	// SQLite's writer lock and use the busy timeout.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
@@ -45,9 +93,6 @@ func OpenDB(ctx context.Context, path string) (*sql.DB, error) {
 	// Verify connection works (this will trigger file creation/open)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		if IsCantOpenError(err) {
-			return nil, DiagnoseDBOpenError(path, err)
-		}
 		return nil, err
 	}
 

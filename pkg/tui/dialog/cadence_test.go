@@ -44,7 +44,11 @@ func TestConcreteDialogOpeningCadence(t *testing.T) {
 			r := newDialogRuntime()
 			mgr := &manager{runtime: r, width: width, height: height}
 			_, cmd := mgr.handleOpen(OpenDialogMsg{Model: fixture.new(r)})
-			require.NotNil(t, cmd)
+			if fixture.name == "commands" || fixture.name == "model" {
+				require.NotNil(t, cmd, "text input retains its cursor initialization")
+			} else {
+				require.Nil(t, cmd, "opening only registers animation")
+			}
 			require.Len(t, mgr.stack, 1)
 			e := &mgr.stack[0]
 			wantWidth, wantHeight := e.targetWidth, e.targetHeight
@@ -55,7 +59,7 @@ func TestConcreteDialogOpeningCadence(t *testing.T) {
 			previous := 0
 			sequence := []int{e.renderHeight}
 			for elapsed := animation.TickRate; e.anim.Running(); elapsed += animation.TickRate {
-				mgr.handleTick(advanceDialog(r, r.EnsureRunning(), elapsed))
+				mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
 				sequence = append(sequence, e.renderHeight)
 				assert.GreaterOrEqual(t, e.renderHeight, previous, "opening progress is consecutive and monotonic")
 				assertManagerFrameBounds(t, mgr, wantWidth, e.renderHeight)
@@ -73,7 +77,7 @@ func TestSettingsSemanticTabChangeHasOneStableTarget(t *testing.T) {
 	mgr := &manager{runtime: r, width: 120, height: 40}
 	d := NewSettingsDialog(messages.Preferences{}, true)
 	mgr.handleOpen(OpenDialogMsg{Model: d})
-	mgr.handleTick(advanceDialog(r, r.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 
 	entry := &mgr.stack[0]
 	baseline := entry.boundsMeasurementCount
@@ -82,7 +86,7 @@ func TestSettingsSemanticTabChangeHasOneStableTarget(t *testing.T) {
 	assert.Equal(t, baseline+1, entry.boundsMeasurementCount)
 	target := entry.targetHeight
 	for elapsed := dialogOpenDuration + animation.TickRate; entry.anim.Running(); elapsed += animation.TickRate {
-		mgr.handleTick(advanceDialog(r, r.EnsureRunning(), elapsed))
+		mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
 		assert.Equal(t, target, entry.targetHeight)
 	}
 	assert.Equal(t, baseline+1, entry.boundsMeasurementCount, "animation ticks do not repeatedly remeasure or retarget")
@@ -94,7 +98,7 @@ func TestSettingsBidirectionalRetargetCadence(t *testing.T) {
 			r := newDialogRuntime()
 			mgr := &manager{runtime: r, width: size[0], height: size[1]}
 			mgr.handleOpen(OpenDialogMsg{Model: NewSettingsDialog(messages.Preferences{}, true)})
-			mgr.handleTick(advanceDialog(r, r.EnsureRunning(), dialogOpenDuration))
+			mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 			entry := &mgr.stack[0]
 
 			elapsed := dialogOpenDuration
@@ -113,7 +117,7 @@ func TestSettingsBidirectionalRetargetCadence(t *testing.T) {
 				direction := target - beforeHeight
 				for entry.anim.Running() {
 					elapsed += animation.TickRate
-					mgr.handleTick(advanceDialog(r, r.EnsureRunning(), elapsed))
+					mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
 					assert.Equal(t, target, entry.targetHeight, "target remains stable through the transition")
 					if direction >= 0 {
 						assert.GreaterOrEqual(t, entry.renderHeight, previous)
@@ -132,7 +136,7 @@ func TestSettingsBidirectionalRetargetCadence(t *testing.T) {
 			// continue from the sampled current position without a reset or jump.
 			mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
 			elapsed += 2 * animation.TickRate
-			mgr.handleTick(advanceDialog(r, r.EnsureRunning(), elapsed))
+			mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
 			current := entry.renderHeight
 			mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 			assert.Equal(t, current, entry.fromHeight)
@@ -145,7 +149,7 @@ func TestIdenticalDialogUpdateIsMeasuredButNotRetargeted(t *testing.T) {
 	r := newDialogRuntime()
 	mgr := &manager{runtime: r, width: 100, height: 30}
 	mgr.handleOpen(OpenDialogMsg{Model: NewSettingsDialog(messages.Preferences{}, true)})
-	mgr.handleTick(advanceDialog(r, r.EnsureRunning(), dialogOpenDuration))
+	mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 	entry := &mgr.stack[0]
 
 	mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -207,7 +211,7 @@ func TestSharedTicksKeepPreparedTargetLayoutWarm(t *testing.T) {
 	preparations := d.bodyPreparationCount
 	gutter := d.bodyScroll.ReservedCols()
 	x, y, w, h := d.BodyScrollBounds()
-	tickCmd := r.EnsureRunning()
+	tickCmd := r.Continue()
 	for entry.anim.Running() {
 		tick := acceptedDialogTick(r, tickCmd)
 		mgr.handleTick(tick)
@@ -248,7 +252,7 @@ func TestSharedTickChildDirtyMarkerRefreshesCachedContent(t *testing.T) {
 	mgr.SetSize(40, 12)
 	d := &tickDirtyDialog{lifecycleDialog: lifecycleDialog{view: "frame 0"}}
 	mgr.handleOpen(OpenDialogMsg{Model: d})
-	tickCmd := r.EnsureRunning()
+	tickCmd := r.Continue()
 	tick := acceptedDialogTick(r, tickCmd)
 	mgr.handleTick(tick)
 	require.True(t, tick.Dirty())

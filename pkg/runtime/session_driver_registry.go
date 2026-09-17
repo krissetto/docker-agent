@@ -590,7 +590,6 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	for _, d := range g.drivers {
 		drivers = append(drivers, d)
 	}
-	g.orphans = map[string][]QueuedMessage{}
 	g.mu.Unlock()
 	for _, d := range drivers {
 		d.StopAll()
@@ -602,9 +601,31 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	// Execution has stopped, but a failed journal or child commit still owns
+	// its driver. Reuse the settlement barrier under this drain's context;
+	// a later CloseContext can retry without executing accepted work again.
+	for _, d := range drivers {
+		d.mu.Lock()
+		settling := d.settling
+		generation, runErr := d.generation, d.completionRunErr
+		d.mu.Unlock()
+		if settling {
+			d.finishRunContext(ctx, generation, runErr)
+			d.mu.Lock()
+			err := d.completionErr
+			d.mu.Unlock()
+			if err != nil {
+				return err
+			}
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	for id := range g.drivers {
+		g.releasePersistence(id)
+	}
 	g.drivers = map[string]*sessionDriver{}
+	g.orphans = map[string][]QueuedMessage{}
 	return nil
 }
 

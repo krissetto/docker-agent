@@ -63,7 +63,38 @@ type SessionEventMsg struct {
 	TurnID          string
 	OriginSessionID string
 	Epoch           uint64
+	Sequence        uint64 // per OriginSessionID journal; zero for compatibility/seed events
 	Projection      *PresentationState
+}
+
+// CurrentSessionEventIdentity captures the attachment identity before starting
+// asynchronous work. Carry the token unchanged and check IsCurrentSessionEvent
+// when applying its result. Event and non-identity metadata remain zero.
+func (a *App) CurrentSessionEventIdentity() SessionEventMsg {
+	a.bridgeMu.Lock()
+	defer a.bridgeMu.Unlock()
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	identity := SessionEventMsg{Epoch: a.bridgeEpoch.Load()}
+	if sess := a.currentState.session; sess != nil {
+		identity.OriginSessionID = sess.ID
+	}
+	return identity
+}
+
+// IsCurrentSessionEvent applies the same attachment identity predicate as
+// Subscribe at consumption time, including messages buffered by a consumer.
+// Epoch zero preserves legacy/synthetic compatibility. Positive epochs must
+// match the current bridge and, when a session is installed, its actual ID.
+func (a *App) IsCurrentSessionEvent(msg SessionEventMsg) bool {
+	if msg.Epoch == 0 {
+		return true
+	}
+	if msg.Epoch != a.bridgeEpoch.Load() {
+		return false
+	}
+	sess := a.Session()
+	return sess == nil || msg.OriginSessionID == sess.ID
 }
 
 // startSessionEventBridge mirrors the App's session's run events onto the
@@ -110,6 +141,10 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 }
 
 func (a *App) sendBridgedEventFrom(ctx context.Context, requestID string, event runtime.Event, seed bool, originSessionID string, epoch uint64) bool {
+	return a.sendSequencedBridgedEventFrom(ctx, requestID, event, seed, originSessionID, epoch, 0)
+}
+
+func (a *App) sendSequencedBridgedEventFrom(ctx context.Context, requestID string, event runtime.Event, seed bool, originSessionID string, epoch, sequence uint64) bool {
 	if epoch != 0 && epoch != a.bridgeEpoch.Load() {
 		return false
 	}
@@ -125,7 +160,7 @@ func (a *App) sendBridgedEventFrom(ctx context.Context, requestID string, event 
 	a.projectionMu.Unlock()
 	originSessionID = strings.TrimSpace(originSessionID)
 	select {
-	case a.events <- SessionEventMsg{Event: event, Seed: seed, TurnID: requestID, OriginSessionID: originSessionID, Epoch: epoch, Projection: projection}:
+	case a.events <- SessionEventMsg{Event: event, Seed: seed, TurnID: requestID, OriginSessionID: originSessionID, Epoch: epoch, Sequence: sequence, Projection: projection}:
 		return true
 	case <-ctx.Done():
 		return false
@@ -142,7 +177,7 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	defer a.lifecycleMu.Unlock()
 
 	switch e.(type) {
-	case *SessionResetEvent, *SessionViewEvent, *runtime.InteractionResolvedEvent:
+	case *SessionResetEvent, *SessionViewEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.DormancyChangedEvent:
 		return e
 	}
 	_, cancelled := a.cancelledRequests[requestID]

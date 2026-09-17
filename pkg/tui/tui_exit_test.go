@@ -141,14 +141,15 @@ func TestRootViewCacheInvalidatesOnlyForDirtyAcceptedTick(t *testing.T) {
 	_ = m.View()
 
 	sub := m.ar.Subscribe()
-	cleanCmd := sub.Start()
+	assert.Nil(t, sub.Start())
+	cleanCmd := m.ar.Continue()
 	clean := cleanCmd().(animation.TickMsg)
 	_, _ = m.update(clean)
+	dirtyCmd := m.ar.Continue()
 	_ = m.View()
 	assert.Equal(t, 1, page.views)
 
 	page.dirtyTick = true
-	dirtyCmd := m.ar.EnsureRunning()
 	dirty := dirtyCmd().(animation.TickMsg)
 	_, _ = m.update(dirty)
 	_ = m.View()

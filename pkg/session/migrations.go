@@ -52,9 +52,14 @@ func NewMigrationManagerWithMigrations(db *sql.DB, migrations []Migration) *Migr
 }
 
 // InitializeMigrations sets up the migrations table and runs pending migrations
-func (m *MigrationManager) InitializeMigrations(ctx context.Context) error {
+func (m *MigrationManager) InitializeMigrations(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w: %w", ErrMigrationFailed, classifySQLiteContextError(ctx, err))
+		}
+	}()
 	// Create migrations table if it doesn't exist
-	err := m.createMigrationsTable(ctx)
+	err = m.createMigrationsTable(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
@@ -75,7 +80,7 @@ func (m *MigrationManager) InitializeMigrations(ctx context.Context) error {
 
 // createMigrationsTable creates the migrations tracking table
 func (m *MigrationManager) createMigrationsTable(ctx context.Context) error {
-	_, err := m.db.ExecContext(ctx, `
+	_, err := execSQLiteWrite(ctx, m.db, `
 		CREATE TABLE IF NOT EXISTS migrations (
 			id INTEGER PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL,
@@ -143,8 +148,9 @@ func (m *MigrationManager) isMigrationApplied(ctx context.Context, name string) 
 }
 
 // applyMigration applies a single migration
-func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migration) error {
-	tx, err := m.db.BeginTx(ctx, nil)
+func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migration) (err error) {
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
+	tx, err := beginSQLiteWrite(ctx, m.db)
 	if err != nil {
 		return err
 	}
@@ -153,6 +159,20 @@ func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migrat
 			slog.ErrorContext(ctx, "failed to rollback migration transaction", "error", err)
 		}
 	}()
+
+	// A deferred transaction must acquire the write lock before reading the
+	// migration receipt. This no-op also protects caller-supplied databases
+	// whose driver does not support an immediate-transaction DSN option.
+	if _, err := tx.ExecContext(ctx, `UPDATE migrations SET id = id WHERE 0`); err != nil {
+		return err
+	}
+	var applied int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM migrations WHERE name = ?`, migration.Name).Scan(&applied); err != nil {
+		return err
+	}
+	if applied != 0 {
+		return nil
+	}
 
 	// Execute SQL migration if present
 	if migration.UpSQL != "" {
@@ -357,7 +377,7 @@ func getAllMigrations() []Migration {
 			ID:          15,
 			Name:        "015_migrate_messages_to_session_items",
 			Description: "Migrate existing messages JSON data to session_items table",
-			UpFunc:      migrateMessagesToSessionItems,
+			UpTxFunc:    migrateMessagesToSessionItems,
 		},
 		{
 			ID:          16,
@@ -577,11 +597,11 @@ func getAllMigrations() []Migration {
 }
 
 // migrateMessagesToSessionItems migrates data from the messages JSON column to the session_items table
-func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
+func migrateMessagesToSessionItems(ctx context.Context, tx *sql.Tx) error {
 	slog.InfoContext(ctx, "Starting migration of messages to session_items")
 
 	// Get all sessions that have messages but no items yet
-	rows, err := db.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT s.id, s.messages 
 		FROM sessions s 
 		WHERE s.messages IS NOT NULL 
@@ -613,13 +633,17 @@ func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("iterating sessions: %w", err)
 	}
 
+	// Close the result set before issuing writes on the same transaction.
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
 	slog.InfoContext(ctx, "Found sessions to migrate", "count", len(sessionsToMigrate))
 
 	// Migrate each session
 	for _, sess := range sessionsToMigrate {
-		if err := migrateSessionMessages(ctx, db, sess.id, sess.messages, ""); err != nil {
-			slog.WarnContext(ctx, "Failed to migrate session, skipping", "session_id", sess.id, "error", err)
-			continue
+		if err := migrateSessionMessages(ctx, tx, sess.id, sess.messages, ""); err != nil {
+			return fmt.Errorf("migrating session %s: %w", sess.id, err)
 		}
 	}
 
@@ -628,7 +652,7 @@ func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
 }
 
 // migrateSessionMessages migrates a single session's messages to session_items
-func migrateSessionMessages(ctx context.Context, db *sql.DB, sessionID, messagesJSON, parentID string) error {
+func migrateSessionMessages(ctx context.Context, tx *sql.Tx, sessionID, messagesJSON, parentID string) error {
 	var items []Item
 	if err := json.Unmarshal([]byte(messagesJSON), &items); err != nil {
 		return fmt.Errorf("unmarshaling messages: %w", err)
@@ -636,14 +660,14 @@ func migrateSessionMessages(ctx context.Context, db *sql.DB, sessionID, messages
 
 	// Update parent_id if this is a sub-session
 	if parentID != "" {
-		_, err := db.ExecContext(ctx, "UPDATE sessions SET parent_id = ? WHERE id = ?", parentID, sessionID)
+		_, err := tx.ExecContext(ctx, "UPDATE sessions SET parent_id = ? WHERE id = ?", parentID, sessionID)
 		if err != nil {
 			return fmt.Errorf("updating parent_id: %w", err)
 		}
 	}
 
 	for position, item := range items {
-		if err := migrateItem(ctx, db, sessionID, position, &item); err != nil {
+		if err := migrateItem(ctx, tx, sessionID, position, &item); err != nil {
 			return fmt.Errorf("migrating item at position %d: %w", position, err)
 		}
 	}
@@ -652,7 +676,7 @@ func migrateSessionMessages(ctx context.Context, db *sql.DB, sessionID, messages
 }
 
 // migrateItem migrates a single Item to session_items
-func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int, item *Item) error {
+func migrateItem(ctx context.Context, tx *sql.Tx, sessionID string, position int, item *Item) error {
 	switch {
 	case item.Message != nil:
 		// Migrate message
@@ -660,7 +684,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 		if err != nil {
 			return fmt.Errorf("marshaling message: %w", err)
 		}
-		_, err = db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit)
 			 VALUES (?, ?, 'message', ?, ?, ?)`,
 			sessionID, position, item.Message.AgentName, string(msgJSON), item.Message.Implicit)
@@ -677,7 +701,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 
 		// Check if sub-session already exists
 		var exists int
-		err := db.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", subSessionID).Scan(&exists)
+		err := tx.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", subSessionID).Scan(&exists)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			// Create the sub-session
@@ -686,7 +710,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 				return fmt.Errorf("marshaling sub-session messages: %w", jsonErr)
 			}
 
-			_, execErr := db.ExecContext(ctx,
+			_, execErr := tx.ExecContext(ctx,
 				`INSERT INTO sessions (id, messages, tools_approved, input_tokens, output_tokens, title, cost, 
 				 send_user_message, max_iterations, working_dir, created_at, starred, permissions, 
 				 agent_model_overrides, custom_models_used, parent_id)
@@ -701,21 +725,21 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 			}
 
 			// Recursively migrate sub-session messages
-			if migrateErr := migrateSessionMessages(ctx, db, subSessionID, string(subMessagesJSON), sessionID); migrateErr != nil {
+			if migrateErr := migrateSessionMessages(ctx, tx, subSessionID, string(subMessagesJSON), sessionID); migrateErr != nil {
 				return fmt.Errorf("migrating sub-session messages: %w", migrateErr)
 			}
 		case err != nil:
 			return fmt.Errorf("checking sub-session existence: %w", err)
 		default:
 			// Sub-session exists, just update parent_id
-			_, updateErr := db.ExecContext(ctx, "UPDATE sessions SET parent_id = ? WHERE id = ?", sessionID, subSessionID)
+			_, updateErr := tx.ExecContext(ctx, "UPDATE sessions SET parent_id = ? WHERE id = ?", sessionID, subSessionID)
 			if updateErr != nil {
 				return fmt.Errorf("updating sub-session parent_id: %w", updateErr)
 			}
 		}
 
 		// Insert subsession reference item
-		_, err = db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, subsession_id)
 			 VALUES (?, ?, 'subsession', ?)`,
 			sessionID, position, subSessionID)
@@ -725,7 +749,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 
 	case item.Summary != "":
 		// Migrate summary
-		_, err := db.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, summary_text)
 			 VALUES (?, ?, 'summary', ?)`,
 			sessionID, position, item.Summary)

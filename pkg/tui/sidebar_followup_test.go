@@ -114,9 +114,22 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			frame := sidebarProgramSnapshot(t, program)
 			x, y := sidebarProgramPoint(t, frame.content, "SelectedWorker")
 			program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).activeID == child.ID }, time.Second, time.Millisecond)
+			var selected shellSnapshot
+			require.Eventually(t, func() bool {
+				selected = sidebarProgramSnapshot(t, program)
+				plain := ansi.Strip(selected.content)
+				return selected.activeID == child.ID && selected.active == 0 &&
+					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director") &&
+					(!withChildren || strings.Contains(plain, "NestedReviewer"))
+			}, time.Second, time.Millisecond)
 			program.Send(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}}, "worker"))
-			selected := sidebarProgramSnapshot(t, program)
+			require.Eventually(t, func() bool {
+				selected = sidebarProgramSnapshot(t, program)
+				plain := ansi.Strip(selected.content)
+				return selected.activeID == child.ID && selected.active == 0 &&
+					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director") &&
+					(!withChildren || strings.Contains(plain, "NestedReviewer"))
+			}, time.Second, time.Millisecond)
 			require.Contains(t, ansi.Strip(selected.content), "SELECTED-CHILD-TRANSCRIPT")
 			require.Contains(t, ansi.Strip(selected.content), "parent: director")
 			require.NotContains(t, ansi.Strip(selected.content), "SelectedWorker", "selected agent is not its own descendant")
@@ -124,24 +137,65 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			if withChildren {
 				x, y = sidebarProgramPoint(t, selected.content, "NestedReviewer")
 				program.Send(tea.MouseMotionMsg{X: x, Y: y})
-				hovered := sidebarProgramSnapshot(t, program)
+				var hovered shellSnapshot
+				require.Eventually(t, func() bool {
+					hovered = sidebarProgramSnapshot(t, program)
+					return hovered.activeID == child.ID && hovered.active == 0 && strings.Contains(ansi.Strip(hovered.content), "NestedReviewer")
+				}, time.Second, time.Millisecond)
+				// This test selects canonical identities, not a moving row. The
+				// independent animation/hit tests exercise transient coordinates.
+				x, y = sidebarProgramPoint(t, hovered.content, "NestedReviewer")
 				row := strings.Split(ansi.Strip(hovered.content), "\n")[y]
+				require.Contains(t, row, "NestedReviewer", "click targets the currently painted canonical label")
 				require.NotContains(t, row, "⌄", "genuine grandchild leaf has no branch action")
 				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-				require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).activeID == grand.ID }, time.Second, time.Millisecond)
+				var lastGrandchildSnapshot shellSnapshot
+				clickX, clickY := x, y
+				t.Cleanup(func() {
+					if t.Failed() {
+						labelPoint := func(content string) [2]int {
+							for row, line := range strings.Split(ansi.Strip(content), "\n") {
+								if prefix, _, found := strings.Cut(line, "NestedReviewer"); found {
+									return [2]int{ansi.StringWidth(prefix), row}
+								}
+							}
+							return [2]int{-1, -1}
+						}
+						clickRow := func(content string) string {
+							rows := strings.Split(ansi.Strip(content), "\n")
+							if clickY >= 0 && clickY < len(rows) {
+								return rows[clickY]
+							}
+							return "<outside>"
+						}
+						t.Logf("grandchild phases selected(id=%q leases=%d ticks=%d row=%q) hovered(id=%q leases=%d ticks=%d row=%q) final(id=%q leases=%d ticks=%d row=%q)", selected.activeID, selected.active, selected.ticks, clickRow(selected.content), hovered.activeID, hovered.active, hovered.ticks, clickRow(hovered.content), lastGrandchildSnapshot.activeID, lastGrandchildSnapshot.active, lastGrandchildSnapshot.ticks, clickRow(lastGrandchildSnapshot.content))
+						t.Logf("grandchild click=(%d,%d) hovered_label=%v final_label=%v selected=%q hovered=%q final_id=%q final_tabs=%q final_modal=%v final_overlay=%v final_focus=%v final_frame=%q", clickX, clickY, labelPoint(hovered.content), labelPoint(lastGrandchildSnapshot.content), selected.content, hovered.content, lastGrandchildSnapshot.activeID, lastGrandchildSnapshot.tabIDs, lastGrandchildSnapshot.open, lastGrandchildSnapshot.overlay, lastGrandchildSnapshot.focus, lastGrandchildSnapshot.content)
+					}
+				})
+				require.Eventually(t, func() bool {
+					lastGrandchildSnapshot = sidebarProgramSnapshot(t, program)
+					return lastGrandchildSnapshot.activeID == grand.ID && lastGrandchildSnapshot.active == 0 &&
+						strings.Contains(ansi.Strip(lastGrandchildSnapshot.content), "parent: worker")
+				}, time.Second, time.Millisecond)
 				leaf := sidebarProgramSnapshot(t, program)
 				require.NotContains(t, ansi.Strip(leaf.content), "NestedReviewer", "leaf has no self row")
 				require.NotContains(t, ansi.Strip(leaf.content), "SelectedWorker")
 				x, y = sidebarProgramPoint(t, leaf.content, "parent: worker")
 				program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-				require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).activeID == child.ID }, time.Second, time.Millisecond)
+				require.Eventually(t, func() bool {
+					back := sidebarProgramSnapshot(t, program)
+					return back.activeID == child.ID && back.active == 0 && strings.Contains(ansi.Strip(back.content), "parent: director")
+				}, time.Second, time.Millisecond)
 			} else {
 				require.NotContains(t, ansi.Strip(selected.content), "NestedReviewer")
 			}
 			back := sidebarProgramSnapshot(t, program)
 			x, y = sidebarProgramPoint(t, back.content, "parent: director")
 			program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).activeID == parent.ID }, time.Second, time.Millisecond)
+			require.Eventually(t, func() bool {
+				back := sidebarProgramSnapshot(t, program)
+				return back.activeID == parent.ID && back.active == 0 && strings.Contains(ansi.Strip(back.content), "SelectedWorker")
+			}, time.Second, time.Millisecond)
 		})
 	}
 }

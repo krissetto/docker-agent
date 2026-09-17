@@ -408,12 +408,15 @@ type model struct {
 	cachedLines          []string // Cached rendered lines
 	cachedWidth          int      // Width used for cached render
 	cachedNeedsScrollbar bool     // Whether scrollbar is needed for cached render
-	cacheDirty           bool     // True when cache needs rebuild
+	hoverOnlyDirty       bool
+	cacheDirty           bool // True when cache needs rebuild
 	// sectionCache reuses unchanged sections across animation-only frames.
 	sectionCache        map[string]string
 	sectionCacheWidth   int
 	layoutDirty         bool // True when a change may alter line count/scrollbar visibility.
 	visualGeneration    uint64
+	cacheInvalidations  uint64
+	sectionRenders      uint64
 	themeGeneration     uint64
 	renderedActiveAgent string
 
@@ -462,8 +465,14 @@ type model struct {
 	branchSpans          map[subagent.NodeID]branchSpans
 	branchCapture        branchCapture
 	treeCollapsed        bool
+	todosCollapsed       bool
+	todoSummaryLine      int
+	todoEnd              int
+	treeCountCache       [3]int
+	treeCountsValid      bool
 	treeCounters         [2]counterPresentation
 	preparedTrees        map[int]preparedTree
+	preparingRows        map[int]preparedTreeRow
 	treeControls         map[int][]treeControl
 	treeSectionStart     int
 	summaryLine          int
@@ -474,6 +483,7 @@ type model struct {
 	hoverAnimation       animation.Subscription
 	workingDirRow        int
 	workingDirBodyRow    int
+	agentIdentityRow     int
 	modelStart           int
 	modelEnd             int
 	queueStart, queueEnd int
@@ -569,11 +579,14 @@ func (m *model) stopSpinner() {
 // AND its line layout (todos, sizing, agents, theme, …): the next View()
 // re-probes scrollbar visibility via the two-pass render.
 func (m *model) invalidateCache() {
+	m.hoverOnlyDirty = false
+	m.cacheInvalidations++
 	m.cacheDirty = true
 	m.layoutDirty = true
 	m.visualGeneration++
 	m.sectionCache = nil
 	m.preparedTrees = nil
+	m.treeCountsValid = false
 	m.reconcileDirty = true
 }
 
@@ -583,9 +596,10 @@ func (m *model) invalidateCache() {
 // change; the next View() can therefore skip the scrollbar-probe pass and render
 // the sections only once.
 func (m *model) invalidateAnimation() {
+	m.hoverOnlyDirty = false
+	m.cacheInvalidations++
 	m.cacheDirty = true
 	m.visualGeneration++
-	m.preparedTrees = nil
 }
 
 func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
@@ -639,17 +653,33 @@ func (m *model) SetAgentInfo(agentName, modelID, description string, contextLimi
 	// Parse "provider/model" format using first slash to handle model names containing slashes
 	// (e.g., "dmr/ai/llama3.2" → Provider="dmr", Model="ai/llama3.2").
 	for i := range m.availableAgents {
-		if m.availableAgents[i].Name == agentName && modelID != "" {
-			if provider, modelName, found := strings.Cut(modelID, "/"); found {
-				m.availableAgents[i].Provider = provider
-				m.availableAgents[i].Model = modelName
-			} else {
-				// An unqualified model has no provider attribution.
-				m.availableAgents[i].Provider = ""
-				m.availableAgents[i].Model = modelID
-			}
-			break
+		if m.availableAgents[i].Name != agentName || modelID == "" {
+			continue
 		}
+		details := &m.availableAgents[i]
+		canonical := details.ModelID
+		if details.Provider != "" {
+			canonical = details.Provider + "/" + canonical
+		}
+		if details.ModelID != "" && modelID != canonical && modelID != details.Model && modelID != details.Provider+"/"+details.Model {
+			// A legacy model-change event precedes its rich projection.
+			// Drop stale labels/capabilities rather than advertising a cycle
+			// for the old model while awaiting authoritative team metadata.
+			details.ModelID, details.ModelName = "", ""
+			details.ThinkingMode, details.ThinkingLevel, details.Thinking = "", "", ""
+			details.ThinkingLevels = nil
+			details.CanCycleThinking = false
+			details.PrimaryThinking = nil
+		}
+		if provider, modelName, found := strings.Cut(modelID, "/"); found {
+			m.availableAgents[i].Provider = provider
+			m.availableAgents[i].Model = modelName
+		} else {
+			// An unqualified model has no provider attribution.
+			m.availableAgents[i].Provider = ""
+			m.availableAgents[i].Model = modelID
+		}
+		break
 	}
 	m.invalidateCache()
 	return nil
@@ -1117,6 +1147,7 @@ const (
 	ClickSubagent            // Click on a subagent row in the swarm section (payload: node id)
 	ClickQueuedMessage       // Click on queued body; payload canonical turn ID
 	ClickRemoveQueuedMessage // Click on remove cell; payload canonical turn ID
+	ClickThinkingLevel       // Click on supported active reasoning level
 	ClickModel               // Click on the active model/provider region
 	ClickSubagentParent      // Click on the "parent: <agent>" line of an attached tab (payload: parent session id)
 )
@@ -1134,7 +1165,11 @@ func (m *model) HandleClick(x, y int) bool {
 func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	// Account for left padding
 	adjustedX := x - m.layoutCfg.PaddingLeft
-	if adjustedX < 0 || x >= m.width-m.layoutCfg.PaddingRight || y < 0 || (m.mode == ModeVertical && y >= m.viewportHeight()) {
+	if adjustedX < 0 || x >= m.width-m.layoutCfg.PaddingRight || y < 0 || (m.mode == ModeVertical && y >= m.height) {
+		return ClickNone, ""
+	}
+
+	if m.mode == ModeVertical && y >= m.viewportHeight() {
 		return ClickNone, ""
 	}
 
@@ -1157,58 +1192,23 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	}
 
 	if m.mode == ModeCollapsed {
-		// In collapsed mode, title starts at line 0
-		titleLines := m.titleLineCount()
-
-		// Check if click is within the title area (line 0 to titleLines-1)
-		if y >= 0 && y < titleLines {
-			// Check if click is on the star (first line only, first few chars)
-			if y == 0 && m.sessionHasContent && adjustedX <= starClickWidth {
-				return ClickStar, ""
-			}
-			// Click is on title area (for double-click to edit)
-			if m.titleGenerated && !m.editingTitle {
-				return ClickTitle, ""
-			}
-		}
-
-		// In collapsed mode, working dir line follows the title section.
-		// A hidden session path renders no line and must not keep a hit target.
 		vm := m.computeCollapsedViewModel(m.contentWidth(false))
-		wdStartY := vm.titleSectionLines()
-		wdLines := linesNeeded(lipgloss.Width(vm.WorkingDir), vm.ContentWidth)
-
-		// The usage reading either shares the working dir line (right-aligned)
-		// or takes its own line(s) right after it. Mirrors RenderCollapsedView.
-		if vm.UsageSummary != "" {
-			usageWidth := lipgloss.Width(vm.UsageSummary)
-			if vm.WorkingDir != "" && vm.WdAndUsageOnOneLine {
-				if y == wdStartY && adjustedX >= vm.ContentWidth-usageWidth {
-					return segmentClickResult(adjustedX - (vm.ContentWidth - usageWidth)), ""
-				}
-			} else {
-				usageStartY := wdStartY
-				if vm.WorkingDir != "" {
-					usageStartY += wdLines + linesNeededOptional(vm.Branch, vm.ContentWidth)
-				}
-
-				if y >= usageStartY && y < usageStartY+linesNeeded(usageWidth, vm.ContentWidth) {
-					offset := (y-usageStartY)*vm.ContentWidth + adjustedX
-					return segmentClickResult(offset), ""
-				}
+		for _, span := range vm.spans() {
+			if y != span.y || adjustedX < span.x || adjustedX >= span.x+ansi.StringWidth(span.text) {
+				continue
 			}
-		}
-
-		if m.workingDirectory != "" && !m.sectionVisibility.HideSessionPath && y >= wdStartY && y < wdStartY+wdLines {
-			return ClickWorkingDir, ""
-		}
-
-		modelY := vm.LineCount() - linesNeededOptional(vm.InfoLine, vm.ContentWidth) - linesNeededOptional(vm.Yolo, vm.ContentWidth)
-		if vm.ModelInfo != "" {
-			modelRows := len(strings.Split(vm.ModelInfo, "\n"))
-			modelY -= modelRows
-			if y >= modelY && y < modelY+modelRows {
-				return ClickModel, ""
+			switch span.action {
+			case ClickTitle:
+				if m.sessionHasContent && adjustedX <= starClickWidth {
+					return ClickStar, ""
+				}
+				if m.titleGenerated && !m.editingTitle {
+					return ClickTitle, ""
+				}
+			case ClickUsage:
+				return segmentClickResult(adjustedX - span.x), ""
+			default:
+				return span.action, ""
 			}
 		}
 		return ClickNone, ""
@@ -1244,7 +1244,7 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	}
 
 	if contentY >= m.modelStart && contentY < m.modelEnd {
-		return ClickModel, ""
+		return m.modelClick(adjustedX, contentY-m.modelStart, m.contentWidth(m.cachedNeedsScrollbar)), ""
 	}
 
 	// Check if click is on the Token Usage reading line or a budget line
@@ -1568,7 +1568,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if msg.X-m.xPos != m.branchCapture.x || msg.Y-m.yPos != m.branchCapture.y {
 			m.branchCapture = branchCapture{}
 		}
-		if m.mode != ModeVertical {
+		if m.mode != ModeVertical || (m.footerHeight() > 0 && msg.Y-m.yPos == m.height-1) {
 			hoverCmd := m.updateRegionHover(msg.X-m.xPos, msg.Y-m.yPos)
 			return m, hoverCmd
 		}
@@ -1898,12 +1898,21 @@ func (m *model) syncViewState() {
 	}
 }
 
+// CacheStats reports invalidation calls and content render passes, not cached
+// viewport composition. Cold scrollbar probes count as separate render passes.
+func (m *model) CacheStats() (invalidations, renders uint64) {
+	return m.cacheInvalidations, m.sectionRenders
+}
+
 func (m *model) VisualGeneration() uint64 {
 	return m.visualGeneration + styles.ThemeGeneration()
 }
 
 // View renders the component
 func (m *model) View() string {
+	if m.mode == ModeVertical && (m.height <= 0 || m.width <= 0) {
+		return ""
+	}
 	if m.placement == nil {
 		m.syncViewState()
 	}
@@ -1969,7 +1978,10 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 		WorkingDir:       m.workingDirLine(),
 		Branch:           m.branchLine(contentWidth),
 		Yolo:             m.yoloIndicator(contentWidth),
+		AgentIdentity:    styles.AgentIdentityStyle(m.activeAgentName(), false).Render(m.activeAgentName()),
 		ModelInfo:        m.activeModelInfo(contentWidth),
+		Thinking:         m.activeThinkingLabel(),
+		CanCycleThinking: m.activeModelDetails().ThinkingControl().CanCycle,
 		InfoLine:         m.collapsedInfoLine(contentWidth),
 		ContentWidth:     contentWidth,
 	}
@@ -2073,8 +2085,12 @@ func (m *model) todosSummaryCollapsed() string {
 }
 
 func (m *model) collapsedView() string {
+	m.sectionRenders++
 	vm := m.computeCollapsedViewModel(m.contentWidth(false))
 	vm.WorkingDir = m.hoverText(vm.WorkingDir, "directory")
+	if vm.CanCycleThinking {
+		vm.Thinking = m.hoverText(vm.Thinking, "thinking-level")
+	}
 	if vm.ModelInfo != "" {
 		lines := strings.Split(vm.ModelInfo, "\n")
 		for i := range lines {
@@ -2145,12 +2161,15 @@ func (m *model) renderFromCache() string {
 	content := ""
 	if m.viewportHeight() > 0 {
 		content = m.scrollview.View()
+		if content == "" {
+			content = strings.Repeat("\n", m.viewportHeight()-1)
+		}
 	}
 	if m.footerHeight() > 0 {
-		if content != "" {
+		if m.viewportHeight() > 0 {
 			content += "\n"
 		}
-		content += m.footerView(m.contentWidth(false))
+		content += strings.Repeat("\n", m.footerGapHeight()) + m.footerView(m.contentWidth(false))
 	}
 	return content
 }
@@ -2164,6 +2183,7 @@ func (m *model) renderFromCache() string {
 // sectionCache, so an idle parent watching a working subagent costs one small
 // section per frame instead of the whole sidebar.
 func (m *model) renderSections(contentWidth int) []string {
+	m.sectionRenders++
 	m.syncViewState()
 	if m.sectionCache == nil || m.sectionCacheWidth != contentWidth {
 		m.sectionCache = map[string]string{}
@@ -2214,6 +2234,17 @@ func (m *model) renderSections(contentWidth int) []string {
 		m.usageReadingLine = sectionStart
 		m.usageSectionEnd = len(lines)
 	}
+	// Keep canonical identity directly above the model and provider/reasoning,
+	// below the complete context/cost block. It is not an agent-switch target.
+	m.agentIdentityRow = -1
+	if m.activeAgentName() != "" || m.activeModelInfo(contentWidth) != "" {
+		markBlock()
+	}
+	if m.activeAgentName() != "" {
+		m.agentIdentityRow = appendSection(m.agentIdentityView(contentWidth))
+	}
+	m.modelStart = appendSection(m.modelView(contentWidth))
+	m.modelEnd = len(lines)
 	if len(m.queuedMessages) > 0 {
 		markBlock()
 	}
@@ -2222,13 +2253,6 @@ func (m *model) renderSections(contentWidth int) []string {
 	if len(m.queuedMessages) > 0 {
 		markBlock()
 	}
-
-	modelSection := cached("model", false, m.activeModelInfo)
-	if modelSection != "" {
-		markBlock()
-	}
-	m.modelStart = appendSection(modelSection)
-	m.modelEnd = len(lines)
 
 	// The canonical root stays fixed while the active model may follow a transfer.
 	treeSection := cached("subagents", true, m.subagentsInfo)
@@ -2250,11 +2274,24 @@ func (m *model) renderSections(contentWidth int) []string {
 		m.agentClickZones[subagentSectionStart+row] = agent
 	}
 
-	if !m.sectionVisibility.HideTodos {
-		appendSection(cached("todos", false, func(w int) string {
-			m.todoComp.SetSize(w)
-			return m.todoComp.RenderBody()
-		}))
+	m.todoSummaryLine, m.todoEnd = -1, -1
+	if _, total := m.todoComp.Counts(); !m.sectionVisibility.HideTodos && total > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		m.todoSummaryLine = appendSection(m.todoSummary(contentWidth))
+		if !m.todosCollapsed {
+			appendSection(cached("todos", false, func(w int) string {
+				indent := min(2, max(0, w-1))
+				m.todoComp.SetSize(max(1, w-indent))
+				body := strings.Split(m.todoComp.RenderBody(), "\n")
+				for i := range body {
+					body[i] = strings.Repeat(" ", indent) + ansi.Truncate(body[i], w-indent, "")
+				}
+				return strings.Join(body, "\n")
+			}))
+		}
+		m.todoEnd = len(lines)
 	}
 
 	if m.viewportHeight() >= 12 && m.treeSectionStart+len(breathingBefore)+1 <= m.viewportHeight() {
@@ -2525,9 +2562,11 @@ func (m *model) activeAgentName() string {
 	return m.currentAgent
 }
 
-func (m *model) activeModelInfo(contentWidth int) string {
+func (m *model) activeModelIdentity() (modelName, provider string) {
+	if details := m.activeModelDetails(); details.ModelID != "" {
+		return details.ModelID, details.Provider
+	}
 	name := m.activeAgentName()
-	var modelName, provider string
 	for _, agent := range m.availableAgents {
 		if agent.Name == name {
 			modelName, provider = agent.Model, agent.Provider
@@ -2540,10 +2579,19 @@ func (m *model) activeModelInfo(contentWidth int) string {
 			provider, modelName = p, model
 		}
 	}
+	return modelName, provider
+}
+
+func (m *model) activeModelInfo(contentWidth int) string {
+	modelName, provider := m.activeModelIdentity()
 	if modelName == "" {
 		return ""
 	}
-	lines := []string{styles.TabPrimaryStyle.Render(toolcommon.TruncateText(modelName, contentWidth))}
+	display := m.activeModelDetails().ModelName
+	if display == "" {
+		display = modelName
+	}
+	lines := []string{styles.BaseStyle.Render(toolcommon.TruncateText(display, contentWidth))}
 	if provider != "" {
 		lines = append(lines, styles.MutedStyle.Render(toolcommon.TruncateText(provider, contentWidth)))
 	}
@@ -2614,6 +2662,7 @@ func (m *model) parentLine() string {
 // line. It records per-row node ownership (and the parent-line offset) so
 // renderSections can register hover/click zones.
 func (m *model) prepareTreeInfo(contentWidth int) string {
+	m.preparingRows = nil
 	m.subagentLineNodes = nil
 	m.subagentRowOffset = 0
 	m.delegationRootLine = -1
@@ -2632,6 +2681,13 @@ func (m *model) prepareTreeInfo(contentWidth int) string {
 	}
 	lines = append(lines, m.hoverText(m.treeSummary(contentWidth), "tree-summary"), "")
 	m.subagentRowOffset = len(lines)
+	indent := min(2, max(0, contentWidth-1))
+	bodyWidth := max(1, contentWidth-indent)
+	m.preparingRows = make(map[int]preparedTreeRow)
+	renderNode := func(node subagent.NodeSnapshot, guides string, row int) string {
+		m.preparingRows[row] = preparedTreeRow{node: node.Node, guides: guides, branch: len(node.Children) > 0}
+		return strings.Repeat(" ", indent) + m.subagentRow(node.Node, guides, bodyWidth, row, len(node.Children) > 0)
+	}
 	var walk func(nodes []subagent.NodeSnapshot, prefix string)
 	walk = func(nodes []subagent.NodeSnapshot, prefix string) {
 		for i := range nodes {
@@ -2641,7 +2697,7 @@ func (m *model) prepareTreeInfo(contentWidth int) string {
 				connector, childPrefix = prefix+"└ ", prefix+"  "
 			}
 			row := len(lines)
-			line := m.subagentRow(nodes[i].Node, connector, contentWidth, row, len(nodes[i].Children) > 0)
+			line := renderNode(nodes[i], connector, row)
 			lines = append(lines, line)
 			m.subagentLineNodes = append(m.subagentLineNodes, nodes[i].Node.ID)
 			if !m.collapsedBranches[nodes[i].Node.ID] {
@@ -2651,7 +2707,7 @@ func (m *model) prepareTreeInfo(contentWidth int) string {
 	}
 	for _, node := range m.subagentNodes {
 		row := len(lines)
-		lines = append(lines, m.subagentRow(node.Node, "", contentWidth, row, len(node.Children) > 0))
+		lines = append(lines, renderNode(node, "", row))
 		m.subagentLineNodes = append(m.subagentLineNodes, node.Node.ID)
 		if !m.collapsedBranches[node.Node.ID] {
 			walk(node.Children, "")
@@ -2659,7 +2715,7 @@ func (m *model) prepareTreeInfo(contentWidth int) string {
 	}
 	for _, name := range m.participantNames() {
 		m.transferAgentLines[len(lines)] = name
-		lines = append(lines, m.participantLine(name, contentWidth))
+		lines = append(lines, strings.Repeat(" ", indent)+m.participantLine(name, bodyWidth))
 	}
 	if pres, ok := m.visibleTransfer(); ok {
 		lines = append(lines, m.renderTransferRelation(pres, contentWidth))
@@ -2882,7 +2938,7 @@ func (m *model) updateSubagentHover(y int) {
 		}
 		if id != m.hoveredSubagent {
 			m.hoveredSubagent = id
-			m.invalidateAnimation()
+			m.invalidateHover()
 		}
 		if !ok || id == "" {
 			m.hoveredTreeRow = -1
@@ -2898,7 +2954,7 @@ func (m *model) updateSubagentHover(y int) {
 		parent := ok && row.action == ClickSubagentParent
 		if parent != m.hoveredParent {
 			m.hoveredParent = parent
-			m.invalidateAnimation()
+			m.invalidateHover()
 		}
 		return
 	}
@@ -2907,12 +2963,12 @@ func (m *model) updateSubagentHover(y int) {
 	id := m.subagentHoverZone[contentY]
 	if id != m.hoveredSubagent {
 		m.hoveredSubagent = id
-		m.invalidateAnimation()
+		m.invalidateHover()
 	}
 	hoveredParent := m.parentLineZone >= 0 && contentY == m.parentLineZone
 	if hoveredParent != m.hoveredParent {
 		m.hoveredParent = hoveredParent
-		m.invalidateAnimation()
+		m.invalidateHover()
 	}
 }
 
@@ -2925,7 +2981,7 @@ func (m *model) ClearSubagentHover() tea.Cmd {
 	m.hoveredSubagent = ""
 	m.hoveredParent = false
 	if changed {
-		m.invalidateAnimation()
+		m.invalidateHover()
 	}
 	return m.setHoverTarget("")
 }
@@ -3673,6 +3729,9 @@ func (m *model) GetSize() (width, height int) {
 }
 
 func (m *model) SetMode(mode Mode) {
+	if m.mode == mode {
+		return
+	}
 	m.mode = mode
 	m.invalidateCache()
 }

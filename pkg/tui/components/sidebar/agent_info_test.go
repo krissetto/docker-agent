@@ -207,5 +207,5 @@ func TestSetAgentInfoHarnessClearsPreviousProvider(t *testing.T) {
 	assert.Empty(t, m.availableAgents[0].Provider)
 	assert.Equal(t, "harness", m.availableAgents[0].Model)
 	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "stale", Model: "Remote display"}})
-	assert.Equal(t, styles.TabPrimaryStyle.Render("harness"), m.activeModelInfo(60), "late team metadata cannot restore a provider for an unqualified active model")
+	assert.Equal(t, styles.BaseStyle.Render("harness"), m.activeModelInfo(60), "late team metadata cannot restore a provider for an unqualified active model")
 }

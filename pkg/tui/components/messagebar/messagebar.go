@@ -3,6 +3,7 @@ package messagebar
 
 import (
 	"strings"
+	"time"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
@@ -17,11 +18,32 @@ type Action struct {
 	Command tea.Cmd
 }
 
-// Message is a plain-text, single-row notice; actions return caller-owned commands.
+// Message is a single-row notice; actions return caller-owned commands.
+// AgentName and AgentNodeID are optional canonical identity metadata, not ANSI.
+// Callers must supply an actual node ID, never a shortened session identifier.
 type Message struct {
-	Text     string
-	Severity Severity
-	Actions  []Action
+	Text        string
+	Severity    Severity
+	Actions     []Action
+	Category    Category
+	Owner       string
+	AgentName   string
+	AgentNodeID string
+}
+
+func (m Message) label() string {
+	label := m.AgentName
+	if label != "" && m.AgentNodeID != "" {
+		label += " (" + m.AgentNodeID + ")"
+	}
+	if label != "" && m.Text != "" {
+		label += " · "
+	}
+	return label + m.Text
+}
+
+func (m Message) empty() bool {
+	return m.Text == "" && m.AgentName == "" && len(m.Actions) == 0
 }
 
 // SetMessageMsg and ClearMessageMsg are handled by the owning event loop.
@@ -45,12 +67,17 @@ type Model struct {
 	cacheValid    bool
 	cachedView    string
 	theme         uint64
+	agentColors   uint64
 
 	ar         *animation.Runtime
 	transition animation.Transition
 	alpha      float64
 	closing    bool
 	closeFrom  float64
+	entryFrom  float64
+	generation uint64
+	token      Token
+	deadline   time.Time
 }
 
 func New() *Model {
@@ -76,9 +103,24 @@ func (m *Model) SetSize(width, height int) tea.Cmd {
 func (m *Model) Height() int { return m.height }
 
 func (m *Model) SetMessage(message Message) tea.Cmd {
+	_, cmd, _ := m.SetNotice(message, time.Time{})
+	return cmd
+}
+
+// SetNotice applies shared priority policy and returns ownership only on success.
+// A zero deadline is persistent; the caller alone schedules nonzero deadlines.
+func (m *Model) SetNotice(message Message, deadline time.Time) (Token, tea.Cmd, bool) {
 	defer m.prepareView()
+	message.Text = singleLine(message.Text)
+	message.AgentName = singleLine(message.AgentName)
+	message.AgentNodeID = singleLine(message.AgentNodeID)
+	if !CanReplace(m.message, message) {
+		return Token{}, nil, false
+	}
+	m.generation++
+	m.token = Token{Owner: message.Owner, Generation: m.generation}
+	m.deadline = deadline
 	m.message = message
-	m.message.Text = singleLine(message.Text)
 	m.message.Actions = append([]Action(nil), message.Actions...)
 	for i := range m.message.Actions {
 		m.message.Actions[i].Label = singleLine(m.message.Actions[i].Label)
@@ -86,7 +128,7 @@ func (m *Model) SetMessage(message Message) tea.Cmd {
 	m.focused, m.hovered, m.selected = false, -1, -1
 	m.layout()
 	m.invalidate()
-	return m.startNotice()
+	return m.token, m.startNotice(), true
 }
 
 func (m *Model) HasActions() bool { return !m.closing && len(m.bounds) > 0 }
@@ -198,7 +240,8 @@ func (m *Model) layout() {
 	available := m.width
 	// Reserve a message cell and separator, then fit only complete action pills.
 	actionBudget := available
-	if m.message.Text != "" {
+	label := m.message.label()
+	if label != "" {
 		actionBudget = max(0, actionBudget-2)
 	}
 	actionWidth := 0
@@ -227,7 +270,7 @@ func (m *Model) layout() {
 		}
 	}
 	if textWidth > 0 {
-		m.text = ansi.Truncate(m.message.Text, textWidth, "…")
+		m.text = ansi.Truncate(label, textWidth, "…")
 	}
 	if !m.HasActions() {
 		m.focused, m.selected = false, -1
@@ -243,7 +286,7 @@ func (m *Model) layout() {
 }
 
 func (m *Model) View() string {
-	if m.cacheValid && m.theme == styles.ThemeGeneration() {
+	if m.cacheValid && m.theme == styles.ThemeGeneration() && m.agentColors == styles.AgentColorGeneration() {
 		return m.cachedView
 	}
 	return m.render()
@@ -252,11 +295,12 @@ func (m *Model) View() string {
 // Cache preparation belongs to the event loop, never to View.
 func (m *Model) prepareView() {
 	generation := styles.ThemeGeneration()
-	if m.cacheValid && m.theme == generation {
+	agentColors := styles.AgentColorGeneration()
+	if m.cacheValid && m.theme == generation && m.agentColors == agentColors {
 		return
 	}
 	m.cachedView = m.render()
-	m.cacheValid, m.theme = true, generation
+	m.cacheValid, m.theme, m.agentColors = true, generation, agentColors
 }
 
 func (m *Model) render() string {
@@ -265,7 +309,20 @@ func (m *Model) render() string {
 	}
 	base := styles.NoStyle.Background(styles.Background)
 	var out strings.Builder
-	out.WriteString(base.Foreground(m.severityColor()).Render(m.text))
+	// Segment the already-truncated plain text by terminal cells. Caller ANSI
+	// never passes through; identity colors are resolved from the current theme.
+	nameEnd := min(ansi.StringWidth(m.message.AgentName), ansi.StringWidth(m.text))
+	idEnd := nameEnd
+	if m.message.AgentName != "" && m.message.AgentNodeID != "" {
+		idEnd = min(nameEnd+ansi.StringWidth(" ("+m.message.AgentNodeID+")"), ansi.StringWidth(m.text))
+	}
+	if nameEnd > 0 {
+		out.WriteString(base.Foreground(styles.AgentIdentityStyle(m.message.AgentName, false).GetForeground()).Render(ansi.Cut(m.text, 0, nameEnd)))
+	}
+	if idEnd > nameEnd {
+		out.WriteString(base.Foreground(styles.TextSecondary).Render(ansi.Cut(m.text, nameEnd, idEnd)))
+	}
+	out.WriteString(base.Foreground(m.severityColor()).Render(ansi.Cut(m.text, idEnd, ansi.StringWidth(m.text))))
 	cursor := ansi.StringWidth(m.text)
 	for _, bounds := range m.bounds {
 		out.WriteString(base.Render(strings.Repeat(" ", bounds.start-cursor)))

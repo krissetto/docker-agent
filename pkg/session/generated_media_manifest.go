@@ -206,19 +206,19 @@ func (s *InMemorySessionStore) LookupGeneratedBlob(_ context.Context, sessionID,
 
 func (s *SQLiteSessionStore) AddGeneratedBlob(ctx context.Context, sessionID, relPath string, data []byte) error {
 	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := execSQLiteWrite(ctx, s.db, `
 		INSERT INTO generated_media_blobs (session_id, rel_path, data)
 		VALUES (?, ?, ?)
 		ON CONFLICT (session_id, rel_path) DO UPDATE SET data = excluded.data
 	`, sessionID, relPath, data)
-	return err
+	return classifySQLiteContextError(ctx, err)
 }
 
 func (s *SQLiteSessionStore) LookupGeneratedBlob(ctx context.Context, sessionID, relPath string) ([]byte, error) {
 	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	var data []byte
 	err := s.db.QueryRowContext(ctx, `
@@ -229,16 +229,16 @@ func (s *SQLiteSessionStore) LookupGeneratedBlob(ctx context.Context, sessionID,
 		return nil, fmt.Errorf("%w: %q", ErrGeneratedBlobNotFound, relPath)
 	}
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	return data, nil
 }
 
 func (s *SQLiteSessionStore) AddGeneratedFile(ctx context.Context, file GeneratedFile) error {
 	if err := validateGeneratedFileRecord(file.SessionID, file.Root, file.RelPath); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := execSQLiteWrite(ctx, s.db, `
 		INSERT INTO generated_media_manifest (session_id, rel_path, root_kind, mime_type, created_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (session_id, rel_path) DO UPDATE SET
@@ -246,12 +246,12 @@ func (s *SQLiteSessionStore) AddGeneratedFile(ctx context.Context, file Generate
 			mime_type = excluded.mime_type,
 			created_at = excluded.created_at
 	`, file.SessionID, file.RelPath, string(normalizeGeneratedFileRoot(file.Root)), file.MimeType, file.CreatedAt.UTC().Format(time.RFC3339Nano))
-	return err
+	return classifySQLiteContextError(ctx, err)
 }
 
 func (s *SQLiteSessionStore) LookupGeneratedFile(ctx context.Context, sessionID, relPath string) (*GeneratedFile, error) {
 	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	file := GeneratedFile{SessionID: sessionID, RelPath: relPath}
 	var root, createdAt string
@@ -263,7 +263,7 @@ func (s *SQLiteSessionStore) LookupGeneratedFile(ctx context.Context, sessionID,
 		return nil, fmt.Errorf("%w: %q", ErrGeneratedFileNotFound, relPath)
 	}
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	file.Root = normalizeGeneratedFileRoot(chat.ArtifactRootKind(root))
 	file.CreatedAt = parseCreatedAt(createdAt)

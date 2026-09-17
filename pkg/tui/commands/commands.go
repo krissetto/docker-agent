@@ -36,6 +36,9 @@ type Category struct {
 type ArgumentCandidate struct {
 	Label       string
 	Description string
+	// Value is the exact full argument inserted after the slash command.
+	// Empty preserves the legacy behavior of inserting Label.
+	Value string
 	// Disabled marks a candidate that is shown for context but cannot be
 	// submitted (e.g. a non-restartable toolset for /toolset-restart).
 	Disabled bool
@@ -58,10 +61,70 @@ type Item struct {
 	// reflect current runtime state (e.g. toolset lifecycle). Nil for
 	// commands with no argument completion.
 	CompleteArgument func() []ArgumentCandidate
+	// CompleteArgumentFor receives the complete argument text after the slash
+	// command, including spacing and quotes. It takes precedence over the
+	// legacy provider, allowing contextual multi-argument completion. The
+	// provider MUST filter the full raw argument and return phase-appropriate
+	// candidates in relevance order: completion adapters preserve that order
+	// and bypass their ordinary label-based filter for these results.
+	CompleteArgumentFor func(arg string) []ArgumentCandidate
 }
 
 func builtInSessionCommands() []Item {
 	cmds := []Item{
+		{
+			ID:           "session.resume",
+			Label:        "Resume",
+			SlashCommand: "/resume",
+			Description:  "Resume the addressed restored session and its queued work",
+			Category:     "Session",
+			Immediate:    true,
+			Execute:      func(string) tea.Cmd { return core.CmdHandler(messages.ResumeSessionMsg{}) },
+		},
+		{
+			ID:           "session.subagents",
+			Label:        "Subagents",
+			SlashCommand: "/subagents",
+			Description:  "List subagent sessions",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.ShowSubagentSessionsMsg{})
+			},
+		},
+		{
+			ID:           "session.subagent.view",
+			Label:        "View Subagent",
+			SlashCommand: "/subagent-view",
+			Description:  "Open a live subagent viewer; sending targets that session",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.OpenSubagentMsg{NodeID: strings.TrimSpace(arg)})
+			},
+		},
+		{
+			ID:           "session.subagent.attach",
+			Label:        "Attach Subagent",
+			SlashCommand: "/subagent-attach",
+			Description:  "Attach a live subagent viewer by exact node or session ID",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.OpenSubagentMsg{NodeID: strings.TrimSpace(arg)})
+			},
+		},
+		{
+			ID:           "session.back",
+			Label:        "Back",
+			SlashCommand: "/back",
+			Description:  "Return to the previous session without cancelling execution",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.ReturnToPreviousSessionMsg{})
+			},
+		},
 		{
 			ID:           "session.clear",
 			Label:        "Clear",

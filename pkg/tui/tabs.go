@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -75,14 +76,22 @@ func (m *appModel) restoreTabs(
 	}
 
 	sessionStore := initialApp.SessionStore()
+	var summaries map[string]session.Summary
+	if sessionStore != nil {
+		if rows, err := sessionStore.GetSessionSummaries(ctx); err == nil {
+			summaries = make(map[string]session.Summary, len(rows))
+			for _, row := range rows {
+				summaries[row.ID] = row
+			}
+		}
+	}
 	restoredFirst := false
 
 	for _, saved := range savedTabs {
-		// Validate the saved session still exists.
-		if sessionStore != nil && saved.SessionID != "" {
-			if _, err := sessionStore.GetSession(ctx, saved.SessionID); err != nil {
-				slog.WarnContext(ctx, "Saved session no longer exists, removing stale tab",
-					"session_id", saved.SessionID, "error", err)
+		// Startup presence/title checks use one metadata read, never per-tab
+		// transcript loads or persisted canonical owner admission.
+		if summaries != nil && saved.SessionID != "" {
+			if _, exists := summaries[saved.SessionID]; !exists {
 				_ = ts.RemoveTab(ctx, saved.SessionID)
 				continue
 			}
@@ -94,6 +103,9 @@ func (m *appModel) restoreTabs(
 			restoredFirst = true
 			runtimeID = initialTabID
 		} else {
+			if spawner == nil {
+				continue
+			}
 			spawned, err := spawner(ctx, saved.WorkingDir)
 			if err != nil {
 				slog.WarnContext(ctx, "Failed to restore tab", "working_dir", saved.WorkingDir, "error", err)
@@ -126,11 +138,8 @@ func (m *appModel) restoreTabs(
 			}
 		}
 
-		// Peek at the session title so the tab bar shows a name before lazy load.
-		if sessionStore != nil && saved.SessionID != "" {
-			if oldSess, err := sessionStore.GetSession(ctx, saved.SessionID); err == nil && oldSess.Title != "" {
-				sv.SeedTitle(runtimeID, oldSess.Title)
-			}
+		if summary, exists := summaries[saved.SessionID]; exists && summary.Title != "" {
+			sv.SeedTitle(runtimeID, summary.Title)
 		}
 	}
 

@@ -145,7 +145,7 @@ func BenchmarkTabbarFixedMotion(b *testing.B) {
 		tb.Update(DragHoldMsg{seq: tb.drag.seq})
 		tb.Update(tea.MouseMotionMsg{X: 38})
 		for range 8 {
-			cmd := runtime.EnsureRunning()
+			cmd := runtime.Continue()
 			if cmd == nil {
 				break
 			}

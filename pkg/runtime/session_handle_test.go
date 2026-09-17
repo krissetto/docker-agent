@@ -390,6 +390,7 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 		submission, err := h.Submit(t.Context(), TurnInput{Content: content})
 		require.NoError(t, err)
 		var terminal bool
+		var stopped int
 		for !terminal {
 			select {
 			case envelope, ok := <-obs.Events:
@@ -397,7 +398,16 @@ func TestObservationCorrelatesSubmissionAndOrdersEvents(t *testing.T) {
 				assert.Greater(t, envelope.Sequence, previous)
 				previous = envelope.Sequence
 				assert.Equal(t, submission.TurnID, envelope.TurnID)
-				_, terminal = envelope.Event.(*StreamStoppedEvent)
+				switch event := envelope.Event.(type) {
+				case *StreamStoppedEvent:
+					stopped++
+				case *TurnSettledEvent:
+					assert.Equal(t, 1, stopped, "stream stop precedes durable settlement exactly once")
+					assert.Equal(t, h.ID(), event.SessionID)
+					assert.Equal(t, submission.TurnID, event.TurnID)
+					assert.Equal(t, TurnCompleted, event.Outcome)
+					terminal = true
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatalf("timed out waiting for %q turn settlement", content)
 			}

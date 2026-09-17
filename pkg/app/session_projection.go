@@ -77,7 +77,11 @@ func (s *appProjectionSink) Apply(envelope runtime.SessionEvent) {
 	if positioned && envelope.TranscriptPosition >= s.position {
 		s.position = envelope.TranscriptPosition + 1
 	}
-	s.app.sendBridgedEventFrom(s.ctx, envelope.TurnID, envelope.Event, false, s.sessionID, s.epoch)
+	originSessionID := envelope.SessionID
+	if originSessionID == "" {
+		originSessionID = s.sessionID // compatibility observations may omit the envelope owner
+	}
+	s.app.sendSequencedBridgedEventFrom(s.ctx, envelope.TurnID, envelope.Event, false, originSessionID, s.epoch, envelope.Sequence)
 }
 
 func (a *App) Presentation() *PresentationState { return a.presentation.Load() }
@@ -132,6 +136,8 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		next.Interactions = append(slices.Clone(next.Interactions), runtime.InteractionSnapshot{SessionID: key.SessionID, InteractionID: key.InteractionID, Event: event})
 	case *runtime.PendingUserMessageCanceledEvent:
 		next.Lifecycle.Pending = slices.DeleteFunc(slices.Clone(next.Lifecycle.Pending), func(id string) bool { return id == e.TurnID })
+	case *runtime.DormancyChangedEvent:
+		next.Status.Dormant = e.Dormant
 	case *runtime.PauseChangedEvent:
 		next.Status.PauseArmed = e.Paused
 		if !e.Paused {
@@ -232,7 +238,7 @@ func (a *App) EditSession(ctx context.Context, edit runtime.SessionEdit) error {
 		return err
 	}
 	switch edit.Kind {
-	case runtime.SessionEditPendingMessage:
+	case runtime.SessionEditPendingMessage, runtime.SessionEditResume:
 		// The canonical edited event updates the projection without a new bridge.
 	case runtime.SessionEditMessage, runtime.SessionEditSummary, runtime.SessionEditTokens:
 		a.startSessionEventBridge(ctx)

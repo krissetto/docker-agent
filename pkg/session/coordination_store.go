@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -24,6 +25,14 @@ type ChildRecord struct {
 type ChildAdmission struct {
 	Child  *Session
 	Record ChildRecord
+}
+
+// ChildAdmissionBatchStore atomically adopts an existing, bounded legacy tree.
+// Every child, parent and root row must still exist at admission; unlike
+// AdmitChild, this capability never creates a missing session row.
+// Runtime source, membership and grant validation must precede admission.
+type ChildAdmissionBatchStore interface {
+	AdmitChildren(ctx context.Context, admissions []ChildAdmission) error
 }
 
 type ChildReport struct {
@@ -75,6 +84,9 @@ func prepareAdmission(a ChildAdmission) (*Session, ChildRecord, error) {
 	if a.Child.ID != r.Node.SessionID || a.Child.ID == r.ParentSessionID || a.Child.ID == r.RootSessionID {
 		return nil, r, errors.New("invalid child identity")
 	}
+	if a.Child.ParentID != "" && a.Child.ParentID != r.ParentSessionID {
+		return nil, r, ErrAlreadyExists
+	}
 	child := a.Child.OwnSnapshot()
 	child.ParentID = r.ParentSessionID
 	r.Revision = 1
@@ -107,72 +119,135 @@ type acceptedChildReport struct {
 
 func (s *InMemorySessionStore) Durability() subagent.Durability { return subagent.DurabilityVolatile }
 
+// AdmitChild shares the batch implementation for spawn admission, but may create
+// its new child. Restore batches must not recreate rows deleted after prepare.
 func (s *InMemorySessionStore) AdmitChild(ctx context.Context, a ChildAdmission) error {
+	return s.admitChildren(ctx, []ChildAdmission{a}, true)
+}
+
+func (s *InMemorySessionStore) AdmitChildren(ctx context.Context, admissions []ChildAdmission) error {
+	return s.admitChildren(ctx, admissions, false)
+}
+
+type preparedChildAdmission struct {
+	child        *Session
+	record       ChildRecord
+	recordJSON   string
+	createChild  bool
+	recordExists bool
+}
+
+func prepareAdmissions(admissions []ChildAdmission) ([]preparedChildAdmission, error) {
+	prepared := make([]preparedChildAdmission, 0, len(admissions))
+	sessions := make(map[string]bool, len(admissions))
+	nodes := make(map[subagent.NodeID]bool, len(admissions))
+	for _, admission := range admissions {
+		child, record, err := prepareAdmission(admission)
+		if err != nil {
+			return nil, err
+		}
+		if sessions[child.ID] || nodes[record.Node.ID] {
+			return nil, ErrAlreadyExists
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		sessions[child.ID], nodes[record.Node.ID] = true, true
+		prepared = append(prepared, preparedChildAdmission{child: child, record: record, recordJSON: string(data)})
+	}
+	return prepared, nil
+}
+
+// Lifecycle state may have advanced since admission. Idempotence compares the
+// immutable ownership identity only, and never rewrites the current record.
+func sameChildIdentity(old, record ChildRecord) bool {
+	return old.RootSessionID == record.RootSessionID && old.ParentSessionID == record.ParentSessionID &&
+		old.Node.SessionID == record.Node.SessionID && old.Node.ID == record.Node.ID &&
+		old.Node.Agent == record.Node.Agent && old.Node.Parent == record.Node.Parent
+}
+
+func (s *InMemorySessionStore) admitChildren(ctx context.Context, admissions []ChildAdmission, allowCreate bool) error {
+	if len(admissions) == 0 {
+		return nil
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	child, record, err := prepareAdmission(a)
+	prepared, err := prepareAdmissions(admissions)
 	if err != nil {
 		return err
 	}
 	s.coordinationMu.Lock()
 	defer s.coordinationMu.Unlock()
-	if old, ok := s.children[child.ID]; ok {
-		if old.RootSessionID == record.RootSessionID && old.ParentSessionID == record.ParentSessionID && old.Node.ID == record.Node.ID && old.Node.Agent == record.Node.Agent && old.Node.Parent == record.Node.Parent {
-			return nil
+	lookup := func(id string) (*Session, error) {
+		sess, ok := s.sessions.Load(id)
+		if !ok {
+			return nil, ErrNotFound
 		}
-		return ErrAlreadyExists
+		return sess, nil
 	}
-	parent, ok := s.sessions.Load(record.ParentSessionID)
-	if !ok {
-		return ErrNotFound
-	}
-	if _, ok := s.sessions.Load(record.RootSessionID); !ok {
-		return ErrNotFound
-	}
-	for _, existing := range s.children {
-		if existing.RootSessionID == record.RootSessionID && existing.Node.ID == record.Node.ID {
-			return ErrAlreadyExists
-		}
-	}
-	existing, exists := s.sessions.Load(child.ID)
-	if exists {
-		lookup := func(id string) (*Session, error) {
-			sess, ok := s.sessions.Load(id)
-			if !ok {
-				return nil, ErrNotFound
+	for i := range prepared {
+		entry := &prepared[i]
+		child, record := entry.child, entry.record
+		existing, err := lookup(child.ID)
+		if errors.Is(err, ErrNotFound) && allowCreate {
+			if err := validateNewChild(child); err != nil {
+				return err
 			}
-			return sess, nil
+			entry.createChild = true
+			existing = child
+		} else if err != nil {
+			return err
 		}
 		if err := validateChildAdoption(existing, child, record, lookup); err != nil {
 			return err
 		}
-	} else {
-		if err := validateNewChild(child); err != nil {
-			return err
+		if old, ok := s.children[child.ID]; ok {
+			if !sameChildIdentity(old, record) || entry.createChild {
+				return ErrAlreadyExists
+			}
+			entry.recordExists = true
 		}
-		for _, item := range child.Messages {
-			if item.Message != nil {
-				item.Message.ID = s.messageID.Add(1)
+		for id, old := range s.children {
+			if id != child.ID && old.RootSessionID == record.RootSessionID && old.Node.ID == record.Node.ID {
+				return ErrAlreadyExists
 			}
 		}
-		s.sessions.Store(child.ID, child)
 	}
-	linked := false
-	for _, item := range parent.MessagesSnapshot() {
-		if item.SubSession != nil && item.SubSession.ID == child.ID {
-			linked = true
-			break
-		}
+	// DeleteSession uses this same mutex. After the final cancellation check,
+	// applying this completely validated batch has no fallible steps.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if !linked {
-		parent.AddSubSession(&Session{ID: child.ID, ParentID: record.ParentSessionID})
-	}
-
 	if s.children == nil {
 		s.children = make(map[string]ChildRecord)
 	}
-	s.children[child.ID] = record
+	for _, entry := range prepared {
+		child, record := entry.child, entry.record
+		if entry.createChild {
+			for _, item := range child.Messages {
+				if item.Message != nil {
+					item.Message.ID = s.messageID.Add(1)
+				}
+			}
+			s.sessions.Store(child.ID, child)
+		}
+		parent, _ := s.sessions.Load(record.ParentSessionID)
+		linked := false
+		for _, item := range parent.MessagesSnapshot() {
+			if item.SubSession != nil && item.SubSession.ID == child.ID {
+				linked = true
+				break
+			}
+		}
+		if !linked {
+			parent.AddSubSession(&Session{ID: child.ID, ParentID: record.ParentSessionID})
+		}
+		if !entry.recordExists {
+			s.children[child.ID] = record
+		}
+	}
 	return nil
 }
 
@@ -295,8 +370,10 @@ func (s *InMemorySessionStore) AcceptReport(ctx context.Context, parent, id stri
 }
 
 var (
-	_ CoordinationStore = (*InMemorySessionStore)(nil)
-	_ CoordinationStore = (*SQLiteSessionStore)(nil)
+	_ CoordinationStore        = (*InMemorySessionStore)(nil)
+	_ CoordinationStore        = (*SQLiteSessionStore)(nil)
+	_ ChildAdmissionBatchStore = (*InMemorySessionStore)(nil)
+	_ ChildAdmissionBatchStore = (*SQLiteSessionStore)(nil)
 )
 
 // Resolve references from the current owner row, never from an ancestor's copy.

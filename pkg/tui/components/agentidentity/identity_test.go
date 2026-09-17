@@ -38,7 +38,7 @@ func TestIdentityOnlyNameUsesAccentAndHover(t *testing.T) {
 func TestIdentityWrappedSuffixStaysNeutralOnHover(t *testing.T) {
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "746aa-exact-node", Name: "worker (lead)", Agent: "worker", DisplayID: "746aa"}
 	for _, prefix := range []string{"Spawned ", "Inspecting ", ""} {
-		wrapped := Wrap(styles.MutedStyle.Render(prefix), ref, styles.MutedStyle.Render(" has replied"), 18)
+		wrapped := Wrap(styles.MutedStyle.Render(prefix), ref, styles.MutedStyle.Render(" has finished their work"), 18)
 		for line := range strings.SplitSeq(wrapped, "\n") {
 			hover := Hover(line, 0, ansi.StringWidth(line), ref)
 			require.Equal(t, ansi.Strip(line), ansi.Strip(hover))
@@ -59,7 +59,7 @@ func TestIdentityBorderKeepsNeutralSuffix(t *testing.T) {
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "1819e-exact-node", Name: "root", Agent: "root", DisplayID: "1819e"}
 	style := styles.UserMessageStyle
 	line := strings.Split(Border(style.Width(40).Render("body"), ref, 40, style), "\n")[0]
-	start := style.GetBorderLeftSize() + style.GetPaddingLeft()
+	start := style.GetBorderLeftSize() + 2
 	hover := Hover(line, start, start+ansi.StringWidth(ref.Label()), ref)
 	for x := start + len(ref.Name); x < start+ansi.StringWidth(ref.Label()); x++ {
 		assert.Equal(t, color.RGBAModel.Convert(styles.MutedStyle.GetForeground()), foregroundAt(line, x))
@@ -174,4 +174,28 @@ func TestNameMetadataDoesNotSupplyForegroundToUncoloredWrappedCells(t *testing.T
 	last := ansi.StringWidth(line) - 1
 	require.Nil(t, foregroundAt(line, last))
 	assert.Nil(t, foregroundAt(got, last), "metadata cannot fabricate a foreground on reset/uncolored cells")
+}
+
+func TestBorderPreservesCallerBodyANSIAndGraphemesAcrossResize(t *testing.T) {
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "abcde-canonical", Name: "Cafe\u0301 界", Agent: "worker", DisplayID: "abcde"}
+	const body = "Natural spaced text cafe\u0301 界 \x1b[1mbold\x1b[22m \x1b]8;;https://example.invalid\x1b\\link words\x1b]8;;\x1b\\"
+	for _, width := range []int{1, 2, 3, 4, 8, 24, 80, 4, 80} {
+		style := styles.UserMessageStyle.Bold(false)
+		before := style.Width(width).Render(body)
+		after := Border(before, ref, width, style)
+		original, got := strings.Split(before, "\n"), strings.Split(after, "\n")
+		require.Equal(t, original[1:], got[1:], "identity seam cannot touch caller-rendered body bytes")
+		require.Equal(t, width, ansi.StringWidth(got[0]))
+		hover := Hover(got[0], 0, width, ref)
+		require.Equal(t, ansi.Strip(got[0]), ansi.Strip(hover))
+		if width >= 24 {
+			require.Contains(t, ansi.Strip(got[0]), "━ Cafe\u0301 界 (abcde) ━")
+			require.NotContains(t, ansi.Strip(got[0]), ref.ID)
+		}
+	}
+	for _, ref := range []lifecycle.InputReference{{}, {Name: "worker"}, {Name: "worker", DisplayID: "abcde"}} {
+		got := Border("padding\n"+body, ref, 40, styles.UserMessageStyle)
+		require.NotContains(t, got, Link, "unresolved identity cannot fabricate navigation")
+		require.Equal(t, body, strings.SplitN(got, "\n", 2)[1])
+	}
 }

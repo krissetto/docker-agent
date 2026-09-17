@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
@@ -27,6 +28,25 @@ import (
 )
 
 func (m *model) handleKey(ctx context.Context, k ui.Key) {
+	if k.Typ == ui.KeyBackgroundDark || k.Typ == ui.KeyBackgroundLight {
+		m.handleBackgroundColor(k.Typ == ui.KeyBackgroundDark)
+		return
+	}
+	if m.transcriber != nil && m.transcriber.IsRunning() && (k.Typ == ui.KeyEnter || k.Typ == ui.KeyEsc) {
+		m.stopSpeech()
+		if k.Typ == ui.KeyEsc {
+			return
+		}
+	}
+	if m.interruptPending {
+		if k.Typ == ui.KeyRune && len(k.Runes) > 0 && (k.Runes[0] == 'y' || k.Runes[0] == 'Y') {
+			m.interruptPending = false
+			m.handleInterrupt()
+		} else if k.Typ == ui.KeyEsc || k.Typ == ui.KeyCtrlC || (k.Typ == ui.KeyRune && len(k.Runes) > 0 && (k.Runes[0] == 'n' || k.Runes[0] == 'N')) {
+			m.interruptPending = false
+		}
+		return
+	}
 	if m.screen.Confirm != nil {
 		m.handleConfirmKey(ctx, k)
 		return
@@ -34,7 +54,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 
 	switch k.Typ {
 	case ui.KeyCtrlC:
-		m.handleInterrupt()
+		m.requestInterrupt()
 	case ui.KeyCtrlD:
 		if m.screen.Editor.IsEmpty() {
 			m.quit()
@@ -89,7 +109,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 		m.screen.Editor.DeleteWordBack()
 	case ui.KeyEsc:
 		if m.busy || m.runCancel != nil {
-			m.handleInterrupt()
+			m.requestInterrupt()
 		} else {
 			m.screen.Autocomplete.Dismiss()
 			return // Keep the matching draft from immediately reopening completion.
@@ -126,6 +146,25 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 	m.screen.Editor.SetText(strings.Join(cancelled, "\n"))
 	m.screen.Autocomplete.Sync(m.screen.Editor.Text())
 	return true
+}
+
+func (m *model) requestInterrupt() {
+	if m.busy {
+		switch m.interruptMode {
+		case "always":
+			m.interruptPending = true
+			m.reportCapability("Cancel this session's current response? [y] yes [n/Esc] keep running", nil)
+			return
+		case "double-tap":
+			now := time.Now()
+			if now.Sub(m.lastInterrupt) > time.Second {
+				m.lastInterrupt = now
+				m.reportCapability("Press interrupt again within one second to cancel.", nil)
+				return
+			}
+		}
+	}
+	m.handleInterrupt()
 }
 
 func (m *model) handleInterrupt() {
@@ -184,7 +223,9 @@ func (m *model) handleCycleThinkingLevel(ctx context.Context) {
 		m.reportThinkingLevelError("change", err)
 		return
 	}
-	m.status.Thinking = level.String()
+	if m.status.ThinkingMode == "" {
+		m.status.Thinking = level.String()
+	}
 }
 
 // handleSetThinkingLevel applies the /effort command: it sets the current
@@ -194,7 +235,11 @@ func (m *model) handleSetThinkingLevel(ctx context.Context, level string) {
 		return
 	}
 	if level == "" {
-		m.addNotice("", "Usage: /effort <none|minimal|low|medium|high|xhigh|max>", ui.StMuted())
+		var choices []ui.Command
+		for _, level := range m.app.CurrentAgentThinkingLevels(ctx) {
+			choices = append(choices, ui.Command{Name: string(level), Value: string(level)})
+		}
+		m.completeArgument("effort", choices)
 		return
 	}
 	parsed, ok := effort.Parse(level)
@@ -207,7 +252,9 @@ func (m *model) handleSetThinkingLevel(ctx context.Context, level string) {
 		m.reportThinkingLevelError("set", err)
 		return
 	}
-	m.status.Thinking = applied.String()
+	if m.status.ThinkingMode == "" {
+		m.status.Thinking = applied.String()
+	}
 	m.addNotice("", "Reasoning effort set to "+applied.String(), ui.StMuted())
 }
 
@@ -248,7 +295,11 @@ type submitOptions struct {
 }
 
 func (m *model) submitEditor(ctx context.Context, text string) {
-	m.submitEditorMode(ctx, text, busySubmitSteer)
+	mode := busySubmitSteer
+	if m.queueSendMode {
+		mode = busySubmitFollowUp
+	}
+	m.submitEditorMode(ctx, text, mode)
 }
 
 func (m *model) submitEditorMode(ctx context.Context, text string, mode busySubmitMode) {
@@ -261,7 +312,7 @@ func (m *model) submitFollowUp(ctx context.Context, text string) {
 
 func (m *model) submit(ctx context.Context, text string, opts submitOptions) {
 	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
+	if trimmed == "" && len(m.draftAttachments) == 0 {
 		return
 	}
 	if opts.fromEditor {
@@ -297,11 +348,26 @@ func (m *model) runBangCommand(ctx context.Context, command string) {
 // should be treated as a normal message.
 func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMode) bool {
 	name, rest := splitCommand(text)
+	if m.disabledCommands[name] {
+		m.addNotice("⚠ ", "Command /"+name+" is disabled.", ui.StWarning())
+		return true
+	}
+	if m.handleCapabilityCommand(ctx, name, rest, mode) {
+		return true
+	}
 	switch name {
-	case "exit", "quit":
+	case "exit", "quit", "q":
 		m.quit()
 		return true
 	case "new":
+		if m.app != nil && m.app.AttachedSubagent() != nil && m.spawnSession == nil {
+			m.reportCapability("A host spawner is required to create an independent session from an attached viewer.", nil)
+			return true
+		}
+		if rest != "" || m.spawnSession != nil {
+			m.spawnViewer(ctx, rest, false)
+			return true
+		}
 		m.app.NewSession()
 		m.resetConversation()
 		m.addNotice("", "Started a new session.", ui.StMuted())
@@ -310,7 +376,7 @@ func (m *model) handleSlash(ctx context.Context, text string, mode busySubmitMod
 	case "clear":
 		m.clearScreen()
 		return true
-	case "copy":
+	case "copy", "copy-last":
 		m.copyLastResponse()
 		return true
 	case "help":
@@ -395,6 +461,14 @@ func (m *model) sessionCatalog() (runtime.SessionCatalog, bool) {
 }
 
 func (m *model) handleSessionsCommand(ctx context.Context, sessionID string) {
+	if sessionID != "" && m.selectRestoredViewer(ctx, sessionID) {
+		return
+	}
+	if sessionID == "" && m.viewers != nil && len(m.viewers.cold) > 0 {
+		for _, entry := range m.viewers.cold {
+			m.reportCapability("/sessions "+entry.SessionID+" · "+entry.WorkingDir, nil)
+		}
+	}
 	if m.busy {
 		m.addNotice("", "Wait for the current response to finish before switching sessions", ui.StMuted())
 		return
@@ -466,6 +540,17 @@ func cleanDirectory(dir string) string {
 }
 
 func (m *model) resumeSession(ctx context.Context, sessionID string) {
+	if m.selectRestoredViewer(ctx, sessionID) {
+		return
+	}
+	if m.sessionViews != nil && m.viewers != nil {
+		m.acquireSessionView(ctx, sessionID)
+		return
+	}
+	if m.busy {
+		m.reportCapability("Wait for the current response to finish before switching sessions", nil)
+		return
+	}
 	catalog, ok := m.sessionCatalog()
 	if !ok {
 		return
@@ -504,7 +589,23 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 		m.addNotice("✗ ", "Session is not from the current directory", ui.StError())
 		return
 	}
+	previousID := m.app.Session().ID
 	m.app.ReplaceSession(ctx, sess)
+	if current := m.app.Session(); current == nil || current.ID != sess.ID || m.app.SessionHandle() == nil {
+		m.reportCapability("Session loading failed to bind the requested canonical handle.", nil)
+		return
+	}
+	if m.viewers != nil && m.viewers.store != nil {
+		if err := m.viewers.store.ReplaceTab(ctx, previousID, sess.ID, sess.WorkingDir); err != nil {
+			m.reportCapability(nil, err)
+		}
+		for i := range m.viewers.cold {
+			if m.viewers.cold[i].SessionID == previousID {
+				m.viewers.cold[i].SessionID = sess.ID
+				m.viewers.cold[i].WorkingDir = sess.WorkingDir
+			}
+		}
+	}
 	m.resetConversation()
 	m.screen.Transcript = ui.NewTranscript()
 	m.sessionState = service.NewSessionState(sess)
@@ -542,6 +643,17 @@ func (m *model) handleDeleteSession(ctx context.Context, id string) {
 	if err := m.app.SessionRuntime().DeleteSession(ctx, id); err != nil {
 		m.addNotice("✗ ", err.Error(), ui.StError())
 		return
+	}
+	if m.viewers != nil && m.viewers.store != nil {
+		if err := m.viewers.store.RemoveTab(ctx, id); err != nil {
+			m.reportCapability(nil, err)
+		}
+		for i, entry := range m.viewers.cold {
+			if entry.SessionID == id {
+				m.viewers.cold = append(m.viewers.cold[:i], m.viewers.cold[i+1:]...)
+				break
+			}
+		}
 	}
 	m.addNotice("", "Deleted session "+id, ui.StMuted())
 }
@@ -652,7 +764,14 @@ func (m *model) handleModelCommand(ctx context.Context, modelRef string) {
 		}
 		cmds := make([]ui.Command, 0, len(models))
 		for _, choice := range models {
+			label := choice.ModelName
+			if label == "" {
+				label = choice.Ref
+			}
 			desc := choice.Name
+			if choice.ModelID != "" {
+				desc = strings.TrimSpace(desc + " · " + choice.Provider + "/" + choice.ModelID)
+			}
 			if choice.IsCurrent {
 				desc = strings.TrimSpace(desc + " (current)")
 			} else if choice.IsDefault {
@@ -663,7 +782,7 @@ func (m *model) handleModelCommand(ctx context.Context, modelRef string) {
 				value = "default"
 			}
 			cmds = append(cmds, ui.Command{
-				Name:  choice.Ref,
+				Name:  label,
 				Desc:  desc,
 				Value: value,
 				MatchScore: func(query string) (int, bool) {
@@ -696,39 +815,62 @@ func (m *model) handleModelCommand(ctx context.Context, modelRef string) {
 }
 
 func (m *model) dispatchUserMessage(ctx context.Context, display, content string, mode busySubmitMode) {
+	for _, attachment := range m.draftAttachments {
+		if _, err := validatedAttachment(attachment.FilePath, m.app.Session().WorkingDir); err != nil {
+			m.screen.Editor.SetText(display)
+			m.reportCapability(nil, err)
+			return
+		}
+	}
 	if m.app.IsReadOnly() {
 		m.addUserEcho(display)
 		m.addNotice("⚠ ", "This session is read-only.", ui.StWarning())
+		m.screen.Editor.SetText(display)
 		return
 	}
 	if m.busy {
 		switch mode {
 		case busySubmitSteer:
-			submission, err := m.app.SteerMessage(ctx, content, nil)
+			submission, err := m.app.SteerMessage(ctx, content, m.draftAttachments)
 			if err != nil {
 				m.addNotice("⚠ ", "Could not steer current response: "+err.Error(), ui.StWarning())
+				m.screen.Editor.SetText(display)
 				return
 			}
 			kind := ui.PendingUserSteer
 			if submission.Disposition == runtime.SubmissionDispositionQueued {
 				kind = ui.PendingUserFollowUp
 			}
+			m.draftAttachments = nil
 			m.addPendingUser(display, content, submission.TurnID, kind)
 			return
 		case busySubmitFollowUp:
-			submission, err := m.app.FollowUpMessage(ctx, content, nil)
+			submission, err := m.app.FollowUpMessage(ctx, content, m.draftAttachments)
 			if err != nil {
 				m.addNotice("⚠ ", "Could not enqueue follow-up: "+err.Error(), ui.StWarning())
+				m.screen.Editor.SetText(display)
 				return
 			}
+			m.draftAttachments = nil
 			m.addPendingUser(display, content, submission.TurnID, ui.PendingUserFollowUp)
 			return
 		default:
+			if len(m.draftAttachments) > 0 {
+				m.dispatchUserMessage(ctx, display, content, busySubmitFollowUp)
+				return
+			}
 			m.enqueueFollowUp(display, content)
 			return
 		}
 	}
-	m.startRun(ctx, content, nil)
+	submission, err := m.app.FollowUpMessage(ctx, content, m.draftAttachments)
+	if err != nil {
+		m.screen.Editor.SetText(display)
+		m.reportCapability(nil, err)
+		return
+	}
+	m.draftAttachments = nil
+	m.addPendingUser(display, content, submission.TurnID, ui.PendingUserFollowUp)
 }
 
 func (m *model) enqueueFollowUp(display, content string) {
@@ -738,37 +880,15 @@ func (m *model) enqueueFollowUp(display, content string) {
 }
 
 func (m *model) sendFirstMessage(ctx context.Context, msg, attachPath string) {
-	var atts []messages.Attachment
 	if attachPath != "" {
-		if abs, err := filepath.Abs(attachPath); err == nil {
-			atts = append(atts, messages.Attachment{Name: filepath.Base(abs), FilePath: abs})
-		}
-	}
-
-	trimmed := strings.TrimSpace(msg)
-	if command, ok := strings.CutPrefix(trimmed, "!"); ok {
-		m.runBangCommand(ctx, command)
-		return
-	}
-
-	content := msg
-	if strings.HasPrefix(trimmed, "/") {
-		if resolved, err := m.app.ResolveInputOnce(ctx, trimmed); err != nil {
-			m.addNotice("⚠ ", "Could not resolve input: "+err.Error(), ui.StWarning())
+		attachment, err := validatedAttachment(attachPath, m.app.Session().WorkingDir)
+		if err != nil {
+			m.reportCapability(nil, err)
 			return
-		} else if resolved.Content != "" {
-			content = resolved.Content
 		}
+		m.draftAttachments = append(m.draftAttachments, attachment)
 	}
-
-	switch {
-	case trimmed != "":
-	case len(atts) > 0:
-		m.addNotice("", "(attached "+atts[0].Name+")", ui.StMuted())
-	default:
-		return
-	}
-	m.startRun(ctx, content, atts)
+	m.submit(ctx, msg, submitOptions{busyMode: busySubmitSteer})
 }
 
 // beginRun marks the model busy and returns a cancelable context for a new
@@ -782,8 +902,15 @@ func (m *model) beginRun(ctx context.Context) (context.Context, context.CancelFu
 }
 
 func (m *model) startRun(ctx context.Context, message string, attachments []messages.Attachment) {
-	runCtx, cancel := m.beginRun(ctx)
-	m.app.Run(runCtx, cancel, message, attachments)
+	submission, err := m.app.FollowUpMessage(ctx, message, attachments)
+	if err != nil {
+		m.screen.Editor.SetText(message)
+		m.draftAttachments = attachments
+		m.reportCapability(nil, err)
+		return
+	}
+	m.busy = true
+	m.addPendingUser(message, message, submission.TurnID, ui.PendingUserFollowUp)
 }
 
 func (m *model) startCompact(ctx context.Context, additionalPrompt string) {
@@ -825,6 +952,10 @@ func (m *model) refreshCommands(ctx context.Context) {
 			cmds = append(cmds, cmd)
 		}
 	}
+	if m.app == nil || m.app.Runtime() == nil {
+		m.screen.Autocomplete.SetCommands(cmds)
+		return
+	}
 	for name, c := range m.app.CurrentAgentCommands(ctx) {
 		if m.disabledCommands[name] {
 			continue
@@ -836,12 +967,43 @@ func (m *model) refreshCommands(ctx context.Context) {
 		m.addNotice("⚠ ", "Could not discover skills: "+err.Error(), ui.StWarning())
 	}
 	for _, sk := range sk {
+		if m.disabledCommands[sk.Name] {
+			continue
+		}
 		cmds = append(cmds, ui.Command{Name: sk.Name, Desc: sk.Description, Kind: ui.CmdAgent})
+	}
+	for name, prompt := range m.app.CurrentMCPPrompts(ctx) {
+		if !m.disabledCommands[name] {
+			cmds = append(cmds, ui.Command{Name: name, Desc: prompt.Description, Kind: ui.CmdAgent})
+		}
 	}
 	m.screen.Autocomplete.SetCommands(cmds)
 }
 
 func (m *model) handleConfirmKey(ctx context.Context, k ui.Key) {
+	if m.rejectingTool {
+		switch k.Typ {
+		case ui.KeyEsc:
+			m.rejectingTool = false
+			m.rejectReason = ""
+		case ui.KeyEnter:
+			m.rejectingTool = false
+			m.resolveConfirm(ctx, runtime.ResumeReject(m.rejectReason))
+			m.rejectReason = ""
+		case ui.KeyBackspace:
+			runes := []rune(m.rejectReason)
+			if len(runes) > 0 {
+				m.rejectReason = string(runes[:len(runes)-1])
+			}
+		case ui.KeyRune, ui.KeyPaste:
+			m.rejectReason += string(k.Runes)
+		}
+		if m.screen.Confirm != nil {
+			m.screen.Confirm.RejectReason = m.rejectReason
+			m.screen.Confirm.Rejecting = m.rejectingTool
+		}
+		return
+	}
 	if k.Typ == ui.KeyEsc {
 		m.resolveConfirm(ctx, runtime.ResumeReject("rejected by user"))
 		return
@@ -858,6 +1020,9 @@ func (m *model) handleConfirmKey(ctx context.Context, k ui.Key) {
 		m.resolveConfirm(ctx, runtime.ResumeApproveBalanced())
 	case 's', 'S':
 		m.resolveConfirm(ctx, runtime.ResumeApproveAutonomous())
+	case 'r', 'R':
+		m.rejectingTool = true
+		m.screen.Confirm.Rejecting = true
 	case 'n', 'N':
 		m.resolveConfirm(ctx, runtime.ResumeReject("rejected by user"))
 	}
@@ -899,6 +1064,12 @@ func (m *model) resolveConfirm(ctx context.Context, req runtime.ResumeRequest) {
 }
 
 func (m *model) resetConversation() {
+	m.cancelViewAcquisition()
+	m.runtimeStatus = runtime.SessionStatus{}
+	m.elicitations, m.maxIterations = nil, nil
+	m.subagentSnapshot = nil
+	m.majorHighWater = [2]uint64{}
+	m.majorNoticeVisible = false
 	if m.runCancel != nil {
 		m.runCancel()
 		m.runCancel = nil
@@ -906,6 +1077,7 @@ func (m *model) resetConversation() {
 	m.screen.Transcript.ClearActive()
 	m.queue = nil
 	m.pendingUsers = nil
+	m.draftAttachments = nil
 	m.inputReplay.Reset(nil)
 	m.busy = false
 	m.cancelMarkerPending = false
@@ -925,7 +1097,7 @@ func (m *model) clearScreen() {
 }
 
 func (m *model) quit() {
-	if m.runCancel != nil {
+	if m.runCancel != nil && (m.app == nil || m.app.AttachedSubagent() == nil) {
 		m.runCancel()
 	}
 	m.quitting = true
@@ -962,8 +1134,12 @@ func (m *model) addInputEcho(origin session.InputOrigin, mode, senderName, sende
 	input.InputOrigin, input.InputMode = origin, mode
 	input.SenderName, input.SenderID = senderName, senderID
 	msg := tuitypes.Input(input)
+	if m.inputReferences == nil {
+		m.inputReferences = subagentindex.New()
+	}
+	references, parentID := m.inputReferences, m.inputParentSessionID
 	m.screen.Transcript.AddInputBlock(func(w int) []string {
-		msg.InputReference = m.inputReferences.Resolve(m.inputParentSessionID, msg.SenderID, msg.SenderName)
+		msg.InputReference = references.Resolve(parentID, msg.SenderID, msg.SenderName)
 		return ui.RenderInputLines(msg, w)
 	})
 }
@@ -988,10 +1164,21 @@ func (m *model) commitHelp() {
 		heading("Lean terminal help")
 		entry("Independent lean app only; not the full TUI's shortcuts.")
 		entry("/help: show this help. Type / for the available command list.")
-		entry("The list includes enabled built-ins and current agent commands/skills.")
+		entry("The list includes enabled built-ins, agent commands, skills, and MCP prompts.")
+		for _, command := range builtinCommands() {
+			if !m.disabledCommands[command.Name] {
+				entry("/" + command.Name + ": " + command.Desc)
+			}
+		}
+		entry("Disabled commands are rejected, including direct slash input.")
+		entry("/subagents lists descendants; /subagent-view and /subagent-attach open the same live viewer.")
+		entry("Sending targets the visible viewer. /back restores its predecessor without cancelling execution.")
+		entry("Restored · paused sessions wait for /resume; related sessions require their own explicit Resume.")
+		entry("/attach <path> adds a draft attachment; /drop lists draft and session files.")
+		entry("/clear only redraws here; in the full TUI it starts a new session.")
 
 		heading("Composer and sending")
-		entry("Enter: send nonempty input; while busy, steer the response (may queue).")
+		entry("Enter: send input or draft attachments; while busy, steer (may queue), or queue when send-mode is queue.")
 		entry("LF / Ctrl+J and CR / Ctrl+M decode as Enter here, not newline or model selection.")
 		entry("Shift+Enter: insert newline (requires terminal keyboard support).")
 		entry("Alt+Enter: send; while busy, enqueue an end-of-turn follow-up.")
@@ -1023,15 +1210,19 @@ func (m *model) commitHelp() {
 		heading("Response and application controls")
 		entry("Alt+Up: withdraw all eligible pending messages and restore their displays as one draft.")
 		entry("This replaces the draft; unavailable or already-consumed pending messages stay unchanged.")
-		entry("Ctrl+C: cancel while busy; otherwise clear a nonempty draft; otherwise quit.")
-		entry("Esc: invoke that same interrupt when busy or a run handle remains; no double-Esc guard.")
+		entry("Ctrl+C: interrupt while busy; otherwise clear a nonempty draft; otherwise quit.")
+		entry("/settings interrupt-confirmation selects always (Y/N), double-tap (one second), or none.")
+		entry("Esc: invoke that same interrupt when busy or a run handle remains; follows interrupt-confirmation.")
 		entry("Shift+Tab: cycle thinking effort when the current model/runtime supports it.")
 		entry("Ctrl+L: clear/redraw the screen, without resetting the conversation.")
 
 		heading("Tool confirmation (takes priority over all other keys)")
 		entry("Y / y: approve once. A / a: always approve this tool.")
 		entry("B / b: auto-approve safe tools (balanced). S / s: approve autonomously for the session.")
-		entry("N / n / Esc: reject. Other keys, including Enter, Ctrl+C and Ctrl+D, are ignored.")
+		entry("N / n / Esc: reject. R / r: reject with a reason; Enter submits it, Esc goes back.")
+		entry("Elicitation/OAuth: /respond <request-id> <JSON|decline|cancel>; schema required fields are validated.")
+		entry("Maximum iterations: /respond <request-id> continue|cancel. Responses keep exact session correlation.")
+		entry("Other keys, including Enter, Ctrl+C and Ctrl+D, are ignored at the approval prompt.")
 
 		heading("Terminal key aliases")
 		entry("Alt includes Option when the terminal sends Alt sequences.")

@@ -56,7 +56,7 @@ func commandMessages(cmd tea.Cmd) []tea.Msg {
 
 func advanceTabRuntime(t *testing.T, runtime *animation.Runtime, tb *TabBar, target time.Duration) {
 	t.Helper()
-	cmd := runtime.EnsureRunning()
+	cmd := runtime.Continue()
 	for runtime.Now() < target {
 		if cmd == nil {
 			return
@@ -66,7 +66,9 @@ func advanceTabRuntime(t *testing.T, runtime *animation.Runtime, tb *TabBar, tar
 		_, ok = runtime.Accept(msg)
 		require.True(t, ok)
 		tb.Tick()
-		cmd = runtime.Continue()
+		if runtime.Now() < target {
+			cmd = runtime.Continue()
+		}
 	}
 }
 
@@ -271,7 +273,9 @@ func TestStopAnimationsCancelsTransitionsAndReleasesSubscription(t *testing.T) {
 	tb.SetWidth(30)
 	tabs := motionTabs(8, 0)
 	tabs[0].IsRunning = true
-	require.NotNil(t, tb.SetTabs(tabs, 0))
+	require.Nil(t, tb.SetTabs(tabs, 0), "component only registers animation")
+	queued := runtime.Continue()
+	require.NotNil(t, queued, "owner schedules the running tab indicator")
 	tb.scrollAnim.Start(scrollAnimDuration, animation.EaseOutQuint)
 	tb.reorderAnim.Start(reorderAnimDuration, animation.EaseOutQuint)
 	tb.dragAnim.Start(dragReflowAnimDuration, animation.EaseOutQuint)
@@ -286,6 +290,9 @@ func TestStopAnimationsCancelsTransitionsAndReleasesSubscription(t *testing.T) {
 	assert.False(t, tb.scrollPending)
 	assert.False(t, tb.indicatorSub.IsActive())
 	assert.Zero(t, runtime.ActiveCount())
+	_, accepted := runtime.Accept(queued().(animation.TickMsg))
+	assert.False(t, accepted, "teardown invalidates the queued owner tick")
+	assert.Nil(t, runtime.Continue())
 	tb.StopAnimations()
 	assert.Zero(t, runtime.ActiveCount())
 }

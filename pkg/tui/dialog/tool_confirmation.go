@@ -57,7 +57,7 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 }
 
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
-	return d.RenderActions(contentWidth,
+	return d.RenderChoices(contentWidth,
 		Action{Label: "No", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
 		Action{Label: "Yes, once", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
 		Action{Label: "Always allow tool", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
@@ -335,6 +335,7 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		if (msg.String() == "r" || msg.String() == "R") && !d.responseSent {
+			d.FocusDefaultAction()
 			d.BlurActions()
 			return d, core.CmdHandler(OpenDialogMsg{Model: NewToolRejectionReasonDialog(d.msg.SessionID, d.msg.RequestID)})
 		}
@@ -388,7 +389,8 @@ func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, hea
 	}
 	parts = append(parts,
 		styles.DialogQuestionStyle.Width(bodyWidth).Render(toolconfirm.Question),
-		styles.DialogContentStyle.Width(bodyWidth).Render(d.policyExplanation()))
+		styles.DialogContentStyle.Width(bodyWidth).Render(d.policyExplanation()),
+		styles.MutedStyle.Width(bodyWidth).Render("↑/↓ choose · Enter confirm · shortcut/click applies · wheel scroll · Esc denies"))
 	return styles.DialogStyle, dialogWidth, header, lipgloss.JoinVertical(lipgloss.Left, parts...), footer
 }
 

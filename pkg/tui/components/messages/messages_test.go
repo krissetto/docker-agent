@@ -768,7 +768,7 @@ func TestTerminalReasoningFadeTickInvalidatesTranscript(t *testing.T) {
 		require.Contains(t, ansi.Strip(m.View()), "fading_tool")
 		time.Sleep(2600 * time.Millisecond) //nolint:forbidigo // Advances the synctest fake clock.
 
-		cmd := ar.EnsureRunning()
+		cmd := ar.Continue()
 		require.NotNil(t, cmd)
 		tick, ok := cmd().(animation.TickMsg)
 		require.True(t, ok)
@@ -808,7 +808,8 @@ func TestRenderCacheNotInvalidatedOnAnimationTickWithoutAnimatedContent(t *testi
 	// An unrelated component may dirty the shared tick. Settled message content
 	// must still retain its cached transcript.
 	sub := ar.Subscribe()
-	cmd := sub.Start()
+	require.Nil(t, sub.Start())
+	cmd := ar.Continue()
 	require.NotNil(t, cmd)
 	tick, ok := cmd().(animation.TickMsg)
 	require.True(t, ok)

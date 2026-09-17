@@ -24,9 +24,14 @@ func TestResumeAnimationDoesNotRetryMarkdownImages(t *testing.T) {
 		require.False(t, ar.HasActive())
 	}
 	pending := New(ar, types.Spinner(), nil)
-	require.NotNil(t, pending.ResumeAnimation())
+	require.Nil(t, pending.ResumeAnimation(), "visibility only registers the spinner")
+	queued := ar.Continue()
+	require.NotNil(t, queued, "owner schedules the resumed spinner")
 	require.Equal(t, int32(1), ar.ActiveCount())
 	require.Nil(t, pending.ResumeAnimation())
+	require.Nil(t, ar.Continue(), "repeated resume preserves the existing owner lease")
 	pending.StopAnimation()
 	require.False(t, ar.HasActive())
+	_, accepted := ar.Accept(queued().(animation.TickMsg))
+	require.False(t, accepted, "stopped spinner rejects its queued owner tick")
 }

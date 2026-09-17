@@ -25,13 +25,24 @@ func (e *TemporaryError) Unwrap() error   { return e.Err }
 func (e *TemporaryError) Temporary() bool { return true }
 
 func IsTemporary(err error) bool {
+	// An explicit store/runtime wrapper can mark its own expired attempt as
+	// retryable while the operation's caller context is still alive.
+	var explicit *TemporaryError
+	if errors.As(err, &explicit) {
+		return true
+	}
+	// context.DeadlineExceeded implements Temporary, but a caller's expired
+	// deadline is cancellation, not permission to start another attempt.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var temporary interface{ Temporary() bool }
 	return errors.As(err, &temporary) && temporary.Temporary()
 }
 
 func classifySQLiteError(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || IsTemporary(err) {
+		return err
 	}
 	// Keep the generic session surface independent of a concrete SQLite
 	// implementation. SQLite drivers expose Code on their errors; the low byte
@@ -46,12 +57,32 @@ func classifySQLiteError(err error) error {
 	return err
 }
 
+// classifySQLiteContextError preserves cancellation when a driver reports BUSY
+// or INTERRUPT while returning from a canceled SQLite call. A successful commit
+// stays successful even if the context is canceled just after it returns.
+func classifySQLiteContextError(ctx context.Context, err error) error {
+	if err != nil && ctx.Err() != nil {
+		var coded interface{ Code() int }
+		if errors.As(err, &coded) {
+			switch coded.Code() & 0xff {
+			case 5, 6, 9: // BUSY, LOCKED, INTERRUPT
+				return ctx.Err()
+			}
+		}
+		if errors.Is(err, sql.ErrTxDone) {
+			return ctx.Err()
+		}
+	}
+	return classifySQLiteError(err)
+}
+
 var (
-	ErrEmptyID        = errors.New("session ID cannot be empty")
-	ErrNotFound       = errors.New("session not found")
-	ErrAlreadyExists  = errors.New("session already exists")
-	ErrOriginMismatch = errors.New("session origin cannot be changed")
-	ErrNewerDatabase  = errors.New("session database was created by a newer version of docker-agent")
+	ErrEmptyID         = errors.New("session ID cannot be empty")
+	ErrNotFound        = errors.New("session not found")
+	ErrAlreadyExists   = errors.New("session already exists")
+	ErrOriginMismatch  = errors.New("session origin cannot be changed")
+	ErrNewerDatabase   = errors.New("session database was created by a newer version of docker-agent")
+	ErrMigrationFailed = errors.New("session database migration failed; existing data preserved")
 )
 
 // IsRelativeSessionRef reports whether ref is a relative session reference
@@ -107,14 +138,27 @@ func ResolveSessionID(ctx context.Context, store Store, ref string) (string, err
 // Summary contains lightweight session metadata for listing purposes.
 // This is used instead of loading full Session objects with all messages.
 type Summary struct {
-	ID          string
-	Title       string
-	CreatedAt   time.Time
-	Starred     bool
-	NumMessages int
-	Cost        float64
-	WorkingDir  string
-	Attributes  map[string]string
+	ID                  string
+	Title               string
+	CreatedAt           time.Time
+	Starred             bool
+	NumMessages         int
+	Cost                float64
+	WorkingDir          string
+	Attributes          map[string]string
+	ParentID            string
+	AgentModelOverrides map[string]string
+}
+
+// SummaryScope explicitly opts into child rows; the zero scope remains root-only.
+type SummaryScope struct {
+	IncludeChildren bool
+}
+
+// ScopedSummaryStore is an optional metadata-only catalog capability. It does
+// not load message bodies or change the historical Store listing contract.
+type ScopedSummaryStore interface {
+	GetSessionSummariesWithScope(ctx context.Context, scope SummaryScope) ([]Summary, error)
 }
 
 // Store defines the interface for session storage
@@ -277,24 +321,34 @@ func (s *InMemorySessionStore) GetSessions(_ context.Context) ([]*Session, error
 	return sessions, nil
 }
 
-func (s *InMemorySessionStore) GetSessionSummaries(_ context.Context) ([]Summary, error) {
+func (s *InMemorySessionStore) GetSessionSummaries(ctx context.Context) ([]Summary, error) {
+	return s.GetSessionSummariesWithScope(ctx, SummaryScope{})
+}
+
+func (s *InMemorySessionStore) GetSessionSummariesWithScope(ctx context.Context, scope SummaryScope) ([]Summary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.coordinationMu.Lock()
 	defer s.coordinationMu.Unlock()
 	summaries := make([]Summary, 0, s.sessions.Length())
 	s.sessions.Range(func(_ string, value *Session) bool {
-		if value.ParentID != "" {
+		if !scope.IncludeChildren && value.ParentID != "" {
 			return true
 		}
 		_, _, cost := value.TokensAndCost()
+		overrides, _ := value.ModelStateSnapshot()
 		summaries = append(summaries, Summary{
-			ID:          value.ID,
-			Title:       value.TitleSnapshot(),
-			CreatedAt:   value.CreatedAt,
-			Starred:     value.Starred,
-			NumMessages: value.MessageCount(),
-			Cost:        cost,
-			WorkingDir:  value.WorkingDir,
-			Attributes:  value.AttributesSnapshot(),
+			ID:                  value.ID,
+			Title:               value.TitleSnapshot(),
+			CreatedAt:           value.CreatedAt,
+			Starred:             value.Starred,
+			NumMessages:         value.MessageCount(),
+			Cost:                cost,
+			WorkingDir:          value.WorkingDir,
+			Attributes:          value.AttributesSnapshot(),
+			ParentID:            value.ParentID,
+			AgentModelOverrides: overrides,
 		})
 		return true
 	})
@@ -727,8 +781,12 @@ func (s *InMemorySessionStore) Close() error {
 //
 // This is intended primarily for tests that want to use an in-memory database
 // (sql.Open("sqlite", ":memory:")) or pre-seed a database with non-default
-// state. Production callers should use sqlitestore.New.
-func NewSQLiteSessionStoreFromDB(ctx context.Context, db *sql.DB) (*SQLiteSessionStore, error) {
+// state. Production callers should use sqlitestore.New. Caller-supplied pools
+// must configure each connection for foreign keys, a busy timeout, and immediate
+// writable transactions (modernc: _txlock=immediate) when sharing a file. A
+// deferred read-then-write transaction may otherwise fail with BUSY_SNAPSHOT.
+func NewSQLiteSessionStoreFromDB(ctx context.Context, db *sql.DB) (store *SQLiteSessionStore, err error) {
+	defer func() { err = classifySQLiteContextError(ctx, err) }()
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}
@@ -748,7 +806,7 @@ func NewSQLiteSessionStoreFromDB(ctx context.Context, db *sql.DB) (*SQLiteSessio
 // columns the very first migration expects to find; later columns are added
 // by subsequent ALTER TABLE migrations.
 func setupAndMigrate(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, `
+	_, err := execSQLiteWrite(ctx, db, `
 		CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			messages TEXT,
@@ -784,13 +842,13 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 
 	fields, err := sessionPersistedFieldsOf(session)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	// Use a transaction to insert session and its items
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -805,17 +863,17 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON, session.Starred, fields.ExecutionSettingsJSON)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	// Insert all messages into session_items
 	for position, item := range session.Messages {
 		if err := s.addItemTx(ctx, tx, session.ID, position, item); err != nil {
-			return fmt.Errorf("adding item at position %d: %w", position, err)
+			return fmt.Errorf("adding item at position %d: %w", position, classifySQLiteContextError(ctx, err))
 		}
 	}
 
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // scanSession scans a single row into a Session struct.
@@ -946,7 +1004,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer rows.Close()
 
@@ -956,12 +1014,12 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	for rows.Next() {
 		var row sessionItemRow
 		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
-			return nil, err
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		rawRows = append(rawRows, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 
 	if len(rawRows) == 0 {
@@ -975,7 +1033,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 		case "message":
 			var chatMsg chat.Message
 			if err := json.Unmarshal([]byte(row.messageJSON.String), &chatMsg); err != nil {
-				return nil, fmt.Errorf("unmarshaling message at position %d: %w", row.position, err)
+				return nil, fmt.Errorf("unmarshaling message at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
 			}
 			items = append(items, Item{
 				Message: &Message{
@@ -1008,7 +1066,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 					slog.WarnContext(ctx, "Skipping orphaned subsession reference", "session_id", sessionID, "subsession_id", row.subsessionID.String)
 					continue
 				}
-				return nil, fmt.Errorf("getting sub-session %s: %w", row.subsessionID.String, err)
+				return nil, fmt.Errorf("getting sub-session %s: %w", row.subsessionID.String, classifySQLiteContextError(ctx, err))
 			}
 			items = append(items, Item{SubSession: subSession})
 
@@ -1017,7 +1075,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			if row.usageJSON != "" {
 				var usage chat.Usage
 				if err := json.Unmarshal([]byte(row.usageJSON), &usage); err != nil {
-					return nil, fmt.Errorf("unmarshaling summary usage at position %d: %w", row.position, err)
+					return nil, fmt.Errorf("unmarshaling summary usage at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
 				}
 				item.Usage = &usage
 			}
@@ -1027,7 +1085,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			var e Error
 			if row.messageJSON.Valid && row.messageJSON.String != "" {
 				if err := json.Unmarshal([]byte(row.messageJSON.String), &e); err != nil {
-					return nil, fmt.Errorf("unmarshaling error at position %d: %w", row.position, err)
+					return nil, fmt.Errorf("unmarshaling error at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
 				}
 			}
 			items = append(items, Item{Error: &e})
@@ -1036,7 +1094,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			var term Termination
 			if row.messageJSON.Valid && row.messageJSON.String != "" {
 				if err := json.Unmarshal([]byte(row.messageJSON.String), &term); err != nil {
-					return nil, fmt.Errorf("unmarshaling termination at position %d: %w", row.position, err)
+					return nil, fmt.Errorf("unmarshaling termination at position %d: %w", row.position, classifySQLiteContextError(ctx, err))
 				}
 			}
 			items = append(items, Item{Termination: &term})
@@ -1063,12 +1121,12 @@ func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id stri
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 
 	sess.Messages, err = s.loadSessionItems(ctx, q, id)
 	if err != nil {
-		return nil, fmt.Errorf("loading session items: %w", err)
+		return nil, fmt.Errorf("loading session items: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	return sess, nil
@@ -1083,12 +1141,12 @@ func (s *SQLiteSessionStore) loadSessionByOrigin(ctx context.Context, q querier,
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 
 	sess.Messages, err = s.loadSessionItems(ctx, q, id)
 	if err != nil {
-		return nil, fmt.Errorf("loading session items: %w", err)
+		return nil, fmt.Errorf("loading session items: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	return sess, nil
@@ -1099,7 +1157,7 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT "+sessionSelectColumns+" FROM sessions WHERE parent_id IS NULL OR parent_id = '' ORDER BY created_at DESC")
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer rows.Close()
 
@@ -1108,19 +1166,19 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 	for rows.Next() {
 		session, err := scanSession(rows)
 		if err != nil {
-			return nil, err
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		sessions = append(sessions, session)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 
 	// Load messages for each session
 	for _, session := range sessions {
 		items, err := s.loadSessionItems(ctx, s.db, session.ID)
 		if err != nil {
-			return nil, fmt.Errorf("loading items for session %s: %w", session.ID, err)
+			return nil, fmt.Errorf("loading items for session %s: %w", session.ID, classifySQLiteContextError(ctx, err))
 		}
 		session.Messages = items
 	}
@@ -1131,14 +1189,21 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 // GetSessionSummaries retrieves lightweight session metadata for listing (excludes sub-sessions).
 // This is much faster than GetSessions as it doesn't load message content.
 func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
-		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message')
-		 FROM sessions s
-		 WHERE s.parent_id IS NULL OR s.parent_id = ''
-		 ORDER BY s.created_at DESC`)
+	return s.GetSessionSummariesWithScope(ctx, SummaryScope{})
+}
+
+func (s *SQLiteSessionStore) GetSessionSummariesWithScope(ctx context.Context, scope SummaryScope) ([]Summary, error) {
+	query := `SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
+		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message'),
+		        s.parent_id, s.agent_model_overrides
+		 FROM sessions s`
+	if !scope.IncludeChildren {
+		query += " WHERE s.parent_id IS NULL OR s.parent_id = ''"
+	}
+	query += " ORDER BY s.created_at DESC"
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	defer rows.Close()
 
@@ -1149,21 +1214,28 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 			createdAtStr   string
 			workingDir     sql.NullString
 			attributesJSON sql.NullString
+			parentID       sql.NullString
+			overridesJSON  sql.NullString
 		)
-		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.Cost, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
-			return nil, err
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.Cost, &workingDir, &attributesJSON, &summary.NumMessages, &parentID, &overridesJSON); err != nil {
+			return nil, classifySQLiteContextError(ctx, err)
 		}
 		summary.CreatedAt = parseCreatedAt(createdAtStr)
 		summary.WorkingDir = workingDir.String
+		summary.ParentID = parentID.String
+		summary.AgentModelOverrides, err = decodeAttributes(overridesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshaling session model overrides for %s: %w", summary.ID, classifySQLiteContextError(ctx, err))
+		}
 		summary.Attributes, err = decodeAttributes(attributesJSON)
 		if err != nil {
-			return nil, fmt.Errorf("unmarshaling session attributes for %s: %w", summary.ID, err)
+			return nil, fmt.Errorf("unmarshaling session attributes for %s: %w", summary.ID, classifySQLiteContextError(ctx, err))
 		}
 		summaries = append(summaries, summary)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 
 	return summaries, nil
@@ -1177,48 +1249,48 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 
 	// These tables carry no foreign keys because media may be recorded before
 	// the lazily persisted session row exists, so prune them explicitly.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	// Explicit cleanup also covers caller-supplied pools without foreign keys.
 	if _, err := tx.ExecContext(ctx, "DELETE FROM session_todos WHERE session_id = ?", id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM subagent_trees WHERE session_id = ?", id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM child_reports WHERE parent_session_id = ? OR child_session_id = ? OR child_session_id IN (SELECT session_id FROM child_records WHERE root_session_id = ?)`, id, id, id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM child_records WHERE session_id = ? OR parent_session_id = ? OR root_session_id = ?`, id, id, id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_blobs WHERE session_id = ?", id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_manifest WHERE session_id = ?", id); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	if rowsAffected == 0 {
 		return ErrNotFound
 	}
 
-	return tx.Commit()
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).
@@ -1233,13 +1305,13 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 
 	fields, err := sessionPersistedFieldsOf(snapshot)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	// Use a transaction
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -1276,11 +1348,11 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON, fields.ExecutionSettingsJSON)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("update session %q: %w", session.ID, ErrOriginMismatch)
@@ -1289,7 +1361,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	// Note: Messages are NOT persisted here. They are persisted via events
 	// (UserMessageEvent, MessageAddedEvent, etc.) to avoid duplication.
 
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // SetSessionStarred sets the starred status of a session.
@@ -1298,14 +1370,14 @@ func (s *SQLiteSessionStore) SetSessionStarred(ctx context.Context, id string, s
 		return ErrEmptyID
 	}
 
-	result, err := s.db.ExecContext(ctx, "UPDATE sessions SET starred = ? WHERE id = ?", starred, id)
+	result, err := execSQLiteWrite(ctx, s.db, "UPDATE sessions SET starred = ? WHERE id = ?", starred, id)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	if rowsAffected == 0 {
@@ -1343,21 +1415,21 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 
 	msgJSON, err := json.Marshal(msg.Message)
 	if err != nil {
-		return 0, fmt.Errorf("marshaling message: %w", err)
+		return 0, fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	// Insert a new message at the next position
-	result, err := s.db.ExecContext(ctx,
+	result, err := execSQLiteWrite(ctx, s.db,
 		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name)
 		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName)
 	if err != nil {
-		return 0, fmt.Errorf("inserting message: %w", classifySQLiteError(err))
+		return 0, fmt.Errorf("inserting message: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("getting last insert id: %w", err)
+		return 0, fmt.Errorf("getting last insert id: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	slog.DebugContext(ctx, "[STORE] AddMessage", "session_id", sessionID, "message_id", id, "role", msg.Message.Role, "agent", msg.AgentName)
@@ -1365,9 +1437,9 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 }
 
 func (s *SQLiteSessionStore) PromotePendingUserMessage(ctx context.Context, sessionID, turnID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var rawPosition, position, itemCount int
@@ -1378,28 +1450,28 @@ func (s *SQLiteSessionStore) PromotePendingUserMessage(ctx context.Context, sess
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	// Keep summary boundaries stable under the same move-to-tail transform used
 	// by Session.promotePendingUserMessageLocked.
 	if _, err := tx.ExecContext(ctx, `UPDATE session_items SET first_kept_entry = first_kept_entry - 1
 		WHERE session_id = ? AND summary_text IS NOT NULL AND ? < first_kept_entry AND first_kept_entry < ?`, sessionID, position, itemCount); err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE session_items
 		SET actor_pending = 0, position = (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?)
 		WHERE session_id = ? AND position = ? AND actor_pending = 1 AND actor_turn_id = ?`, sessionID, sessionID, rawPosition, turnID)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	changed, err := result.RowsAffected()
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	if changed != 1 {
 		return ErrNotFound
 	}
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // UpdateMessage updates a message belonging to sessionID by its ID.
@@ -1409,19 +1481,19 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	}
 	msgJSON, err := json.Marshal(msg.Message)
 	if err != nil {
-		return fmt.Errorf("marshaling message: %w", err)
+		return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 	}
 
-	result, err := s.db.ExecContext(ctx,
+	result, err := execSQLiteWrite(ctx, s.db,
 		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ? WHERE session_id = ? AND id = ?`,
 		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, sessionID, messageID)
 	if err != nil {
-		return fmt.Errorf("updating message: %w", classifySQLiteError(err))
+		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("checking rows affected: %w", err)
+		return fmt.Errorf("checking rows affected: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	if rowsAffected == 0 {
@@ -1437,9 +1509,9 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 		return ErrEmptyID
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() {
 		_ = tx.Rollback()
@@ -1451,7 +1523,7 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 	snapshot := subSession.Clone()
 	snapshot.ParentID = parentSessionID
 	if err := s.ensureSubSessionTx(ctx, tx, snapshot); err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	// Add the reference in the parent's items, once: repeat persists of the
@@ -1464,21 +1536,21 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 		 )`,
 		parentSessionID, parentSessionID, subSession.ID, parentSessionID, subSession.ID)
 	if err != nil {
-		return fmt.Errorf("inserting subsession reference: %w", err)
+		return fmt.Errorf("inserting subsession reference: %w", classifySQLiteContextError(ctx, err))
 	}
 
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // upsertSubSessionTx imports a missing session and its initial history.
 func (s *SQLiteSessionStore) upsertSubSessionTx(ctx context.Context, tx *sql.Tx, subSession *Session) error {
 	if err := s.upsertSessionRowTx(ctx, tx, subSession); err != nil {
-		return fmt.Errorf("upserting sub-session: %w", err)
+		return fmt.Errorf("upserting sub-session: %w", classifySQLiteContextError(ctx, err))
 	}
 
 	for i, item := range subSession.Messages {
 		if err := s.addItemTx(ctx, tx, subSession.ID, i, item); err != nil {
-			return fmt.Errorf("inserting sub-session item %d: %w", i, err)
+			return fmt.Errorf("inserting sub-session item %d: %w", i, classifySQLiteContextError(ctx, err))
 		}
 	}
 	return nil
@@ -1496,7 +1568,7 @@ func (s *SQLiteSessionStore) ensureSubSessionTx(ctx context.Context, tx *sql.Tx,
 		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	return s.upsertSubSessionTx(ctx, tx, child)
 }
@@ -1507,7 +1579,7 @@ func (s *SQLiteSessionStore) ensureSubSessionTx(ctx context.Context, tx *sql.Tx,
 func (s *SQLiteSessionStore) upsertSessionRowTx(ctx context.Context, tx *sql.Tx, session *Session) error {
 	fields, err := sessionPersistedFieldsOf(session)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	_, err = tx.ExecContext(ctx,
@@ -1541,7 +1613,7 @@ func (s *SQLiteSessionStore) upsertSessionRowTx(ctx context.Context, tx *sql.Tx,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
 		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
 		fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON, fields.ExecutionSettingsJSON)
-	return err
+	return classifySQLiteContextError(ctx, err)
 }
 
 // addItemTx inserts a session item within a transaction.
@@ -1550,61 +1622,61 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 	case item.Message != nil:
 		msgJSON, err := json.Marshal(item.Message.Message)
 		if err != nil {
-			return fmt.Errorf("marshaling message: %w", err)
+			return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name)
 			 VALUES (?, ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			sessionID, position, item.Message.AgentName, string(msgJSON), item.Message.Implicit, item.Message.Pending, item.Message.Accepted, item.Message.TurnID, item.Message.InputMode, item.Message.InputOrigin, item.Message.SenderID, item.Message.SenderName)
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 
 	case item.SubSession != nil:
 		// Nested sub-sessions are already cloned with the outer snapshot.
 		item.SubSession.ParentID = sessionID
 		if err := s.ensureSubSessionTx(ctx, tx, item.SubSession); err != nil {
-			return fmt.Errorf("upserting nested sub-session: %w", err)
+			return fmt.Errorf("upserting nested sub-session: %w", classifySQLiteContextError(ctx, err))
 		}
 
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, subsession_id)
 			 VALUES (?, ?, 'subsession', ?)`,
 			sessionID, position, item.SubSession.ID)
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 
 	case item.Summary != "":
 		usageJSON, err := summaryUsageJSON(item.Usage)
 		if err != nil {
-			return classifySQLiteError(err)
+			return classifySQLiteContextError(ctx, err)
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
 			 VALUES (?, ?, 'summary', ?, ?, ?, ?, ?)`,
 			sessionID, position, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 
 	case item.Error != nil:
 		errJSON, err := json.Marshal(item.Error)
 		if err != nil {
-			return fmt.Errorf("marshaling error: %w", err)
+			return fmt.Errorf("marshaling error: %w", classifySQLiteContextError(ctx, err))
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, message_json)
 			 VALUES (?, ?, 'error', ?)`,
 			sessionID, position, string(errJSON))
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 
 	case item.Termination != nil:
 		// Terminations reuse the message_json column like error items;
 		// item_type discriminates the row, so no schema migration is needed.
 		termJSON, err := json.Marshal(item.Termination)
 		if err != nil {
-			return fmt.Errorf("marshaling termination: %w", err)
+			return fmt.Errorf("marshaling termination: %w", classifySQLiteContextError(ctx, err))
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO session_items (session_id, position, item_type, message_json)
 			 VALUES (?, ?, 'termination', ?)`,
 			sessionID, position, string(termJSON))
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 
 	default:
 		return nil // Empty item, skip
@@ -1619,17 +1691,17 @@ func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *S
 	}
 	usageJSON, err := summaryUsageJSON(item.Usage)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	snapshot, resultingCost := compactionSessionSnapshot(compacted, inputTokens, outputTokens, item)
 	fields, err := sessionPersistedFieldsOf(snapshot)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -1649,11 +1721,11 @@ func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *S
 		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON, fields.ExecutionSettingsJSON)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("persist compaction %q: %w", snapshot.ID, ErrOriginMismatch)
@@ -1664,10 +1736,10 @@ func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *S
 		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?)`,
 		snapshot.ID, snapshot.ID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 	compacted.applyCompaction(inputTokens, outputTokens, resultingCost, item)
 	return nil
@@ -1681,14 +1753,14 @@ func (s *SQLiteSessionStore) AddSummary(ctx context.Context, sessionID string, i
 
 	usageJSON, err := summaryUsageJSON(item.Usage)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
-	_, err = s.db.ExecContext(ctx,
+	_, err = execSQLiteWrite(ctx, s.db,
 		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
 		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?)`,
 		sessionID, sessionID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
 	if err != nil {
-		return err
+		return classifySQLiteContextError(ctx, err)
 	}
 
 	return nil
@@ -1718,14 +1790,14 @@ func (s *SQLiteSessionStore) AddError(ctx context.Context, sessionID string, e *
 
 	errJSON, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("marshaling error: %w", err)
+		return fmt.Errorf("marshaling error: %w", classifySQLiteContextError(ctx, err))
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = execSQLiteWrite(ctx, s.db,
 		`INSERT INTO session_items (session_id, position, item_type, message_json)
 		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'error', ?)`,
 		sessionID, sessionID, string(errJSON))
-	return err
+	return classifySQLiteContextError(ctx, err)
 }
 
 // UpdateSessionTokens updates only token/cost fields.
@@ -1733,10 +1805,10 @@ func (s *SQLiteSessionStore) UpdateSessionTokens(ctx context.Context, sessionID 
 	if sessionID == "" {
 		return ErrEmptyID
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := execSQLiteWrite(ctx, s.db,
 		"UPDATE sessions SET input_tokens = ?, output_tokens = ?, cost = ? WHERE id = ?",
 		inputTokens, outputTokens, cost, sessionID)
-	return err
+	return classifySQLiteContextError(ctx, err)
 }
 
 // UpdateSessionTitle updates only the title.
@@ -1744,8 +1816,8 @@ func (s *SQLiteSessionStore) UpdateSessionTitle(ctx context.Context, sessionID, 
 	if sessionID == "" {
 		return ErrEmptyID
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := execSQLiteWrite(ctx, s.db,
 		"UPDATE sessions SET title = ? WHERE id = ?",
 		title, sessionID)
-	return err
+	return classifySQLiteContextError(ctx, err)
 }

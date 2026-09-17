@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -121,7 +122,7 @@ func TestSplitReleaseRehitTestsInvalidCenterSelfAndComposer(t *testing.T) {
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	root.Update(tea.MouseMotionMsg{X: bounds.X, Y: bounds.Y, Button: tea.MouseLeft})
 	root.Update(tea.MouseReleaseMsg{X: bounds.X, Y: bounds.Y, Button: tea.MouseLeft})
-	require.False(t, root.panesEnabled(), "self drop is invalid")
+	require.Equal(t, []string{"profile", "second"}, root.panes.Sessions(), "active self-edge uses next hidden tab")
 }
 
 func TestSplitDividerTransactionalKeyboardMouseAndNoMarkdownPreview(t *testing.T) {
@@ -175,6 +176,67 @@ func TestSplitDividerPreviewReturnsToOriginalPosition(t *testing.T) {
 			require.Nil(t, root.paneGesture)
 			require.Same(t, original, root.panes.root, "return-to-origin commit is a true no-op")
 			require.Equal(t, d.Rect, root.paneGeometry.Dividers[0].Rect)
+		})
+	}
+}
+
+func TestPaneGhostTracksInvalidCenterWithoutPreviewIOOrLease(t *testing.T) {
+	root := splitTestRoot(t)
+	x, y := paneTabPoint(t, root, "second")
+	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.Nil(t, root.paneGhostLayer(), "press neither activates nor shows ghost")
+	_, bounds, _ := root.measurePanes()
+	center := tea.MouseMotionMsg{X: bounds.X + bounds.W/2, Y: bounds.Y + bounds.H/2, Button: tea.MouseLeft}
+	root.Update(center)
+	require.NotNil(t, root.paneGhostLayer())
+	require.Nil(t, root.paneGestureLayer(), "center remains invalid while dragged session is visible")
+	require.Contains(t, ansi.Strip(root.paneGesture.ghostLabel), "second")
+	root.View()
+	base := root.paneGesture.base
+	require.NotEmpty(t, base)
+	root.Update(center)
+	require.True(t, root.viewCacheValid, "identical drag coordinate/proposal is a cache hit")
+	require.Equal(t, base, root.paneGesture.base)
+	require.Zero(t, root.ar.ActiveCount(), "ghost never creates an animation lease")
+	root.Update(tea.MouseMotionMsg{X: center.X + 3, Y: center.Y + 2, Button: tea.MouseLeft})
+	require.False(t, root.viewCacheValid)
+	root.View()
+	require.Equal(t, base, root.paneGesture.base, "pointer-only movement retains the transcript canvas")
+	root.Update(tea.MouseReleaseMsg{X: center.X, Y: center.Y, Button: tea.MouseLeft})
+	require.Nil(t, root.paneGhostLayer())
+	require.Equal(t, "profile", root.paneFocus())
+}
+
+func TestPaneGhostReorderCrossingAndCancellation(t *testing.T) {
+	for _, cancel := range []string{"escape", "blur", "modal", "resize", "outside", "close"} {
+		t.Run(cancel, func(t *testing.T) {
+			root := splitTestRoot(t)
+			x, y := paneTabPoint(t, root, "second")
+			root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			root.Update(tea.MouseMotionMsg{X: x + 5, Y: y, Button: tea.MouseLeft})
+			require.True(t, root.paneGesture.reorder)
+			require.Nil(t, root.paneGhostLayer(), "tabbar floating source is the only reorder ghost")
+			_, bounds, _ := root.measurePanes()
+			motion := tea.MouseMotionMsg{X: bounds.X + bounds.W/2, Y: bounds.Y + bounds.H/2, Button: tea.MouseLeft}
+			root.Update(motion)
+			require.NotNil(t, root.paneGhostLayer())
+			switch cancel {
+			case "escape":
+				root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+			case "blur":
+				root.Update(tea.BlurMsg{})
+			case "modal":
+				root.Update(dialog.OpenDialogMsg{Model: &stubDialog{id: "ghost-modal"}})
+			case "resize":
+				root.Update(tea.WindowSizeMsg{Width: 1, Height: 1})
+			case "outside":
+				root.Update(tea.MouseReleaseMsg{X: -1, Y: -1, Button: tea.MouseLeft})
+			case "close":
+				root.supervisor.CloseSession("second")
+				root.Update(motion)
+			}
+			require.Nil(t, root.paneGhostLayer())
+			require.Nil(t, root.paneGesture)
 		})
 	}
 }

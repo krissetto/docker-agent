@@ -365,6 +365,21 @@ func TestConcurrentPostsWaitForAdmissionAndPreserveOrder(t *testing.T) {
 			d := r.sessionDrivers.Get(sess)
 			entered := make(chan struct{})
 			release := make(chan struct{})
+			started := make(chan struct{})
+			releaseStart := make(chan struct{})
+			defer func() {
+				for _, barrier := range []chan struct{}{release, releaseStart} {
+					select {
+					case <-barrier:
+					default:
+						close(barrier)
+					}
+				}
+			}()
+			// OnStarted runs after publishing running state but before startWake
+			// launches the provider. Other posts can append while this callback
+			// holds execution, making retained FIFO assertions phase-stable.
+			d.OnStarted(func() { close(started); <-releaseStart })
 			var gates atomic.Int64
 			d.SetPreStartGate(func() bool {
 				call := gates.Add(1)
@@ -390,6 +405,26 @@ func TestConcurrentPostsWaitForAdmissionAndPreserveOrder(t *testing.T) {
 				}
 			}, 20*time.Millisecond, time.Millisecond, "second post must wait for the first handshake")
 			close(release)
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("accepted FIFO did not reach the pre-provider barrier")
+			}
+			// The posting caller that won admission is still in OnStarted; do
+			// not wait for its Post result until the independent barrier opens.
+			require.Eventually(t, func() bool {
+				d.mu.Lock()
+				defer d.mu.Unlock()
+				return len(d.pending) == 2
+			}, 2*time.Second, time.Millisecond)
+			assert.True(t, d.HasPending(), "both inputs remain retained before execution, including after a denied first admission")
+			func() {
+				d.mu.Lock()
+				defer d.mu.Unlock()
+				require.Len(t, d.pending, 2)
+				assert.Equal(t, []string{"first", "second"}, []string{d.pending[0].Content, d.pending[1].Content})
+			}()
+			close(releaseStart)
 
 			assert.Equal(t, tc.wantFirst, <-first)
 			assert.True(t, <-second, "second post is accepted behind a denied predecessor")
@@ -400,10 +435,7 @@ func TestConcurrentPostsWaitForAdmissionAndPreserveOrder(t *testing.T) {
 						seen = append(seen, item.Message.Content)
 					}
 				}
-				if tc.firstGate {
-					return len(seen) >= 2 && strings.TrimSpace(seen[0]) == "first" && seen[1] == "second"
-				}
-				return d.HasPending()
+				return len(seen) == 2 && strings.TrimSpace(seen[0]) == "first" && seen[1] == "second"
 			}, 2*time.Second, time.Millisecond)
 			if tc.firstGate {
 				assert.Equal(t, int64(1), gates.Load())

@@ -29,26 +29,26 @@ func (s *SQLiteSessionStore) SaveTree(ctx context.Context, sessionID string, sna
 	}
 	data, err := json.Marshal(snapshot)
 	if err != nil {
-		return fmt.Errorf("marshaling subagent tree: %w", err)
+		return fmt.Errorf("marshaling subagent tree: %w", classifySQLiteContextError(ctx, err))
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
 	if _, err = tx.ExecContext(ctx,
 		`INSERT INTO subagent_trees (session_id, snapshot) VALUES (?, ?)
 		 ON CONFLICT(session_id) DO UPDATE SET snapshot = excluded.snapshot`,
 		sessionID, string(data)); err != nil {
-		return classifySQLiteError(err)
+		return classifySQLiteContextError(ctx, err)
 	}
-	return classifySQLiteError(tx.Commit())
+	return classifySQLiteContextError(ctx, tx.Commit())
 }
 
 // LoadTree returns the stored swarm snapshot, or nil when the session has none.
@@ -63,11 +63,11 @@ func (s *SQLiteSessionStore) LoadTree(ctx context.Context, sessionID string) (*s
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, classifySQLiteContextError(ctx, err)
 	}
 	snapshot := &subagent.Snapshot{}
 	if err := json.Unmarshal([]byte(data), snapshot); err != nil {
-		return nil, fmt.Errorf("unmarshaling subagent tree: %w", err)
+		return nil, fmt.Errorf("unmarshaling subagent tree: %w", classifySQLiteContextError(ctx, err))
 	}
 	return snapshot, nil
 }

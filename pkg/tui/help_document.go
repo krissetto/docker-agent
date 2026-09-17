@@ -192,6 +192,7 @@ func (m *appModel) helpDocument() help.Document {
 	}
 	if m.leanMode {
 		doc.Context += " — lean layout (not the standalone lean UI)"
+		doc.Current = append(doc.Current, leanSessionHelp())
 	}
 	return doc
 }
@@ -337,6 +338,8 @@ func (m *appModel) referenceHelp() []help.Section {
 	sections = append(sections, rootMouseHelp()...)
 	if !m.leanMode {
 		sections = append(sections, paneHelp())
+	} else {
+		sections = append(sections, leanSessionHelp())
 	}
 	if m.buildCommandCategories != nil {
 		for _, category := range m.commandCategories() {
@@ -357,11 +360,21 @@ func (m *appModel) referenceHelp() []help.Section {
 
 func paneHelp() help.Section {
 	return helpSection("panes", "Session panes", "Full TUI only; no pane gestures behind dialogs",
-		helpEntry("panes.actions", []string{"/panes"}, "Open searchable action/source picker: split left/right/up/down, focus, remove pane, single view, resize divider"),
-		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Split or move the canonical session; center/self/sidebar/composer drops cancel"),
-		helpEntry("panes.focus", []string{"click pane"}, "Focus session and its existing draft, attachments, context and sidebar"),
+		helpEntry("panes.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
+		helpEntry("panes.actions", []string{"/panes"}, "Open dedicated Panes chooser; /panes left|right|up|down [session], next|prev|remove|single; resize [divider number] previews with arrows, Enter commits, Esc cancels"),
+		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Split or move the canonical session; self-edge fills remainder with next hidden tab; center/sidebar/composer drops cancel"),
+		helpEntry("panes.focus", []string{"click pane"}, "Focus session and its existing draft/attachments; tiled sidebar width/collapse stay layout-wide"),
 		helpEntry("panes.scroll", []string{"wheel over pane"}, "Scroll only that pane without switching composer"),
 		helpEntry("panes.divider", []string{"drag divider"}, "Preview a clamped divider; release commits"),
 		helpEntry("panes.cancel-reference", []string{"esc"}, "Cancel gesture before response interruption; outside release, Blur, resize or dialog opening also cancel"),
-		helpEntry("panes.remove", []string{"/panes → Remove pane", "/panes → Single view"}, "Change layout only; never close/cancel the session tab"))
+		helpEntry("panes.remove", []string{"/panes → Remove pane", "/panes → Single view"}, "Change layout only; never close/cancel the tab; single view restores focused tab sidebar preference"))
+}
+
+func leanSessionHelp() help.Section {
+	return helpSection("lean.sessions", "Lean session navigation", "Normal-screen layout; dialogs remain keyboard-operable; panes and tour require the full TUI",
+		helpEntry("lean.subagents", []string{"/subagents"}, "Search canonical subagent identities and open a live session"),
+		helpEntry("lean.attach", []string{"/subagent-view <node-id>", "/subagent-attach <node-id>"}, "Open the same canonical live viewer; only explicit submission sends a message"),
+		helpEntry("lean.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
+		helpEntry("lean.back", []string{"/back"}, "Return to the previous still-open session; preserve drafts and ongoing work"),
+		helpEntry("lean.operations", []string{"/settings", "/plans", "/permissions", "/pause"}, "Use the ordinary nonvisual command handlers and keyboard dialogs"))
 }

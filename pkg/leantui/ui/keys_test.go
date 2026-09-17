@@ -121,3 +121,27 @@ func TestParseMixedRun(t *testing.T) {
 	assert.Equal(t, KeyRune, keys[1].Typ)
 	assert.Equal(t, KeyEnter, keys[2].Typ)
 }
+
+func TestBackgroundColorRepliesDoNotEnterDraft(t *testing.T) {
+	var parser InputParser
+	if got := parser.Feed([]byte("\x1b]11;rgb:ffff/")); len(got) != 0 {
+		t.Fatalf("partial OSC became input: %v", got)
+	}
+	got := parser.Feed([]byte("ffff/ffff\x1b\\"))
+	if len(got) != 1 || got[0].Typ != KeyBackgroundLight {
+		t.Fatalf("light report: %v", got)
+	}
+	got = parser.Feed([]byte("\x1b]11;rgb:00/00/00\a"))
+	if len(got) != 1 || got[0].Typ != KeyBackgroundDark {
+		t.Fatalf("dark report: %v", got)
+	}
+	for _, report := range []string{"\x1b]11;rgb:no/no/no\a", "\x1b]10;rgb:ff/ff/ff\a"} {
+		if got := parser.Feed([]byte(report)); len(got) != 0 {
+			t.Fatalf("invalid/control report became text: %v", got)
+		}
+	}
+	got = parser.Feed([]byte("\x1b[?997;1n\x1b[?997;2n"))
+	if len(got) != 2 || got[0].Typ != KeyBackgroundDark || got[1].Typ != KeyBackgroundLight {
+		t.Fatalf("mode 2031 reports: %v", got)
+	}
+}

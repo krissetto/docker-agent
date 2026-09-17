@@ -230,7 +230,7 @@ func TestTypedInputPresentationModesLiveAndReload(t *testing.T) {
 				assert.NotContains(t, out, "system_info")
 				assert.NotContains(t, out, "private model")
 				if sender != "" {
-					assert.Contains(t, out, "worker (ref 12345) has replied")
+					assert.Contains(t, out, "worker (ref 12345) has finished their work")
 				} else {
 					assert.Contains(t, out, "Runtime update received")
 				}

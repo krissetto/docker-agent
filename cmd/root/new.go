@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	tuiinput "github.com/docker/docker-agent/pkg/tui/input"
+	viewhost "github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -69,7 +70,13 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	t := loadResult.Team
 	defer stopToolSets(ctx, t)
 
+	// Bind the creator's tools and runtime hooks to the same captured workspace.
+	workingDir, err := session.CaptureLocalWorkingDir(f.runConfig.WorkingDir)
+	if err != nil {
+		return err
+	}
 	rt, err := runtime.NewLocalRuntime(ctx, t,
+		runtime.WithWorkingDir(workingDir),
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)
@@ -82,11 +89,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 
 	var appOpts []app.Opt
 	// The creator runs in the user's checkout and writes the generated agent
-	// YAML there; capture that workspace as the session's provenance.
-	workingDir, err := session.CaptureLocalWorkingDir(f.runConfig.WorkingDir)
-	if err != nil {
-		return err
-	}
+	// YAML there; retain the captured workspace as session provenance.
 	sessOpts := []session.Opt{
 		session.WithTitle("New agent"),
 		session.WithMaxIterations(f.maxIterationsParam),
@@ -106,7 +109,27 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	applyTheme("")
 
 	appOpts = append(appOpts, app.WithRuntimeServices(rt))
-	return runTUI(ctx, rt, supervisor.Runtime(), sess, runtime.SessionBinding{AgentName: rt.CurrentAgentName(ctx), Model: f.modelParam}, nil, nil, nil, appOpts...)
+	sessions := supervisor.Runtime()
+	viewSupervisor := viewhost.New(nil)
+	scope := viewhost.NewViewOwnerScope()
+	if err := viewSupervisor.ConfigureSessionViews(ctx, viewhost.HostViewConfig{
+		Resolve:               localViewOwnerResolver(scope, "creator", rt.SessionStore()),
+		MaxRetainedViewOwners: viewhost.DefaultMaxRetainedViewOwners,
+	}); err != nil {
+		return err
+	}
+	if err := viewSupervisor.RegisterSessionOwner(viewhost.ViewOwnerIdentity{
+		Scope: scope, Source: "creator", RootSessionID: sess.ID, RootWorkingDir: workingDir,
+		RootBinding: runtime.SessionBinding{AgentName: rt.CurrentAgentName(ctx)},
+	}, viewhost.ViewOwnerResources{
+		Services: rt, Sessions: sessions,
+		NewApp:  resolvedViewBuilder(sessions, withTitleGenerator(ctx, rt, []app.Opt{app.WithRuntimeServices(rt)})),
+		Cleanup: func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) },
+	}, true); err != nil {
+		return err
+	}
+	defer viewSupervisor.Shutdown()
+	return runTUI(ctx, rt, sessions, sess, runtime.SessionBinding{AgentName: rt.CurrentAgentName(ctx), Model: f.modelParam}, nil, viewSupervisor.Shutdown, []tui.Option{tui.WithSupervisor(viewSupervisor)}, appOpts...)
 }
 
 func runTUI(ctx context.Context, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, binding runtime.SessionBinding, spawner tui.SessionSpawner, cleanup func(), tuiOpts []tui.Option, opts ...app.Opt) error {

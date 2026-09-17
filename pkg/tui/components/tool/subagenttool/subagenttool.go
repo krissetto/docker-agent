@@ -178,7 +178,7 @@ func RenderInput(msg *types.Message, width int) string {
 	if ref.Name == "" {
 		ref.Name = "subagent"
 	}
-	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" has replied"), width)
+	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" has finished their work"), width)
 }
 
 // verb picks the wording from the tool status: the in-progress form while

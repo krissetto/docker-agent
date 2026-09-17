@@ -238,7 +238,7 @@ func (h *sessionEventHub) appendReplayLocked(sessionID string, event retainedSes
 	h.bytes[sessionID] += event.bytes
 	for len(replay) > 0 && (len(replay) > h.capacity || h.bytes[sessionID] > h.maxBytes || h.capacity == 0 || h.maxBytes == 0) {
 		h.bytes[sessionID] -= replay[0].bytes
-		replay[0].event = nil
+		replay[0] = retainedSessionEvent{}
 		replay = replay[1:]
 	}
 	h.replay[sessionID] = replay

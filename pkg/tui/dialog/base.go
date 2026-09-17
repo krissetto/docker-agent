@@ -86,6 +86,8 @@ type BaseDialog struct {
 	bodyScroll                            *scrollview.Model
 	bodyX, bodyY, bodyWidth, bodyHeight   int
 	bodyHeaderGap                         int
+	bodyTitleGap                          int
+	bodyHeaderRows                        int
 	bodyFooterGap                         int
 	bodyPreparationCount                  uint64
 	bodyMaxHeight                         int
@@ -398,7 +400,7 @@ func CloseWithElicitationResponse(action tools.ElicitationAction, content map[st
 
 // RenderTitle renders a dialog title with the given style and width.
 func RenderTitle(title string, contentWidth int, style lipgloss.Style) string {
-	return style.Width(contentWidth).Render(title)
+	return style.Width(max(1, contentWidth)).Render(ansi.Truncate(title, max(1, contentWidth), "…"))
 }
 
 // RenderSeparator renders a horizontal separator line.
@@ -705,6 +707,11 @@ func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int
 	}
 	style, width, inner, available := b.bodyFrame(style, dialogWidth)
 	headers, footers := bodyChrome(header, footer, available)
+	b.bodyHeaderRows = len(headers)
+	b.bodyTitleGap = 0
+	if len(headers) > 2 && headers[1] == "" {
+		b.bodyTitleGap = 1
+	}
 	b.bodyHeaderGap = 0
 	if len(headers) > 0 && headers[len(headers)-1] == "" {
 		b.bodyHeaderGap = 1
@@ -782,13 +789,15 @@ func (b *BaseDialog) bodyFrame(style lipgloss.Style, dialogWidth int) (lipgloss.
 	return style, width, max(1, width-style.GetHorizontalFrameSize()), max(1, height-style.GetVerticalFrameSize())
 }
 
+// bodyChrome owns structural spacing; callers supply title/header content and
+// actions without margins. Body rows are deliberately not normalized here.
 func bodyChrome(header, footer string, available int) ([]string, []string) {
-	var headers, footers []string
-	if header != "" {
-		headers = strings.Split(strings.TrimRight(header, "\n"), "\n")
-	}
-	if footer != "" {
-		footers = strings.Split(footer, "\n")
+	headers := trimChromeLines(header)
+	footers := trimChromeLines(footer)
+	// Older callers may already separate the title from header controls. Remove
+	// only that structural gap before allocating one shared, adaptive gap.
+	for len(headers) > 1 && strings.TrimSpace(ansi.Strip(headers[1])) == "" {
+		headers = append(headers[:1], headers[2:]...)
 	}
 	if len(headers)+len(footers)+1 > available {
 		headers = headers[:min(1, len(headers))]
@@ -796,10 +805,34 @@ func bodyChrome(header, footer string, available int) ([]string, []string) {
 	if len(headers)+len(footers)+1 > available {
 		headers = nil
 	}
+	// Reclaim decorative spacing before dropping header controls or body rows.
+	if len(headers) > 1 && len(headers)+len(footers)+3 <= available {
+		headers = append(headers[:1], append([]string{""}, headers[1:]...)...)
+	}
 	if len(headers) > 0 && len(headers)+len(footers)+2 <= available {
 		headers = append(headers, "")
 	}
 	return headers, footers
+}
+
+func trimChromeLines(content string) []string {
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.TrimSpace(ansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// headerRow locates a header content row in the prepared frame, excluding the
+// shared title gap. Hidden compact headers have no pointer target.
+func (b *BaseDialog) headerRow(line int) (int, bool) {
+	if line > 0 {
+		line += b.bodyTitleGap
+	}
+	if line < 0 || line >= b.bodyHeaderRows-b.bodyHeaderGap {
+		return 0, false
+	}
+	return b.bodyY - b.bodyHeaderRows + line, true
 }
 
 func wrapBodyLines(body string, width int) []string {

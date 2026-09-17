@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -594,4 +595,101 @@ func TestFormDefaultEnterMarkerMovesOnlyWithActionFocus(t *testing.T) {
 	result, ok := findMsg[MultiChoiceResultMsg](collectMsgs(cmd))
 	require.True(t, ok)
 	assert.True(t, result.Result.IsSkipped)
+}
+
+func TestMCPPromptSharedFooterGapDoesNotDoubleFieldSpacing(t *testing.T) {
+	d := NewMCPPromptInputDialog("fields", mcptools.PromptInfo{Arguments: []mcptools.PromptArgument{{Name: "first"}, {Name: "second"}}}).(*MCPPromptInputDialog)
+	d.SetSize(80, 24)
+	width, _ := d.mcpPromptDialogDimensions()
+	body, starts, heights := d.buildBody(d.BodyContentWidth(width))
+	lines := strings.Split(ansi.Strip(body), "\n")
+	require.Equal(t, []int{0, 3}, starts)
+	require.Equal(t, []int{2, 2}, heights)
+	require.Len(t, lines, 5, "inter-field gap remains; final field does not add a footer spacer")
+	require.Empty(t, strings.TrimSpace(lines[2]))
+	require.Equal(t, 1, d.bodyFooterGap)
+	require.Equal(t, 5, d.bodyHeight)
+}
+
+func TestFormInitialFocusCursorVisibleBeforeRenderAndAfterResize(t *testing.T) {
+	for _, family := range []string{"mcp", "elicitation-free", "elicitation-schema"} {
+		for _, initial := range [][2]int{{100, 30}, {45, 12}, {20, 6}} {
+			t.Run(fmt.Sprintf("%s/%dx%d", family, initial[0], initial[1]), func(t *testing.T) {
+				var d Dialog
+				switch family {
+				case "mcp":
+					d = NewMCPPromptInputDialog("prompt", mcptools.PromptInfo{Description: strings.Repeat("Description. ", 16), Arguments: []mcptools.PromptArgument{{Name: "name"}}})
+				case "elicitation-free":
+					d = NewElicitationDialog("Question", nil, nil, ElicitationRef{})
+				default:
+					d = NewElicitationDialog("Question", map[string]any{"type": "string", "title": "Name"}, nil, ElicitationRef{})
+				}
+				var b *BaseDialog
+				var input *textinput.Model
+				var focusLine func() int
+				switch model := d.(type) {
+				case *MCPPromptInputDialog:
+					b, input = &model.BaseDialog, &model.inputs[0]
+					focusLine = func() int { return model.fieldStarts[0] + model.fieldHeights[0] - 1 }
+				case *ElicitationDialog:
+					b = &model.BaseDialog
+					if model.hasFreeFormInput() {
+						input = &model.responseInput
+						focusLine = func() int { return len(model.layout().bodyLines) - 1 }
+					} else {
+						input = &model.inputs[0]
+						focusLine = func() int {
+							start, _ := model.focusRange()
+							return start
+						}
+					}
+				}
+				input.SetValue("ZX")
+				input.SetCursor(0)
+				for _, size := range [][2]int{initial, {20, 6}, {100, 30}, {45, 12}} {
+					d.SetSize(size[0], size[1])
+					x, y, _, height := b.BodyScrollBounds()
+					line := focusLine()
+					offset := b.BodyScrollOffset()
+					require.GreaterOrEqual(t, line, offset, "focused row is prepared before View")
+					require.Less(t, line, offset+height)
+					view := d.View()
+					row, col := d.Position()
+					inputY := y + line - offset
+					lines := strings.Split(view, "\n")
+					require.Contains(t, ansi.Strip(lines[inputY-row]), "ZX")
+					require.Regexp(t, `\x1b\[[0-9;]*\b7(?:;[0-9;]*)?mZ`, lines[inputY-row], "actual focused cursor remains visible, not just its row")
+					require.Equal(t, offset, b.BodyScrollOffset(), "View never reanchors focus")
+					require.LessOrEqual(t, col+lipgloss.Width(view), size[0])
+					require.LessOrEqual(t, row+lipgloss.Height(view), size[1])
+					// Returned cursor blink commands are deliberately not executed.
+					_, _ = d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x + lipgloss.Width(input.Prompt) + 1, Y: inputY})
+					require.Equal(t, 1, input.Position(), "painted input row maps to the actual cursor cell")
+					input.SetCursor(0)
+				}
+			})
+		}
+	}
+}
+
+func TestFormFocusPreparationDoesNotOverrideManualScrollAtSameSize(t *testing.T) {
+	forms := []Dialog{
+		NewMCPPromptInputDialog("prompt", mcptools.PromptInfo{Description: strings.Repeat("Description. ", 30), Arguments: []mcptools.PromptArgument{{Name: "name"}}}),
+		NewElicitationDialog(strings.Repeat("Question. ", 30), nil, nil, ElicitationRef{}),
+	}
+	for _, d := range forms {
+		d.SetSize(45, 12)
+		var b *BaseDialog
+		switch model := d.(type) {
+		case *MCPPromptInputDialog:
+			b = &model.BaseDialog
+		case *ElicitationDialog:
+			b = &model.BaseDialog
+		}
+		require.Positive(t, b.BodyScrollOffset(), "initial preparation reveals focus below long prose")
+		b.bodyScroll.ScrollToTop()
+		d.SetSize(45, 12)
+		d.View()
+		require.Zero(t, b.BodyScrollOffset(), "same-size preparation and paint preserve deliberate manual scrolling")
+	}
 }

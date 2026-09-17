@@ -3,6 +3,7 @@ package editor
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -22,6 +23,8 @@ const (
 type contextBar struct {
 	attachments []bannerItem
 	height      int
+	maxHeight   int
+	width       int
 	regions     []bannerRegion
 	expanded    bool
 	focused     bool
@@ -40,7 +43,7 @@ type bannerRegion struct {
 }
 
 func newContextBar() *contextBar {
-	return &contextBar{}
+	return &contextBar{maxHeight: 6}
 }
 
 func (b *contextBar) SetItems(items []bannerItem) {
@@ -67,7 +70,7 @@ func (b *contextBar) Toggle() {
 }
 
 func (b *contextBar) SetFocused(focused bool) {
-	b.focused = focused && b.hasContent()
+	b.focused = focused && b.hasContent() && b.height > 0
 }
 
 func (b *contextBar) hasContent() bool {
@@ -75,8 +78,9 @@ func (b *contextBar) hasContent() bool {
 }
 
 func (b *contextBar) updateHeight() {
-	if !b.hasContent() {
+	if !b.hasContent() || b.maxHeight == 0 {
 		b.height = 0
+		b.focused = false
 		return
 	}
 	// top border + summary row
@@ -84,33 +88,57 @@ func (b *contextBar) updateHeight() {
 	if b.expanded {
 		b.height += len(b.attachments)
 	}
+	b.height = min(b.height, b.maxHeight)
+}
+
+func (b *contextBar) SetMaxHeight(height int) {
+	height = max(0, height)
+	if b.maxHeight == height {
+		return
+	}
+	b.maxHeight = height
+	b.regions = nil
+	b.updateHeight()
+}
+
+func (b *contextBar) summaryY() int {
+	return min(2, max(0, b.height-1))
 }
 
 func (b *contextBar) View(totalWidth int) string {
-	if !b.hasContent() {
+	b.width = max(0, totalWidth)
+	b.regions = nil
+	if !b.hasContent() || b.height == 0 || totalWidth <= 0 {
 		return ""
 	}
 
-	innerWidth := max(0, totalWidth-2*styles.AppPadding)
-	b.updateHeight()
-
+	leftPadding := min(styles.AppPadding, totalWidth)
+	rightPadding := min(styles.AppPadding, totalWidth-leftPadding)
+	innerWidth := totalWidth - leftPadding - rightPadding
 	var rows []string
-	b.regions = nil
-	rows = append(rows, b.renderTopBorder(innerWidth), b.renderSummaryRow(innerWidth))
+	if b.height >= 3 {
+		rows = append(rows, strings.Repeat(" ", innerWidth))
+	}
+	if b.height >= 2 {
+		rows = append(rows, b.renderTopBorder(innerWidth))
+	}
+	rows = append(rows, b.renderSummaryRow(innerWidth))
 	if b.expanded {
 		for i, item := range b.attachments {
+			if len(rows) >= b.height {
+				break
+			}
 			pill := ansi.Truncate(renderAttachmentPill(item), innerWidth, "…")
 			rows = append(rows, pill+strings.Repeat(" ", max(0, innerWidth-ansi.StringWidth(pill))))
-			b.regions = append(b.regions, bannerRegion{start: 0, end: ansi.StringWidth(pill), y: contextBarMarginTop + 2 + i, item: item})
+			b.regions = append(b.regions, bannerRegion{start: 0, end: ansi.StringWidth(pill), y: b.summaryY() + 1 + i, item: item})
 		}
 	}
 
-	content := strings.Join(rows, "\n")
-	padStyle := lipgloss.NewStyle().Padding(0, styles.AppPadding).MarginTop(contextBarMarginTop)
+	padStyle := lipgloss.NewStyle().Padding(0, rightPadding, 0, leftPadding)
 	if b.focused {
 		padStyle = padStyle.Background(styles.Selected)
 	}
-	return padStyle.Render(content)
+	return padStyle.Render(strings.Join(rows, "\n"))
 }
 
 func (b *contextBar) renderTopBorder(innerWidth int) string {
@@ -186,14 +214,20 @@ func (b *contextBar) buildRegions(pills []string, separator string) {
 			start: pos,
 			end:   pos + width,
 			item:  b.attachments[i],
-			y:     contextBarMarginTop + 1,
+			y:     b.summaryY(),
 		})
 		pos += width
 	}
 }
 
 func renderAttachmentPill(item bannerItem) string {
-	name, size := parseLabel(item.label)
+	label := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, ansi.Strip(item.label))
+	name, size := parseLabel(label)
 	pill := styles.AttachmentIconStyle.Render("📎 ") + styles.AttachmentBadgeStyle.Render(name)
 	if size != "" {
 		pill += " " + styles.AttachmentSizeStyle.Render(size)
@@ -202,11 +236,11 @@ func renderAttachmentPill(item bannerItem) string {
 }
 
 func (b *contextBar) HitTest(x int) (bannerItem, bool) {
-	return b.HitTestPosition(x, contextBarMarginTop+1)
+	return b.HitTestPosition(x, b.summaryY())
 }
 
 func (b *contextBar) HitTestPosition(x, y int) (bannerItem, bool) {
-	if len(b.regions) == 0 {
+	if len(b.regions) == 0 || x >= b.width || y < 0 || y >= b.height {
 		return bannerItem{}, false
 	}
 
