@@ -25,7 +25,7 @@ func TestProjectionResetReplacesLeanTranscriptAndPreservesLiveConfirmation(t *te
 	head := &app.PresentationState{Interactions: []runtime.InteractionSnapshot{{SessionID: "s", InteractionID: "live"}}}
 	m.handleEvent(t.Context(), app.SessionEventMsg{Event: &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: sess, Status: runtime.SessionStatus{SessionID: "s", State: runtime.SessionStateSettled}, PendingInputs: []runtime.PendingInput{{TurnID: "new", Content: "queued"}}}}, Projection: head})
 	assert.Same(t, live, m.screen.Confirm)
-	assert.False(t, m.busy)
+	assert.False(t, m.busy())
 	assert.Len(t, m.pendingUsers, 1)
 	assert.Equal(t, "new", m.pendingUsers[0].TurnID)
 	m.handleEvent(t.Context(), app.SessionEventMsg{Event: &runtime.InteractionResolvedEvent{SessionID: "s", InteractionID: "live"}, Projection: &app.PresentationState{}})
@@ -120,7 +120,7 @@ func TestLeanTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() string {
 		out := ansi.Strip(strings.Join(m.screen.Transcript.Lines(100, 0, false, m.sessionState, nil), "\n"))
-		assert.Equal(t, 1, strings.Count(out, "worker (ref 12345) has replied"))
+		assert.Equal(t, 1, strings.Count(out, "worker (ref 12345) has finished their work"))
 		assert.Contains(t, out, "worker (ref 12345)")
 		assert.Contains(t, out, "clean steering **literal** body")
 		assert.Contains(t, out, strings.TrimSpace(ui.PromptText)+" original parent delegation", "delegation must reuse the user prompt presentation")

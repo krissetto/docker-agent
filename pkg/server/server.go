@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 
@@ -107,6 +108,16 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 		e.Use(BearerTokenMiddleware(authToken))
 	}
 
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			path := c.Request().URL.Path
+			parts := strings.Split(strings.TrimPrefix(path, "/api/"), "/")
+			if strings.HasPrefix(path, "/api/") && len(parts) >= 2 && parts[1] == "sessions" && parts[0] != "v2" {
+				return c.JSON(http.StatusNotAcceptable, api.ErrorResponse{Code: "unsupported_session_api_version", Message: "Unsupported session API version; supported version: v2 (/api/v2/sessions)."})
+			}
+			return next(c)
+		}
+	})
 	s := &Server{e: e, sm: sm, authToken: authToken, heartbeatInterval: defaultEventsHeartbeatInterval}
 	s.registerRoutes()
 	return s
@@ -122,18 +133,19 @@ func (s *Server) registerRoutes() {
 	group.GET("/agents", s.getAgents)
 	group.GET("/agents/:id", s.getAgentConfig)
 
-	group.POST("/sessions/:id/tools/toggle", s.toggleSessionYolo)
-	group.PATCH("/sessions/:id/safety-policy", s.updateSessionSafetyPolicy)
-	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions)
-	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens)
-	group.POST("/sessions/:id/fork", s.forkSession)
-	group.PATCH("/sessions/:id/messages/:msg_id", s.updateMessage)
-	group.POST("/sessions/:id/summaries", s.addSummary)
-	group.GET("/sessions/:id/recovery", s.getSessionRecoveryData)
-	group.POST("/sessions/batch/delete", s.batchDeleteSessions)
-	group.POST("/sessions/batch/export", s.batchExportSessions)
+	group.POST("/v2/sessions/:id/tools/toggle", s.toggleSessionYolo)
+	group.PATCH("/v2/sessions/:id/safety-policy", s.updateSessionSafetyPolicy)
+	group.PATCH("/v2/sessions/:id/permissions", s.updateSessionPermissions)
+	group.PATCH("/v2/sessions/:id/tokens", s.updateSessionTokens)
+	group.POST("/v2/sessions/:id/fork", s.forkSession)
+	group.PATCH("/v2/sessions/:id/messages/:msg_id", s.updateMessage)
+	group.POST("/v2/sessions/:id/summaries", s.addSummary)
+	group.GET("/v2/sessions/:id/recovery", s.getSessionRecoveryData)
+	group.POST("/v2/sessions/batch/delete", s.batchDeleteSessions)
+	group.POST("/v2/sessions/batch/export", s.batchExportSessions)
 
-	s.registerCanonicalSessionRoutes(group.Group("/sessions"))
+	s.registerCanonicalSessionRoutes(group.Group("/v2/sessions"))
+	s.registerLegacySessionRoutes(group.Group("/sessions"))
 
 	group.GET("/agents/:id/:agent_name/tools/count", s.getAgentToolCount)
 

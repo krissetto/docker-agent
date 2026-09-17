@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -48,11 +49,12 @@ func TestCagentAPI_ListSessions(t *testing.T) {
 			client := &http.Client{Transport: transport}
 			t.Cleanup(transport.CloseIdleConnections)
 
-			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/api/sessions", http.NoBody)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost"+api.SessionAPIPath, http.NoBody)
 			require.NoError(t, err)
 			resp, err := client.Do(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
 
 			var catalog struct {
 				Sessions []Session `json:"sessions"`

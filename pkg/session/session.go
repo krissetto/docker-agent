@@ -2339,7 +2339,7 @@ func (s *Session) CompactionInput() ([]chat.Message, []int, int) {
 	}
 
 	for i := startIndex; i < len(items); i++ {
-		if !items[i].IsMessage() || items[i].Message.Pending {
+		if !items[i].IsMessage() || (items[i].Message.Pending || items[i].Message.InputMode == "legacy_run") {
 			continue
 		}
 		msg := items[i].Message.Message
@@ -2480,7 +2480,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, pr
 			})
 			updateIndex++
 		}
-		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending {
+		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending && items[i].Message.InputMode != "legacy_run" {
 			if project != nil {
 				project(items[i].Message)
 			}

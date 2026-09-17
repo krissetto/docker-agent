@@ -84,7 +84,7 @@ func TestRuntime_MultiAgent_SessionReload(t *testing.T) {
 
 	// --- Turn 1: trigger a task transfer ---
 	handle, err := supervisor.Runtime().CreateSession(ctx,
-		session.New(session.WithNonInteractive(true)), runtime.SessionBinding{})
+		session.New(session.WithNonInteractive(true), session.WithToolsApproved(true)), runtime.SessionBinding{})
 	require.NoError(t, err)
 	sess, err := runTestTurn(ctx, handle, "What's the weather in Paris? Delegate to the weather agent.")
 	require.NoError(t, err)

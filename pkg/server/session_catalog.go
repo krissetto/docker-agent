@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -20,33 +19,6 @@ import (
 // Session catalog and cold session resolution: which persisted rows are
 // attachable through which source registry, durable-tree validation for child
 // sessions, and restoring a session (and its swarm) on first access.
-
-func (s *Server) sessionCatalog(c echo.Context) error {
-	c.Response().Header().Set("Cache-Control", "no-store")
-	if c.QueryParam("view") == "summary" {
-		includeChildren := false
-		if raw := c.QueryParam("include_children"); raw != "" {
-			var err error
-			includeChildren, err = strconv.ParseBool(raw)
-			if err != nil {
-				return sessionRequestError("invalid include_children scope")
-			}
-		}
-		if c.QueryParam("active") != "" {
-			return sessionRequestError("active filter is unsupported for summary view")
-		}
-		rows, err := s.sm.ListSessionSummaries(c.Request().Context(), runtime.SessionSummaryOptions{IncludeChildren: includeChildren})
-		if err != nil {
-			return sessionHTTPError(err)
-		}
-		return c.JSON(http.StatusOK, struct {
-			Version  int                           `json:"version"`
-			View     string                        `json:"view"`
-			Sessions []runtime.SessionSummaryEntry `json:"sessions"`
-		}{Version: 1, View: "summary", Sessions: rows})
-	}
-	return s.sessionCatalogResponse(c)
-}
 
 type sessionTreeMember struct {
 	agent    string
@@ -61,67 +33,15 @@ type sessionTreeValidation struct {
 
 type sessionCatalogIndex struct {
 	byID  map[string]*session.Session
-	roots map[string]*session.Session
-	errs  map[string]error
 	trees map[string]sessionTreeValidation
 }
 
 func newSessionCatalogIndex(sessions []*session.Session) *sessionCatalogIndex {
-	index := &sessionCatalogIndex{byID: make(map[string]*session.Session, len(sessions)), roots: make(map[string]*session.Session), errs: make(map[string]error), trees: make(map[string]sessionTreeValidation)}
+	index := &sessionCatalogIndex{byID: make(map[string]*session.Session, len(sessions)), trees: make(map[string]sessionTreeValidation)}
 	for _, sess := range sessions {
 		index.byID[sess.ID] = sess
 	}
 	return index
-}
-
-func (i *sessionCatalogIndex) root(sess *session.Session) (*session.Session, error) {
-	if root := i.roots[sess.ID]; root != nil {
-		return root, i.errs[sess.ID]
-	}
-	path := make([]*session.Session, 0, 4)
-	seen := make(map[string]struct{})
-	current := sess
-	source := sess.AttributesSnapshot()[sessionSourceAttribute]
-	var err error
-	for current.ParentID != "" {
-		if cached := i.roots[current.ID]; cached != nil {
-			current = cached
-			break
-		}
-		if cachedErr, known := i.errs[current.ID]; known && cachedErr != nil {
-			err = cachedErr
-			break
-		}
-		if _, duplicate := seen[current.ID]; duplicate {
-			err = errors.New("persisted session ancestry has a cycle")
-			break
-		}
-		seen[current.ID] = struct{}{}
-		path = append(path, current)
-		parent := i.byID[current.ParentID]
-		if parent == nil {
-			err = errors.New("persisted parent session is missing")
-			break
-		}
-		parentSource := parent.AttributesSnapshot()[sessionSourceAttribute]
-		if source != "" && parentSource != source {
-			err = errors.New("persisted child session source differs from root source")
-			break
-		}
-		source, current = parentSource, parent
-	}
-	if err == nil {
-		path = append(path, current)
-		for _, item := range path {
-			i.roots[item.ID] = current
-			i.errs[item.ID] = nil
-		}
-		return current, nil
-	}
-	for _, item := range append(path, sess) {
-		i.errs[item.ID] = err
-	}
-	return nil, err
 }
 
 func (i *sessionCatalogIndex) validateChild(ctx context.Context, registry runtime.SessionRuntime, sess, root *session.Session) error {
@@ -220,97 +140,6 @@ func validateSessionTree(root *session.Session, snapshot *subagent.Snapshot) ses
 	return out
 }
 
-func (s *Server) sessionCatalogResponse(c echo.Context) error {
-	var sessions []*session.Session
-	if c.QueryParam("active") != "true" {
-		var err error
-		sessions, err = s.sm.sessionStore.GetSessions(c.Request().Context())
-		if err != nil {
-			return sessionHTTPError(err)
-		}
-	}
-	// The store catalog may contain only roots. Merge loaded children and
-	// replace persisted rows with canonical snapshots without retaining pointers.
-	positions := make(map[string]int, len(sessions))
-	for i, sess := range sessions {
-		positions[sess.ID] = i
-	}
-	s.sm.runtimeSessions.Range(func(id string, active *activeRuntimes) bool {
-		if active.handle == nil {
-			return true
-		}
-		snapshot, err := active.handle.Snapshot(c.Request().Context())
-		if err != nil {
-			return true
-		}
-		if i, ok := positions[id]; ok {
-			sessions[i] = snapshot
-		} else {
-			positions[id] = len(sessions)
-			sessions = append(sessions, snapshot)
-		}
-		return true
-	})
-	catalog := sessionCatalogDTO{Version: 1, Sessions: make([]sessionResourceDTO, 0, len(sessions))}
-	index := newSessionCatalogIndex(sessions)
-	if len(s.sm.sessionRegistries) == 0 {
-		if s.sm.sessionRegistry != nil {
-			catalog.Sources = append(catalog.Sources, sessionCatalogSourceDTO{CanCreate: true})
-		}
-	} else {
-		for name := range s.sm.sessionRegistries {
-			catalog.Sources = append(catalog.Sources, sessionCatalogSourceDTO{Name: name, CanCreate: true})
-		}
-		sort.Slice(catalog.Sources, func(i, j int) bool { return catalog.Sources[i].Name < catalog.Sources[j].Name })
-	}
-	for _, sess := range sessions {
-		entry := catalogEntryFromSession(sess)
-		if active, ok := s.sm.runtimeSessions.Load(sess.ID); ok && active.handle != nil {
-			entry.Loaded, entry.Loadable, entry.Attachable = true, true, true
-			entry.AgentName = active.handle.Metadata().AgentName
-			if status, statusErr := active.handle.Status(c.Request().Context()); statusErr == nil {
-				entry.StateKnown = true
-				entry.State, entry.LastError = status.State, status.LastError
-				pending := status.Pending
-				entry.Pending = &pending
-				if status.State == runtime.SessionStateRunning || status.State == runtime.SessionStateCancelling {
-					entry.Activity = string(status.State)
-				}
-			} else {
-				entry.RouteError = "session status unavailable"
-			}
-		} else if entry.AgentName == "" && sess.ParentID == "" {
-			entry.RouteError = "session is not attachable"
-		} else if registry, _, routeErr := s.sm.sessionRegistryForCreate(entry.Source); routeErr != nil {
-			entry.RouteError = "persisted session source is unavailable or ambiguous"
-		} else if sess.ParentID != "" {
-			root, chainErr := index.root(sess)
-			if chainErr != nil {
-				entry.RouteError = chainErr.Error()
-			} else if root.AttributesSnapshot()[sessionSourceAttribute] != entry.Source && entry.Source != "" {
-				entry.RouteError = "persisted child session source differs from root source"
-			} else if treeErr := index.validateChild(c.Request().Context(), registry, sess, root); treeErr != nil {
-				entry.RouteError = treeErr.Error()
-			} else if _, ok := registry.(runtime.TreeRestorer); !ok {
-				entry.RouteError = "runtime cannot load durable child session tree"
-			} else {
-				entry.Source = root.AttributesSnapshot()[sessionSourceAttribute]
-				entry.Loadable, entry.Attachable = true, true
-			}
-		} else {
-			entry.Loadable, entry.Attachable = true, true
-		}
-		catalog.Sessions = append(catalog.Sessions, entry)
-	}
-	sort.Slice(catalog.Sessions, func(i, j int) bool {
-		if catalog.Sessions[i].UpdatedAt != catalog.Sessions[j].UpdatedAt {
-			return catalog.Sessions[i].UpdatedAt > catalog.Sessions[j].UpdatedAt
-		}
-		return catalog.Sessions[i].SessionID < catalog.Sessions[j].SessionID
-	})
-	return c.JSON(http.StatusOK, catalog)
-}
-
 func catalogEntryFromSession(sess *session.Session) sessionResourceDTO {
 	clone := sess.Clone()
 	updated := clone.CreatedAt
@@ -365,7 +194,7 @@ func (s *Server) getCanonicalSession(c echo.Context) error {
 			Version int                             `json:"version"`
 			View    string                          `json:"view"`
 			Info    runtime.PreparedSessionViewInfo `json:"info"`
-		}{Version: 1, View: "prepare-info", Info: info})
+		}{Version: api.SessionAPIVersion, View: "prepare-info", Info: info})
 	}
 	sess, err := s.sm.GetSession(c.Request().Context(), c.Param("id"))
 	if err != nil {

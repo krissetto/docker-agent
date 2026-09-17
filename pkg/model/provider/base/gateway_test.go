@@ -30,6 +30,11 @@ func TestVerifyDockerGatewayAuth(t *testing.T) {
 		assert.NoError(t, VerifyDockerGatewayAuth(t.Context(), fakeEnv{}, "https://gateway.example.com"))
 	})
 
+	t.Run("loopback gateway needs no token", func(t *testing.T) {
+		t.Parallel()
+		assert.NoError(t, VerifyDockerGatewayAuth(t.Context(), fakeEnv{}, "http://localhost:8080"))
+	})
+
 	t.Run("trusted docker gateway with token", func(t *testing.T) {
 		t.Parallel()
 		env := fakeEnv{environment.DockerDesktopTokenEnv: "jwt"}
@@ -49,6 +54,13 @@ func TestGatewayAuthToken(t *testing.T) {
 	t.Run("non-docker gateway returns empty token", func(t *testing.T) {
 		t.Parallel()
 		token, err := GatewayAuthToken(t.Context(), fakeEnv{}, "https://gateway.example.com")
+		require.NoError(t, err)
+		assert.Empty(t, token)
+	})
+
+	t.Run("loopback gateway returns empty token", func(t *testing.T) {
+		t.Parallel()
+		token, err := GatewayAuthToken(t.Context(), fakeEnv{}, "http://127.0.0.1:8080")
 		require.NoError(t, err)
 		assert.Empty(t, token)
 	})

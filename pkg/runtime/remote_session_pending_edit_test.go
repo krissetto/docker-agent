@@ -9,13 +9,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
 func TestRemotePendingEditExistingPatchAndTypedEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPatch, r.Method)
-		assert.Equal(t, "/api/sessions/child", r.URL.Path)
+		assert.Equal(t, api.SessionAPIPath+"/child", r.URL.Path)
 		assert.Equal(t, "Bearer token", r.Header.Get("Authorization"))
 		var edit SessionEdit
 		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&edit)) {

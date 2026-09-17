@@ -22,6 +22,22 @@ func TestSessionEventHubDisconnectsSlowCompatibilitySubscriber(t *testing.T) {
 	assert.LessOrEqual(t, got, 4)
 }
 
+func TestSessionEventHubSlowSequencedObserverGetsActionableGap(t *testing.T) {
+	h := newSessionEventHubWithLimits(32, 8<<20)
+	_, events, cancel, _ := h.SubscribeSequenced("s", nil, 1)
+	defer cancel()
+	h.Publish("s", AgentChoice("root", "s", "first"))
+	h.Publish("s", AgentChoice("root", "s", "overflow"))
+	var got []SequencedSessionEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	require.Len(t, got, 2, "bounded event plus reserved gap slot")
+	assert.Equal(t, uint64(1), got[0].Sequence)
+	assert.True(t, got[1].Gap, "overflow is not unexplained EOF")
+	assert.Equal(t, uint64(2), got[1].FirstAvailable)
+}
+
 func TestSessionEventHubReportsReplayGap(t *testing.T) {
 	h := newSessionEventHubWithLimits(32, 8<<20)
 	for i := range 100 {

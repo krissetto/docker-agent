@@ -438,3 +438,63 @@ func TestViewOwnerReplacementKeepsExistingCleanupAuthority(t *testing.T) {
 		})
 	}
 }
+
+type ownerInfoRuntime struct {
+	*ownerTestRuntime
+
+	read func(context.Context, string) (runtime.PreparedSessionViewInfo, error)
+}
+
+func (r *ownerInfoRuntime) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	return r.read(ctx, id)
+}
+
+func TestConfirmedSessionViewInfoReleasesTemporaryOwner(t *testing.T) {
+	var builds, cleanups atomic.Int32
+	r := &ownerInfoRuntime{ownerTestRuntime: &ownerTestRuntime{}, read: func(_ context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+		return runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id}, nil
+	}}
+	s, _ := ownerTestHost(t, 1, func(context.Context, ViewOwnerIdentity) (ViewOwnerResources, error) {
+		builds.Add(1)
+		resources := ownerTestResources(r.ownerTestRuntime, func() { cleanups.Add(1) })
+		resources.Sessions = r
+		return resources, nil
+	})
+	for _, id := range []string{"first", "second"} {
+		info, err := s.ConfirmedSessionViewInfo(t.Context(), id)
+		require.NoError(t, err)
+		require.Equal(t, id, info.SessionID)
+	}
+	require.EqualValues(t, 2, builds.Load(), "metadata reads cannot consume retained-owner capacity")
+	require.EqualValues(t, 2, cleanups.Load())
+	require.Zero(t, s.Count())
+	s.Shutdown()
+	require.EqualValues(t, 2, cleanups.Load(), "temporary ownership released exactly once")
+}
+
+func TestConfirmedSessionViewInfoHostShutdownCancelsRead(t *testing.T) {
+	entered := make(chan struct{})
+	var cleanups atomic.Int32
+	r := &ownerInfoRuntime{ownerTestRuntime: &ownerTestRuntime{}, read: func(ctx context.Context, _ string) (runtime.PreparedSessionViewInfo, error) {
+		close(entered)
+		<-ctx.Done()
+		return runtime.PreparedSessionViewInfo{}, ctx.Err()
+	}}
+	s, _ := ownerTestHost(t, 1, func(context.Context, ViewOwnerIdentity) (ViewOwnerResources, error) {
+		resources := ownerTestResources(r.ownerTestRuntime, func() { cleanups.Add(1) })
+		resources.Sessions = r
+		return resources, nil
+	})
+	result := make(chan error, 1)
+	go func() { _, err := s.ConfirmedSessionViewInfo(t.Context(), "root"); result <- err }()
+	select {
+	case <-entered:
+	case err := <-result:
+		t.Fatalf("read failed before admission: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("read did not enter")
+	}
+	s.Shutdown()
+	require.ErrorIs(t, <-result, context.Canceled)
+	require.EqualValues(t, 1, cleanups.Load())
+}

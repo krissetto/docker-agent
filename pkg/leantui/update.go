@@ -108,7 +108,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 	case ui.KeyCtrlW:
 		m.screen.Editor.DeleteWordBack()
 	case ui.KeyEsc:
-		if m.busy || m.runCancel != nil {
+		if m.busy() {
 			m.requestInterrupt()
 		} else {
 			m.screen.Autocomplete.Dismiss()
@@ -149,7 +149,7 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 }
 
 func (m *model) requestInterrupt() {
-	if m.busy {
+	if m.busy() {
 		switch m.interruptMode {
 		case "always":
 			m.interruptPending = true
@@ -169,16 +169,13 @@ func (m *model) requestInterrupt() {
 
 func (m *model) handleInterrupt() {
 	switch {
-	case m.busy:
+	case m.busy():
 		outcome := runtime.CancelNotActive
 		if m.app != nil {
 			outcome = m.app.CancelRun()
 		}
-		if outcome == runtime.CancelNotActive && m.runCancel == nil {
+		if outcome == runtime.CancelNotActive {
 			m.addNotice("⚠ ", "Could not cancel current response", ui.StWarning())
-		}
-		if m.runCancel != nil {
-			m.runCancel()
 		}
 		m.queue = nil
 		m.pendingUsers = nil
@@ -469,7 +466,7 @@ func (m *model) handleSessionsCommand(ctx context.Context, sessionID string) {
 			m.reportCapability("/sessions "+entry.SessionID+" · "+entry.WorkingDir, nil)
 		}
 	}
-	if m.busy {
+	if m.busy() {
 		m.addNotice("", "Wait for the current response to finish before switching sessions", ui.StMuted())
 		return
 	}
@@ -547,7 +544,7 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 		m.acquireSessionView(ctx, sessionID)
 		return
 	}
-	if m.busy {
+	if m.busy() {
 		m.reportCapability("Wait for the current response to finish before switching sessions", nil)
 		return
 	}
@@ -828,7 +825,7 @@ func (m *model) dispatchUserMessage(ctx context.Context, display, content string
 		m.screen.Editor.SetText(display)
 		return
 	}
-	if m.busy {
+	if m.busy() {
 		switch mode {
 		case busySubmitSteer:
 			submission, err := m.app.SteerMessage(ctx, content, m.draftAttachments)
@@ -891,16 +888,6 @@ func (m *model) sendFirstMessage(ctx context.Context, msg, attachPath string) {
 	m.submit(ctx, msg, submitOptions{busyMode: busySubmitSteer})
 }
 
-// beginRun marks the model busy and returns a cancelable context for a new
-// run, storing its cancel func so it can be interrupted.
-func (m *model) beginRun(ctx context.Context) (context.Context, context.CancelFunc) {
-	runCtx, cancel := context.WithCancel(ctx)
-	m.runCancel = cancel
-	m.busy = true
-	m.cancelMarkerPending = false
-	return runCtx, cancel
-}
-
 func (m *model) startRun(ctx context.Context, message string, attachments []messages.Attachment) {
 	submission, err := m.app.FollowUpMessage(ctx, message, attachments)
 	if err != nil {
@@ -909,7 +896,6 @@ func (m *model) startRun(ctx context.Context, message string, attachments []mess
 		m.reportCapability(nil, err)
 		return
 	}
-	m.busy = true
 	m.addPendingUser(message, message, submission.TurnID, ui.PendingUserFollowUp)
 }
 
@@ -932,15 +918,12 @@ func (m *model) startSkillFork(ctx context.Context, skillName, task string) {
 		m.addNotice("", "Forked skills are not supported for this session", ui.StMuted())
 		return
 	}
-	_, cancel := m.beginRun(ctx)
-	_ = cancel
 	operationID := app.NewSkillOperationID()
 	m.ownedSkillOperation = operationID
 	err := m.app.StartSkillForkOperation(ctx, operationID, skillName, task)
 	if err != nil {
 		m.ownedSkillOperation = ""
 		m.addNotice("⚠ ", "Could not start fork skill: "+err.Error(), ui.StWarning())
-		m.finishBusy(ctx)
 		return
 	}
 }
@@ -981,26 +964,26 @@ func (m *model) refreshCommands(ctx context.Context) {
 }
 
 func (m *model) handleConfirmKey(ctx context.Context, k ui.Key) {
-	if m.rejectingTool {
+	confirm := m.screen.Confirm
+	if confirm == nil {
+		return
+	}
+	if confirm.Rejecting {
 		switch k.Typ {
 		case ui.KeyEsc:
-			m.rejectingTool = false
-			m.rejectReason = ""
+			confirm.Rejecting = false
+			confirm.RejectReason = ""
 		case ui.KeyEnter:
-			m.rejectingTool = false
-			m.resolveConfirm(ctx, runtime.ResumeReject(m.rejectReason))
-			m.rejectReason = ""
+			confirm.Rejecting = false
+			m.resolveConfirm(ctx, runtime.ResumeReject(confirm.RejectReason))
+			confirm.RejectReason = ""
 		case ui.KeyBackspace:
-			runes := []rune(m.rejectReason)
+			runes := []rune(confirm.RejectReason)
 			if len(runes) > 0 {
-				m.rejectReason = string(runes[:len(runes)-1])
+				confirm.RejectReason = string(runes[:len(runes)-1])
 			}
 		case ui.KeyRune, ui.KeyPaste:
-			m.rejectReason += string(k.Runes)
-		}
-		if m.screen.Confirm != nil {
-			m.screen.Confirm.RejectReason = m.rejectReason
-			m.screen.Confirm.Rejecting = m.rejectingTool
+			confirm.RejectReason += string(k.Runes)
 		}
 		return
 	}
@@ -1021,8 +1004,7 @@ func (m *model) handleConfirmKey(ctx context.Context, k ui.Key) {
 	case 's', 'S':
 		m.resolveConfirm(ctx, runtime.ResumeApproveAutonomous())
 	case 'r', 'R':
-		m.rejectingTool = true
-		m.screen.Confirm.Rejecting = true
+		confirm.Rejecting = true
 	case 'n', 'N':
 		m.resolveConfirm(ctx, runtime.ResumeReject("rejected by user"))
 	}
@@ -1065,21 +1047,17 @@ func (m *model) resolveConfirm(ctx context.Context, req runtime.ResumeRequest) {
 
 func (m *model) resetConversation() {
 	m.cancelViewAcquisition()
-	m.runtimeStatus = runtime.SessionStatus{}
+	m.status.Dormant, m.status.Pending = false, 0
+	m.lifecycle = lifecycle.State{}
 	m.elicitations, m.maxIterations = nil, nil
 	m.subagentSnapshot = nil
 	m.majorHighWater = [2]uint64{}
 	m.majorNoticeVisible = false
-	if m.runCancel != nil {
-		m.runCancel()
-		m.runCancel = nil
-	}
 	m.screen.Transcript.ClearActive()
 	m.queue = nil
 	m.pendingUsers = nil
 	m.draftAttachments = nil
 	m.inputReplay.Reset(nil)
-	m.busy = false
 	m.cancelMarkerPending = false
 	m.screen.Confirm = nil
 	m.usage.Reset()
@@ -1097,9 +1075,6 @@ func (m *model) clearScreen() {
 }
 
 func (m *model) quit() {
-	if m.runCancel != nil && (m.app == nil || m.app.AttachedSubagent() == nil) {
-		m.runCancel()
-	}
 	m.quitting = true
 }
 
@@ -1204,7 +1179,7 @@ func (m *model) commitHelp() {
 		entry("Type / at the start of a single-line draft (no spaces) to find commands.")
 		entry("Up / Down: select previous / next match (stops at the ends).")
 		entry("Enter: execute selected completion. Tab: accept it and add a space, without sending.")
-		entry("Esc: dismiss completion when idle with no run handle; typing can reopen it.")
+		entry("Esc: dismiss completion when idle; typing can reopen it.")
 		entry("Tab does nothing without active completion; scoped arguments use the same controls.")
 
 		heading("Response and application controls")
@@ -1212,7 +1187,7 @@ func (m *model) commitHelp() {
 		entry("This replaces the draft; unavailable or already-consumed pending messages stay unchanged.")
 		entry("Ctrl+C: interrupt while busy; otherwise clear a nonempty draft; otherwise quit.")
 		entry("/settings interrupt-confirmation selects always (Y/N), double-tap (one second), or none.")
-		entry("Esc: invoke that same interrupt when busy or a run handle remains; follows interrupt-confirmation.")
+		entry("Esc: invoke that same interrupt when busy; follows interrupt-confirmation.")
 		entry("Shift+Tab: cycle thinking effort when the current model/runtime supports it.")
 		entry("Ctrl+L: clear/redraw the screen, without resetting the conversation.")
 

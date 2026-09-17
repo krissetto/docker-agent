@@ -14,12 +14,12 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
-// VerifyDockerGatewayAuth fails fast when gateway targets a trusted Docker
-// domain but Docker Desktop's auth token is unavailable. Provider clients
-// call it at construction time so a missing sign-in surfaces before the
-// first request. Non-Docker gateways need no Desktop token and always pass.
+// VerifyDockerGatewayAuth fails fast when gateway targets a Docker domain but
+// Docker Desktop's auth token is unavailable. Provider clients call it at
+// construction time so a missing sign-in surfaces before the first request.
+// Loopback and non-Docker gateways need no Desktop token and always pass.
 func VerifyDockerGatewayAuth(ctx context.Context, env environment.Provider, gateway string) error {
-	if !environment.IsTrustedDockerURL(gateway) {
+	if !environment.IsDockerDomainURL(gateway) {
 		return nil
 	}
 	if token, _ := env.Get(ctx, environment.DockerDesktopTokenEnv); token == "" {
@@ -28,15 +28,15 @@ func VerifyDockerGatewayAuth(ctx context.Context, env environment.Provider, gate
 	return nil
 }
 
-// GatewayAuthToken returns a fresh Docker Desktop auth token when gateway
-// targets a trusted Docker domain, or "" for other gateways. Gateway clients
-// call it on every request because Desktop tokens are short-lived.
+// GatewayAuthToken returns a fresh Docker Desktop auth token for trusted
+// gateways. Docker domains require a token; loopback gateways may proceed
+// without one. Other gateways receive no Docker token.
 func GatewayAuthToken(ctx context.Context, env environment.Provider, gateway string) (string, error) {
 	if !environment.IsTrustedDockerURL(gateway) {
 		return "", nil
 	}
 	token, _ := env.Get(ctx, environment.DockerDesktopTokenEnv)
-	if token == "" {
+	if token == "" && environment.IsDockerDomainURL(gateway) {
 		return "", errors.New(NoDesktopTokenErrorMessage)
 	}
 	return token, nil

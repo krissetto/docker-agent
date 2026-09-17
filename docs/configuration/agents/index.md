@@ -118,7 +118,7 @@ agents:
 | `use_commands`              | list of string | ✗   | Names of top-level `commands` groups to merge into this agent. Inline `commands` entries take precedence on name conflicts. Default: `[]`. |
 | `use_skills`                | list of string | ✗   | Names of top-level `skills` groups to merge into this agent. Inline skills are deduplicated by name against merged entries. Default: `[]`. |
 | `use_toolsets`              | list of string | ✗   | Names of top-level `toolsets` groups to merge into this agent. See [Reusable Toolsets](../overview/index.md#reusable-toolsets-toolsets). Default: `[]`. |
-| `readonly`                  | boolean | ✗   | When `true`, every toolset on this agent is filtered to expose only read-only tools (those annotated with a read-only hint). Mutating tools are removed at load time and cannot be called even if the model tries. See [Read-Only Agents](#read-only-agents) below. |
+| `readonly`                  | boolean | ✗   | When `true`, every toolset on this agent is filtered to expose only read-only tools (those annotated with a read-only hint). Mutating tools, including generated delegation tools, are excluded from the final available tool list. See [Read-Only Agents](#read-only-agents) below. |
 | `welcome_message`           | string  | ✗        | Message displayed to the user when a session starts. Rendered as Markdown in the TUI. **Not sent to the model** — it exists purely for the user's benefit. Useful for telling users what the agent can do and what commands are available. |
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing](../../concepts/multi-agent/index.md#handoffs-routing).                  |
 | `force_handoff`             | string  | ✗        | Name of an agent that unconditionally receives the conversation whenever this agent produces a final response. The runtime performs the switch itself, bypassing the LLM's tool-calling, guaranteeing deterministic pipelines. Must not reference the agent itself, and chains must not form a cycle. See [Forced Handoffs](../../concepts/multi-agent/index.md#forced-handoffs). |
@@ -623,9 +623,22 @@ subagent tree; a subagent's session can be opened in a tab, and the tree is
 restored when the session is loaded again. See
 [`examples/async_subagents.yaml`](https://github.com/docker/docker-agent/blob/main/examples/async_subagents.yaml).
 
+**Migration:** `subagents` is not an alias or spelling correction for `sub_agents`.
+Keep `sub_agents` for existing synchronous `transfer_task` workflows, particularly
+external OCI references. To migrate to async execution, use local `subagents`
+entries and update the coordinator's instructions to spawn children, read their
+results, and send follow-ups rather than wait for a synchronous return. Avoid
+mixing both keys on one agent; the loader warns when both are declared. Existing
+sessions are not converted by renaming a key.
+
+
 ## Read-Only Agents
 
-Set `readonly: true` on an agent to restrict all of its toolsets to tools that are annotated as read-only. Mutating tools are filtered out at load time — the agent cannot list or call them, even if the model hallucinates a call.
+Set `readonly: true` on an agent to restrict all of its toolsets to tools that are annotated as read-only. The policy applies to the final available tools, including generated tools, deferred discovery/activation, and tools called through code mode. Mutating tools are excluded, so hallucinating a call does not make them available.
+
+In particular, a read-only agent cannot call `spawn_subagent`, `send_message`, `stop_subagent`, `transfer_task`, or `handoff`: delegation can execute unrestricted tools in the target agent. `read_subagent` remains available. Code mode can still execute JavaScript over the permitted read-only tools.
+
+This is an annotation-based capability restriction, **not** an operating-system sandbox or an approval mode. Tool authors must classify effects accurately. `safety` settings and user approval do not grant tools removed by `readonly`. The flag restricts this agent's tools; it does not turn other agents in the team into read-only agents.
 
 You can also set `readonly: true` on an individual toolset to restrict only that toolset while leaving others unrestricted.
 

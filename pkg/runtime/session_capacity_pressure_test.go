@@ -64,7 +64,12 @@ func TestSessionCapacityPressureProtectsObserverPendingSteeringInteractionAndRun
 			d.mu.Unlock()
 			return func() {}
 		}},
-		{"running", func(d *sessionDriver) func() { d.mu.Lock(); d.running = true; d.mu.Unlock(); return func() {} }},
+		{"running", func(d *sessionDriver) func() {
+			d.mu.Lock()
+			d.phase = sessionRunning
+			d.mu.Unlock()
+			return func() {}
+		}},
 		{"retrying", func(d *sessionDriver) func() {
 			d.mu.Lock()
 			d.retryRunning = true

@@ -58,8 +58,12 @@ func TestCanonicalSettlementOutcomesAndSingleFlight(t *testing.T) {
 				cancel()
 			}
 			d := newSessionDriver(r, session.New(session.WithID("owner")))
-			d.generation, d.activeRequestID, d.running = 1, "accepted", true
-			d.cancelling, d.stopped = tc.canceled, tc.stopped
+			d.generation, d.activeRequestID = 1, "accepted"
+			d.phase = sessionRunning
+			if tc.canceled {
+				d.phase = sessionCancelling
+			}
+			d.stopped = tc.stopped
 			d.events.SetRequest("owner", "accepted", 1)
 			d.events.Publish("owner", StreamStopped("owner", "root", ""))
 			assert.Empty(t, canonicalSettlements(canonicalReplay(d)), "stream stop is not settlement")
@@ -84,7 +88,8 @@ func TestCanonicalSettlementPersistenceFailureRetryAndWithdrawal(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	r.sessionDrivers.closed = true
 	d := newSessionDriver(r, session.New(session.WithID("owner")))
-	d.generation, d.activeRequestID, d.running = 1, "accepted", true
+	d.generation, d.activeRequestID = 1, "accepted"
+	d.phase = sessionRunning
 	observer := newPersistenceObserver(session.NewInMemorySessionStore())
 	r.observers = []EventObserver{observer}
 	failure := errors.New("durable write rejected")

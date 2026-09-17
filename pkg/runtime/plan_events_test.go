@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -45,7 +46,7 @@ func TestSessionTransportDecodesPlanChangedEvent(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		flusher := writeCanonicalObservationStart(w)
-		fmt.Fprint(w, `data: {"version":1,"type":"event","envelope":{"version":1,"session_id":"s","sequence":1,"event":{"type":"plan_changed","scope":"shared","name":"release","action":"status","version":4}}}`+"\n\n")
+		fmt.Fprintf(w, `data: {"version":%d,"type":"event","envelope":{"version":%d,"session_id":"s","sequence":1,"event":{"type":"plan_changed","scope":"shared","name":"release","action":"status","version":4}}}`+"\n\n", api.SessionAPIVersion, api.SessionAPIVersion)
 		flusher.Flush()
 	}))
 	t.Cleanup(srv.Close)

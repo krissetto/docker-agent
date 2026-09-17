@@ -224,9 +224,7 @@ func localViewOwnerResolver(scope *viewhost.ViewOwnerScope, source string, store
 
 func remoteViewOwnerResolver(scope *viewhost.ViewOwnerScope, source string, sessions runtime.SessionRuntime) func(context.Context, string) (viewhost.ViewOwnerIdentity, error) {
 	return func(ctx context.Context, id string) (viewhost.ViewOwnerIdentity, error) {
-		reader, ok := sessions.(interface {
-			ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error)
-		})
+		reader, ok := sessions.(runtime.SessionViewInfoReader)
 		if !ok {
 			return viewhost.ViewOwnerIdentity{}, runtime.ErrUnsupported
 		}

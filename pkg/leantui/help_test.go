@@ -199,33 +199,27 @@ func TestLeanHelpIdleEscapeKeepsMatchingDraftDismissed(t *testing.T) {
 }
 
 func TestLeanHelpInterruptConditions(t *testing.T) {
-	t.Parallel()
 	for _, tc := range []struct {
 		name, sequence, draft string
-		busy, runHandle       bool
+		busy                  bool
 		wantDraft             string
-		quit, cancelled       bool
+		quit                  bool
+		stops                 int
 	}{
-		{"clear", "\x03", "draft", false, false, "", false, false},
-		{"quit", "\x03", "", false, false, "", true, false},
-		{"EOF quit", "\x04", "", false, false, "", true, false},
-		{"busy cancel", "\x03", "draft", true, true, "draft", false, true},
-		{"busy escape", "\x1b", "draft", true, true, "draft", false, true},
-		{"remaining handle clear", "\x1b", "draft", false, true, "", false, false},
-		{"remaining handle quit", "\x1b", "", false, true, "", true, true},
+		{"clear", "\x03", "draft", false, "", false, 0},
+		{"quit", "\x03", "", false, "", true, 0},
+		{"EOF quit", "\x04", "", false, "", true, 0},
+		{"busy cancel", "\x03", "draft", true, "draft", false, 1},
+		{"busy escape", "\x1b", "draft", true, "draft", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := bareModel(24)
+			m, handle := sessionModel(t)
 			m.screen.Editor.SetText(tc.draft)
-			m.busy = tc.busy
-			cancelled := false
-			if tc.runHandle {
-				m.runCancel = func() { cancelled = true }
-			}
+			m.setTestBusy(tc.busy)
 			m.handleKey(t.Context(), leanHelpKey(t, tc.sequence))
 			assert.Equal(t, tc.wantDraft, m.screen.Editor.Text())
 			assert.Equal(t, tc.quit, m.quitting)
-			assert.Equal(t, tc.cancelled, cancelled)
+			assert.Equal(t, tc.stops, handle.stops)
 		})
 	}
 }
@@ -243,7 +237,7 @@ func TestLeanHelpConfirmationAliasesAndPrecedence(t *testing.T) {
 	} {
 		for _, sequence := range tc.keys {
 			m, handle := sessionModel(t)
-			m.busy = true
+			m.lifecycle.Status = runtime.SessionStateRunning
 			m.screen.Editor.SetText("draft")
 			m.screen.Confirm = &ui.ConfirmModel{Tool: "shell", SessionID: handle.id, RequestID: "help-confirm"}
 			m.handleKey(t.Context(), leanHelpKey(t, sequence))
@@ -257,7 +251,7 @@ func TestLeanHelpConfirmationAliasesAndPrecedence(t *testing.T) {
 	}
 	for _, sequence := range []string{"\r", "\n", "\x03", "\x04", "\t", "\x1b[1;3A", "\x1b[A", "\x1b[200~y\x1b[201~", "x"} {
 		m := bareModel(24)
-		m.busy = true
+		m.lifecycle.Status = runtime.SessionStateRunning
 		m.screen.Editor.SetText("draft")
 		confirm := &ui.ConfirmModel{Tool: "shell"}
 		m.screen.Confirm = confirm
@@ -289,7 +283,7 @@ func TestLeanHelpPreservesDynamicCommandList(t *testing.T) {
 
 func TestLeanHelpPendingRecallAndThinkingContext(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.screen.Editor.SetText("replaced draft")
 	m.pendingUsers = []ui.PendingUserMessage{
 		{TurnID: "consumed", Display: "stay pending", Kind: ui.PendingUserSteer},
@@ -302,7 +296,7 @@ func TestLeanHelpPendingRecallAndThinkingContext(t *testing.T) {
 	require.Len(t, m.pendingUsers, 1)
 	assert.Equal(t, "consumed", m.pendingUsers[0].TurnID)
 	assert.Zero(t, handle.stops)
-	assert.True(t, m.busy)
+	assert.True(t, m.busy())
 
 	m.handleKey(t.Context(), leanHelpKey(t, "\x1b[Z"))
 	assert.Equal(t, "high", m.status.Thinking)
@@ -320,7 +314,7 @@ func TestLeanHelpBusySendAliases(t *testing.T) {
 		{"\r", false}, {"\n", false}, {"\x1b\r", true}, {"\x1b[13;3u", true},
 	} {
 		m, handle := sessionModel(t)
-		m.busy = true
+		m.lifecycle.Status = runtime.SessionStateRunning
 		before := len(handle.submitted)
 		m.screen.Editor.SetText("message")
 		m.handleKey(t.Context(), leanHelpKey(t, tc.sequence))

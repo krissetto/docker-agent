@@ -198,7 +198,7 @@ func TestSubmitBangCommandRunsImmediatelyWhileBusy(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "bang-output")
 	m, handle := sessionModel(t)
 	handle.submitted = nil
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.submitEditor(t.Context(), `!printf bang > "`+outputPath+`"`)
 
@@ -208,7 +208,7 @@ func TestSubmitBangCommandRunsImmediatelyWhileBusy(t *testing.T) {
 	assert.Empty(t, handle.submitted)
 	assert.Empty(t, handle.sent)
 	assert.Empty(t, m.queue)
-	assert.True(t, m.busy)
+	assert.True(t, m.busy())
 }
 
 func TestSubmitBangCommandHonorsReadOnlySession(t *testing.T) {
@@ -271,7 +271,7 @@ func TestSessionsCommandDoesNotSwitchWhileBusy(t *testing.T) {
 	sessions := &leanSessions{handle: handle, sessions: []runtime.SessionCatalogEntry{{SessionID: "other", WorkingDir: sess.WorkingDir, Loadable: true}}}
 	m := bareModel(80)
 	m.app = app.New(t.Context(), sessions, sess, runtime.SessionBinding{AgentName: "agent"})
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 
 	assert.True(t, m.handleSlash(t.Context(), "/sessions", busySubmitSteer))
 	assert.Equal(t, sess.ID, m.app.Session().ID)
@@ -365,7 +365,7 @@ func TestLeanThinkingRefreshUsesPinnedWorker(t *testing.T) {
 func TestBusySubmissionsUseActorSendAndSubmit(t *testing.T) {
 	t.Parallel()
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.dispatchUserMessage(t.Context(), "steer", "steer", busySubmitSteer)
 	m.dispatchUserMessage(t.Context(), "next", "next", busySubmitFollowUp)
@@ -379,7 +379,7 @@ func TestBusySubmissionsUseActorSendAndSubmit(t *testing.T) {
 func TestBusyQueuedSteerIsClassifiedAsFollowUp(t *testing.T) {
 	t.Parallel()
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	handle.steerQueued = true
 	beforeSubmits := len(handle.submitted)
 
@@ -394,7 +394,7 @@ func TestBusyQueuedSteerIsClassifiedAsFollowUp(t *testing.T) {
 func TestInterruptStopsSessionHandle(t *testing.T) {
 	t.Parallel()
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.handleInterrupt()
 
@@ -477,25 +477,25 @@ func TestLeanThinkingCapabilityHidesMutation(t *testing.T) {
 
 func TestLeanCompactUsesActorCapability(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = false
+	m.lifecycle.Status = runtime.SessionStateSettled
 
 	m.startCompact(t.Context(), "focus")
 
 	assert.Equal(t, []string{"focus"}, handle.compactPrompts)
 	assert.Equal(t, 0, m.screen.Transcript.BlockCount())
-	assert.False(t, m.busy, "canonical events own busy-state changes")
+	assert.False(t, m.busy(), "canonical events own busy-state changes")
 }
 
 func TestLeanBoundaryCompactionDoesNotFinishActiveStream(t *testing.T) {
 	m, _ := sessionModel(t)
-	m.busy = false
+	m.lifecycle.Status = runtime.SessionStateSettled
 	m.queue = []ui.PendingUserMessage{{Display: "later", Content: "later"}}
 
 	m.handleEvent(t.Context(), runtime.StreamStarted("root", "agent"))
 	m.handleEvent(t.Context(), &runtime.SessionCompactionEvent{SessionID: "root", Status: "started"})
 	m.handleEvent(t.Context(), runtime.SessionCompactionCompleted("root", runtime.CompactionOutcomeApplied, "agent"))
 
-	assert.True(t, m.busy)
+	assert.True(t, m.busy())
 	assert.False(t, m.status.Compacting)
 	assert.Equal(t, 1, m.lifecycle.Depth())
 	require.Len(t, m.queue, 1, "boundary compaction must not advance queued input")
@@ -503,7 +503,10 @@ func TestLeanBoundaryCompactionDoesNotFinishActiveStream(t *testing.T) {
 	m.handleEvent(t.Context(), runtime.StreamStopped("root", "agent", "normal"))
 	assert.Equal(t, 0, m.lifecycle.Depth())
 	assert.Empty(t, m.queue)
-	assert.True(t, m.busy, "StreamStopped advances the queued run")
+	assert.False(t, m.busy(), "submitting the queued input cannot invent a running phase")
+	require.Len(t, m.pendingUsers, 1)
+	m.handleEvent(t.Context(), runtime.StreamStarted("root", "agent"))
+	assert.True(t, m.busy(), "canonical StreamStarted owns the next running phase")
 }
 
 func TestUnsupportedMutableExecutionCommandsAreVisible(t *testing.T) {
@@ -516,7 +519,7 @@ func TestUnsupportedMutableExecutionCommandsAreVisible(t *testing.T) {
 	assert.Equal(t, effort.High, handle.level)
 	assert.Equal(t, "high", m.status.Thinking)
 	assert.Equal(t, 2, m.screen.Transcript.BlockCount())
-	assert.False(t, m.busy)
+	assert.False(t, m.busy())
 }
 
 func TestLeanLoadSessionTranscriptRestoresToolCalls(t *testing.T) {
@@ -553,7 +556,7 @@ func TestLeanLoadSessionTranscriptRestoresToolCalls(t *testing.T) {
 
 func TestLeanEscapeCancelsActorAndOrdersMarkerAfterBufferedResponse(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	require.Equal(t, 1, handle.stops)
@@ -569,7 +572,7 @@ func TestLeanEscapeCancelsActorAndOrdersMarkerAfterBufferedResponse(t *testing.T
 
 func TestLeanEscapeRejectsConfirmationWithoutCancellingIdleActor(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = false
+	m.lifecycle.Status = runtime.SessionStateSettled
 	m.screen.Confirm = &ui.ConfirmModel{Tool: "shell", SessionID: handle.id, RequestID: "request-escape"}
 
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
@@ -650,7 +653,7 @@ func TestCopyCommandReportsMissingAssistantResponse(t *testing.T) {
 func TestOptionUpRestoresOnlyWithdrawnCanonicalInputs(t *testing.T) {
 	t.Parallel()
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.pendingUsers = []ui.PendingUserMessage{
 		{TurnID: "consumed", Display: "already sent", Kind: ui.PendingUserSteer},
 		{TurnID: "steer", Display: "first steer", Kind: ui.PendingUserSteer},
@@ -662,7 +665,7 @@ func TestOptionUpRestoresOnlyWithdrawnCanonicalInputs(t *testing.T) {
 	require.Len(t, m.pendingUsers, 1)
 	assert.Equal(t, "consumed", m.pendingUsers[0].TurnID)
 	assert.Equal(t, "first steer\nthen follow up", m.screen.Editor.Text())
-	assert.True(t, m.busy)
+	assert.True(t, m.busy())
 	assert.Zero(t, handle.stops, "recall must not cancel the active turn")
 }
 
@@ -754,4 +757,20 @@ func TestShiftTabUsesPrimaryCapabilityAcrossFallbackProjectionTransitions(t *tes
 		assert.Empty(t, m.status.ThinkingMode, "agent replacement invalidates reasoning even if model identity is unchanged")
 		assert.Nil(t, m.status.PrimaryThinking)
 	}
+}
+
+func TestSkillCompletionCannotAdvanceQueueTwice(t *testing.T) {
+	m, handle := sessionModel(t)
+	handle.submitted = nil
+	m.ownedSkillOperation = "skill"
+	m.queue = []ui.PendingUserMessage{{Content: "first"}, {Content: "second"}}
+	m.handleEvent(t.Context(), runtime.StreamStarted(handle.id, "agent"))
+	m.handleEvent(t.Context(), runtime.StreamStopped(handle.id, "agent", "normal"))
+	require.Len(t, handle.submitted, 1)
+	require.Len(t, m.queue, 1)
+	m.handleEvent(t.Context(), &runtime.SkillOperationEvent{OperationID: "skill", Status: "completed"})
+	assert.Empty(t, m.ownedSkillOperation)
+	assert.Len(t, handle.submitted, 1, "operation completion is not another canonical stream boundary")
+	assert.Len(t, m.queue, 1)
+	assert.False(t, m.busy(), "skill completion cannot invent the next execution phase")
 }

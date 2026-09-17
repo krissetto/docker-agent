@@ -78,7 +78,7 @@ func (h *sessionHandle) AwaitTurn(ctx context.Context, turnID string) error {
 	known := false
 	for {
 		d.mu.Lock()
-		active := d.activeRequestID == turnID && (d.running || d.starting || d.settling)
+		active := d.activeRequestID == turnID && (d.running() || d.starting() || d.settling())
 		pending := active
 		for _, msg := range append(slices.Clone(d.pending), d.steering...) {
 			pending = pending || msg.RequestID == turnID

@@ -67,6 +67,7 @@ type Agent struct {
 	addEnvironmentInfo      bool
 	addDescriptionParameter bool
 	redactSecrets           bool
+	readOnly                bool
 	safety                  latest.SafetyMode // Author-declared safety-mode default for new sessions; empty when unset
 	maxIterations           int
 	maxConsecutiveToolCalls int
@@ -145,6 +146,16 @@ func (a *Agent) RedactSecrets() bool {
 
 func (a *Agent) MaxIterations() int {
 	return a.maxIterations
+}
+
+// FilterTools applies the agent's capability policy to a final tool composition.
+// Runtimes must call it after adding implicit tools, before exposing or dispatching
+// them. Read-only restrictions are independent of interactive approval settings.
+func (a *Agent) FilterTools(candidates []tools.Tool) []tools.Tool {
+	if a.readOnly {
+		return tools.FilterReadOnly(candidates)
+	}
+	return candidates
 }
 
 // Safety returns the safety-mode default the agent's author declared in
@@ -587,7 +598,7 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 		agentTools = tools.AddDescriptionParameter(agentTools)
 	}
 
-	return agentTools, nil
+	return a.FilterTools(agentTools), nil
 }
 
 // collisionKey identifies one (tool, kept origin, dropped origin) collision so

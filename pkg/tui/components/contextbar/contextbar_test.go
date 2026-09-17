@@ -22,9 +22,9 @@ func TestSetContextUsageRetargetsFromDisplayedValue(t *testing.T) {
 	m.SetWidth(40)
 	m.SetContextUsageDirect(20, 100)
 
-	require.NotNil(t, m.SetContextUsage(80, 100))
+	require.Nil(t, m.SetContextUsage(80, 100))
 	m.contextPercent = 0.45 // deterministic in-flight displayed value
-	require.NotNil(t, m.SetContextUsage(10, 100))
+	require.Nil(t, m.SetContextUsage(10, 100))
 	assert.InDelta(t, 0.45, m.animFrom, 0.001)
 	assert.InDelta(t, 0.10, m.animTo, 0.001)
 	assert.Contains(t, m.View(), "Context 45%")
@@ -40,11 +40,22 @@ func TestContextUsageAnimationRegistersAndCancels(t *testing.T) {
 	m := New(runtime)
 
 	cmd := m.SetContextUsage(50, 100)
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd)
 	assert.Equal(t, int32(1), runtime.ActiveCount())
 	assert.True(t, m.animating)
+	tickCmd := runtime.Continue()
+	require.NotNil(t, tickCmd)
+	tick, accepted := runtime.Accept(tickCmd().(animation.TickMsg))
+	require.True(t, accepted)
+	m.Update(tick)
+	assert.Positive(t, m.contextPercent, "owner continuation advances displayed usage")
+	queued := runtime.Continue()
+	require.NotNil(t, queued)
 
 	m.Cancel()
+	_, accepted = runtime.Accept(queued().(animation.TickMsg))
+	assert.False(t, accepted)
+	assert.Nil(t, runtime.Continue())
 	assert.False(t, m.animating)
 	assert.Equal(t, int32(0), runtime.ActiveCount())
 }

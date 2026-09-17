@@ -73,11 +73,11 @@ func TestSessionViewUnknownPrepareViewFailsBeforeColdHandle(t *testing.T) {
 	sm := NewSessionManager(t.Context(), nil, base, 0, nil, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "secret")
 	for _, suffix := range []string{"?view=", "?view=unknown", "?view=prepare-info&view=unknown"} {
-		response := sessionRequest(t, srv, http.MethodGet, "/api/sessions/cold"+suffix, "", "secret")
+		response := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/cold"+suffix, "", "secret")
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 	}
 	assert.Zero(t, registry.createCount)
-	unauthorized := sessionRequest(t, srv, http.MethodGet, "/api/sessions/cold?view=prepare-info", "", "")
+	unauthorized := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/cold?view=prepare-info", "", "")
 	assert.Equal(t, http.StatusUnauthorized, unauthorized.Code)
 	assert.Zero(t, registry.createCount)
 }

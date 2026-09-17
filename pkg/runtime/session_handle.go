@@ -322,9 +322,10 @@ func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session,
 	if err != nil {
 		return nil, err
 	}
+	boundSession.SetAttribute(SessionAgentAttribute, boundAgent)
 	createdRow := false
 	if r.sessionStore != nil {
-		if _, err := r.sessionStore.GetSession(ctx, sess.ID); errors.Is(err, session.ErrNotFound) {
+		if stored, err := r.sessionStore.GetSession(ctx, sess.ID); errors.Is(err, session.ErrNotFound) {
 			boundSession.SetAttribute(SessionAgentAttribute, boundAgent)
 			if err := r.sessionStore.AddSession(ctx, boundSession.OwnSnapshot()); err != nil {
 				if !errors.Is(err, session.ErrAlreadyExists) {
@@ -335,6 +336,16 @@ func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session,
 			}
 		} else if err != nil {
 			return nil, err
+		} else {
+			persistedAgent := stored.AttributesSnapshot()[SessionAgentAttribute]
+			if persistedAgent != "" && persistedAgent != boundAgent {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "bind_agent"}
+			}
+			if persistedAgent == "" {
+				if err := r.sessionStore.UpdateSession(ctx, boundSession.OwnSnapshot()); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if existing, ok := r.sessionDrivers.Lookup(sess.ID); ok && !existing.isStopped() {
@@ -1023,7 +1034,7 @@ func (r *LocalRuntime) DeleteSession(ctx context.Context, sessionID string) erro
 	r.interactions.deleteSession(sessionID)
 	r.sessionEvents.Delete(sessionID)
 	if r.sessionStore != nil {
-		if err := r.sessionStore.DeleteSession(ctx, sessionID); err != nil && !strings.Contains(err.Error(), "session not found") {
+		if err := r.sessionStore.DeleteSession(ctx, sessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
 			return err
 		}
 	}

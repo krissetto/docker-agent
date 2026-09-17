@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/skills"
@@ -26,7 +26,7 @@ import (
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
 
-const sessionWireVersion = 1
+const sessionWireVersion = api.SessionAPIVersion
 
 // SessionTransport is the first-party session-v2 HTTP transport. It is a
 // borrowed registry: closing an observation never stops server-side execution.
@@ -61,19 +61,14 @@ func (r *SessionTransport) CreateSession(ctx context.Context, sess *session.Sess
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
 	template := sess.Clone()
-	request := struct {
-		Source          string                     `json:"source,omitempty"`
-		AgentName       string                     `json:"agent_name"`
-		Model           string                     `json:"model,omitempty"`
-		Title           string                     `json:"title,omitempty"`
-		ParentSessionID string                     `json:"parent_session_id,omitempty"`
-		WorkingDir      string                     `json:"working_dir,omitempty"`
-		SafetyPolicy    session.SafetyPolicy       `json:"safety_policy,omitempty"`
-		ToolsApproved   bool                       `json:"tools_approved,omitempty"`
-		Permissions     *session.PermissionsConfig `json:"permissions,omitempty"`
-	}{r.source, binding.AgentName, binding.Model, template.Title, binding.ParentSessionID, template.WorkingDir, template.SafetyPolicy, template.ToolsApproved, template.Permissions}
+	request := api.SessionCreateRequest{
+		Source: r.source, AgentName: binding.AgentName, Model: binding.Model,
+		Title: template.Title, ParentSessionID: binding.ParentSessionID,
+		WorkingDir: template.WorkingDir, SafetyPolicy: template.SafetyPolicy,
+		ToolsApproved: template.ToolsApproved, Permissions: template.Permissions,
+	}
 	var metadata remoteSessionMetadata
-	if err := r.client.sessionJSON(ctx, http.MethodPost, "/api/sessions", request, &metadata); err != nil {
+	if err := r.client.sessionJSON(ctx, http.MethodPost, api.SessionAPIPath, request, &metadata); err != nil {
 		return nil, err
 	}
 	if metadata.SessionID == "" {
@@ -94,7 +89,7 @@ func (r *SessionTransport) SwitchAgent(ctx context.Context, sessionID, targetAge
 		Metadata remoteSessionMetadata `json:"metadata"`
 		Session  *session.Session      `json:"session"`
 	}
-	if err := r.client.sessionJSON(ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sessionID)+"/switch-agent", struct {
+	if err := r.client.sessionJSON(ctx, http.MethodPost, api.SessionAPIPath+"/"+url.PathEscape(sessionID)+"/switch-agent", struct {
 		AgentName string `json:"agent_name"`
 	}{targetAgent}, &response); err != nil {
 		return nil, nil, err
@@ -106,62 +101,99 @@ func (r *SessionTransport) SwitchAgent(ctx context.Context, sessionID, targetAge
 }
 
 func (r *SessionTransport) DeleteSession(ctx context.Context, id string) error {
-	return r.client.sessionJSON(ctx, http.MethodDelete, "/api/sessions/"+url.PathEscape(id), nil, nil)
+	return r.client.sessionJSON(ctx, http.MethodDelete, api.SessionAPIPath+"/"+url.PathEscape(id), nil, nil)
 }
 
 func (r *SessionTransport) ListSessions(ctx context.Context) ([]SessionCatalogEntry, error) {
-	var catalog struct {
-		Sessions []struct {
-			SessionID  string            `json:"session_id"`
-			Title      string            `json:"title"`
-			AgentName  string            `json:"agent_name"`
-			UpdatedAt  string            `json:"updated_at"`
-			CreatedAt  time.Time         `json:"created_at"`
-			Starred    bool              `json:"starred"`
-			Loadable   bool              `json:"loadable"`
-			Messages   []session.Message `json:"messages"`
-			WorkingDir string            `json:"working_dir"`
-		} `json:"sessions"`
+	query := url.Values{"limit": {strconv.Itoa(api.SessionCatalogDefaultLimit)}}
+	out := make([]SessionCatalogEntry, 0)
+	seenIDs, seenCursors := map[string]bool{}, map[string]bool{}
+	for {
+		var catalog api.SessionCatalog[SessionState]
+		if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"?"+query.Encode(), nil, &catalog); err != nil {
+			return nil, err
+		}
+		if catalog.Version != sessionWireVersion {
+			return nil, fmt.Errorf("unsupported session catalog version %d (expected %d)", catalog.Version, sessionWireVersion)
+		}
+		for _, row := range catalog.Sessions {
+			if row.SessionID == "" || seenIDs[row.SessionID] {
+				return nil, errors.New("invalid or duplicate session catalog identity")
+			}
+			seenIDs[row.SessionID] = true
+			var createdAt time.Time
+			if row.CreatedAt != "" {
+				var err error
+				createdAt, err = time.Parse(time.RFC3339Nano, row.CreatedAt)
+				if err != nil {
+					return nil, fmt.Errorf("invalid session catalog creation time: %w", err)
+				}
+			}
+			out = append(out, SessionCatalogEntry{SessionID: row.SessionID, Title: row.Title, AgentName: row.AgentName, UpdatedAt: row.UpdatedAt, CreatedAt: createdAt, Starred: row.Starred, Loadable: row.Loadable, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir})
+		}
+		if err := advanceSessionCatalog(query, seenCursors, catalog.NextCursor, len(catalog.Sessions)); err != nil {
+			return nil, err
+		}
+		if catalog.NextCursor == "" {
+			return out, nil
+		}
 	}
-	if err := r.client.sessionJSON(ctx, http.MethodGet, "/api/sessions", nil, &catalog); err != nil {
-		return nil, err
-	}
-	out := make([]SessionCatalogEntry, 0, len(catalog.Sessions))
-	for _, row := range catalog.Sessions {
-		out = append(out, SessionCatalogEntry{SessionID: row.SessionID, Title: row.Title, AgentName: row.AgentName, UpdatedAt: row.UpdatedAt, CreatedAt: row.CreatedAt, Starred: row.Starred, Loadable: row.Loadable, NumMessages: len(row.Messages), WorkingDir: row.WorkingDir})
-	}
-	return out, nil
 }
 
 // ListSessionSummaries explicitly negotiates the metadata view. An older
-// server's transcript catalog is not accepted as a silent fallback.
+// server's transcript catalog is not accepted as a silent fallback. All pages
+// are required: any later failure discards the incomplete listing.
 func (r *SessionTransport) ListSessionSummaries(ctx context.Context, options SessionSummaryOptions) ([]SessionSummaryEntry, error) {
-	var catalog struct {
-		Version  int                   `json:"version"`
-		View     string                `json:"view"`
-		Sessions []SessionSummaryEntry `json:"sessions"`
-	}
-	endpoint := "/api/sessions?view=summary&include_children=" + strconv.FormatBool(options.IncludeChildren)
-	if err := r.client.sessionJSON(ctx, http.MethodGet, endpoint, nil, &catalog); err != nil {
-		return nil, err
-	}
-	if catalog.Version != 1 || catalog.View != "summary" {
-		return nil, UnsupportedSessionOperation("", "session_summaries")
-	}
-	seen := make(map[string]struct{}, len(catalog.Sessions))
-	for _, row := range catalog.Sessions {
-		if row.SessionID == "" {
-			return nil, errors.New("session summary is missing canonical identity")
+	query := url.Values{"view": {"summary"}, "include_children": {strconv.FormatBool(options.IncludeChildren)}, "limit": {strconv.Itoa(api.SessionCatalogDefaultLimit)}}
+	var out []SessionSummaryEntry
+	seenIDs, seenCursors := map[string]bool{}, map[string]bool{}
+	for {
+		var catalog api.SessionSummaryCatalog[SessionSummaryEntry]
+		if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"?"+query.Encode(), nil, &catalog); err != nil {
+			return nil, err
 		}
-		if _, duplicate := seen[row.SessionID]; duplicate {
-			return nil, errors.New("duplicate session summary identity")
+		if catalog.Version != sessionWireVersion || catalog.View != "summary" {
+			return nil, UnsupportedSessionOperation("", "session_summaries")
 		}
-		seen[row.SessionID] = struct{}{}
-		if !options.IncludeChildren && row.ParentID != "" {
-			return nil, errors.New("session summary exceeds requested scope")
+		for _, row := range catalog.Sessions {
+			if row.SessionID == "" {
+				return nil, errors.New("session summary is missing canonical identity")
+			}
+			if seenIDs[row.SessionID] {
+				return nil, errors.New("duplicate session summary identity")
+			}
+			seenIDs[row.SessionID] = true
+			if !options.IncludeChildren && row.ParentID != "" {
+				return nil, errors.New("session summary exceeds requested scope")
+			}
+		}
+		out = append(out, catalog.Sessions...)
+		if err := advanceSessionCatalog(query, seenCursors, catalog.NextCursor, len(catalog.Sessions)); err != nil {
+			return nil, err
+		}
+		if catalog.NextCursor == "" {
+			return out, nil
 		}
 	}
-	return catalog.Sessions, nil
+}
+
+// Cursors are opaque base64url tokens. Validate only their transport shape and
+// progress; their contents and ordering belong to the server.
+func advanceSessionCatalog(query url.Values, seen map[string]bool, cursor string, rows int) error {
+	if cursor == "" {
+		return nil
+	}
+	if rows == 0 || len(cursor) > 2048 || strings.IndexFunc(cursor, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
+	}) >= 0 {
+		return errors.New("invalid session catalog cursor or empty continuation page")
+	}
+	if seen[cursor] {
+		return errors.New("repeated session catalog cursor")
+	}
+	seen[cursor] = true
+	query.Set("cursor", cursor)
+	return nil
 }
 
 func (r *SessionTransport) LoadSession(ctx context.Context, id string) (SessionHandle, *session.Session, error) {
@@ -217,27 +249,22 @@ func (s *remoteSession) Steer(ctx context.Context, input TurnInput) (Submission,
 }
 
 func (s *remoteSession) input(ctx context.Context, operation string, input TurnInput) (Submission, error) {
-	request := struct {
-		Content      string             `json:"content"`
-		MultiContent []chat.MessagePart `json:"multi_content,omitempty"`
-		Mode         string             `json:"mode,omitempty"`
-		RequestID    string             `json:"request_id,omitempty"`
-	}{input.Content, input.MultiContent, operation, input.RequestID}
-	var out Submission
+	request := api.SessionInputRequest{Content: input.Content, MultiContent: input.MultiContent, Mode: operation, RequestID: input.RequestID}
+	var out api.SessionSubmission[SubmissionDisposition]
 	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("messages"), request, &out)
 	if err == nil && (out.SessionID != s.ID() || out.TurnID == "") {
 		return Submission{}, fmt.Errorf("invalid session submission identity: session=%q turn=%q", out.SessionID, out.TurnID)
 	}
-	return out, err
+	return Submission(out), err
 }
 
 func (s *remoteSession) Retry(ctx context.Context) (Submission, error) {
-	var out Submission
+	var out api.SessionSubmission[SubmissionDisposition]
 	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("retry"), struct{}{}, &out)
 	if err == nil && (out.SessionID != s.ID() || out.TurnID == "") {
 		return Submission{}, fmt.Errorf("invalid session retry identity: session=%q turn=%q", out.SessionID, out.TurnID)
 	}
-	return out, err
+	return Submission(out), err
 }
 
 func (s *remoteSession) Snapshot(ctx context.Context) (*session.Session, error) {
@@ -259,8 +286,8 @@ func (s *remoteSession) Hydrate(ctx context.Context) error {
 
 func (s *remoteSession) Status(ctx context.Context) (SessionStatus, error) {
 	var out struct {
-		Metadata remoteSessionMetadata `json:"metadata"`
-		Status   SessionStatus         `json:"status"`
+		Metadata remoteSessionMetadata           `json:"metadata"`
+		Status   api.SessionStatus[SessionState] `json:"status"`
 	}
 	if err := s.runtime.client.sessionJSON(ctx, http.MethodGet, s.endpoint("status"), nil, &out); err != nil {
 		return SessionStatus{}, err
@@ -271,27 +298,17 @@ func (s *remoteSession) Status(ctx context.Context) (SessionStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metadata = out.Metadata.runtime()
-	return out.Status, nil
+	return SessionStatus(out.Status), nil
 }
 
 func (s *remoteSession) Respond(ctx context.Context, response InteractionResponse) error {
-	request := struct {
-		InteractionID string          `json:"interaction_id"`
-		Kind          InteractionKind `json:"kind"`
-		Confirmation  string          `json:"confirmation,omitempty"`
-		Reason        string          `json:"reason,omitempty"`
-		ToolName      string          `json:"tool_name,omitempty"`
-		ElicitationID string          `json:"elicitation_id,omitempty"`
-		Action        string          `json:"action,omitempty"`
-		Content       map[string]any  `json:"content,omitempty"`
-		ClientID      string          `json:"client_id,omitempty"`
-	}{InteractionID: response.InteractionID, Kind: response.Kind, Confirmation: string(response.Resume.Type), Reason: response.Resume.Reason, ToolName: response.Resume.ToolName, ElicitationID: response.ElicitationID, Action: string(response.Elicitation.Action), Content: response.Elicitation.Content, ClientID: response.ClientID}
+	request := api.SessionResponseRequest[InteractionKind]{InteractionID: response.InteractionID, Kind: response.Kind, Confirmation: string(response.Resume.Type), Reason: response.Resume.Reason, ToolName: response.Resume.ToolName, ElicitationID: response.ElicitationID, Action: string(response.Elicitation.Action), Content: response.Elicitation.Content, ClientID: response.ClientID}
 	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("responses"), request, nil)
 }
 
 func (s *remoteSession) Edit(ctx context.Context, edit SessionEdit) (*session.Session, error) {
 	var updated session.Session
-	if err := s.runtime.client.sessionJSON(ctx, http.MethodPatch, "/api/sessions/"+url.PathEscape(s.ID()), edit, &updated); err != nil {
+	if err := s.runtime.client.sessionJSON(ctx, http.MethodPatch, api.SessionAPIPath+"/"+url.PathEscape(s.ID()), edit, &updated); err != nil {
 		return nil, err
 	}
 	if updated.ID != s.ID() {
@@ -308,9 +325,7 @@ func (s *remoteSession) UpdateTitle(ctx context.Context, title string) error {
 
 func (s *remoteSession) Cancel(ctx context.Context, turnID string) (CancelResult, error) {
 	var out CancelResult
-	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("cancel"), struct {
-		TurnID string `json:"turn_id,omitempty"`
-	}{turnID}, &out)
+	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("cancel"), api.SessionCancelRequest{TurnID: turnID}, &out)
 	if err == nil && out.SessionID != s.ID() {
 		return CancelResult{}, fmt.Errorf("invalid session cancel identity %q", out.SessionID)
 	}
@@ -411,15 +426,11 @@ func (s *remoteSession) refreshThinkingMetadata(ctx context.Context) error {
 }
 
 func (s *remoteSession) mutateThinkingLevel(ctx context.Context, method, endpoint string, request any) (effort.Level, error) {
-	var out struct {
-		Levels   []effort.Level        `json:"levels"`
-		Current  effort.Level          `json:"current"`
-		Metadata remoteSessionMetadata `json:"metadata"`
-	}
+	var out api.SessionThinkingLevel
 	if err := s.runtime.client.sessionJSON(ctx, method, s.endpoint(endpoint), request, &out); err != nil {
 		return "", err
 	}
-	metadata := out.Metadata.runtime()
+	metadata := remoteSessionMetadata(out.Metadata).runtime()
 	metadata.ThinkingLevels, metadata.ThinkingLevel = slices.Clone(out.Levels), out.Current
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -576,31 +587,10 @@ func (s *remoteSession) Todos(ctx context.Context) ([]session.Todo, error) {
 func (s *remoteSession) EmitPinnedAgentInfo(context.Context, EventSink) {}
 
 func (s *remoteSession) endpoint(operation string) string {
-	return "/api/sessions/" + url.PathEscape(s.ID()) + "/" + operation
+	return api.SessionAPIPath + "/" + url.PathEscape(s.ID()) + "/" + operation
 }
 
-type remoteSessionMetadata struct {
-	SessionID    string `json:"session_id"`
-	AgentName    string `json:"agent_name"`
-	Model        string `json:"model,omitempty"`
-	Capabilities struct {
-		AvailableModels     []string `json:"available_models,omitempty"`
-		Durability          string   `json:"durability,omitempty"`
-		Compaction          bool     `json:"compaction,omitempty"`
-		TargetCompaction    bool     `json:"target_compaction,omitempty"`
-		ModelSwitching      bool     `json:"model_switching,omitempty"`
-		ContextInspection   bool     `json:"context_inspection,omitempty"`
-		LiveSessions        bool     `json:"live_sessions,omitempty"`
-		SessionEditing      bool     `json:"session_editing,omitempty"`
-		ForkSkills          bool     `json:"fork_skills,omitempty"`
-		Pause               bool     `json:"pause,omitempty"`
-		ModelCatalogRefresh bool     `json:"model_catalog_refresh,omitempty"`
-		ThinkingLevels      bool     `json:"thinking_levels,omitempty"`
-		Todos               bool     `json:"todos,omitempty"`
-	} `json:"capabilities"`
-	ThinkingLevels []effort.Level `json:"thinking_levels,omitempty"`
-	ThinkingLevel  effort.Level   `json:"thinking_level,omitempty"`
-}
+type remoteSessionMetadata api.SessionMetadata
 
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
@@ -613,48 +603,11 @@ func (m remoteSessionMetadata) runtime() SessionMetadata {
 	}}
 }
 
-type remoteSessionSnapshot struct {
-	Session      *session.Session `json:"session"`
-	Status       SessionStatus    `json:"status"`
-	Interactions []struct {
-		SessionID     string          `json:"session_id"`
-		InteractionID string          `json:"interaction_id"`
-		ElicitationID string          `json:"elicitation_id"`
-		Kind          InteractionKind `json:"kind"`
-		Event         json.RawMessage `json:"event"`
-	} `json:"interactions"`
-	PendingInputs []struct {
-		InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
-		SenderID        string              `json:"sender_id,omitempty"`
-		SenderName      string              `json:"sender_name,omitempty"`
-		InputMode       string              `json:"input_mode,omitempty"`
-		TurnID          string              `json:"turn_id"`
-		Content         string              `json:"content"`
-		MultiContent    []chat.MessagePart  `json:"multi_content,omitempty"`
-		SessionPosition int                 `json:"session_position"`
-	} `json:"pending_inputs"`
-	Cursor             uint64 `json:"cursor"`
-	TranscriptPosition int    `json:"transcript_position"`
-}
-type remoteSessionEnvelope struct {
-	Version            int             `json:"version"`
-	SessionID          string          `json:"session_id"`
-	TurnID             string          `json:"turn_id,omitempty"`
-	InteractionID      string          `json:"interaction_id,omitempty"`
-	Sequence           uint64          `json:"sequence"`
-	TranscriptPosition int             `json:"transcript_position"`
-	Event              json.RawMessage `json:"event,omitempty"`
-	Gap                bool            `json:"gap,omitempty"`
-	FirstAvailable     uint64          `json:"first_available,omitempty"`
-}
-type remoteSessionStreamMessage struct {
-	Version  int                    `json:"version"`
-	Type     string                 `json:"type"`
-	Snapshot *remoteSessionSnapshot `json:"snapshot,omitempty"`
-	Envelope *remoteSessionEnvelope `json:"envelope,omitempty"`
-	Cursor   uint64                 `json:"cursor,omitempty"`
-	Chunk    []byte                 `json:"chunk,omitempty"`
-}
+type (
+	remoteSessionSnapshot      = api.SessionSnapshot[SessionState, InteractionKind, json.RawMessage]
+	remoteSessionEnvelope      = api.SessionEnvelope[json.RawMessage]
+	remoteSessionStreamMessage = api.SessionStreamMessage[SessionState, InteractionKind, json.RawMessage]
+)
 
 func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body, result any) error {
 	var data []byte
@@ -744,7 +697,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 
 func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (Observation, error) {
 	u := *c.baseURL
-	u.Path = path.Join(u.Path, "/api/sessions/"+url.PathEscape(id)+"/events")
+	u.Path = path.Join(u.Path, api.SessionAPIPath+"/"+url.PathEscape(id)+"/events")
 	if options.Tree {
 		q := u.Query()
 		q.Set("tree", "true")
@@ -826,6 +779,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				return Observation{}, decodeErr
 			}
 			snapshots = append(snapshots, additional)
+			replaySequences[additional.Status.SessionID] = additional.Cursor
 			continue
 		}
 		if message.Type == "ready" {
@@ -848,7 +802,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			return Observation{}, decodeErr
 		}
 		previous, known := replaySequences[envelope.SessionID]
-		zeroSeed := options.Tree && envelope.Sequence == 0 && envelope.Event != nil
+		zeroSeed := options.Since == nil && known && validRemoteLiveSeed(envelope)
 		if (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
 			resp.Body.Close()
 			cancel()
@@ -882,8 +836,10 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			lastSequences[item.Status.SessionID] = item.Cursor
 		}
 		lastSequence := snapshot.Cursor
-		if len(replay) > 0 {
-			lastSequence = replay[len(replay)-1].Sequence
+		for _, envelope := range replay {
+			if envelope.Sequence != 0 {
+				lastSequence = max(lastSequence, envelope.Sequence)
+			}
 		}
 		for {
 			m, e := scanSessionMessage(scanner)
@@ -917,7 +873,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				return
 			}
 			previous := lastSequences[env.SessionID]
-			if (!options.Tree && env.SessionID != id) || (env.Sequence != 0 && env.Sequence <= previous) {
+			if (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
 				errorsCh <- fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous)
 				return
 			}
@@ -933,6 +889,24 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	}()
 	var once sync.Once
 	return Observation{Initial: snapshots, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
+}
+
+// Live seeds are a nil-cursor snapshot supplement, not journal events. Only
+// the event hub's three current-output projections may bypass sequence checks.
+func validRemoteLiveSeed(envelope SessionEvent) bool {
+	if envelope.Sequence != 0 || envelope.Gap || envelope.FirstAvailable != 0 || envelope.TurnID != "" || envelope.InteractionID != "" || envelope.TranscriptPosition != -1 {
+		return false
+	}
+	switch event := envelope.Event.(type) {
+	case *StreamStartedEvent:
+		return event.SessionID == envelope.SessionID
+	case *AgentChoiceEvent:
+		return event.SessionID == envelope.SessionID && event.Content != ""
+	case *AgentChoiceReasoningEvent:
+		return event.SessionID == envelope.SessionID && event.Content != ""
+	default:
+		return false
+	}
 }
 
 const remoteSnapshotChunkBytes = 64 << 10
@@ -1028,6 +1002,9 @@ func scanSessionFrame(scanner *bufio.Scanner) (remoteSessionStreamMessage, error
 		if err := json.Unmarshal(data, &m); err != nil {
 			return m, err
 		}
+		if m.Version != sessionWireVersion {
+			return m, fmt.Errorf("unsupported session wire version %d (expected %d)", m.Version, sessionWireVersion)
+		}
 		return m, nil
 	}
 	if err := scanner.Err(); err != nil {
@@ -1040,7 +1017,7 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 	if in.Session == nil || in.Session.ID == "" || in.Status.SessionID != in.Session.ID {
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
-	out := SessionSnapshot{Session: in.Session, Status: in.Status, Cursor: in.Cursor, TranscriptPosition: in.TranscriptPosition}
+	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, TranscriptPosition: in.TranscriptPosition}
 	for _, pending := range in.PendingInputs {
 		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, InputMode: pending.InputMode})
 	}
@@ -1124,10 +1101,10 @@ func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (P
 		View    string                  `json:"view"`
 		Info    PreparedSessionViewInfo `json:"info"`
 	}
-	if err := r.client.sessionJSON(ctx, http.MethodGet, "/api/sessions/"+url.PathEscape(id)+"?view=prepare-info", nil, &response); err != nil {
+	if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"/"+url.PathEscape(id)+"?view=prepare-info", nil, &response); err != nil {
 		return nil, err
 	}
-	if response.Version != 1 || response.View != "prepare-info" {
+	if response.Version != sessionWireVersion || response.View != "prepare-info" {
 		return nil, UnsupportedSessionOperation(id, "prepare_view")
 	}
 	if response.Info.SessionID != id || response.Info.Session == nil || response.Info.Session.ID != id || response.Info.Binding.AgentName == "" || response.Info.WorkingDir != response.Info.Session.WorkingDir {
@@ -1175,7 +1152,7 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 	defer cancel()
 	defer p.cancel()
 	var snapshot session.Session
-	if err := p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, "/api/sessions/"+url.PathEscape(p.info.SessionID), SessionEdit{Kind: SessionEditOpenView}, &snapshot); err != nil {
+	if err := p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, api.SessionAPIPath+"/"+url.PathEscape(p.info.SessionID), SessionEdit{Kind: SessionEditOpenView}, &snapshot); err != nil {
 		return CommittedSessionView{}, err
 	}
 	if snapshot.ID != p.info.SessionID || snapshot.ParentID != p.info.Session.ParentID {

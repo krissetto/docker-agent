@@ -70,9 +70,9 @@ func (g *sessionDriverRegistry) schedule() {
 			}
 			pendingWork = g.deliverReports(d) || pendingWork
 			d.mu.Lock()
-			completion := d.settling && d.completionErr != nil && !d.stopped
+			completion := d.settling() && d.completionErr != nil
 			generation, runErr := d.generation, d.completionRunErr
-			wake := len(d.pending) > 0 && !d.stopped && !d.running && !d.starting && !d.settling
+			wake := d.pendingWakeableLocked() && !d.stopped && !d.running() && !d.starting() && !d.settling()
 			if completion {
 				d.wg.Add(1)
 			}
@@ -134,7 +134,7 @@ func (g *sessionDriverRegistry) admitRun(candidate *sessionDriver) error {
 			continue
 		}
 		d.mu.Lock()
-		running := d.running || d.starting || d.settling
+		running := d.running() || d.starting() || d.settling()
 		s := d.sess
 		d.mu.Unlock()
 		if !running || s == nil || !s.AsyncSubagent {

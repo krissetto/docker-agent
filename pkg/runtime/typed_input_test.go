@@ -17,7 +17,7 @@ func TestTypedInputRuntimeSteeringBypassesUserFIFO(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	sess := session.New(session.WithID("typed"))
 	d := r.sessionDrivers.Get(sess)
-	d.running = true
+	d.phase = sessionRunning
 	for _, id := range []string{"user-one", "user-two"} {
 		require.True(t, d.Post(t.Context(), QueuedMessage{Content: "identical", RequestID: id, InputOrigin: session.InputOriginUser}, false))
 	}

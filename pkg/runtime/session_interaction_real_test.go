@@ -50,7 +50,8 @@ func TestLocalRuntimeGeneratedMaxIterationsObserveRespondContinueAndReject(t *te
 			require.NoError(t, err)
 			driver := handle.(*sessionHandle).driver
 			driver.mu.Lock()
-			driver.running, driver.activeRequestID = true, "turn-max"
+			driver.phase = sessionRunning
+			driver.activeRequestID = "turn-max"
 			driver.generation++
 			driver.mu.Unlock()
 			observation, err := handle.Observe(t.Context(), ObserveOptions{})
@@ -81,7 +82,8 @@ func TestLocalRuntimeGeneratedConcurrentElicitationsObserveRespondUnique(t *test
 	require.NoError(t, err)
 	driver := handle.(*sessionHandle).driver
 	driver.mu.Lock()
-	driver.running, driver.activeRequestID = true, "same-turn"
+	driver.phase = sessionRunning
+	driver.activeRequestID = "same-turn"
 	driver.generation++
 	driver.mu.Unlock()
 	observation, err := handle.Observe(t.Context(), ObserveOptions{})

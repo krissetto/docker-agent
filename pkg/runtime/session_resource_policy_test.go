@@ -73,7 +73,7 @@ func TestSessionResourcePolicyOptionsComposeAndReplace(t *testing.T) {
 
 	disabledDriver := newSessionDriver(rt, session.New(session.WithID("disabled-mailbox")))
 	disabledDriver.mu.Lock()
-	disabledDriver.running = true
+	disabledDriver.phase = sessionRunning
 	disabledDriver.mu.Unlock()
 	assert.False(t, disabledDriver.Post(t.Context(), QueuedMessage{Content: "no"}, true))
 }
@@ -94,7 +94,7 @@ func TestUnlimitedSessionResourcesForSessionsAndMailboxes(t *testing.T) {
 	driver := rt.sessionDrivers.Get(session.New(session.WithID("mailbox")))
 	require.NotNil(t, driver)
 	driver.mu.Lock()
-	driver.running = true
+	driver.phase = sessionRunning
 	driver.mu.Unlock()
 	for i := range defaultMaxSubagentMailbox + 1 {
 		assert.True(t, driver.Post(t.Context(), QueuedMessage{Content: fmt.Sprintf("pending-%d", i)}, true))

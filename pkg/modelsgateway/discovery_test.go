@@ -13,9 +13,8 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
-// Note: httptest servers listen on 127.0.0.1, which IsTrustedDockerURL
-// treats as trusted, so every test against them exercises the Docker
-// token auth path.
+// Note: httptest servers listen on 127.0.0.1, where Docker token auth
+// is optional. Tests using tokenEnv exercise the authenticated path.
 
 func tokenEnv() environment.Provider {
 	return environment.NewMapEnvProvider(map[string]string{
@@ -107,12 +106,8 @@ func TestListModels_InvalidJSON(t *testing.T) {
 func TestListModels_MissingDockerToken(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"}]}`))
-	}))
-	defer server.Close()
-
-	_, err := ListModels(t.Context(), server.URL, environment.NewMapEnvProvider(nil))
+	// Docker domains reject missing credentials before any network request.
+	_, err := ListModels(t.Context(), "https://api.docker.com", environment.NewMapEnvProvider(nil))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Docker Desktop")

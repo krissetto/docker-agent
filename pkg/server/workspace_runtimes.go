@@ -57,6 +57,7 @@ type workspaceBuild struct {
 type workspaceSessionRuntimes struct {
 	ctx    context.Context //nolint:containedctx // owns workspace runtime and pruner lifetimes
 	source config.Source
+	store  session.Store
 	build  SessionRuntimeFactory
 
 	mu            sync.Mutex
@@ -82,14 +83,19 @@ var _ interface {
 	runtime.TreeRestorer
 	runtime.AgentSwitcher
 	runtime.SafetyDefaults
+	runtime.SessionViewInfoReader
+	runtime.SessionViewPreparer
 } = (*workspaceSessionRuntimes)(nil)
 
-func newWorkspaceSessionRuntimes(ctx context.Context, source config.Source, build SessionRuntimeFactory) *workspaceSessionRuntimes {
+func newWorkspaceSessionRuntimes(ctx context.Context, source config.Source, build SessionRuntimeFactory, stores ...session.Store) *workspaceSessionRuntimes {
 	w := &workspaceSessionRuntimes{
 		ctx: ctx, source: source, build: build,
 		runtimes: map[workspaceKey]*workspaceRuntimeEntry{}, owners: map[string]workspaceKey{}, building: map[workspaceKey]*workspaceBuild{},
 		idleTTL: defaultWorkspaceRuntimeIdleTTL, idleCap: defaultWorkspaceRuntimeIdleCap, now: time.Now,
 		wakePrune: make(chan struct{}, 1), pruneDone: make(chan struct{}), shutdownDone: make(chan struct{}),
+	}
+	if len(stores) != 0 {
+		w.store = stores[0]
 	}
 	return w
 }

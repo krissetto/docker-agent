@@ -14,13 +14,24 @@ func TestSpinnerCopyDoesNotLeakAnimationSubscription(t *testing.T) {
 	ar := animation.NewRuntime()
 	s1 := New(ar, ModeSpinnerOnly, lipgloss.NewStyle())
 	cmd := s1.Init()
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd)
 	require.True(t, ar.HasActive())
+	tickCmd := ar.Continue()
+	require.NotNil(t, tickCmd)
+	tick, accepted := ar.Accept(tickCmd().(animation.TickMsg))
+	require.True(t, accepted)
+	require.Positive(t, ar.Now())
+	_, _ = s1.Update(tick)
+	queued := ar.Continue()
+	require.NotNil(t, queued)
 
 	// Copy the spinner value and stop via the copy; should still stop the shared subscription.
 	s2 := s1
 	s2.Stop()
 	require.False(t, ar.HasActive())
+	require.Nil(t, ar.Continue())
+	_, accepted = ar.Accept(queued().(animation.TickMsg))
+	require.False(t, accepted, "teardown invalidates a queued continuation")
 }
 
 func BenchmarkSpinner_ModeSpinnerOnly(b *testing.B) {

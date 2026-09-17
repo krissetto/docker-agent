@@ -66,7 +66,8 @@ func TestSQLiteContentionStreamingDoesNotCancelAndDrainsFIFO(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	d.cancel = cancel
-	d.generation, d.activeRequestID, d.running = 1, "accepted", true
+	d.generation, d.activeRequestID = 1, "accepted"
+	d.phase = sessionRunning
 	d.events.SetRequest(sess.ID, "accepted", 1)
 	p := newPersistenceObserver(session.NewInMemorySessionStore())
 	p.lifetime = t.Context()
@@ -119,7 +120,8 @@ func TestSQLiteContentionShutdownRetainsUnsettledJournal(t *testing.T) {
 	r.sessionDrivers.closed = true
 	d := newSessionDriver(r, session.New(session.WithID("drain")))
 	r.sessionDrivers.drivers["drain"] = d
-	d.generation, d.activeRequestID, d.running = 1, "accepted", true
+	d.generation, d.activeRequestID = 1, "accepted"
+	d.phase = sessionRunning
 	p := newPersistenceObserver(session.NewInMemorySessionStore())
 	r.observers = []EventObserver{p}
 	failure := &session.TemporaryError{Err: errors.New("database is locked")}
@@ -159,7 +161,8 @@ func TestSQLiteContentionRegistryDrainUsesCallerContext(t *testing.T) {
 		r.sessionDrivers.closed = true
 		d := newSessionDriver(r, session.New(session.WithID("caller-drain")))
 		r.sessionDrivers.drivers["caller-drain"] = d
-		d.generation, d.activeRequestID, d.running = 1, "accepted", true
+		d.generation, d.activeRequestID = 1, "accepted"
+		d.phase = sessionRunning
 		p := newPersistenceObserver(session.NewInMemorySessionStore())
 		r.observers = []EventObserver{p}
 		blocked := true
@@ -195,7 +198,8 @@ func TestSQLiteContentionRegistryDrainUsesCallerContext(t *testing.T) {
 func TestSQLiteContentionStoppedTurnStillAwaitsDurability(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	d := newSessionDriver(r, session.New(session.WithID("stopped")))
-	d.generation, d.activeRequestID, d.running = 1, "accepted", true
+	d.generation, d.activeRequestID = 1, "accepted"
+	d.phase = sessionRunning
 	d.StopAll()
 	h := &sessionHandle{driver: d, sessionID: "stopped"}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -277,7 +281,8 @@ func TestSQLiteContentionSteeringContinuationKeepsIdentity(t *testing.T) {
 		sess := session.New(session.WithID("steering-contention"))
 		d := newSessionDriver(r, sess)
 		r.sessionDrivers.drivers[sess.ID] = d
-		d.generation, d.activeRequestID, d.running = 1, "accepted", true
+		d.generation, d.activeRequestID = 1, "accepted"
+		d.phase = sessionRunning
 		d.steering = []QueuedMessage{{RequestID: "steer", Content: "guidance"}}
 		store := session.NewInMemorySessionStore()
 		require.NoError(t, store.AddSession(t.Context(), sess))

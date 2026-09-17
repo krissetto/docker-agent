@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
-	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/gitbranch"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -22,7 +20,7 @@ import (
 
 // viewerHost owns presentation subscriptions, never runtime execution. Hidden
 // viewers keep receiving their own events so returning restores a current view.
-// A model copy here contains presentation and App pointers, not a session clone.
+// Suspended models retain their presentation; fresh viewers are constructed explicitly.
 type viewerHost struct {
 	themeWatcher        ThemeWatcher
 	themeWatcherFactory func(func(string)) ThemeWatcher
@@ -209,36 +207,12 @@ func (m *model) handleViewerCommand(ctx context.Context, command, id string) {
 		return
 	}
 	m.viewers.cancel = append(m.viewers.cancel, cancel)
-	target := *m
-	target.app = application
-	target.viewAcquireCancel = nil
-	target.viewAcquireGeneration = 0
-	target.runtimeStatus = runtime.SessionStatus{}
-	target.screen = ui.NewScreen(info.Session.WorkingDir, "", "Message this subagent; /back to return", m.historyStore)
-	target.sessionState = service.NewSessionState(info.Session)
-	target.usage = ui.NewUsageTracker()
-	target.busy, target.runCancel = false, nil
-	target.queue, target.pendingUsers, target.draftAttachments = nil, nil, nil
-	target.lifecycle = lifecycle.State{}
-	target.inputReplay = lifecycle.InputReplay{}
-	target.inputReferences = subagentindex.New()
-	target.ownedSkillOperation, target.ownedSkillStream = "", false
-	target.cancelMarkerPending = false
-	target.majorHighWater = [2]uint64{}
-	target.soundSequence = 0
-	target.streamStarted = time.Time{}
-	target.priorityNoticeUntil = time.Time{}
-	target.budgetUsage = nil
-	target.majorNoticeVisible = false
-	target.elicitations, target.maxIterations = nil, nil
-	target.interruptPending, target.rejectingTool = false, false
-	target.rejectReason = ""
-	target.status = ui.StatusModel{WorkingDir: info.Session.WorkingDir, Agent: info.Agent}
+	target := m.newViewer(application, "Message this subagent; /back to return")
 	target.loadInitialSessionTranscript()
 	m.subscribeViewer(viewerCtx, application)
 	application.Start(viewerCtx)
 	target.watchViewerBranch(viewerCtx)
-	m.focusViewer(&target, true)
+	m.focusViewer(target, true)
 	m.refreshCommands(ctx)
 	m.reportCapability("Live subagent viewer: "+info.Name+" · "+string(info.NodeID)+". Sending targets this session; /back returns without cancelling it.", nil)
 }
@@ -316,40 +290,55 @@ func (m *model) spawnViewer(ctx context.Context, directory string, fork bool) {
 	m.admitViewer(ctx, application, cleanup)
 }
 
+// newViewer borrows only host services and presentation preferences. All session
+// state (including interaction drafts, replay cursors and acquisition fences) is
+// fresh; no lifecycle state is inherited from the currently focused session.
+// The host owns service teardown; the view owns its screen and projection.
+func (m *model) newViewer(application *app.App, placeholder string) *model {
+	return &model{
+		app:              application,
+		viewers:          m.viewers,
+		sessionViews:     m.sessionViews,
+		transcriber:      m.transcriber,
+		majorEvents:      m.majorEvents,
+		historyStore:     m.historyStore,
+		spawnSession:     m.spawnSession,
+		runExternal:      m.runExternal,
+		plansService:     m.plansService,
+		themeResolve:     m.themeResolve,
+		themeList:        m.themeList,
+		themeLoad:        m.themeLoad,
+		themeApply:       m.themeApply,
+		settingsSave:     m.settingsSave,
+		playSound:        m.playSound,
+		soundEnabled:     m.soundEnabled,
+		soundThreshold:   m.soundThreshold,
+		queueSendMode:    m.queueSendMode,
+		interruptMode:    m.interruptMode,
+		appName:          m.appName,
+		banner:           m.banner,
+		disabledCommands: m.disabledCommands,
+		renderImages:     m.renderImages,
+		hideBanner:       m.hideBanner,
+		term:             m.term, r: m.r, width: m.width, height: m.height,
+		screen:          ui.NewScreen(application.Session().WorkingDir, "", placeholder, m.historyStore),
+		sessionState:    service.NewSessionState(application.Session()),
+		usage:           ui.NewUsageTracker(),
+		inputReferences: subagentindex.New(),
+		status:          ui.StatusModel{WorkingDir: application.Session().WorkingDir, Agent: application.Binding().AgentName},
+	}
+}
+
 func (m *model) admitViewer(ctx context.Context, application *app.App, cleanup func()) {
 	if cleanup != nil {
 		m.viewers.cleanup = append(m.viewers.cleanup, cleanup)
 	}
-	target := *m
-	target.app = application
-	target.viewAcquireCancel = nil
-	target.viewAcquireGeneration = 0
-	target.runtimeStatus = runtime.SessionStatus{}
-	target.screen = ui.NewScreen(application.Session().WorkingDir, "", "Type a message, / for commands", m.historyStore)
-	target.sessionState = service.NewSessionState(application.Session())
-	target.usage = ui.NewUsageTracker()
-	target.busy, target.runCancel = false, nil
-	target.queue, target.pendingUsers, target.draftAttachments = nil, nil, nil
-	target.lifecycle = lifecycle.State{}
-	target.inputReplay = lifecycle.InputReplay{}
-	target.inputReferences = subagentindex.New()
-	target.ownedSkillOperation, target.ownedSkillStream = "", false
-	target.cancelMarkerPending = false
-	target.majorHighWater = [2]uint64{}
-	target.soundSequence = 0
-	target.streamStarted = time.Time{}
-	target.priorityNoticeUntil = time.Time{}
-	target.budgetUsage = nil
-	target.majorNoticeVisible = false
-	target.elicitations, target.maxIterations = nil, nil
-	target.interruptPending, target.rejectingTool = false, false
-	target.rejectReason = ""
-	target.status = ui.StatusModel{WorkingDir: application.Session().WorkingDir, Agent: application.Binding().AgentName}
+	target := m.newViewer(application, "Type a message, / for commands")
 	target.loadInitialSessionTranscript()
 	m.subscribeViewer(m.viewers.ctx(), application)
 	application.Start(m.viewers.ctx())
 	target.watchViewerBranch(m.viewers.ctx())
-	m.focusViewer(&target, true)
+	m.focusViewer(target, true)
 	m.refreshCommands(ctx)
 	m.reportCapability("Opened session "+application.Session().ID+"; /back returns to the previous viewer.", nil)
 }

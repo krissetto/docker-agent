@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
-	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -25,187 +25,30 @@ import (
 	skills "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
 
-type sessionCatalogDTO struct {
-	Version  int                       `json:"version"`
-	Sources  []sessionCatalogSourceDTO `json:"sources"`
-	Sessions []sessionResourceDTO      `json:"sessions"`
-}
-
-type sessionCatalogSourceDTO struct {
-	Name      string `json:"name"`
-	CanCreate bool   `json:"can_create"`
-}
-
-type sessionResourceDTO struct {
-	SessionID     string                     `json:"session_id"`
-	ParentID      string                     `json:"parent_id,omitempty"`
-	Source        string                     `json:"source,omitempty"`
-	AgentName     string                     `json:"agent_name,omitempty"`
-	Title         string                     `json:"title,omitempty"`
-	CreatedAt     string                     `json:"created_at"`
-	Messages      []session.Message          `json:"messages,omitempty"`
-	ToolsApproved bool                       `json:"tools_approved"`
-	SafetyPolicy  session.SafetyPolicy       `json:"safety_policy,omitempty"`
-	InputTokens   int64                      `json:"input_tokens"`
-	OutputTokens  int64                      `json:"output_tokens"`
-	WorkingDir    string                     `json:"working_dir,omitempty"`
-	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
-	Starred       bool                       `json:"starred"`
-	StateKnown    bool                       `json:"state_known"`
-	State         runtime.SessionState       `json:"state,omitempty"`
-	Activity      string                     `json:"activity,omitempty"`
-	UpdatedAt     string                     `json:"updated_at"`
-	Pending       *int                       `json:"pending,omitempty"`
-	Interactions  *int                       `json:"interactions,omitempty"`
-	LastError     string                     `json:"last_error,omitempty"`
-	Loaded        bool                       `json:"loaded"`
-	Attachable    bool                       `json:"attachable"`
-	Loadable      bool                       `json:"loadable"`
-	RouteError    string                     `json:"route_error,omitempty"`
-}
-
-type sessionCreateRequest struct {
-	Source          string `json:"source,omitempty"`
-	AgentName       string `json:"agent_name"`
-	Model           string `json:"model,omitempty"`
-	Title           string `json:"title,omitempty"`
-	ParentSessionID string `json:"parent_session_id,omitempty"`
-	// WorkingDir roots the session's toolsets in another directory. It is
-	// validated against the configured --session-workingdir-root.
-	WorkingDir string `json:"working_dir,omitempty"`
-	// SafetyPolicy and ToolsApproved carry the client's safety choice. When
-	// neither is set the agent's author-declared default applies.
-	SafetyPolicy  session.SafetyPolicy       `json:"safety_policy,omitempty"`
-	ToolsApproved bool                       `json:"tools_approved,omitempty"`
-	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
-}
+type (
+	sessionCatalogDTO       = api.SessionCatalog[runtime.SessionState]
+	sessionCatalogSourceDTO = api.SessionCatalogSource
+	sessionResourceDTO      = api.SessionResource[runtime.SessionState]
+	sessionCreateRequest    = api.SessionCreateRequest
+	sessionMetadataDTO      = api.SessionMetadata
+	sessionCapabilitiesDTO  = api.SessionCapabilities
+	sessionThinkingLevelDTO = api.SessionThinkingLevel
+	sessionInputRequest     = api.SessionInputRequest
+	sessionSubmissionDTO    = api.SessionSubmission[runtime.SubmissionDisposition]
+	sessionCancelRequest    = api.SessionCancelRequest
+	sessionResponseRequest  = api.SessionResponseRequest[runtime.InteractionKind]
+	sessionStatusDTO        = api.SessionStatus[runtime.SessionState]
+	sessionPendingInputDTO  = api.SessionPendingInput
+	sessionInteractionDTO   = api.SessionInteraction[runtime.InteractionKind, any]
+	sessionSnapshotDTO      = api.SessionSnapshot[runtime.SessionState, runtime.InteractionKind, any]
+	sessionEnvelopeDTO      = api.SessionEnvelope[any]
+	sessionStreamMessage    = api.SessionStreamMessage[runtime.SessionState, runtime.InteractionKind, any]
+)
 
 const (
 	sessionSourceAttribute = "docker-agent.actor.source"
 	sessionAgentAttribute  = runtime.SessionAgentAttribute
 )
-
-type sessionMetadataDTO struct {
-	SessionID      string                 `json:"session_id"`
-	AgentName      string                 `json:"agent_name"`
-	Model          string                 `json:"model,omitempty"`
-	ThinkingLevels []effort.Level         `json:"thinking_levels,omitempty"`
-	ThinkingLevel  effort.Level           `json:"thinking_level,omitempty"`
-	Capabilities   sessionCapabilitiesDTO `json:"capabilities"`
-}
-
-type sessionCapabilitiesDTO struct {
-	AvailableModels     []string `json:"available_models,omitempty"`
-	Durability          string   `json:"durability,omitempty"`
-	Compaction          bool     `json:"compaction,omitempty"`
-	TargetCompaction    bool     `json:"target_compaction,omitempty"`
-	ModelSwitching      bool     `json:"model_switching,omitempty"`
-	ContextInspection   bool     `json:"context_inspection,omitempty"`
-	LiveSessions        bool     `json:"live_sessions,omitempty"`
-	SessionEditing      bool     `json:"session_editing,omitempty"`
-	ForkSkills          bool     `json:"fork_skills,omitempty"`
-	Pause               bool     `json:"pause,omitempty"`
-	ModelCatalogRefresh bool     `json:"model_catalog_refresh,omitempty"`
-	ThinkingLevels      bool     `json:"thinking_levels,omitempty"`
-	Todos               bool     `json:"todos,omitempty"`
-}
-
-type sessionThinkingLevelDTO struct {
-	Levels   []effort.Level     `json:"levels"`
-	Current  effort.Level       `json:"current,omitempty"`
-	Metadata sessionMetadataDTO `json:"metadata"`
-}
-
-type sessionInputRequest struct {
-	Mode         string             `json:"mode,omitempty"`
-	Content      string             `json:"content"`
-	MultiContent []chat.MessagePart `json:"multi_content,omitempty"`
-	RequestID    string             `json:"request_id,omitempty"`
-}
-
-type sessionSubmissionDTO struct {
-	SessionID   string                        `json:"session_id"`
-	TurnID      string                        `json:"turn_id"`
-	Disposition runtime.SubmissionDisposition `json:"disposition,omitempty"`
-}
-
-type sessionCancelRequest struct {
-	TurnID string `json:"turn_id,omitempty"`
-}
-
-type sessionResponseRequest struct {
-	InteractionID string                  `json:"interaction_id"`
-	Kind          runtime.InteractionKind `json:"kind"`
-	Confirmation  string                  `json:"confirmation,omitempty"`
-	Reason        string                  `json:"reason,omitempty"`
-	ToolName      string                  `json:"tool_name,omitempty"`
-	ElicitationID string                  `json:"elicitation_id,omitempty"`
-	Action        string                  `json:"action,omitempty"`
-	Content       map[string]any          `json:"content,omitempty"`
-	ClientID      string                  `json:"client_id,omitempty"`
-}
-
-type sessionStatusDTO struct {
-	SessionID       string               `json:"session_id"`
-	AgentName       string               `json:"agent_name"`
-	State           runtime.SessionState `json:"state"`
-	Pending         int                  `json:"pending"`
-	TurnID          string               `json:"turn_id,omitempty"`
-	LastError       string               `json:"last_error,omitempty"`
-	Dormant         bool                 `json:"dormant,omitempty"`
-	PauseArmed      bool                 `json:"pause_armed,omitempty"`
-	Paused          bool                 `json:"paused,omitempty"`
-	PauseGeneration uint64               `json:"pause_generation,omitempty"`
-}
-
-type sessionPendingInputDTO struct {
-	InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID        string              `json:"sender_id,omitempty"`
-	SenderName      string              `json:"sender_name,omitempty"`
-	InputMode       string              `json:"input_mode,omitempty"`
-	TurnID          string              `json:"turn_id"`
-	Content         string              `json:"content"`
-	MultiContent    []chat.MessagePart  `json:"multi_content,omitempty"`
-	SessionPosition int                 `json:"session_position"`
-}
-
-type sessionInteractionDTO struct {
-	SessionID     string                  `json:"session_id"`
-	InteractionID string                  `json:"interaction_id"`
-	Kind          runtime.InteractionKind `json:"kind"`
-	ElicitationID string                  `json:"elicitation_id,omitempty"`
-	Event         runtime.Event           `json:"event"`
-}
-
-type sessionSnapshotDTO struct {
-	Session            *session.Session         `json:"session"`
-	Status             sessionStatusDTO         `json:"status"`
-	Interactions       []sessionInteractionDTO  `json:"interactions"`
-	PendingInputs      []sessionPendingInputDTO `json:"pending_inputs"`
-	Cursor             uint64                   `json:"cursor"`
-	TranscriptPosition int                      `json:"transcript_position"`
-}
-
-type sessionEnvelopeDTO struct {
-	Version            int    `json:"version"`
-	SessionID          string `json:"session_id"`
-	TurnID             string `json:"turn_id,omitempty"`
-	InteractionID      string `json:"interaction_id,omitempty"`
-	Sequence           uint64 `json:"sequence"`
-	TranscriptPosition int    `json:"transcript_position"`
-	Event              any    `json:"event,omitempty"`
-	Gap                bool   `json:"gap,omitempty"`
-	FirstAvailable     uint64 `json:"first_available,omitempty"`
-}
-
-type sessionStreamMessage struct {
-	Version  int                 `json:"version"`
-	Type     string              `json:"type"`
-	Snapshot *sessionSnapshotDTO `json:"snapshot,omitempty"`
-	Envelope *sessionEnvelopeDTO `json:"envelope,omitempty"`
-	Cursor   uint64              `json:"cursor,omitempty"`
-	Chunk    []byte              `json:"chunk,omitempty"`
-}
 
 func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("", s.sessionCatalog)
@@ -792,15 +635,15 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	}
 	for _, envelope := range observation.Replay {
 		dto := sessionEnvelope(envelope)
-		if err := write(sessionStreamMessage{Version: 1, Type: "event", Envelope: &dto}); err != nil {
+		if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
 			return nil
 		}
 	}
 	if !tree {
-		if err := write(sessionStreamMessage{Version: 1, Type: "ready", Cursor: observation.Primary().Cursor}); err != nil {
+		if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "ready", Cursor: observation.Primary().Cursor}); err != nil {
 			return nil
 		}
-	} else if err := write(sessionStreamMessage{Version: 1, Type: "ready"}); err != nil {
+	} else if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "ready"}); err != nil {
 		return nil
 	}
 	heartbeat := time.NewTicker(s.heartbeatInterval)
@@ -823,7 +666,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 				return nil
 			}
 			dto := sessionEnvelope(envelope)
-			if err := write(sessionStreamMessage{Version: 1, Type: "event", Envelope: &dto}); err != nil {
+			if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
 				return nil
 			}
 		case <-heartbeat.C:
@@ -847,19 +690,19 @@ func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamM
 		return err
 	}
 	if len(data) <= sessionSnapshotChunkBytes {
-		return write(sessionStreamMessage{Version: 1, Type: "snapshot", Snapshot: &snapshot})
+		return write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "snapshot", Snapshot: &snapshot})
 	}
-	if err := write(sessionStreamMessage{Version: 1, Type: "snapshot_begin", Cursor: snapshot.Cursor}); err != nil {
+	if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "snapshot_begin", Cursor: snapshot.Cursor}); err != nil {
 		return err
 	}
 	for len(data) > 0 {
 		n := min(len(data), sessionSnapshotChunkBytes)
-		if err := write(sessionStreamMessage{Version: 1, Type: "snapshot_chunk", Cursor: snapshot.Cursor, Chunk: data[:n]}); err != nil {
+		if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "snapshot_chunk", Cursor: snapshot.Cursor, Chunk: data[:n]}); err != nil {
 			return err
 		}
 		data = data[n:]
 	}
-	return write(sessionStreamMessage{Version: 1, Type: "snapshot_end", Cursor: snapshot.Cursor})
+	return write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "snapshot_end", Cursor: snapshot.Cursor})
 }
 
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
@@ -891,7 +734,7 @@ func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 }
 
 func sessionEnvelope(envelope runtime.SessionEvent) sessionEnvelopeDTO {
-	return sessionEnvelopeDTO{Version: envelope.Version, SessionID: envelope.SessionID, TurnID: envelope.TurnID, InteractionID: envelope.InteractionID, Sequence: envelope.Sequence, TranscriptPosition: envelope.TranscriptPosition, Event: sessionEventDTO(envelope.Event), Gap: envelope.Gap, FirstAvailable: envelope.FirstAvailable}
+	return sessionEnvelopeDTO{Version: api.SessionAPIVersion, SessionID: envelope.SessionID, TurnID: envelope.TurnID, InteractionID: envelope.InteractionID, Sequence: envelope.Sequence, TranscriptPosition: envelope.TranscriptPosition, Event: sessionEventDTO(envelope.Event), Gap: envelope.Gap, FirstAvailable: envelope.FirstAvailable}
 }
 
 func sessionEventDTO(event runtime.Event) any {

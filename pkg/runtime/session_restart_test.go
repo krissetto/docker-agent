@@ -487,7 +487,7 @@ func TestLocalSessionCatalogLoadsPersistedSessionBinding(t *testing.T) {
 	assert.Equal(t, "root", loaded.AgentName)
 }
 
-func TestExistingLegacySessionRemainsUnstampedAfterSessionPersistence(t *testing.T) {
+func TestExistingLegacySessionCommitsExplicitBindingBeforePublication(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sessions.db")
 	store, err := sqlitestore.New(t.Context(), dbPath)
 	require.NoError(t, err)
@@ -514,7 +514,7 @@ func TestExistingLegacySessionRemainsUnstampedAfterSessionPersistence(t *testing
 	persisted, err := reopened.GetSession(t.Context(), legacy.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "legacy updated", persisted.Title)
-	assert.Empty(t, persisted.AttributesSnapshot()[SessionAgentAttribute])
+	assert.Equal(t, "root", persisted.AttributesSnapshot()[SessionAgentAttribute])
 }
 
 func TestFreshSessionHandlePersistsAcrossSQLiteReopen(t *testing.T) {

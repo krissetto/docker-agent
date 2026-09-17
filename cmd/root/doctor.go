@@ -289,7 +289,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		autoStatus.Note = "credentials are supplied by the models gateway"
 		// Mirrors the run-time preflight: the Docker AI Gateway authenticates
 		// with the Docker Desktop JWT, not per-provider API keys.
-		if environment.IsTrustedDockerURL(f.runConfig.ModelsGateway) {
+		if environment.IsDockerDomainURL(f.runConfig.ModelsGateway) {
 			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
 				autoIssues = append(autoIssues,

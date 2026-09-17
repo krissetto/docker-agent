@@ -58,52 +58,79 @@ For an agent loaded from a remote HTTP(S) configuration source, endpoints that n
 
 ### Canonical sessions
 
-Session execution has one API surface:
+New integrations use `/api/v2/sessions`. The unversioned upstream HTTP API
+remains available through compatibility translation over the same session
+runtime; it is not a second execution engine. There is no `/api/v1` alias.
+
+The canonical endpoints are:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` / `POST` | `/api/sessions` | Catalog sessions (`?active=true` lists attached sessions without reading stored history) / create a session-bound session (`source`, `agent_name`, optional `model`, `title`, `working_dir`, `safety_policy`, `tools_approved`, `permissions`). |
-| `GET` / `DELETE` | `/api/sessions/:id` | Inspect or delete the session. Legacy stored rows remain inspectable but are not attachable. |
-| `PATCH` | `/api/sessions/:id` | Canonical edit: `kind` is `policy`, `permissions`, `title`, `message`, `summary`, `tokens`, or `attachment`; returns the updated session. Transcript edits require a quiescent session. |
-| `GET` | `/api/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
-| `GET` | `/api/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
-| `GET` | `/api/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
-| `POST` | `/api/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
-| `POST` | `/api/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |
-| `POST` | `/api/sessions/:id/cancel` | Cancel the active or exactly named active/queued `turn_id` without closing the session. |
-| `POST` | `/api/sessions/:id/turns/:turnID/wait` | Wait for this exact turn to settle, including durable completion; `204` on success, typed `404` for unknown/expired turns. Disconnecting cancels only the wait. |
-| `POST` | `/api/sessions/:id/retry` | Retry the last failed settled turn. |
-| `PATCH` | `/api/sessions/:id/title` | Session-ordered durable title change. |
-| `GET` | `/api/sessions/:id/tree` | Authoritative subtree rooted at any session node; metrics are cumulative per node and can be summed for a subtree rollup. |
-| `GET` | `/api/sessions/:id/todos` | Current session-keyed todo snapshot. SQLite-backed runtimes persist it; other stores may provide volatile storage. `shared: true` toolsets use the stable root-session ID so agents in one tree share a list without cross-root leakage. |
-| `POST` | `/api/sessions/:id/compact` | Compact the session at its execution boundary. |
-| `POST` | `/api/sessions/:id/compact/:target` | Compact a live target in the same session tree. |
-| `GET` | `/api/sessions/:id/context` | Inspect context-window composition. |
-| `GET` | `/api/sessions/:id/live-sessions` | List live sessions visible from this session. |
-| `GET` / `POST` | `/api/sessions/:id/skills` / `/api/sessions/:id/skills/run` | List skills or start a fork skill. |
-| `GET` / `POST` | `/api/sessions/:id/models` / `/api/sessions/:id/models/refresh` | List or refresh available models. |
-| `PATCH` | `/api/sessions/:id/model` | Change the session's pinned model. |
-| `GET` / `PATCH` | `/api/sessions/:id/thinking-level` | Read or set the thinking level. |
-| `POST` | `/api/sessions/:id/thinking-level/cycle` | Cycle to the next thinking level. |
-| `POST` | `/api/sessions/:id/pause` | Toggle iteration-boundary pause. |
-| `POST` | `/api/sessions/:id/switch-agent` | Branch into a new session bound to another agent. |
-| `PATCH` | `/api/sessions/:id/starred` | Set starred state. |
-| `DELETE` | `/api/sessions/:id/attachments` | Remove an attachment. |
+| `GET` / `POST` | `/api/v2/sessions` | Catalog sessions (`?active=true` lists attached sessions without reading stored history) / create a session-bound session (`source`, `agent_name`, optional `model`, `title`, `working_dir`, `safety_policy`, `tools_approved`, `permissions`). |
+| `GET` / `DELETE` | `/api/v2/sessions/:id` | Inspect or delete the session. Legacy stored rows remain inspectable but are not attachable. |
+| `PATCH` | `/api/v2/sessions/:id` | Canonical edit: `kind` is `policy`, `permissions`, `title`, `message`, `summary`, `tokens`, or `attachment`; returns the updated session. Transcript edits require a quiescent session. |
+| `GET` | `/api/v2/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
+| `GET` | `/api/v2/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
+| `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
+| `POST` | `/api/v2/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
+| `POST` | `/api/v2/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |
+| `POST` | `/api/v2/sessions/:id/cancel` | Cancel the active or exactly named active/queued `turn_id` without closing the session. |
+| `POST` | `/api/v2/sessions/:id/turns/:turnID/wait` | Wait for this exact turn to settle, including durable completion; `204` on success, typed `404` for unknown/expired turns. Disconnecting cancels only the wait. |
+| `POST` | `/api/v2/sessions/:id/retry` | Retry the last failed settled turn. |
+| `PATCH` | `/api/v2/sessions/:id/title` | Session-ordered durable title change. |
+| `GET` | `/api/v2/sessions/:id/tree` | Authoritative subtree rooted at any session node; metrics are cumulative per node and can be summed for a subtree rollup. |
+| `GET` | `/api/v2/sessions/:id/todos` | Current session-keyed todo snapshot. SQLite-backed runtimes persist it; other stores may provide volatile storage. `shared: true` toolsets use the stable root-session ID so agents in one tree share a list without cross-root leakage. |
+| `POST` | `/api/v2/sessions/:id/compact` | Compact the session at its execution boundary. |
+| `POST` | `/api/v2/sessions/:id/compact/:target` | Compact a live target in the same session tree. |
+| `GET` | `/api/v2/sessions/:id/context` | Inspect context-window composition. |
+| `GET` | `/api/v2/sessions/:id/live-sessions` | List live sessions visible from this session. |
+| `GET` / `POST` | `/api/v2/sessions/:id/skills` / `/api/v2/sessions/:id/skills/run` | List skills or start a fork skill. |
+| `GET` / `POST` | `/api/v2/sessions/:id/models` / `/api/v2/sessions/:id/models/refresh` | List or refresh available models. |
+| `PATCH` | `/api/v2/sessions/:id/model` | Change the session's pinned model. |
+| `GET` / `PATCH` | `/api/v2/sessions/:id/thinking-level` | Read or set the thinking level. |
+| `POST` | `/api/v2/sessions/:id/thinking-level/cycle` | Cycle to the next thinking level. |
+| `POST` | `/api/v2/sessions/:id/pause` | Toggle iteration-boundary pause. |
+| `POST` | `/api/v2/sessions/:id/switch-agent` | Branch into a new session bound to another agent. |
+| `PATCH` | `/api/v2/sessions/:id/starred` | Set starred state. |
+| `DELETE` | `/api/v2/sessions/:id/attachments` | Remove an attachment. |
 
-Legacy-compatible session routes remain available for existing clients:
+Additional canonical metadata and editing endpoints:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/sessions/:id/tools/toggle` | Toggle tool auto-approval. |
-| `PATCH` | `/api/sessions/:id/safety-policy` | Update safety policy. |
-| `PATCH` | `/api/sessions/:id/permissions` | Update permissions. |
-| `PATCH` | `/api/sessions/:id/tokens` | Update persisted token/cost totals. |
-| `POST` | `/api/sessions/:id/fork` | Fork before a user message. |
-| `PATCH` | `/api/sessions/:id/messages/:msg_id` | Update a persisted message. |
-| `POST` | `/api/sessions/:id/summaries` | Add a persisted summary. |
-| `GET` | `/api/sessions/:id/recovery` | Read recovery data. |
-| `POST` | `/api/sessions/batch/delete` | Delete sessions in a batch. |
-| `POST` | `/api/sessions/batch/export` | Export sessions in a batch. |
+| `POST` | `/api/v2/sessions/:id/tools/toggle` | Toggle tool auto-approval. |
+| `PATCH` | `/api/v2/sessions/:id/safety-policy` | Update safety policy. |
+| `PATCH` | `/api/v2/sessions/:id/permissions` | Update permissions. |
+| `PATCH` | `/api/v2/sessions/:id/tokens` | Update persisted token/cost totals. |
+| `POST` | `/api/v2/sessions/:id/fork` | Fork before a user message. |
+| `PATCH` | `/api/v2/sessions/:id/messages/:msg_id` | Update a persisted message. |
+| `POST` | `/api/v2/sessions/:id/summaries` | Add a persisted summary. |
+| `GET` | `/api/v2/sessions/:id/recovery` | Read recovery data. |
+| `POST` | `/api/v2/sessions/batch/delete` | Delete sessions in a batch. |
+| `POST` | `/api/v2/sessions/batch/export` | Export sessions in a batch. |
+
+### Catalog pagination and confirmed views
+
+Catalog responses contain metadata only, never message bodies. `view=summary`
+selects the dedicated metadata schema. Use `include_children=true` to include
+child candidates; a child marked `requires_confirmation` is not an access grant.
+Ancestry, source, agent binding and durable tree membership are checked only on
+confirmed selection, not while paging the catalog.
+
+Use `limit` (default 50, maximum 200) and the opaque `next_cursor` from the response
+as the next request's `cursor`. Preserve the same `view`, `include_children` and
+`active` scope across pages; malformed or differently scoped cursors return 400.
+Stored rows are ordered by creation time descending, then session ID ascending.
+Pages use bounded metadata queries, not full transcript hydration. Concurrent
+inserts or deletes do not provide a point-in-time catalog snapshot. Start a fresh
+scan to discover new rows inserted before the current cursor.
+
+`active=true` is a bounded live metadata projection ordered by session ID and
+does not read historical transcripts. It cannot be combined with `view=summary`.
+Fetch one session's detail or snapshot explicitly when its transcript is needed.
+`GET .../:id?view=prepare-info` confirms identity without publishing execution;
+`PATCH .../:id` with `{"kind":"open_view"}` commits a dormant view through the
+same runtime owner. Neither operation starts a model turn.
 
 Todo state is mutated through the configured todo tools; the API endpoint is a
 read-only projection and is not a direct todo mutation surface. SQLite persistence
@@ -115,20 +142,22 @@ directory, and rebuilds for new sessions when `--pull-interval` refreshes the
 source). Without `safety_policy` or `tools_approved` the session starts in the
 agent's author-declared safety mode, exactly like a fresh local session.
 
-There are no separate resume, elicitation, steer, follow-up, execution-stream,
-or direct transcript-mutation routes. All execution is session-owned and all
-interactive responses are correlated by the envelope's immutable
-`interaction_id`.
+The canonical API uses `messages` and `responses` rather than separate
+resume, elicitation, steer, follow-up, or execution-stream routes. All execution
+is session-owned and canonical interactive responses are correlated by the
+envelope's immutable `interaction_id`. The unversioned compatibility routes
+translate older requests into those same operations; see the migration table
+below.
 
 ### Sending and observing a turn
 
 ```bash
-SID=$(curl -s -X POST http://localhost:8080/api/sessions \
+SID=$(curl -s -X POST http://localhost:8080/api/v2/sessions \
   -H 'Content-Type: application/json' \
   -d '{"agent_name":"root"}' | jq -r .session_id)
 
-curl -N http://localhost:8080/api/sessions/$SID/events &
-curl -X POST http://localhost:8080/api/sessions/$SID/messages \
+curl -N http://localhost:8080/api/v2/sessions/$SID/events &
+curl -X POST http://localhost:8080/api/v2/sessions/$SID/messages \
   -H 'Content-Type: application/json' \
   -d '{"mode":"submit","content":"Hello","request_id":"greeting-1"}'
 ```
@@ -161,7 +190,7 @@ Omit `request_id` to submit independently each time. Persistence-blocked
 submissions return `503` with typed `error: "persistence"` and a diagnostic
 `detail`; they are not accepted or automatically retried by the transport.
 
-For `PATCH /api/sessions/:id`, send a `kind` and its matching payload:
+For `PATCH /api/v2/sessions/:id`, send a `kind` and its matching payload:
 `policy` uses `safety_policy`, `tools_approved`, or `toggle_tools_approved`;
 `permissions` uses `permissions`; `title` uses `title`; `message` uses
 `message_index` and `message`; `summary` uses `summary`; `tokens` uses
@@ -180,7 +209,8 @@ interleave within a snapshot. The decoded snapshot cursor must match the frame
 cursor. Clients must reject oversized chunks, mismatched boundaries and missing
 end frames. This bounds framing overhead, not total reconstructed history RAM;
 use request cancellation/deadlines to bound waits. History is never truncated.
-This chunk extension and `request_id` rename are breaking wire changes.
+The chunk extension and `request_id` field belong to the v2 wire contract;
+unversioned clients continue to receive raw runtime events, not these frames.
 
 Live event envelopes carry monotonically increasing sequence IDs,
 `turn_id`, and (for interactions) `interaction_id`. `interaction_resolved`
@@ -191,16 +221,16 @@ turn wait endpoint when durable settlement is required.
 
 Reconnect with either `?since=<last sequence>` or `Last-Event-ID`. A retained
 cursor is replayed before `ready`. A `gap` envelope is a hard resnapshot
-barrier. When `DELETE /api/sessions/:id` closes an attached stream, the stream
+barrier. When `DELETE /api/v2/sessions/:id` closes an attached stream, the stream
 emits a terminal `stream_stopped` event with reason `deleted` before transport
 EOF. Clients should consume that terminal event rather than treating EOF alone
 as successful deletion.
 
-Use `/api/sessions/:id/events?tree=true` for a rooted multiplexed stream. It
+Use `/api/v2/sessions/:id/events?tree=true` for a rooted multiplexed stream. It
 rejects cursors, emits a fresh snapshot for every current node, then events
 with per-session sequences, and observes descendants added later. It emits no
 SSE IDs. Reconnect without a cursor for fresh snapshots and events from then.
-Observer disconnect never stops sessions. `POST /api/sessions` accepts optional
+Observer disconnect never stops sessions. `POST /api/v2/sessions` accepts optional
 `parent_session_id`; such children begin idle. Tree nodes expose
 `needs_attention` and `waiting_on` (`failed`, `approve tool`, or `answer
 question`, in that precedence). `/children` is removed.
@@ -208,10 +238,119 @@ question`, in that precedence). `/children` is removed.
 To answer an interaction:
 
 ```bash
-curl -X POST http://localhost:8080/api/sessions/$SID/responses \
+curl -X POST http://localhost:8080/api/v2/sessions/$SID/responses \
   -H 'Content-Type: application/json' \
   -d '{"interaction_id":"<from envelope>","kind":"confirmation","confirmation":"approve"}'
 ```
+
+### Migrating the upstream HTTP API
+
+The unversioned `/api/sessions` protocol and canonical `/api/v2/sessions`
+protocol are **different wire formats**, not interchangeable URL prefixes.
+Existing HTTP clients can continue using the unversioned routes. New clients
+should use v2 for correlated interactions, explicit acceptance identities,
+bounded catalogs, and snapshot/replay barriers.
+
+| Upstream HTTP request | Canonical v2 operation | Compatibility treatment |
+| --- | --- | --- |
+| `GET /api/sessions` | `GET /api/v2/sessions` | Adapted: old clients receive a bare array with `id`; v2 returns a versioned catalog with `sessions`, `session_id`, and `next_cursor`. |
+| `POST /api/sessions` with a session template | `POST /api/v2/sessions` with a binding request | Adapted: old creation returns a session with `id`; v2 returns session metadata with `session_id`. Old execution selects its source through `/agent/:source[/agent_name]`. |
+| `GET /api/sessions/:id` and `.../snapshot` | v2 detail and snapshot | Adapted: old snapshot has flat `messages`, `streaming`, and `last_event_seq`; v2 has `session`, `status`, `interactions`, `pending_inputs`, and `cursor`. |
+| `POST .../agent/:source[/agent_name]` | `POST .../messages` plus `GET .../events` | Adapted: old `messages` arrays start session-owned work and receive raw runtime SSE events; v2 separates acceptance from observation. |
+| `POST .../steer` and `.../followup` | `POST .../messages` with `mode: "steer"` or `"submit"` | Adapted into the same session mailbox, not independent legacy queues. |
+| `GET .../queue` | v2 status and snapshot pending inputs | Adapted: old `steer`/`followup` depth fields project the canonical pending inputs. |
+| `POST .../resume` and `.../elicitation` | `POST .../responses` | Adapted only when exactly one matching interaction can be identified. Zero or multiple matches return `409 Conflict`; use v2 `interaction_id` rather than guessing. |
+| `GET .../events` | v2 events | Adapted raw events, not v2 envelopes or snapshot chunk frames. See replay restrictions below. |
+| Title, starred, policy, permissions, token, message, summary, fork, recovery, and batch routes | Corresponding v2 session operations | Retained adapters. Mutations remain subject to the canonical owner's admission and persistence checks; transcript edits cannot race a busy turn. |
+| `/health`, `/ready`, `/api/ping`, agent discovery, OAuth callback | Same routes | Direct, unchanged by session API versioning. |
+
+The complete retained unversioned session routes are:
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` / `POST` | `/api/sessions` | Bare-array catalog / create a stored session template. |
+| `GET` / `DELETE` | `/api/sessions/:id` | Legacy detail / delete through the session owner. |
+| `GET` | `/api/sessions/:id/status` | Legacy live status; optional `wait` duration bounds readiness waiting. |
+| `GET` | `/api/sessions/:id/snapshot` | Flat snapshot with `last_event_seq`. |
+| `GET` | `/api/sessions/:id/events` | Raw-event replay and live observation. |
+| `POST` | `/api/sessions/:id/agent/:agent` | Bind the source named by `:agent` on first run and execute. |
+| `POST` | `/api/sessions/:id/agent/:agent/:agent_name` | First run with an explicitly named agent in that source. |
+| `POST` | `/api/sessions/:id/resume` | Respond to the sole matching confirmation or iteration prompt. |
+| `POST` | `/api/sessions/:id/elicitation` | Respond to the sole matching elicitation. |
+| `POST` | `/api/sessions/:id/steer` | Submit message-array guidance to the active turn. |
+| `POST` | `/api/sessions/:id/followup` | Append message-array follow-ups to the canonical mailbox. |
+| `GET` | `/api/sessions/:id/queue` | Project steer and follow-up depths and capacities. |
+| `POST` | `/api/sessions/:id/messages` | Append a stored message at a quiescent boundary, not a v2 input request. |
+| `PATCH` | `/api/sessions/:id/messages/:msg_id` | Edit a stored message at a quiescent boundary. |
+| `PATCH` | `/api/sessions/:id/title` | Durable title update. |
+| `PATCH` | `/api/sessions/:id/starred` | Set starred state. |
+| `GET` | `/api/sessions/:id/models` | Legacy model list for the session. |
+| `POST` | `/api/sessions/:id/tools/toggle` | Toggle tool auto-approval. |
+| `PATCH` | `/api/sessions/:id/safety-policy` | Update safety policy. |
+| `PATCH` | `/api/sessions/:id/permissions` | Update permissions. |
+| `PATCH` | `/api/sessions/:id/tokens` | Update stored usage at a quiescent boundary. |
+| `POST` | `/api/sessions/:id/fork` | Fork before a user message. |
+| `POST` | `/api/sessions/:id/summaries` | Append a stored summary at a quiescent boundary. |
+| `GET` | `/api/sessions/:id/recovery` | Read recovery data. |
+| `POST` | `/api/sessions/batch/delete` | Delete the selected sessions. |
+| `POST` | `/api/sessions/batch/export` | Export the selected sessions. |
+
+The old `client_id` was not a deduplication promise. To safely retry a submission,
+migrate to v2 `request_id`; do not replay an old execution POST merely because
+its stream disconnected. Canonical accepted work belongs to the session, not
+its observer. A legacy
+execution POST that freshly admits a turn retains historical request ownership:
+disconnecting it cancels and drains that exact turn, not unrelated queued work.
+The cancellation drain is bounded to five seconds. A reused submission must
+not acquire cancellation ownership. Disconnecting a
+GET event observer only detaches it. V2 clients cancel explicitly through
+`POST .../cancel`, or delete the session. Use `POST .../turns/:turnID/wait` when you
+need a durable completion barrier rather than a `stream_stopped` notification.
+
+An old follow-up accepted while a headless session is idle stays queued until
+an explicit run starts it. Unlike canonical `mode: "submit"`, accepting that
+legacy follow-up alone does not start a model turn. Old message-array roles
+retain upstream semantics: each supplied message is user input, not permission
+to inject assistant or system messages.
+
+Legacy interaction matching is intentionally restricted: a response without an
+immutable interaction ID cannot safely select among simultaneous prompts. An
+optional old `elicitation_id` narrows elicitation matching, but still must identify
+exactly one outstanding request. Stale replies fail instead of resolving an
+unrelated prompt.
+
+Compatibility is not a promise to emulate removed execution machinery. The
+legacy GET event stream treats a missing, invalid, or overflowing cursor as
+zero (the `since` query takes precedence over `Last-Event-ID`) and
+replays retained history. A replay gap emits a raw `gap` event and closes the
+stream without applying its stale tail. Execution POST streams additionally
+emit an error with code `observation_gap` on a gap; neither silently succeeds nor waits indefinitely.
+Fetch a fresh old
+snapshot and reconnect from `last_event_seq`, or migrate to the v2 `gap` and
+snapshot barrier. `session_exited` marks session deletion, never normal turn
+completion. A premature run-observation EOF emits `observation_ended`; an
+observation error emits `observation_failed`. These observation failures do not
+cancel accepted work or fabricate successful completion. They differ from an
+owning POST request disconnect, which cancels its exact turn as described above.
+
+Legacy agent-switch commands change the **active agent in the same session**
+through its owner; they do not change the initial binding or create a fork.
+Built-in local handles support command selection and model ordering as part of
+atomic input admission. A custom handle missing the required command-admission
+capability can return `501`; a custom handle without atomic legacy model
+admission returns `422` when a run requests a model override. These unsupported
+operations reject before appending input. Unsupported capabilities return
+an explicit HTTP error; they
+do not start a fallback execution loop. Historical client method names for
+`tools`, MCP prompts, `skills`, `compact`, `toolsets`, `pause`, `snapshots`,
+`undo`, and `reset` do not establish an unversioned server contract: those
+routes were not registered by the upstream server and are not compatibility
+aliases. Use the documented v2 capabilities where available.
+
+HTTP compatibility does **not** imply Go SDK source compatibility or automatic
+conversion of old database rows into executable sessions. See the
+[Go SDK migration notes](../../guides/go-sdk/index.md#http-and-go-sdk-migration)
+for these separate boundaries.
 
 ### Health
 
@@ -230,7 +369,7 @@ curl -X POST http://localhost:8080/api/sessions/$SID/responses \
 
 ## Workflow summary
 
-1. Discover sources and sessions with `GET /api/sessions`.
+1. Discover sources and sessions with `GET /api/v2/sessions`.
 2. Create a session-bound session.
 3. Attach SSE and establish the snapshot/replay/ready barrier.
 4. Submit input through `messages` with the desired mode.
@@ -248,7 +387,7 @@ docker agent serve api <agent-file>|<agents-dir> [flags]
 | `-l, --listen`     | `127.0.0.1:8080` | Address to listen on                             |
 | `--auth-token`     | (none)           | Bearer token required for all API requests. Leave empty to disable authentication (safe when listening on loopback interfaces only). Recommended when `--listen` binds to a network-reachable interface. |
 | `--max-request-size <bytes>` | `1048576` (1 MiB) | Maximum request body size in bytes. Requests whose body exceeds this limit are rejected with HTTP 413 (Request Entity Too Large) — see [Troubleshooting: HTTP 413](../../community/troubleshooting/index.md#http-413-request-body-too-large) if you hit this. |
-| `--session-workingdir-root` | (none — unrestricted) | Confine the `working_dir` accepted by `POST /api/sessions` to this directory: after resolving symlinks, the requested directory must be the root or one of its descendants. By default any clean host directory is accepted — the intended behaviour for local single-user daemons that open arbitrary workspaces — but raw values containing `..` are always rejected. Set a root whenever the API serves callers that must not reach arbitrary host paths (multi-user or network-exposed deployments). |
+| `--session-workingdir-root` | (none — unrestricted) | Confine the `working_dir` accepted by `POST /api/v2/sessions` to this directory: after resolving symlinks, the requested directory must be the root or one of its descendants. By default any clean host directory is accepted — the intended behaviour for local single-user daemons that open arbitrary workspaces — but raw values containing `..` are always rejected. Set a root whenever the API serves callers that must not reach arbitrary host paths (multi-user or network-exposed deployments). |
 | `-s, --session-db` | `session.db`     | Path to the SQLite session database              |
 | `--pull-interval`  | `0` (disabled)   | Auto-pull OCI reference every N minutes          |
 | `--fake`           | (none)           | Replay AI responses from cassette file (testing) |
@@ -283,10 +422,10 @@ Sessions are stored in a SQLite database (default: `session.db` in the current d
 By default, tool calls require approval. In the API workflow:
 
 1. Agent makes a tool call → server emits a `tool_call_confirmation` event
-2. Client reviews and sends `POST /api/sessions/:id/responses` with the envelope `interaction_id`, kind, and decision
+2. Client reviews and sends `POST /api/v2/sessions/:id/responses` with the envelope `interaction_id`, kind, and decision
 3. Execution continues based on approval/denial
 
-Toggle auto-approve with `POST /api/sessions/:id/tools/toggle` for automated workflows.
+Toggle auto-approve with `POST /api/v2/sessions/:id/tools/toggle` for automated workflows.
 
 ## Driving a running TUI with `--listen` {#listen}
 
@@ -299,11 +438,11 @@ completion.
 
 ```bash
 docker agent run agent.yaml --listen 127.0.0.1:8080
-curl -X POST http://127.0.0.1:8080/api/sessions/$SID/messages \
+curl -X POST http://127.0.0.1:8080/api/v2/sessions/$SID/messages \
   -H 'Content-Type: application/json' \
   -d '{"mode":"submit","content":"Now add tests"}'
 curl -N -H 'Last-Event-ID: 42' \
-  http://127.0.0.1:8080/api/sessions/$SID/events
+  http://127.0.0.1:8080/api/v2/sessions/$SID/events
 ```
 
 The run keeps its interactive TUI; accepted input is executed by the session
@@ -313,7 +452,7 @@ an SSE client cancels only its observation, not the accepted turn.
 > [!NOTE]
 > **Discovering a run**
 >
-> Each run started with `--listen` writes a discovery record to `<data-dir>/runs/<pid>.json` containing its address and initial session ID. Tabs opened later are separate sessions on the same control plane; use `GET /api/sessions?active=true` to enumerate them without loading session history.
+> Each run started with `--listen` writes a discovery record to `<data-dir>/runs/<pid>.json` containing its address and initial session ID. Tabs opened later are separate sessions on the same control plane; use `GET /api/v2/sessions?active=true` to enumerate them without loading session history.
 
 > [!WARNING]
 > **The attached control plane has a fixed 1 MiB request-body cap and no built-in authentication**
@@ -322,7 +461,7 @@ an SSE client cancels only its observation, not the accepted turn.
 
 ## Session Forking
 
-`POST /api/sessions/:id/fork` creates a new session whose history is a copy of the parent up to (but **excluding**) a specified user message. This lets a client "branch" a conversation — e.g. rewind to an earlier question and try a different prompt — without losing the shared history that came before.
+`POST /api/v2/sessions/:id/fork` creates a new session whose history is a copy of the parent up to (but **excluding**) a specified user message. This lets a client "branch" a conversation — e.g. rewind to an earlier question and try a different prompt — without losing the shared history that came before.
 
 **Request body:**
 
@@ -336,7 +475,7 @@ an SSE client cancels only its observation, not the accepted turn.
 
 ```bash
 # Fork a session before the second user message (ordinal 1)
-$ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
+$ curl -X POST http://localhost:8080/api/v2/sessions/$SID/fork \
   -H 'Content-Type: application/json' \
   -d '{"user_message_index": 1}'
 # Returns: api.SessionResponse for the new forked session
@@ -350,7 +489,7 @@ $ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
 
 ## Reliable queued messages
 
-A successful `POST /api/sessions/:id/messages` is the acceptance boundary. If a
+A successful `POST /api/v2/sessions/:id/messages` is the acceptance boundary. If a
 turn is already running, submit mode durably appends the input to that session's
 bounded FIFO mailbox and returns `disposition: "queued"`; clients must not
 resubmit merely because execution has not started yet. The response's immutable

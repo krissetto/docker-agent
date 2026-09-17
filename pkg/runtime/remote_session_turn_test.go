@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/api"
 )
 
 func TestRemoteAwaitTurnExactIdentityAndContext(t *testing.T) {
@@ -21,12 +23,12 @@ func TestRemoteAwaitTurnExactIdentityAndContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		switch r.URL.Path {
-		case "/api/sessions/s/turns/settled/wait":
+		case api.SessionAPIPath + "/s/turns/settled/wait":
 			w.WriteHeader(http.StatusNoContent)
-		case "/api/sessions/s/turns/missing/wait", "/api/sessions/s/turns/expired/wait":
+		case api.SessionAPIPath + "/s/turns/missing/wait", api.SessionAPIPath + "/s/turns/expired/wait":
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":"not_found","session_id":"s","operation":"await_turn"}`)
-		case "/api/sessions/s/turns/active/wait":
+		case api.SessionAPIPath + "/s/turns/active/wait":
 			entered <- struct{}{}
 			<-r.Context().Done()
 		default:
@@ -61,13 +63,13 @@ func TestRemoteAwaitTurnExactIdentityAndContext(t *testing.T) {
 
 func snapshotFrames(t *testing.T, payload []byte, cursor uint64) []remoteSessionStreamMessage {
 	t.Helper()
-	frames := []remoteSessionStreamMessage{{Version: 1, Type: "snapshot_begin", Cursor: cursor}}
+	frames := []remoteSessionStreamMessage{{Version: sessionWireVersion, Type: "snapshot_begin", Cursor: cursor}}
 	for len(payload) > 0 {
 		n := min(len(payload), remoteSnapshotChunkBytes)
-		frames = append(frames, remoteSessionStreamMessage{Version: 1, Type: "snapshot_chunk", Cursor: cursor, Chunk: bytes.Clone(payload[:n])})
+		frames = append(frames, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "snapshot_chunk", Cursor: cursor, Chunk: bytes.Clone(payload[:n])})
 		payload = payload[n:]
 	}
-	return append(frames, remoteSessionStreamMessage{Version: 1, Type: "snapshot_end", Cursor: cursor})
+	return append(frames, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "snapshot_end", Cursor: cursor})
 }
 
 func scanSnapshotFrames(t *testing.T, frames []remoteSessionStreamMessage) (remoteSessionStreamMessage, error) {
@@ -127,7 +129,7 @@ func TestRemoteInteractionResolutionIdentity(t *testing.T) {
 	require.NoError(t, err)
 	for _, reason := range []string{"responded", "canceled", "stopped"} {
 		payload := json.RawMessage(fmt.Sprintf(`{"type":"interaction_resolved","session_id":"s","interaction_id":"i","reason":%q}`, reason))
-		envelope := remoteSessionEnvelope{Version: 1, SessionID: "s", InteractionID: "i", Sequence: 1, Event: payload}
+		envelope := remoteSessionEnvelope{Version: sessionWireVersion, SessionID: "s", InteractionID: "i", Sequence: 1, Event: payload}
 		decoded, err := client.decodeSessionEnvelope(envelope)
 		require.NoError(t, err)
 		resolved, ok := decoded.Event.(*InteractionResolvedEvent)
@@ -146,8 +148,8 @@ func TestRemoteChunkedSnapshotCancellationClosesTransport(t *testing.T) {
 	entered, disconnected := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"snapshot_begin\",\"cursor\":1}\n\n")
-		chunk, err := json.Marshal(remoteSessionStreamMessage{Version: 1, Type: "snapshot_chunk", Cursor: 1, Chunk: []byte(`{"session":{"id":"s","title":"`)})
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"snapshot_begin\",\"cursor\":1}\n\n")
+		chunk, err := json.Marshal(remoteSessionStreamMessage{Version: sessionWireVersion, Type: "snapshot_chunk", Cursor: 1, Chunk: []byte(`{"session":{"id":"s","title":"`)})
 		if err != nil {
 			t.Error(err)
 			return
@@ -201,10 +203,12 @@ func TestRemoteCanonicalEventsMatchLocalEnvelope(t *testing.T) {
 		payload, err := json.Marshal(event)
 		require.NoError(t, err)
 		remote, err := client.decodeSessionEnvelope(remoteSessionEnvelope{
-			Version: local.Version, SessionID: local.SessionID, TurnID: local.TurnID,
+			Version: sessionWireVersion, SessionID: local.SessionID, TurnID: local.TurnID,
 			Sequence: local.Sequence, TranscriptPosition: local.TranscriptPosition, Event: payload,
 		})
 		require.NoError(t, err)
+		// The HTTP projection versions its envelope independently of the runtime journal.
+		local.Version = sessionWireVersion
 		assert.Equal(t, local, remote, "typed remote transport must preserve the canonical event and envelope")
 	}
 }

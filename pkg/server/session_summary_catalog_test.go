@@ -32,6 +32,11 @@ func (s *summaryOnlyServerStore) GetSession(context.Context, string) (*session.S
 	return nil, errors.New("summary must not perform per-row hydration")
 }
 
+func (s *summaryOnlyServerStore) GetSessionSummaryPage(ctx context.Context, options session.SummaryPageOptions) (session.SummaryPage, error) {
+	s.reads.Add(1)
+	return s.Store.(session.PagedSummaryStore).GetSessionSummaryPage(ctx, options)
+}
+
 func (s *summaryOnlyServerStore) GetSessionSummariesWithScope(ctx context.Context, scope session.SummaryScope) ([]session.Summary, error) {
 	s.reads.Add(1)
 	return s.ScopedSummaryStore.GetSessionSummariesWithScope(ctx, scope)
@@ -53,7 +58,7 @@ func TestSessionSummaryCatalogHTTPMetadataScopeAuthAndTypedParity(t *testing.T) 
 	registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}}
 	sm := NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "secret")
-	path := "/api/sessions?view=summary&include_children=true"
+	path := "/api/v2/sessions?view=summary&include_children=true"
 	for _, token := range []string{"", "wrong"} {
 		response := sessionRequest(t, srv, http.MethodGet, path, "", token)
 		assert.Equal(t, http.StatusUnauthorized, response.Code)
@@ -79,8 +84,8 @@ func TestSessionSummaryCatalogHTTPMetadataScopeAuthAndTypedParity(t *testing.T) 
 	assert.True(t, byID[child.ID].RequiresConfirmation)
 	assert.False(t, byID[child.ID].Loadable, "metadata is not durable child access authorization")
 	assert.Equal(t, "provider/model", byID[child.ID].Model)
-	assert.False(t, byID[orphan.ID].RequiresConfirmation)
-	assert.NotEmpty(t, byID[orphan.ID].RouteError)
+	assert.True(t, byID[orphan.ID].RequiresConfirmation, "metadata cannot establish durable ancestry")
+	assert.Empty(t, byID[orphan.ID].RouteError)
 	assert.EqualValues(t, 1, store.reads.Load())
 	assert.Zero(t, registry.inspects, "browse never reads one tree per root")
 	assert.Zero(t, registry.restores)
@@ -101,7 +106,7 @@ func TestSessionSummaryCatalogHTTPMetadataScopeAuthAndTypedParity(t *testing.T) 
 	remote, err := transport.ListSessionSummaries(t.Context(), runtime.SessionSummaryOptions{IncludeChildren: true})
 	require.NoError(t, err)
 	assert.Equal(t, local, remote)
-	invalid := sessionRequest(t, srv, http.MethodGet, "/api/sessions?view=summary&include_children=invalid", "", "secret")
+	invalid := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?view=summary&include_children=invalid", "", "secret")
 	assert.Equal(t, http.StatusBadRequest, invalid.Code)
 }
 

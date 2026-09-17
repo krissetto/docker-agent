@@ -80,7 +80,7 @@ type SessionManager struct {
 	runConfig *config.RuntimeConfig
 
 	// sessionWorkingDirRoot, when non-empty, confines the user-supplied
-	// working_dir of POST /api/sessions to that directory (see
+	// working_dir of POST /api/v2/sessions to that directory (see
 	// WithSessionWorkingDirRoot). It is a dedicated boundary: deriving it
 	// from runConfig.WorkingDir or the process cwd broke long-lived daemons
 	// that open arbitrary host workspaces and was reverted (#3788).
@@ -119,7 +119,7 @@ type SessionManager struct {
 type SessionManagerOpt func(*SessionManager)
 
 // WithSessionWorkingDirRoot confines the working_dir accepted by
-// CreateSession (POST /api/sessions) to root: after resolving symlinks,
+// CreateSession (POST /api/v2/sessions) to root: after resolving symlinks,
 // the requested directory must be root or one of its descendants. Empty
 // (the default) keeps the API unrestricted — the intended behaviour for
 // local single-user daemons that legitimately open arbitrary host
@@ -176,7 +176,7 @@ func NewSessionManager(ctx context.Context, sources config.Sources, sessionStore
 	if sm.sessionRuntimeFactory != nil && len(sm.sessionRegistries) == 0 {
 		sm.sessionRegistries = make(map[string]runtime.SessionRuntime, len(loaders))
 		for name, loader := range loaders {
-			router := newWorkspaceSessionRuntimes(ctx, loader, sm.sessionRuntimeFactory)
+			router := newWorkspaceSessionRuntimes(ctx, loader, sm.sessionRuntimeFactory, sm.sessionStore)
 			sm.sessionRegistries[name] = router
 			sm.ownedRegistries = append(sm.ownedRegistries, router)
 			if len(loaders) == 1 {
@@ -270,7 +270,7 @@ func (sm *SessionManager) prepareSession(sessionTemplate *session.Session) (*ses
 		opts = append(opts, session.WithSafetyPolicy(sessionTemplate.SafetyPolicy))
 	}
 
-	// Carry a caller-supplied title (from the POST /api/sessions request body)
+	// Carry a caller-supplied title (from the POST /api/v2/sessions request body)
 	// into the new session. The title is persisted as supplied.
 	if title := strings.TrimSpace(sessionTemplate.Title); title != "" {
 		opts = append(opts, session.WithTitle(title))
@@ -649,6 +649,10 @@ func (sm *SessionManager) editSession(ctx context.Context, id string, edit runti
 	case "title":
 		sess.SetTitle(edit.Title)
 	case "message":
+		if edit.MessageIndex < 0 {
+			_, err := sm.sessionStore.AddMessage(ctx, id, edit.Message)
+			return err
+		}
 		return sm.sessionStore.UpdateMessage(ctx, id, edit.MessageIndex, edit.Message)
 	case "summary":
 		return sm.sessionStore.AddSummary(ctx, id, *edit.Summary)

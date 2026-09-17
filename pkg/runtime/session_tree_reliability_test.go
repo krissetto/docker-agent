@@ -28,7 +28,7 @@ func TestTreeObservationChildlessRootAndBufferOne(t *testing.T) {
 	rootTracking := rt.subagents.ensureSessionLocked(root, "root", "")
 	require.NoError(t, rt.subagents.tree.Add(subagent.Node{ID: "late-node", Agent: "root", Parent: rootTracking.node, SessionID: late.ID, State: subagent.NodeIdle}))
 	rt.subagents.ensureSessionLocked(late, "root", "late-node")
-	rt.subagents.children["late-node"] = &childRecord{sessionID: late.ID, parentSession: root.ID, session: late, state: subagent.NodeIdle}
+	rt.subagents.children["late-node"] = &childRecord{sessionID: late.ID, parentSession: root.ID, session: late, durable: session.ChildRecord{Node: subagent.Node{State: subagent.NodeIdle}}}
 	rt.subagents.mu.Unlock()
 	select {
 	case snapshot := <-observation.SessionsAdded:

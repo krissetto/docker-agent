@@ -14,7 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/fake"
 )
 
-func startRecordingAIProxy(t *testing.T) (*httptest.Server, *config.RuntimeConfig) {
+func startRecordingAIProxy(t *testing.T, proxyOptions ...*fake.ProxyOptions) (*httptest.Server, *config.RuntimeConfig) {
 	t.Helper()
 
 	cassettePath := filepath.Join("testdata", "cassettes", t.Name())
@@ -24,12 +24,16 @@ func startRecordingAIProxy(t *testing.T) (*httptest.Server, *config.RuntimeConfi
 		require.NoError(t, err)
 	})
 
+	var options *fake.ProxyOptions
+	if len(proxyOptions) != 0 {
+		options = proxyOptions[0]
+	}
 	proxyURL, cleanup, err := fake.StartProxyWithOptions(t.Context(),
 		cassettePath,
 		recorder.ModeRecordOnce,
 		matcher,
 		fake.APIKeyHeaderUpdater,
-		nil,
+		options,
 	)
 	require.NoError(t, err)
 

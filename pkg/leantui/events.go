@@ -39,6 +39,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		ev = bridged.Event
 		if bridged.Projection != nil {
 			m.lifecycle = bridged.Projection.Lifecycle
+			m.status.Dormant = bridged.Projection.Status.Dormant
+			m.status.Pending = bridged.Projection.Status.Pending
 			shared = true
 			if confirm := m.screen.Confirm; confirm != nil && !bridged.Projection.HasInteraction(app.InteractionKey{SessionID: confirm.SessionID, InteractionID: confirm.RequestID}) {
 				m.screen.Confirm = nil
@@ -48,7 +50,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	switch e := ev.(type) {
 	case *runtime.DormancyChangedEvent:
 		if m.app != nil && m.app.Session() != nil && e.SessionID == m.app.Session().ID {
-			m.runtimeStatus.Dormant = e.Dormant
+			m.status.Dormant = e.Dormant
 		}
 	case capabilityResult:
 		if m.app != nil && m.app.Session() != nil && e.sessionID == m.app.Session().ID && m.app.IsCurrentSessionEvent(e.identity) {
@@ -95,7 +97,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.sessionState.SetSessionTitle(e.Session.TitleSnapshot())
 		}
 	case *app.SessionResetEvent:
-		m.runtimeStatus = e.Snapshot.Status
+		m.status.Dormant = e.Snapshot.Status.Dormant
+		m.status.Pending = e.Snapshot.Status.Pending
 		m.lifecycle = lifecycle.FromSnapshot(e.Snapshot)
 		m.screen.Transcript.Clear()
 		m.inputReplay.Reset(e.Snapshot.Session)
@@ -115,7 +118,6 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			}
 			m.addPendingUser(input.Content, input.Content, input.TurnID, kind)
 		}
-		m.busy = e.Snapshot.Status.State == runtime.SessionStateRunning || e.Snapshot.Status.State == runtime.SessionStateQueued || e.Snapshot.Status.State == runtime.SessionStateCancelling
 		if m.sessionState != nil {
 			pause := service.PauseNone
 			if e.Snapshot.Status.PauseArmed {
@@ -125,6 +127,12 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 				pause = service.PausePaused
 			}
 			m.sessionState.SetPauseState(pause)
+		}
+		if !shared && m.screen.Confirm != nil {
+			projection := app.PresentationState{Interactions: e.Snapshot.Interactions}
+			if !projection.HasInteraction(app.InteractionKey{SessionID: m.screen.Confirm.SessionID, InteractionID: m.screen.Confirm.RequestID}) {
+				m.screen.Confirm = nil
+			}
 		}
 		m.elicitations = nil
 		m.maxIterations = nil
@@ -155,8 +163,6 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if !shared {
 			m.lifecycle, _ = m.lifecycle.Apply(e)
 		}
-		m.ownedSkillStream = m.ownedSkillOperation != ""
-		m.busy = true
 		m.trackStreamStarted(e.SessionID)
 		if !seed {
 			m.streamStarted = time.Now()
@@ -179,7 +185,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, e.TurnID, e.SessionPosition)
 	case *runtime.PendingUserMessageCanceledEvent:
 		m.inputReplay.Withdraw(e.SessionPosition)
-		m.lifecycle.Pending = slices.DeleteFunc(slices.Clone(m.lifecycle.Pending), func(id string) bool { return id == e.TurnID })
+		if !shared {
+			m.lifecycle.Pending = slices.DeleteFunc(slices.Clone(m.lifecycle.Pending), func(id string) bool { return id == e.TurnID })
+		}
 		m.pendingUsers = slices.DeleteFunc(m.pendingUsers, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
 		m.queue = slices.DeleteFunc(m.queue, func(pending ui.PendingUserMessage) bool { return pending.TurnID == e.TurnID })
 	case *runtime.UserMessageEvent:
@@ -199,13 +207,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		switch e.Status {
 		case "completed", "failed":
 			m.ownedSkillOperation = ""
-			started := m.ownedSkillStream
-			m.ownedSkillStream = false
 			if e.Status == "failed" && e.Error != "" {
 				m.addNotice("✗ ", e.Error, ui.StError())
-			}
-			if !started && m.lifecycle.Depth() == 0 {
-				m.finishBusy(ctx)
 			}
 		}
 	case *runtime.PauseChangedEvent:
@@ -265,6 +268,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 		m.screen.Transcript.FinishTool(e.ToolCallID, ui.ToolResult{Response: e.Response, Result: e.Result, AgentName: e.GetAgentName(), ToolDefinition: e.ToolDefinition, Images: images}, m.sessionState)
 	case *runtime.ToolCallConfirmationEvent:
+		if current := m.screen.Confirm; current != nil && current.SessionID == e.SessionID && current.RequestID == e.RequestID {
+			break // replay of the same interaction preserves its in-progress draft
+		}
 		m.screen.Transcript.RemoveTool(ui.ToolViewID(e.ToolCall))
 		toolDef := ui.EnsureToolDefinition(e.ToolCall, e.ToolDefinition)
 		m.screen.Confirm = &ui.ConfirmModel{
@@ -374,7 +380,6 @@ func (m *model) handleStreamStopped(ctx context.Context) {
 func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionCompactionEvent) {
 	switch e.Status {
 	case "started":
-		m.busy = true
 		m.status.Compacting = true
 	case "completed":
 		m.status.Compacting = false
@@ -384,16 +389,14 @@ func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionC
 	}
 }
 
-// finishBusy clears the busy state at the end of a run and starts the next
-// queued message, if any. It reports whether a queued run was started.
+// finishBusy finalizes presentation and submits the next queued message, if
+// any. Only subsequent canonical events can mark that submission as running.
 func (m *model) finishBusy(ctx context.Context) bool {
 	m.screen.Transcript.FlushPending()
 	if m.cancelMarkerPending {
 		m.screen.Transcript.AddBlock(func(int) []string { return []string{ui.StWarning().Render("⏹ Cancelled")} })
 		m.cancelMarkerPending = false
 	}
-	m.busy = false
-	m.runCancel = nil
 
 	if len(m.queue) > 0 {
 		next := m.queue[0]

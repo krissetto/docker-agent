@@ -56,7 +56,7 @@ func TestPendingEditHTTPAuthLocalRemoteParity(t *testing.T) {
 	body, err := json.Marshal(edit)
 	require.NoError(t, err)
 	for _, token := range []string{"", "wrong"} {
-		rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/sessions/"+handle.ID(), string(body), token)
+		rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/"+handle.ID(), string(body), token)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	}
 	snapshot, err := handle.Edit(ctx, edit)
@@ -91,7 +91,7 @@ func TestPendingEditHTTPAuthLocalRemoteParity(t *testing.T) {
 		{`{"kind":"pending_message"}`, http.StatusBadRequest},
 		{`{"kind":"pending_message","pending_message":{"turn_id":"missing","content":"new"}}`, http.StatusPreconditionFailed},
 	} {
-		rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/sessions/"+handle.ID(), tc.body, "secret")
+		rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/"+handle.ID(), tc.body, "secret")
 		assert.Equal(t, tc.status, rec.Code, rec.Body.String())
 	}
 	edit.PendingMessage.Content = " "
@@ -136,7 +136,7 @@ func TestPendingEditHTTPAttachedChildExactRouting(t *testing.T) {
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: childOwner, registry: registry})
 	authenticated := NewWithManager(srv.sm, "secret")
 	body := `{"kind":"pending_message","pending_message":{"turn_id":"same-turn-id","content":"child only"}}`
-	rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/sessions/child", body, "secret")
+	rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/child", body, "secret")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Empty(t, rootOwner.edits)
 	require.Len(t, childOwner.edits, 1)
@@ -146,10 +146,10 @@ func TestPendingEditHTTPAttachedChildExactRouting(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &returned))
 	assert.Equal(t, child.ID, returned.ID)
 	for _, token := range []string{"", "wrong"} {
-		rec = sessionRequest(t, authenticated, http.MethodPatch, "/api/sessions/child", body, token)
+		rec = sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/child", body, token)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	}
-	rec = sessionRequest(t, authenticated, http.MethodPatch, "/api/sessions/missing", body, "secret")
+	rec = sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/missing", body, "secret")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Len(t, childOwner.edits, 1, "authentication and wrong-owner lookup cannot dispatch an edit")
 	assert.Empty(t, rootOwner.edits)

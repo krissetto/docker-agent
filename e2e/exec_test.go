@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/fake"
+	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/runtime"
+	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
@@ -148,7 +152,9 @@ func TestExec_ToolCallsNeedAcceptance(t *testing.T) {
 
 	agentSource, err := sources.Resolve("testdata/file_writer.yaml", nil)
 	require.NoError(t, err)
-	_, runConfig := startRecordingAIProxy(t)
+	// Approving pauses the consumer; replay realistic provider pacing instead
+	// of delivering the entire recorded reasoning stream as an instant burst.
+	_, runConfig := startRecordingAIProxy(t, &fake.ProxyOptions{SimulateStream: true, StreamChunkDelay: time.Millisecond})
 	workingDir := t.TempDir()
 	runConfig.WorkingDir = workingDir
 	loadedTeam, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
@@ -162,35 +168,25 @@ func TestExec_ToolCallsNeedAcceptance(t *testing.T) {
 	sess := session.New(session.WithAgentName("root"), session.WithWorkingDir(workingDir))
 	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
-	observation, err := handle.Observe(ctx, runtime.ObserveOptions{})
+	owned, err := turn.Start(ctx, handle, runtime.TurnInput{Content: `Create a hello.txt file with "Hello, World!" content. Try only once. On error, exit without further message.`})
 	require.NoError(t, err)
-	defer observation.Cancel()
-
-	submission, err := handle.Submit(ctx, runtime.TurnInput{Content: `Create a hello.txt file with "Hello, World!" content. Try only once. On error, exit without further message.`})
-	require.NoError(t, err)
-
 	var confirmation *runtime.ToolCallConfirmationEvent
-	for envelope := range observation.Events {
-		if envelope.TurnID != submission.TurnID {
-			continue
-		}
+	termination := owned.Consume(ctx, func(ctx context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 		switch event := envelope.Event.(type) {
+		case *runtime.ErrorEvent:
+			return runtimeclient.TurnTerminate, errors.New(event.Error)
 		case *runtime.ToolCallConfirmationEvent:
 			confirmation = event
 			require.Equal(t, sess.ID, event.SessionID)
-			require.NotEmpty(t, event.RequestID)
-			require.NoError(t, handle.Respond(ctx, runtime.InteractionResponse{
-				InteractionID: event.RequestID,
-				Kind:          runtime.InteractionConfirmation,
-				Resume:        runtime.ResumeApprove(),
-			}))
-		case *runtime.StreamStoppedEvent:
-			require.NotNil(t, confirmation, "run stopped before requesting tool confirmation")
-			content, readErr := os.ReadFile(filepath.Join(workingDir, "hello.txt"))
-			require.NoError(t, readErr, "approved tool call must write the file")
-			require.Equal(t, "Hello, World!", string(content))
-			return
+			require.NotEmpty(t, envelope.InteractionID)
+			return runtimeclient.TurnContinue, handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApprove()})
 		}
-	}
-	t.Fatal("session observation closed before the submitted run stopped")
+		return runtimeclient.TurnContinue, nil
+	})
+	require.NoError(t, termination.Err)
+	require.True(t, termination.Stopped)
+	require.NotNil(t, confirmation, "run stopped before requesting tool confirmation")
+	content, err := os.ReadFile(filepath.Join(workingDir, "hello.txt"))
+	require.NoError(t, err, "approved tool call must write the file")
+	require.Equal(t, "Hello, World!", string(content))
 }

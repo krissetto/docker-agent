@@ -1213,7 +1213,7 @@ func (e *editor) TryStartArgumentCompletion() tea.Cmd {
 
 		// Sequenced (not batched) so the popup opens with the full item set
 		// before the query narrows it, regardless of scheduling order.
-		return tea.Sequence(
+		return core.Sequence(
 			e.openCompletion(c, items),
 			core.CmdHandler(completion.QueryMsg{Query: query}),
 		)

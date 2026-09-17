@@ -172,14 +172,14 @@ func (m *model) handleCapabilityCommand(ctx context.Context, name, arg string, m
 			switch {
 			case err != nil || keep < 0 || confirmation != "confirm":
 				m.reportCapability("Usage: /snapshots <nonnegative index> confirm. This restores workspace files.", nil)
-			case m.busy || m.app.IsReadOnly():
+			case m.busy() || m.app.IsReadOnly():
 				m.reportCapability("Cannot restore files while the session is active or read-only.", nil)
 			default:
 				m.reportCapability(m.app.ResetSnapshot(ctx, keep))
 			}
 		}
 	case "undo":
-		if m.busy {
+		if m.busy() {
 			m.reportCapability("Wait for the current response to finish before restoring files.", nil)
 			break
 		}

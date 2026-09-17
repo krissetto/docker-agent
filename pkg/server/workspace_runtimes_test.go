@@ -78,7 +78,7 @@ func newFactoryServer(t *testing.T, factory *factoryRecorder, source config.Sour
 
 func createSessionVia(t *testing.T, srv *Server, body string) (sessionMetadataDTO, int) {
 	t.Helper()
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions", body, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", body, "")
 	var metadata sessionMetadataDTO
 	if rec.Code == http.StatusCreated {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &metadata))
@@ -117,7 +117,7 @@ func TestSessionRuntimeFactoryRoutesSessionsByWorkingDir(t *testing.T) {
 		_, err := registry.SessionByID(id)
 		require.NoError(t, err, "session %s must be reachable through the source registry", id)
 	}
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/"+elsewhere.SessionID+"/status", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+elsewhere.SessionID+"/status", "", "")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -141,7 +141,7 @@ func TestMultiWorkspaceTreeRoutesOwner(t *testing.T) {
 	other := t.TempDir()
 	parent, code := createSessionVia(t, srv, `{"agent_name":"root","working_dir":"`+other+`"}`)
 	require.Equal(t, http.StatusCreated, code)
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/"+parent.SessionID+"/tree", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+parent.SessionID+"/tree", "", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var snapshot subagent.Snapshot
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &snapshot))
@@ -510,4 +510,43 @@ func TestSessionHTTPCreateSeedsAuthorSafetyDefault(t *testing.T) {
 	stored, err = factory.store.GetSession(t.Context(), explicit.SessionID)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyStrict, stored.GetSafetyPolicy(), "a client choice is never overridden by the author default")
+}
+
+// Exercise the production factory decorator, including cold workspace selection
+// and pinning a prepared runtime through an aggressive idle eviction policy.
+func TestFactorySessionViewCapabilitiesColdWorkspaceAndLease(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	dir := t.TempDir()
+	archived := session.New(session.WithID("archived-view"), session.WithWorkingDir(dir), session.WithAttributes(map[string]string{sessionAgentAttribute: "root", sessionSourceAttribute: "agent"}))
+	archived.AddMessage(session.UserMessage("never execute on inspection"))
+	require.NoError(t, store.AddSession(t.Context(), archived))
+	factory := &factoryRecorder{store: store}
+	srv, sm := newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+	router := sm.sessionRegistries["agent"].(*workspaceSessionRuntimes)
+	configureWorkspaceRuntimePool(router, -1, 0)
+	response := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/archived-view?view=prepare-info", "", "")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assert.Contains(t, response.Body.String(), dir)
+	assert.Zero(t, sm.runtimeSessions.Length(), "inspection never publishes a session")
+	_, err := router.SessionByID(archived.ID)
+	require.Error(t, err)
+	prepared, err := sm.PrepareSessionView(t.Context(), archived.ID)
+	require.NoError(t, err)
+	router.prune()
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	prepared.Abort()
+	status, err := committed.SessionHandle.Status(t.Context())
+	require.NoError(t, err)
+	assert.True(t, status.Dormant)
+	router.prune()
+	_, err = router.SessionByID(archived.ID)
+	require.NoError(t, err, "committed sessions pin their canonical supervisor")
+	assert.NotEmpty(t, factory.built())
+	for _, built := range factory.built() {
+		assert.Equal(t, normalizeDir(dir), built)
+	}
+	// PATCH uses exactly the same composed capability through the manager.
+	response = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/archived-view", `{"kind":"open_view"}`, "")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 }

@@ -44,6 +44,13 @@ func (m *subagentManager) completeSessionTurn(d *sessionDriver, turnID, runErr s
 }
 
 func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *sessionDriver, turnID, runErr string) error {
+	m.transitionMu.Lock()
+	transitionHeld := true
+	defer func() {
+		if transitionHeld {
+			m.transitionMu.Unlock()
+		}
+	}()
 	sess := d.session()
 	if sess == nil || !sess.AsyncSubagent {
 		return nil
@@ -57,7 +64,7 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 			break
 		}
 	}
-	if rec == nil {
+	if rec == nil || rec.durable.Node.State == subagent.NodeStopped {
 		m.mu.Unlock()
 		return nil
 	}
@@ -70,16 +77,14 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 	if runErr != "" {
 		state = subagent.NodeFailed
 	}
-	if rec.state == subagent.NodeStopped {
-		state = subagent.NodeStopped
-	}
+
 	d.mu.Lock()
 	result := d.generationResult
 	d.mu.Unlock()
 	preview, truncated := subagent.PreviewText(result, subagent.PreviewLen)
 	record.Node.State, record.Node.Error = state, runErr
 	record.Node.NeedsAttention = state == subagent.NodeFailed
-	record.Result, record.Error, record.LastTurnID = preview, runErr, turnID
+	record.Result, record.LastTurnID = preview, turnID
 	parentID, parentAgent := rec.parentSession, rec.parentAgentName
 	report := session.ChildReport{}
 	if turnID != "" && state != subagent.NodeStopped && !m.hasRunningSubagentsLocked(sess.ID) {
@@ -105,7 +110,9 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 			record.Revision++
 		}
 		if errors.Is(err, session.ErrRevisionConflict) {
-			records, loadErr := m.coordination().LoadChildren(ctx, record.RootSessionID)
+			reconcileCtx, reconcileCancel := context.WithTimeout(context.WithoutCancel(ctx), defaultSubagentPersistenceTimeout)
+			defer reconcileCancel()
+			records, loadErr := m.coordination().LoadChildren(reconcileCtx, record.RootSessionID)
 			if loadErr != nil {
 				return loadErr
 			}
@@ -121,19 +128,20 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 			return err
 		}
 	}
-	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok && m.r.team != nil {
-		a, _ := m.r.team.Agent(parentAgent)
-		m.r.executeSubagentStopHooks(m.r.lifetime(), parent.session(), sess, a, sess.AgentName, result)
-	}
 	m.mu.Lock()
 	if current := m.children[id]; current == rec {
 		current.durable = record
-		current.result, current.errMsg, current.state = preview, runErr, state
 		_ = m.tree.Update(id, func(n *subagent.Node) {
 			n.State, n.Error, n.NeedsAttention = state, runErr, state == subagent.NodeFailed
 		})
 	}
 	m.mu.Unlock()
+	m.transitionMu.Unlock()
+	transitionHeld = false
+	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok && m.r.team != nil {
+		a, _ := m.r.team.Agent(parentAgent)
+		m.r.executeSubagentStopHooks(m.r.lifetime(), parent.session(), sess, a, sess.AgentName, result)
+	}
 	m.persistSnapshot()
 	m.r.sessionDrivers.signalWork()
 	return nil

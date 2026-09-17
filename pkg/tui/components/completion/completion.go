@@ -280,7 +280,7 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return c, nil
 			}
 			c.visible = false
-			return c, tea.Sequence(
+			return c, core.Sequence(
 				core.CmdHandler(SelectedMsg{
 					Value:      selectedItem.Value,
 					Execute:    selectedItem.Execute,
@@ -298,7 +298,7 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return c, nil
 			}
 			c.visible = false
-			return c, tea.Sequence(
+			return c, core.Sequence(
 				core.CmdHandler(SelectedMsg{
 					Value:      selectedItem.Value,
 					Execute:    selectedItem.Execute,

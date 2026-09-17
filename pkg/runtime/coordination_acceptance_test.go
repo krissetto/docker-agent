@@ -409,7 +409,7 @@ func TestCoordinationReleasedChildRetainsMetadataNotPayload(t *testing.T) {
 		if rec.sessionID == child.ID() {
 			assert.Nil(t, rec.session, "manager must not retain the released child transcript")
 			assert.Nil(t, rec.parentSess)
-			assert.LessOrEqual(t, len([]rune(rec.result)), subagent.PreviewLen)
+			assert.LessOrEqual(t, len([]rune(rec.durable.Result)), subagent.PreviewLen)
 		}
 	}
 	if tracked := rt.subagents.sessions[child.ID()]; tracked != nil {

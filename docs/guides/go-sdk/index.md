@@ -924,3 +924,43 @@ See the [examples/golibrary](https://github.com/docker/docker-agent/tree/main/ex
 - `multi/` — Multi-agent with sub-agents
 - `builtintool/` — Using built-in tools
 - `yamlstrict/` — Loading YAML (file or OCI) with hand-picked providers/toolsets and strict mode
+
+## HTTP and Go SDK migration
+
+HTTP compatibility and Go source compatibility are separate contracts:
+
+- **Remote HTTP:** new `runtime.SessionTransport` clients use
+  `/api/v2/sessions` and the shared transport schemas in `pkg/api`. Existing
+  upstream clients keep using `/api/sessions`; server-side adapters translate
+  their session templates, message arrays, and raw SSE events onto the same
+  session owner. There is no `/api/v1` alias. See the
+  [HTTP migration matrix](../../features/api-server/index.md#migrating-the-upstream-http-api)
+  for payload differences and explicit restrictions.
+- **Go SDK:** retaining the old HTTP routes does not restore removed Go
+  interfaces or runtime-global stream/queue methods. Migrate custom execution
+  hosts to `SessionRuntime` and `SessionHandle`: `Submit`, `Steer`, `Observe`,
+  `Respond`, `Cancel`, and `AwaitTurn`. Use the session supervisor for lifetime
+  ownership; a borrowed remote observation is not a runtime owner. The examples
+  in this guide use that boundary.
+- **Stored sessions:** readable historical rows are not necessarily attachable
+  execution sessions. Inspect catalog `attachable`, `loadable`, and
+  `requires_confirmation` metadata; confirm a selected session before opening
+  it. HTTP adapters do not bypass canonical source, agent, ancestry, or durable
+  tree validation, and do not add a second persistence format.
+
+Do not migrate by replacing `/api/sessions` with `/api/v2/sessions` in a custom
+HTTP client. V2 create uses a binding request and returns `session_id`; catalogs
+are paginated envelopes rather than arrays; observations use versioned
+snapshot/replay/ready frames rather than raw runtime events. Interaction
+responses require `interaction_id`. Submission `request_id` supports safe
+matching retries, whereas the old `client_id` did not provide idempotency.
+
+For a remote handle, disconnecting `Observe` only releases the observation.
+Explicitly `Cancel` accepted work when required, then `AwaitTurn` to establish
+settlement. A stream error or replay gap is not successful completion. Keep the
+same error and settlement handling as for a local handle rather than adding a
+client-side queue or transcript writer.
+
+## Policy migration
+
+See [Model policy and todo state migration](policy-migration.md) for strict model resolution and durable session-keyed todos.

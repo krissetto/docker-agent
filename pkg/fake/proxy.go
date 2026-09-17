@@ -24,6 +24,7 @@ import (
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
 // ProxyOptions configures the fake proxy behavior.
@@ -96,6 +97,16 @@ func StartStreamingRecordingProxy(
 	upstreamGateway string,
 	headerUpdater func(host string, req *http.Request),
 ) (string, func() error, error) {
+	return startStreamingRecordingProxy(ctx, cassettePath, upstreamGateway, headerUpdater, http.DefaultTransport)
+}
+
+func startStreamingRecordingProxy(
+	ctx context.Context,
+	cassettePath string,
+	upstreamGateway string,
+	headerUpdater func(host string, req *http.Request),
+	transport http.RoundTripper,
+) (string, func() error, error) {
 	// Fail fast on a bad gateway URL instead of returning 500s per request.
 	if upstreamGateway != "" {
 		if u, err := url.Parse(upstreamGateway); err != nil || u.Scheme == "" || u.Host == "" {
@@ -107,6 +118,26 @@ func StartStreamingRecordingProxy(
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create streaming recorder: %w", err)
 	}
+
+	streamRec.transport = transport
+	streamRec.SetCaptureRequest(func(req *http.Request) ([]byte, error) {
+		recorded := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			recorded.Body = body
+		}
+		if err := httpclient.RemoveEncryptedConfig(recorded); err != nil {
+			return nil, err
+		}
+		if recorded.Body == nil || recorded.Body == http.NoBody {
+			return nil, nil
+		}
+		defer recorded.Body.Close()
+		return io.ReadAll(recorded.Body)
+	})
 
 	e := echo.New()
 	e.HideBanner = true
@@ -452,6 +483,11 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 
 		if headerUpdater != nil {
 			headerUpdater(host, req)
+		}
+		if !environment.IsTrustedDockerURL(options.UpstreamGateway) {
+			if err := httpclient.RemoveEncryptedConfig(req); err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "Failed to scrub encrypted agent config")
+			}
 		}
 
 		client := &http.Client{

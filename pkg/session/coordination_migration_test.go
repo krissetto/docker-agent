@@ -98,7 +98,7 @@ func TestCoordinationSchemaUpgradesPreviouslyAppliedVersions(t *testing.T) {
 			assert.Equal(t, id, retryID)
 			var maxVersion int
 			require.NoError(t, store.(*SQLiteSessionStore).db.QueryRowContext(t.Context(), `SELECT MAX(id) FROM migrations`).Scan(&maxVersion))
-			assert.Equal(t, 36, maxVersion)
+			assert.Equal(t, 37, maxVersion)
 			require.NoError(t, NewMigrationManager(store.(*SQLiteSessionStore).db).InitializeMigrations(t.Context()))
 		})
 	}

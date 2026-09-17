@@ -97,7 +97,7 @@ func TestServer_OversizedBodyRejected(t *testing.T) {
 	srv := NewWithManager(nil, "")
 
 	body := bytes.Repeat([]byte("a"), int(defaultMaxRequestBytes)+1)
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/sessions", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/sessions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -110,7 +110,7 @@ func TestServer_OversizedBodyRejected(t *testing.T) {
 // custom body-size cap: bodies under the limit reach handlers normally, while
 // bodies over the limit are rejected with 413 before any handler runs.
 //
-// The test targets POST /api/sessions/:id/messages because the issue (#3937)
+// The test targets POST /api/v2/sessions/:id/messages because the issue (#3937)
 // specifically calls out that route. With a nil SessionManager the handler
 // returns 400 ("message is required") for an under-limit request — any
 // non-413 status confirms the body cap was not exceeded.
@@ -131,7 +131,7 @@ func TestServer_MaxRequestBytesOption(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/sessions/abc/messages", strings.NewReader(tc.body))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/sessions/abc/messages", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			srv.e.ServeHTTP(rec, req)
@@ -158,7 +158,7 @@ func TestServer_WithMaxRequestBytesZeroFallback(t *testing.T) {
 			srv := NewWithManager(nil, "", WithMaxRequestBytes(n))
 			// A body over the default 1 MiB cap must still be rejected.
 			body := bytes.Repeat([]byte("a"), int(defaultMaxRequestBytes)+1)
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/sessions", bytes.NewReader(body))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/sessions", bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			srv.e.ServeHTTP(rec, req)
@@ -268,7 +268,7 @@ func unmarshal(t *testing.T, buf []byte, v any) {
 }
 
 // TestServer_GetSessionsRace pins the data-race fix for the GET
-// /api/sessions and GET /api/sessions/:id handlers (#3591): the in-memory
+// /api/v2/sessions and GET /api/v2/sessions/:id handlers (#3591): the in-memory
 // store hands them live *session.Session pointers, so reading
 // Title/InputTokens/OutputTokens directly races the granular store updates
 // (UpdateSessionTitle/UpdateSessionTokens) a running stream issues on other
@@ -312,13 +312,13 @@ func TestServer_GetSessionsRace(t *testing.T) {
 
 	for range 25 {
 		var catalog sessionCatalogDTO
-		unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions"), &catalog)
+		unmarshal(t, httpGET(t, ctx, lnPath, "/api/v2/sessions"), &catalog)
 		require.Len(t, catalog.Sessions, 1)
 		assert.Equal(t, sess.ID, catalog.Sessions[0].SessionID)
 		assert.Equal(t, 2*catalog.Sessions[0].InputTokens, catalog.Sessions[0].OutputTokens)
 
 		var single sessionResourceDTO
-		unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions/"+sess.ID), &single)
+		unmarshal(t, httpGET(t, ctx, lnPath, "/api/v2/sessions/"+sess.ID), &single)
 		assert.Equal(t, sess.ID, single.SessionID)
 		assert.Equal(t, 2*single.InputTokens, single.OutputTokens)
 	}
@@ -326,7 +326,7 @@ func TestServer_GetSessionsRace(t *testing.T) {
 	wg.Wait()
 }
 
-// TestServer_ForkSession exercises the POST /api/sessions/:id/fork
+// TestServer_ForkSession exercises the POST /api/v2/sessions/:id/fork
 // endpoint end-to-end: a fork at the Nth user message must return a
 // new session with the history before that message, a fork-numbered
 // title, and a fresh ID. An out-of-range ordinal must be rejected with
@@ -353,7 +353,7 @@ func TestServer_ForkSession(t *testing.T) {
 
 	// Happy path: fork before the second user message (ordinal 1).
 	resp := httpDo(t, ctx, http.MethodPost, lnPath,
-		"/api/sessions/"+parent.ID+"/fork",
+		"/api/v2/sessions/"+parent.ID+"/fork",
 		api.ForkSessionRequest{UserMessageIndex: 1})
 	var forked api.SessionResponse
 	unmarshal(t, resp, &forked)
@@ -366,7 +366,7 @@ func TestServer_ForkSession(t *testing.T) {
 
 	// Fork must be persisted server-side so a subsequent GET returns it.
 	var fetched sessionResourceDTO
-	unmarshal(t, httpGET(t, ctx, lnPath, "/api/sessions/"+forked.ID), &fetched)
+	unmarshal(t, httpGET(t, ctx, lnPath, "/api/v2/sessions/"+forked.ID), &fetched)
 	assert.Equal(t, forked.ID, fetched.SessionID)
 	assert.Equal(t, "Original (fork 1)", fetched.Title)
 
@@ -374,7 +374,7 @@ func TestServer_ForkSession(t *testing.T) {
 	// return 400, not 500. This pins the sentinel-driven classification so
 	// future error-message reshuffles can't silently flip the status code.
 	outOfRange := httpRaw(t, ctx, http.MethodPost, lnPath,
-		"/api/sessions/"+parent.ID+"/fork",
+		"/api/v2/sessions/"+parent.ID+"/fork",
 		api.ForkSessionRequest{UserMessageIndex: 99})
 	assert.Equal(t, http.StatusBadRequest, outOfRange.StatusCode, outOfRange.body)
 }
@@ -466,7 +466,7 @@ func TestServerStrictOptInCORS(t *testing.T) {
 	const origin = "http://127.0.0.1:18081"
 	srv := NewWithManager(nil, "secret", WithCORSOrigin(origin))
 
-	preflight := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/sessions", http.NoBody)
+	preflight := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/v2/sessions", http.NoBody)
 	preflight.Header.Set("Origin", origin)
 	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	preflight.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
@@ -485,7 +485,7 @@ func TestServerStrictOptInCORS(t *testing.T) {
 	assert.Equal(t, http.StatusOK, allowedRec.Code)
 	assert.Equal(t, origin, allowedRec.Header().Get("Access-Control-Allow-Origin"))
 
-	rejected := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/sessions", http.NoBody)
+	rejected := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/api/v2/sessions", http.NoBody)
 	rejected.Header.Set("Origin", "http://127.0.0.1:9999")
 	rejected.Header.Set("Access-Control-Request-Method", http.MethodGet)
 	rejectedRec := httptest.NewRecorder()

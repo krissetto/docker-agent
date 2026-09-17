@@ -335,3 +335,34 @@ func TestSessionViewHostRemoteNeverBuildsLocal(t *testing.T) {
 	require.Error(t, err, "remote hosts have no local resource factory")
 	assert.Nil(t, flags.listenSessions)
 }
+
+func TestControlPlaneForwardsPreparedViewCapabilities(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	dir := t.TempDir()
+	archived := session.New(session.WithID("control-plane-view"), session.WithWorkingDir(dir), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
+	require.NoError(t, store.AddSession(t.Context(), archived))
+	flags := &runExecFlags{}
+	flags.runConfig.WorkingDir = dir
+	resources, err := flags.buildLoadedSessionResources(t.Context(), hostViewLoaded(dir, &hostViewProvider{}), flags.runConfig.Clone(), store)
+	require.NoError(t, err)
+	initial := session.New(session.WithAgentName("root"), session.WithWorkingDir(dir))
+	backend := &localBackend{flags: flags, agentSource: config.NewBytesSource("test-source", nil)}
+	require.NoError(t, flags.configureSessionViewHost(t.Context(), backend, resources.services, resources.sessions, initial, nil, resources.cleanup))
+	t.Cleanup(flags.sessionViewHost.Shutdown)
+	registry := newControlPlaneSessions(resources.sessions, flags)
+	info, err := registry.ConfirmedSessionViewInfo(t.Context(), archived.ID)
+	require.NoError(t, err)
+	assert.Equal(t, dir, info.WorkingDir)
+	_, err = registry.SessionByID(archived.ID)
+	require.Error(t, err, "read-only confirmation must not publish")
+	prepared, err := registry.PrepareSessionView(t.Context(), archived.ID)
+	require.NoError(t, err)
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	prepared.Abort()
+	status, err := committed.SessionHandle.Status(t.Context())
+	require.NoError(t, err)
+	assert.True(t, status.Dormant)
+	_, err = registry.SessionByID(archived.ID)
+	require.NoError(t, err)
+}

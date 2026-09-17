@@ -125,13 +125,31 @@ func loadChildRecord(ctx context.Context, q querier, id string) (ChildRecord, er
 	return record, err
 }
 
-func (s *SQLiteSessionStore) CommitChild(ctx context.Context, c ChildCommit) (err error) {
+func (s *SQLiteSessionStore) CommitChild(ctx context.Context, c ChildCommit) error {
+	return s.CommitChildren(ctx, []ChildCommit{c})
+}
+
+func (s *SQLiteSessionStore) CommitChildren(ctx context.Context, commits []ChildCommit) (err error) {
 	defer func() { err = classifySQLiteContextError(ctx, err) }()
 	tx, err := beginSQLiteWrite(ctx, s.db)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	seen := make(map[string]bool, len(commits))
+	for _, c := range commits {
+		if seen[c.Record.Node.SessionID] {
+			return ErrAlreadyExists
+		}
+		seen[c.Record.Node.SessionID] = true
+		if err := s.commitChildTx(ctx, tx, c); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteSessionStore) commitChildTx(ctx context.Context, tx *sql.Tx, c ChildCommit) error {
 	old, err := loadChildRecord(ctx, tx, c.Record.Node.SessionID)
 	if err != nil {
 		return err
@@ -168,7 +186,7 @@ func (s *SQLiteSessionStore) CommitChild(ctx context.Context, c ChildCommit) (er
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *SQLiteSessionStore) LoadChildren(ctx context.Context, root string) ([]ChildRecord, error) {

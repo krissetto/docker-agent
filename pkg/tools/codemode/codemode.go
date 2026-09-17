@@ -153,6 +153,7 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 	var (
 		functionsDoc  []string
 		excludedTools []tools.Tool
+		readOnly      = true
 	)
 
 	for _, toolset := range c.availableToolsets() {
@@ -162,6 +163,8 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 		}
 
 		for _, tool := range allTools {
+			// Excluded tools are also callable from JavaScript.
+			readOnly = readOnly && tool.Annotations.ReadOnlyHint
 			if isExcludedTool(tool) {
 				excludedTools = append(excludedTools, tool)
 			} else {
@@ -190,7 +193,8 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 		}),
 		OutputSchema: tools.MustSchemaFor[ScriptResult](),
 		Annotations: tools.ToolAnnotations{
-			Title: "Run tools with Javascript",
+			Title:        "Run tools with Javascript",
+			ReadOnlyHint: readOnly,
 		},
 	}}
 

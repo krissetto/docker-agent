@@ -52,7 +52,7 @@ func newAuthorSafetyServer(t *testing.T, store session.Store, factory SessionRun
 
 func authorSafetySnapshot(t *testing.T, srv *Server, id string) *session.Session {
 	t.Helper()
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/"+id+"/snapshot", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+id+"/snapshot", "", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var snapshot sessionSnapshotDTO
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &snapshot))
@@ -113,10 +113,10 @@ func TestCanonicalAuthorSafetyClientChoiceBeforeFirstTurnWins(t *testing.T) {
 	require.Equal(t, http.StatusCreated, code)
 	require.Equal(t, session.SafetyPolicyBalanced, authorSafetySnapshot(t, srv, metadata.SessionID).GetSafetyPolicy())
 
-	updated := sessionRequest(t, srv, http.MethodPatch, "/api/sessions/"+metadata.SessionID+"/safety-policy", `{"safety_policy":"strict"}`, "")
+	updated := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/"+metadata.SessionID+"/safety-policy", `{"safety_policy":"strict"}`, "")
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 	assert.Equal(t, session.SafetyPolicyStrict, authorSafetySnapshot(t, srv, metadata.SessionID).GetSafetyPolicy())
-	submitted := sessionRequest(t, srv, http.MethodPost, "/api/sessions/"+metadata.SessionID+"/messages", `{"content":"hello"}`, "")
+	submitted := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+metadata.SessionID+"/messages", `{"content":"hello"}`, "")
 	require.Equal(t, http.StatusAccepted, submitted.Code, submitted.Body.String())
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		stored, err := store.GetSession(t.Context(), metadata.SessionID)
@@ -143,7 +143,7 @@ func TestCanonicalAuthorSafetyFailedBuildRetryUsesCurrentDefault(t *testing.T) {
 		return build(ctx, source, workingDir)
 	})
 
-	failed := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	failed := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	require.Equal(t, http.StatusInternalServerError, failed.Code, failed.Body.String())
 	stored, err := store.GetSessions(t.Context())
 	require.NoError(t, err)

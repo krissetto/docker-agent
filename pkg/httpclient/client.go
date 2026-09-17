@@ -328,10 +328,10 @@ func (u *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 // can replay the request. Callers must pass a request clone; the body reader is
 // consumed.
 func injectEncryptedConfigBody(req *http.Request, enc string) error {
-	if req.Body == nil {
+	if ct := req.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
 		return nil
 	}
-	if ct := req.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+	if req.Body == nil {
 		return nil
 	}
 
@@ -355,6 +355,44 @@ func injectEncryptedConfigBody(req *http.Request, enc string) error {
 		return fmt.Errorf("encode JSON body: %w", err)
 	}
 
+	resetBody(req, rewritten)
+	return nil
+}
+
+// RemoveEncryptedConfig removes encrypted agent configuration from a JSON
+// request body and deletes its digest header. Bodies without the field remain
+// byte-for-byte unchanged.
+func RemoveEncryptedConfig(req *http.Request) error {
+	req.Header.Del(EncryptedConfigDigestHeader)
+	if req.Body == nil {
+		return nil
+	}
+	if ct := req.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		return nil
+	}
+
+	raw, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read request body: %w", err)
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		resetBody(req, raw)
+		return nil
+	}
+	if _, ok := payload[EncryptedConfigBodyField]; !ok {
+		resetBody(req, raw)
+		return nil
+	}
+	delete(payload, EncryptedConfigBodyField)
+
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		resetBody(req, raw)
+		return fmt.Errorf("encode JSON body: %w", err)
+	}
 	resetBody(req, rewritten)
 	return nil
 }

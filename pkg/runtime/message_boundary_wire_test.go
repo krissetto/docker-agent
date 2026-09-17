@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -43,10 +44,10 @@ func TestMessageAddedBoundaryWireMetadata(t *testing.T) {
 
 func TestMessageAddedBoundaryHTTPReplay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/sessions/s/events", r.URL.Path)
+		assert.Equal(t, api.SessionAPIPath+"/s/events", r.URL.Path)
 		assert.Equal(t, "4", r.URL.Query().Get("since"))
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"agent_name\":\"root\",\"state\":\"running\"},\"cursor\":6,\"transcript_position\":2}}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"agent_name\":\"root\",\"state\":\"running\"},\"cursor\":6,\"transcript_position\":2}}\n\n")
 		for i, role := range []chat.MessageRole{chat.MessageRoleAssistant, chat.MessageRoleUser} {
 			message := session.NewAgentMessage("root", &chat.Message{Role: role, Content: "private body", ToolCalls: []tools.ToolCall{{ID: "published"}}})
 			encoded, err := json.Marshal(MessageAddedAt("s", message, "root", i))
@@ -54,9 +55,9 @@ func TestMessageAddedBoundaryHTTPReplay(t *testing.T) {
 				return
 			}
 			assert.NotContains(t, string(encoded), "private body")
-			fmt.Fprintf(w, "data: {\"version\":1,\"type\":\"event\",\"envelope\":{\"version\":1,\"session_id\":\"s\",\"turn_id\":\"turn\",\"sequence\":%d,\"transcript_position\":%d,\"event\":%s}}\n\n", i+5, i, encoded)
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"turn\",\"sequence\":%d,\"transcript_position\":%d,\"event\":%s}}\n\n", i+5, i, encoded)
 		}
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"ready\",\"cursor\":6}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"ready\",\"cursor\":6}\n\n")
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	}))

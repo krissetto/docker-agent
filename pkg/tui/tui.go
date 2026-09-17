@@ -851,7 +851,7 @@ func (m *appModel) Init() tea.Cmd {
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
-	return cmd
+	return core.MapCommand(cmd, nil)
 }
 
 // autoThemeInitCmd enables DEC mode 2031 (terminal color-scheme reports) so
@@ -942,13 +942,18 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
-	return model, cmd
+	return model, core.MapCommand(cmd, nil)
 }
 
 // updateWithLifecycle processes nested pointer and routed messages without
 // scheduling. Only the outer Update commits a timer, after every nested event
 // has finished starting, stopping, or replacing its animation registrations.
 func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case core.SequenceMsg, core.ClipboardMsg:
+		return m, core.MapCommand(core.CmdHandler(msg), nil)
+	}
+
 	switch pointer := msg.(type) {
 	case messages.PointerBoundaryMsg:
 		_, pendingCmd := m.updateWithLifecycle(pointer.Pending)

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/api"
 )
 
 func TestRemoteSessionCapabilityOperations(t *testing.T) {
@@ -14,17 +16,17 @@ func TestRemoteSessionCapabilityOperations(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
-		case "/api/sessions/s/models":
+		case api.SessionAPIPath + "/s/models":
 			_, _ = w.Write([]byte(`[{"name":"fast","ref":"test/fast"}]`))
-		case "/api/sessions/s/model":
+		case api.SessionAPIPath + "/s/model":
 			_, _ = w.Write([]byte(`{"session_id":"s","agent_name":"root","model":"test/fast","capabilities":{"model_switching":true,"model_catalog_refresh":true,"pause":true,"session_editing":true,"context_inspection":true,"live_sessions":true,"compaction":true,"target_compaction":true}}`))
-		case "/api/sessions/s/models/refresh":
+		case api.SessionAPIPath + "/s/models/refresh":
 			_, _ = w.Write([]byte(`{"session_id":"s","agent_name":"root","model":"test/fast","capabilities":{"model_switching":true,"model_catalog_refresh":true,"pause":true,"session_editing":true,"context_inspection":true,"live_sessions":true,"compaction":true,"target_compaction":true}}`))
-		case "/api/sessions/s/pause":
+		case api.SessionAPIPath + "/s/pause":
 			_, _ = w.Write([]byte(`{"paused":true}`))
-		case "/api/sessions/s/context":
+		case api.SessionAPIPath + "/s/context":
 			_, _ = w.Write([]byte(`{"model":"test/fast"}`))
-		case "/api/sessions/s/live-sessions":
+		case api.SessionAPIPath + "/s/live-sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s","agent_name":"root","current":true}]`))
 		default:
 			w.WriteHeader(http.StatusNoContent)
@@ -52,6 +54,6 @@ func TestRemoteSessionCapabilityOperations(t *testing.T) {
 	require.NoError(t, session.RemoveAttachment(t.Context(), "/tmp/a"))
 	require.NoError(t, session.Compact(t.Context(), "", EventSinkFunc(func(Event) {})))
 	require.NoError(t, session.CompactTarget(t.Context(), "child", "", EventSinkFunc(func(Event) {})))
-	assert.Contains(t, requests, "PATCH /api/sessions/s/model")
-	assert.Contains(t, requests, "POST /api/sessions/s/compact/child")
+	assert.Contains(t, requests, "PATCH "+api.SessionAPIPath+"/s/model")
+	assert.Contains(t, requests, "POST "+api.SessionAPIPath+"/s/compact/child")
 }

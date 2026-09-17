@@ -108,6 +108,10 @@ func TestOwnedTurnDrainsOnEveryExit(t *testing.T) {
 			close(h.settled)
 			select {
 			case result := <-done:
+				if exit == "gap" {
+					var gap *runtimeclient.ObservationGapError
+					require.ErrorAs(t, result.Err, &gap, "host returns actionable gap only after cancellation and canonical settlement")
+				}
 				if exit == "normal" {
 					require.True(t, result.Stopped)
 					require.NoError(t, result.Err)

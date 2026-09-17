@@ -198,13 +198,13 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 	}
 	for sub := range h.seqSubs[sessionID] {
 		if !terminalEvent && len(sub.out) >= sub.limit {
-			h.removeSequencedSubscriberLocked(sessionID, sub)
+			h.gapSequencedSubscriberLocked(sessionID, sub)
 			continue
 		}
 		select {
 		case sub.out <- SequencedSessionEvent{Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: event}:
 		default:
-			h.removeSequencedSubscriberLocked(sessionID, sub)
+			h.gapSequencedSubscriberLocked(sessionID, sub)
 		}
 	}
 }
@@ -369,6 +369,26 @@ func (h *sessionEventHub) removeSubscriberLocked(sessionID string, sub *sessionE
 		delete(h.subs, sessionID)
 	}
 	close(sub.out)
+}
+
+// Overflow is a recoverable cursor gap, never indistinguishable from a clean
+// stream close. Reserve the terminal slot (or discard one queued event if a
+// prior terminal filled it) so even a stalled observer receives the gap.
+func (h *sessionEventHub) gapSequencedSubscriberLocked(sessionID string, sub *sequencedSessionEventSubscriber) {
+	if sub.closed {
+		return
+	}
+	gap := SequencedSessionEvent{Gap: true, FirstAvailable: h.nextSeq[sessionID]}
+	select {
+	case sub.out <- gap:
+	default:
+		select {
+		case <-sub.out:
+		default:
+		}
+		sub.out <- gap
+	}
+	h.removeSequencedSubscriberLocked(sessionID, sub)
 }
 
 func (h *sessionEventHub) removeSequencedSubscriberLocked(sessionID string, sub *sequencedSessionEventSubscriber) {

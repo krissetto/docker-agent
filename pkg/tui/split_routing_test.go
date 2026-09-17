@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -136,7 +137,7 @@ func TestActualProgramSplitNestedSequencePreservesOriginOrderAndFramework(t *tes
 	program := startPaneProgram(t, root)
 	program.Send(paneProgramAction{apply: func(m *appModel) tea.Cmd {
 		mark := func(n int) tea.Cmd { return func() tea.Msg { return paneSequenceMarker(n) } }
-		return m.routePaneCmd("profile", tea.Sequence(mark(1), tea.Sequence(mark(2), tea.Batch(mark(3))), func() tea.Msg { return messages.RequestFocusMsg{Target: messages.PanelMessages} }, mark(4)))
+		return m.routePaneCmd("profile", core.Sequence(mark(1), core.Sequence(mark(2), tea.Batch(mark(3))), func() tea.Msg { return messages.RequestFocusMsg{Target: messages.PanelMessages} }, mark(4)))
 	}})
 	require.Eventually(t, func() bool { return len(queryPaneProgram(t, program).markers["profile"]) == 4 }, time.Second, time.Millisecond)
 	s := queryPaneProgram(t, program)
@@ -146,9 +147,9 @@ func TestActualProgramSplitNestedSequencePreservesOriginOrderAndFramework(t *tes
 	require.Equal(t, "focused draft", s.draft)
 	// The command-result type is unchanged, so Bubble Tea's OSC52 handler
 	// (not a page Update) owns clipboard writes. No host clipboard opener runs.
-	clipboard := tea.SetClipboard("λ pane copy")
-	require.Equal(t, reflect.TypeOf(clipboard()), reflect.TypeOf(paneOriginCommand("profile", 1, clipboard)()))
-	require.Equal(t, reflect.TypeOf(tea.SetPrimaryClipboard("")()), reflect.TypeOf(paneOriginCommand("profile", 1, tea.SetPrimaryClipboard("x"))()))
+	clipboard := core.SetClipboard("λ pane copy")
+	require.Equal(t, reflect.TypeOf(tea.SetClipboard("λ pane copy")()), reflect.TypeOf(paneOriginCommand("profile", 1, clipboard)()))
+	require.Equal(t, reflect.TypeOf(tea.SetPrimaryClipboard("")()), reflect.TypeOf(paneOriginCommand("profile", 1, core.SetPrimaryClipboard("x"))()))
 	require.Nil(t, paneOriginCommand("profile", 1, nil))
 	require.Nil(t, paneOriginCommand("profile", 1, func() tea.Msg { return nil })())
 	routed := messages.RoutedMsg{SessionID: "third", RouteGeneration: 123, Inner: paneSequenceMarker(9)}

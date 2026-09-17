@@ -133,11 +133,11 @@ func TestCanonicalSnapshotChunkFraming(t *testing.T) {
 func TestCanonicalHTTPWaitUnknownTurnReturnsTypedNotFound(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	srv, _ := newCanonicalLocalServer(t, store, agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))
-	created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	require.Equal(t, http.StatusCreated, created.Code)
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
-	response := sessionRequest(t, srv, http.MethodPost, "/api/sessions/"+metadata.SessionID+"/turns/unknown/wait", "", "")
+	response := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+metadata.SessionID+"/turns/unknown/wait", "", "")
 	assert.Equal(t, http.StatusNotFound, response.Code)
 	assert.Contains(t, response.Body.String(), `"error":"not_found"`)
 }
@@ -171,7 +171,7 @@ func TestCanonicalHTTPRemoteLargeSnapshotRoundTrip(t *testing.T) {
 func TestCanonicalHTTPRemotePersistenceFailureDetailWithoutRetry(t *testing.T) {
 	var requests atomic.Int32
 	e := echo.New()
-	e.POST("/api/sessions/s/messages", func(echo.Context) error {
+	e.POST("/api/v2/sessions/s/messages", func(echo.Context) error {
 		requests.Add(1)
 		return sessionHTTPError(&runtime.SessionError{Kind: runtime.SessionErrorPersistence, SessionID: "s", Operation: "submit", Detail: "session writes are blocked: schema mismatch"})
 	})

@@ -16,7 +16,7 @@ import (
 func TestRemoteBackendPassesAgentFileAsSessionSource(t *testing.T) {
 	var source, agent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/sessions", r.URL.Path)
+		assert.Equal(t, "/api/v2/sessions", r.URL.Path)
 		var request struct {
 			Source    string `json:"source"`
 			AgentName string `json:"agent_name"`

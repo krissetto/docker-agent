@@ -48,7 +48,7 @@ func TestWakeClaimStaleSubmitDoesNotStartEmptyGeneration(t *testing.T) {
 		d.Wait()
 		d.mu.Lock()
 		assert.Equal(t, generation, d.generation)
-		assert.False(t, d.running)
+		assert.False(t, d.running())
 		assert.Empty(t, d.pending)
 		d.mu.Unlock()
 		assert.Equal(t, int32(1), calls.Load())
@@ -71,8 +71,8 @@ func TestWakeClaimRechecksInputAfterGate(t *testing.T) {
 	assert.Empty(t, callbacks)
 	assert.Equal(t, int32(1), aborted.Load())
 	assert.Zero(t, d.generation)
-	assert.False(t, d.running)
-	assert.False(t, d.starting)
+	assert.False(t, d.running())
+	assert.False(t, d.starting())
 }
 
 func TestEmptyStopWarningDoesNotInventProviderCause(t *testing.T) {

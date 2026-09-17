@@ -26,7 +26,7 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 }
 
 // TestCreateSession_WorkingDirUnrestrictedDefault pins the compatible
-// default: without WithSessionWorkingDirRoot, POST /api/sessions may point
+// default: without WithSessionWorkingDirRoot, POST /api/v2/sessions may point
 // a session at any existing host directory, stored exactly as supplied
 // (absolute, not canonicalised), and neither the process cwd nor
 // runConfig.WorkingDir acts as an implicit boundary (#3788). The one

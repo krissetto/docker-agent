@@ -403,6 +403,8 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 		promptFiles = unique
 
+		// Build options in source order: author configuration first, followed by
+		// loader/runtime additions below, so explicit execution overrides win.
 		opts := []agent.Opt{
 			agent.WithName(agentConfig.Name),
 			agent.WithDescription(expander.Expand(ctx, agentConfig.Description, nil)),
@@ -412,6 +414,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithAddDescriptionParameter(agentConfig.AddDescriptionParameter),
 			agent.WithRedactSecrets(agentConfig.RedactSecretsEnabled()),
 			agent.WithSafety(agentConfig.Safety),
+			agent.WithReadOnly(agentConfig.ReadOnly),
 			agent.WithAddPromptFiles(promptFiles),
 			agent.WithAddPromptFilesDepth(agentConfig.AddPromptFilesDepth),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
@@ -672,6 +675,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			isAutoModel = true
 		}
 		modelCfg.Name = name
+		config.ApplyModelOverridePolicy(cfg, a.Name, name, &modelCfg)
 
 		// Use max_tokens from config if specified, otherwise look up from models.dev
 		maxTokens := &defaultMaxTokens
@@ -956,7 +960,7 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 		}
 
 		wrapped := WithToolsFilter(tool, toolset.Tools...)
-		wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly || a.ReadOnly)
+		wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly)
 		wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
 		wrapped, err = loadOpts.withToon(wrapped, toolset.Toon)
 		if err != nil {
@@ -972,7 +976,9 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 			if deferredToolset == nil {
 				deferredToolset = loadOpts.newDeferred()
 			}
-			deferredToolset.AddSource(wrapped, toolset.Defer.DeferAll, toolset.Defer.Tools)
+			// Filter the source as well as the final composition: discovery and
+			// activation must never reintroduce a forbidden tool.
+			deferredToolset.AddSource(WithReadOnlyFilter(wrapped, a.ReadOnly), toolset.Defer.DeferAll, toolset.Defer.Tools)
 			if toolset.Defer.DeferAll {
 				wrapped = WithNoToolsFilter(wrapped)
 			} else {
@@ -1018,6 +1024,12 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	}
 	if len(a.Handoffs) > 0 {
 		toolSets = append(toolSets, handoff.New())
+	}
+
+	// Apply agent policy after all generated tools and merges are composed,
+	// before code mode encapsulates their handlers behind one tool.
+	for i, toolSet := range toolSets {
+		toolSets[i] = WithReadOnlyFilter(toolSet, a.ReadOnly)
 	}
 
 	// Wrap all tools in a single Code Mode toolset.

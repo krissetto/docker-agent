@@ -71,7 +71,8 @@ func (s *Screen) Frame(width, height, spinnerFrame int, busy bool, sessionState 
 	return lines, cursorLine, cursorCol
 }
 
-// ConfirmModel holds a pending tool-approval prompt.
+// ConfirmModel owns a pending tool-approval prompt and its rejection draft.
+// Discarding or replacing this correlated prompt discards all of its input.
 type ConfirmModel struct {
 	Rejecting    bool
 	RejectReason string

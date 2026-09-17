@@ -1033,3 +1033,26 @@ func TestCodeModeTool_RateLimitedInnerPacesRetry(t *testing.T) {
 	require.NoError(t, terr)
 	assert.Contains(t, allTools[0].Description, "RagSearch", "recovered inner's declarations must reappear")
 }
+
+func TestCodeModeReadOnlyHintIncludesEveryCallableTool(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		tools []tools.Tool
+		want  bool
+	}{
+		{name: "empty", want: true},
+		{name: "read only", tools: []tools.Tool{{Name: "read", Annotations: tools.ToolAnnotations{ReadOnlyHint: true}}}, want: true},
+		{name: "mutating", tools: []tools.Tool{{Name: "write"}}},
+		{name: "excluded delegation", tools: []tools.Tool{{Name: "transfer_task"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := Wrap(&testToolSet{tools: tc.tools})
+			require.NoError(t, c.(tools.Startable).Start(t.Context()))
+			all, err := c.Tools(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, all[0].Annotations.ReadOnlyHint)
+		})
+	}
+}

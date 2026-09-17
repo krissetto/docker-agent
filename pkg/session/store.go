@@ -225,6 +225,7 @@ type Store interface {
 type InMemorySessionStore struct {
 	coordinationMu sync.Mutex
 	appendReceipts map[itemAppendKey]itemAppendReceipt
+	batchReceipts  map[itemAppendKey]itemBatchReceipt
 	children       map[string]ChildRecord
 	reports        map[string]acceptedChildReport
 	sessions       *concurrent.Map[string, *Session]
@@ -380,6 +381,11 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 		}
 	}
 
+	for key := range s.batchReceipts {
+		if key.sessionID == id {
+			delete(s.batchReceipts, key)
+		}
+	}
 	for key := range s.appendReceipts {
 		if key.sessionID == id {
 			delete(s.appendReceipts, key)
@@ -1193,15 +1199,34 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 }
 
 func (s *SQLiteSessionStore) GetSessionSummariesWithScope(ctx context.Context, scope SummaryScope) ([]Summary, error) {
+	return s.sessionSummaries(ctx, scope, nil)
+}
+
+func (s *SQLiteSessionStore) sessionSummaries(ctx context.Context, scope SummaryScope, page *SummaryPageOptions) ([]Summary, error) {
 	query := `SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
 		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message'),
 		        s.parent_id, s.agent_model_overrides
 		 FROM sessions s`
 	if !scope.IncludeChildren {
-		query += " WHERE s.parent_id IS NULL OR s.parent_id = ''"
+		query += " WHERE (s.parent_id IS NULL OR s.parent_id = '')"
 	}
-	query += " ORDER BY s.created_at DESC"
-	rows, err := s.db.QueryContext(ctx, query)
+	var args []any
+	if page != nil && page.AfterID != "" {
+		if scope.IncludeChildren {
+			query += " WHERE "
+		} else {
+			query += " AND "
+		}
+		query += "(s.created_at < ? OR (s.created_at = ? AND s.id > ?))"
+		stamp := page.AfterCreatedAt.Format(time.RFC3339)
+		args = append(args, stamp, stamp, page.AfterID)
+	}
+	query += " ORDER BY s.created_at DESC, s.id ASC"
+	if page != nil {
+		query += " LIMIT ?"
+		args = append(args, page.Limit+1)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, classifySQLiteContextError(ctx, err)
 	}

@@ -47,7 +47,7 @@ func TestReplaceSessionHydratesSubagentTree(t *testing.T) {
 
 	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "s.db"))
 	require.NoError(t, err)
-	defer store.(*session.SQLiteSessionStore).Close()
+	t.Cleanup(func() { require.NoError(t, store.(*session.SQLiteSessionStore).Close()) })
 
 	// Persisted state from a previous process: session, child sub-session,
 	// and the subagent tree pointing at it.

@@ -113,7 +113,7 @@ func TestToolConfirmationRejectReason(t *testing.T) {
 
 func TestInterruptConfirmationDoesNotCancelUntilApproved(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.interruptMode = "always"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Zero(t, handle.stops)
@@ -164,7 +164,7 @@ func TestUnknownSettingsNeverAccessPersistence(t *testing.T) {
 
 func TestBusyTranscriptHasNoGlobalWorkingSpinner(t *testing.T) {
 	m := bareModel(100)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.status.Agent = "worker"
 	lines, _, _ := m.buildLines()
 	text := strings.Join(lines, "\n")
@@ -176,7 +176,7 @@ func TestBusyTranscriptHasNoGlobalWorkingSpinner(t *testing.T) {
 
 func TestInterruptModesDoubleTapAndNone(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.interruptMode = "double-tap"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Zero(t, handle.stops)
@@ -253,7 +253,7 @@ func TestGlobalSettingsBroadcastWithoutChangingViewerState(t *testing.T) {
 	m.viewers = &viewerHost{views: map[*app.App]*model{hidden.app: hidden}}
 	m.settingsSave = func(mutate func(*userconfig.Config) error) error { return mutate(&userconfig.Config{}) }
 	hidden.screen.Editor.SetText("hidden draft")
-	hidden.busy = true
+	hidden.lifecycle.Status = runtime.SessionStateRunning
 	hidden.interruptPending = true
 	hidden.screen.Transcript.AddUser("hidden history")
 	screen, transcript := hidden.screen, hidden.screen.Transcript
@@ -266,7 +266,7 @@ func TestGlobalSettingsBroadcastWithoutChangingViewerState(t *testing.T) {
 	assert.True(t, hidden.soundEnabled)
 	assert.Equal(t, "double-tap", hidden.interruptMode)
 	assert.False(t, hidden.renderImages)
-	assert.True(t, hidden.busy)
+	assert.True(t, hidden.busy())
 	assert.True(t, hidden.interruptPending)
 	assert.Equal(t, "hidden draft", hidden.screen.Editor.Text())
 	assert.Same(t, screen, hidden.screen)
@@ -402,19 +402,19 @@ func TestDormancyUsesCanonicalSnapshotAndAddressedEvents(t *testing.T) {
 		assert.Contains(t, text, "Any queued work or reports will wait until you resume this session.")
 		assert.NotContains(t, text, "reports queued", "no report count or presence is inferred")
 		m.handleEvent(t.Context(), &runtime.DormancyChangedEvent{SessionID: "relative", Dormant: false})
-		assert.True(t, m.runtimeStatus.Dormant)
+		assert.True(t, m.status.Dormant)
 		m.handleEvent(t.Context(), &runtime.DormancyChangedEvent{SessionID: handle.id, Dormant: false})
-		assert.False(t, m.runtimeStatus.Dormant)
+		assert.False(t, m.status.Dormant)
 	}
 }
 
 func TestUnsupportedResumeKeepsAuthoritativeDormancyAndDraft(t *testing.T) {
 	m, handle := sessionModel(t)
-	m.runtimeStatus = runtime.SessionStatus{SessionID: handle.id, Dormant: true}
+	m.status.Dormant = true
 	m.screen.Editor.SetText("retained draft")
 	before := len(handle.submitted)
 	require.True(t, m.handleSlash(t.Context(), "/resume", busySubmitSteer))
-	assert.True(t, m.runtimeStatus.Dormant, "only canonical events may change dormancy presentation")
+	assert.True(t, m.status.Dormant, "only canonical events may change dormancy presentation")
 	assert.Equal(t, "retained draft", m.screen.Editor.Text())
 	assert.Len(t, handle.submitted, before, "resume is never a synthetic input")
 	assert.Zero(t, handle.stops)

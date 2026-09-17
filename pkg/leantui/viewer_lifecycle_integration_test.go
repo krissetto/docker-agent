@@ -235,7 +235,7 @@ func viewerLifecycleNextCall(t *testing.T, p *viewerLifecycleProvider) viewerLif
 }
 
 func viewerLifecycleText(m *model) string {
-	return strings.Join(m.screen.Transcript.Lines(100, 0, m.busy, m.sessionState, nil), "\n")
+	return strings.Join(m.screen.Transcript.Lines(100, 0, m.busy(), m.sessionState, nil), "\n")
 }
 
 func viewerLifecycleAttachment(t *testing.T, dir, name string) messages.Attachment {
@@ -282,9 +282,9 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 			assert.Empty(t, f.m.screen.Editor.Text())
 			assert.Empty(t, f.m.draftAttachments)
 			if active {
-				assert.True(t, f.m.busy, "canonical snapshot restores an already-running child")
+				assert.True(t, f.m.busy(), "canonical snapshot restores an already-running child")
 			} else {
-				assert.False(t, f.m.busy)
+				assert.False(t, f.m.busy())
 				assert.Contains(t, viewerLifecycleText(f.m), "completed child history")
 			}
 			childScreen := f.m.screen
@@ -340,7 +340,7 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 			assert.Same(t, childHandle, f.m.app.SessionHandle())
 			assert.Contains(t, viewerLifecycleText(f.m), "child follow-up answer")
 			assert.Empty(t, f.m.pendingUsers)
-			assert.False(t, f.m.busy)
+			assert.False(t, f.m.busy())
 			snapshot, err := f.child.Snapshot(t.Context())
 			require.NoError(t, err)
 			count := 0
@@ -386,7 +386,7 @@ func TestViewerLifecycleDeniedAdmissionPreservesDraftAndAttachments(t *testing.T
 					f.m.draftAttachments = []messages.Attachment{viewerLifecycleAttachment(t, f.root.Session().WorkingDir, "denied.txt")}
 				}
 				before := append([]messages.Attachment(nil), f.m.draftAttachments...)
-				f.m.busy = busy
+				f.m.setTestBusy(busy)
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
 				f.m.submitEditorMode(ctx, draft, busySubmitFollowUp)
@@ -555,7 +555,7 @@ func TestViewerLifecycleRemoteUnsupportedAndAdmissionFailureAreTruthful(t *testi
 			assert.Equal(t, "remote draft", m.screen.Editor.Text())
 			assert.Equal(t, []messages.Attachment{attachment}, m.draftAttachments)
 			assert.Empty(t, m.pendingUsers)
-			assert.False(t, m.busy)
+			assert.False(t, m.busy())
 			assert.NotContains(t, viewerLifecycleText(m), "Opened session")
 			assert.NotContains(t, viewerLifecycleText(m), "Live subagent viewer")
 		})

@@ -28,14 +28,14 @@ func TestSecondSubmissionDuringSettlementDoesNotReportMailboxCapacity(t *testing
 	// A finished provider is not yet a committed session turn. Exercise the
 	// public second-submit boundary while that durability barrier is held.
 	d.mu.Lock()
-	d.settling = true
+	d.phase = sessionSettling
 	d.mu.Unlock()
 	second, err := h.Submit(t.Context(), TurnInput{Content: "second"})
 	require.NoError(t, err)
 	assert.Equal(t, SubmissionDispositionQueued, second.Disposition)
 	assert.NotContains(t, d.LastError(), "session start:")
 	d.mu.Lock()
-	d.settling = false
+	d.leave(sessionSettling)
 	d.mu.Unlock()
 	rt.sessionDrivers.signalWork()
 	coordinationAwait(t, h, second.TurnID)
@@ -71,14 +71,14 @@ func TestCompetingWakeDoesNotPublishFalseStartCapacity(t *testing.T) {
 	// Another scheduler wins the wake and runs while the submitter is between
 	// durable append and start. Its request remains accepted, never a limit error.
 	d.mu.Lock()
-	d.starting = true
+	d.phase = sessionStarting
 	d.startDone = make(chan struct{})
 	d.mu.Unlock()
 	close(release)
 	require.NoError(t, <-done)
 	assert.NotContains(t, d.LastError(), "session start:")
 	d.mu.Lock()
-	d.starting = false
+	d.leave(sessionStarting)
 	d.signalStartDoneLocked()
 	d.mu.Unlock()
 	d.WakePending()

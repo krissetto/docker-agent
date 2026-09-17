@@ -21,11 +21,11 @@ func observeRemoteTreeSeeds(t *testing.T) Observation {
 		w.Header().Set("Content-Type", "text/event-stream")
 		out := bufio.NewWriter(w)
 		frames := []string{
-			`{"version":1,"type":"snapshot","snapshot":{"session":{"id":"root"},"status":{"session_id":"root","agent_name":"root","state":"running","pending":0},"interactions":[],"pending_inputs":[],"cursor":4,"transcript_position":0}}`,
-			`{"version":1,"type":"snapshot","snapshot":{"session":{"id":"child"},"status":{"session_id":"child","agent_name":"worker","state":"running","pending":0},"interactions":[],"pending_inputs":[],"cursor":9,"transcript_position":0}}`,
-			`{"version":1,"type":"event","envelope":{"version":1,"session_id":"root","sequence":0,"event":{"type":"stream_started","session_id":"root","agent_name":"root"}}}`,
-			`{"version":1,"type":"event","envelope":{"version":1,"session_id":"child","sequence":0,"event":{"type":"stream_started","session_id":"child","agent_name":"worker"}}}`,
-			`{"version":1,"type":"ready"}`,
+			`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"root"},"status":{"session_id":"root","agent_name":"root","state":"running","pending":0},"interactions":[],"pending_inputs":[],"cursor":4,"transcript_position":0}}`,
+			`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"child"},"status":{"session_id":"child","agent_name":"worker","state":"running","pending":0},"interactions":[],"pending_inputs":[],"cursor":9,"transcript_position":0}}`,
+			`{"version":2,"type":"event","envelope":{"version":2,"session_id":"root","sequence":0,"transcript_position":-1,"event":{"type":"stream_started","session_id":"root","agent_name":"root"}}}`,
+			`{"version":2,"type":"event","envelope":{"version":2,"session_id":"child","sequence":0,"transcript_position":-1,"event":{"type":"stream_started","session_id":"child","agent_name":"worker"}}}`,
+			`{"version":2,"type":"ready"}`,
 		}
 		for _, frame := range frames {
 			fmt.Fprintf(out, "data: %s\n\n", frame)

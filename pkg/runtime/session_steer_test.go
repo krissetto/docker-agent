@@ -61,7 +61,7 @@ func TestDeliverMessageSteersIntoLiveSessionLoop(t *testing.T) {
 	sess := session.New(session.WithID("sess"))
 	d := r.sessionDrivers.Get(sess)
 	d.mu.Lock()
-	d.running = true
+	d.phase = sessionRunning
 	d.openSettledLocked()
 	d.mu.Unlock()
 
@@ -186,7 +186,7 @@ func TestSteeringDrainWaitsForDurableSessionPromotion(t *testing.T) {
 	require.NoError(t, err)
 	d := handle.(*sessionHandle).driver
 	d.mu.Lock()
-	d.running = true
+	d.phase = sessionRunning
 	d.mu.Unlock()
 
 	require.True(t, d.PostSteer(t.Context(), QueuedMessage{Content: "durable first", RequestID: "turn-1", AcceptedPosition: -1, AcceptedPersisted: true}))
@@ -220,7 +220,7 @@ func (s *failingPromotionStore) PromotePendingUserMessage(ctx context.Context, s
 func TestSteeringDrainAtomicSwapLeavesConcurrentArrivalForNextBoundary(t *testing.T) {
 	rt, sess := newSessionFixture(t)
 	d := rt.sessionDrivers.Get(sess)
-	d.running = true
+	d.phase = sessionRunning
 	require.True(t, d.PostSteer(t.Context(), QueuedMessage{Content: "one", RequestID: "one", AcceptedPosition: -1}))
 	require.True(t, d.PostSteer(t.Context(), QueuedMessage{Content: "two", RequestID: "two", AcceptedPosition: -1}))
 	batch := d.DrainSteering()

@@ -132,7 +132,7 @@ func TestRetryStopRaceReturnsErrorWhenMailboxIsCleared(t *testing.T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	assert.Empty(t, d.pending, "stopping clears accepted retry work")
-	assert.False(t, d.running, "cleared retry must not start execution")
+	assert.False(t, d.running(), "cleared retry must not start execution")
 	assert.Zero(t, d.generation, "stopped retry must never create an execution generation")
 }
 

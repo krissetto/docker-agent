@@ -82,7 +82,7 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 		return h.editPendingMessageLocked(ctx, edit.PendingMessage)
 	}
 	transcript := edit.Kind == SessionEditMessage || edit.Kind == SessionEditSummary || edit.Kind == SessionEditTokens
-	if transcript && (d.running || d.starting || d.settling || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {
+	if transcript && (d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {
 		return nil, ErrSessionCapacity
 	}
 	next := d.sess.Clone()

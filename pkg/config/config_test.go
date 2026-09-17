@@ -333,7 +333,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 		require.NoError(t, err)
 
 		err = CheckRequiredEnvVars(t.Context(), cfg, "http://localhost:8080", &noEnvProvider{})
-		require.ErrorContains(t, err, "sign in Docker Desktop")
+		require.NoError(t, err)
 	})
 
 	t.Run("localhost gateway with token", func(t *testing.T) {

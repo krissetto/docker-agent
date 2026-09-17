@@ -57,7 +57,7 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
 	cmd.PersistentFlags().StringVar(&flags.corsOrigin, "cors-origin", "", "Exact browser origin allowed to call the API (empty disables CORS)")
 	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB). Requests exceeding this limit are rejected with HTTP 413.")
-	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
+	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/v2/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
 	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
 	_ = cmd.PersistentFlags().MarkHidden("pprof-addr")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")

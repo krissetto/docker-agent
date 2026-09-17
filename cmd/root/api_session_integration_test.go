@@ -81,7 +81,7 @@ agents:
 		t.Fatalf("serve api did not listen: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	baseURL := "http://" + address
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/api/sessions", strings.NewReader(`{"agent_name":"root","title":"headless"}`))
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/api/v2/sessions", strings.NewReader(`{"agent_name":"root","title":"headless"}`))
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)
@@ -96,7 +96,7 @@ agents:
 	assert.NotEmpty(t, metadata.SessionID)
 	assert.Equal(t, "root", metadata.AgentName)
 
-	request, err = http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/api/sessions", http.NoBody)
+	request, err = http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/api/v2/sessions", http.NoBody)
 	require.NoError(t, err)
 	catalogResponse, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
@@ -111,7 +111,7 @@ agents:
 		} `json:"sessions"`
 	}
 	require.NoError(t, json.NewDecoder(catalogResponse.Body).Decode(&catalog))
-	assert.Equal(t, 1, catalog.Version)
+	assert.Equal(t, 2, catalog.Version)
 	require.Len(t, catalog.Sessions, 1)
 	assert.Equal(t, metadata.SessionID, catalog.Sessions[0].SessionID)
 	assert.Equal(t, "root", catalog.Sessions[0].AgentName)

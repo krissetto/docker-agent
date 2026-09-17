@@ -220,6 +220,8 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 	m, g := p.r.subagents, p.r.sessionDrivers
 	m.restoreMu.Lock()
 	defer m.restoreMu.Unlock()
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
 	candidates := []*session.Session{p.root}
 	for _, entry := range p.nodes {
 		if entry.childSess != nil && entry.childAgent != nil && entry.state != subagent.NodeStopped {
@@ -359,7 +361,9 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		}
 		row := entry.childSess.OwnSnapshot()
 		row.Messages = nil
-		record := session.ChildRecord{RootSessionID: p.root.ID, ParentSessionID: entry.parentSessionID, Node: entry.snapshot.Node, Revision: 1}
+		node := entry.snapshot.Node
+		node.State = entry.state
+		record := session.ChildRecord{RootSessionID: p.root.ID, ParentSessionID: entry.parentSessionID, Node: node, Revision: 1}
 		admissions = append(admissions, session.ChildAdmission{Child: row, Record: record})
 		known[record.Node.ID] = record
 	}
@@ -424,6 +428,23 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	} else if err := p.ctx().Err(); err != nil {
 		return CommittedSessionView{}, err
 	}
+	// Preflight-derived terminalization must become canonical before publication.
+	var commits []session.ChildCommit
+	for _, entry := range p.nodes {
+		record, ok := known[entry.snapshot.Node.ID]
+		if ok && entry.state == subagent.NodeStopped && record.Node.State != subagent.NodeStopped {
+			record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
+			commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
+		}
+	}
+	if err := m.commitChildren(ctx, commits); err != nil {
+		return CommittedSessionView{}, err
+	}
+	for _, commit := range commits {
+		record := commit.Record
+		record.Revision++
+		known[record.Node.ID] = record
+	}
 	// A successful legacy batch is durable linearization. Caller cancellation
 	// after it cannot revoke admission; shutdown/delete still prevent resurrection.
 	m.mu.Lock()
@@ -463,7 +484,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		if entry.parentSess != nil {
 			parentAgent = entry.parentSess.AgentName
 		}
-		record := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, parentAgentName: parentAgent, sessionID: node.SessionID, agent: entry.childAgent, state: entry.state, durable: known[node.ID]}
+		record := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, parentAgentName: parentAgent, sessionID: node.SessionID, agent: entry.childAgent, durable: known[node.ID]}
 		if driver := byID[node.SessionID]; driver != nil {
 			id := node.ID
 			driver.SetPreStartErrorGate(func() error { return m.admitChildRun(id) }, func() { m.abortChildStart(id) })

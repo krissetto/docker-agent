@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"sort"
-	"time"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -15,99 +15,79 @@ var (
 	_ runtime.SessionCatalog        = (*SessionManager)(nil)
 	_ runtime.SessionSummaryCatalog = (*SessionManager)(nil)
 	_ runtime.TreeInspector         = (*SessionManager)(nil)
+	_ runtime.SessionViewInfoReader = (*SessionManager)(nil)
+	_ runtime.SessionViewPreparer   = (*SessionManager)(nil)
 )
 
 // ListSessions exposes the manager-owned catalog without leaking stores or
-// registries. It validates persisted routing and child tree membership without
-// attaching, restoring, or starting any session.
+// registries. Metadata is a routing hint, never a child membership grant;
+// browsing does not attach, restore, or start sessions.
 func (sm *SessionManager) ListSessions(ctx context.Context) ([]runtime.SessionCatalogEntry, error) {
-	sessions, err := sm.sessionStore.GetSessions(ctx)
+	rows, err := sm.ListSessionSummaries(ctx, runtime.SessionSummaryOptions{})
 	if err != nil {
 		return nil, err
 	}
-	index := newSessionCatalogIndex(sessions)
-	out := make([]runtime.SessionCatalogEntry, 0, len(sessions))
-	for _, sess := range sessions {
-		_, _, cost := sess.TokensAndCost()
-		entry := runtime.SessionCatalogEntry{SessionID: sess.ID, Title: sess.TitleSnapshot(), AgentName: sess.AgentName, CreatedAt: sess.CreatedAt, Starred: sess.Starred, NumMessages: len(sess.GetAllMessages()), Cost: cost, WorkingDir: sess.WorkingDir}
-		if entry.AgentName == "" {
-			entry.AgentName = sess.AttributesSnapshot()[sessionAgentAttribute]
-		}
-		if active, loaded := sm.runtimeSessions.Load(sess.ID); loaded && active.handle != nil {
-			entry.Loadable = true
-			entry.AgentName = active.handle.Metadata().AgentName
-		} else if entry.AgentName != "" {
-			registry, _, routeErr := sm.sessionRegistryForCreate(sess.AttributesSnapshot()[sessionSourceAttribute])
-			if routeErr == nil {
-				if sess.ParentID == "" {
-					entry.Loadable = true
-				} else if root, rootErr := index.root(sess); rootErr == nil {
-					if treeErr := index.validateChild(ctx, registry, sess, root); treeErr == nil {
-						_, entry.Loadable = registry.(runtime.TreeRestorer)
-					}
-				}
-			}
-		}
-		out = append(out, entry)
+	out := make([]runtime.SessionCatalogEntry, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, runtime.SessionCatalogEntry{SessionID: row.SessionID, Title: row.Title, AgentName: row.AgentName, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir, Loadable: row.Loadable})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
 // ListSessionSummaries reads only metadata. Cold child rows are candidates,
 // not access grants: durable membership is checked by the confirmed loader.
 func (sm *SessionManager) ListSessionSummaries(ctx context.Context, options runtime.SessionSummaryOptions) ([]runtime.SessionSummaryEntry, error) {
-	store, ok := sm.sessionStore.(session.ScopedSummaryStore)
+	store, ok := sm.sessionStore.(session.PagedSummaryStore)
 	if !ok {
 		return nil, runtime.UnsupportedSessionOperation("", "session_summaries")
 	}
-	rows, err := store.GetSessionSummariesWithScope(ctx, session.SummaryScope{IncludeChildren: options.IncludeChildren})
-	if err != nil {
-		return nil, err
-	}
-	// These detached shells carry routing metadata only. The shared ancestry
-	// index never loads message payloads or performs per-ID store lookups.
-	sessions := make([]*session.Session, 0, len(rows))
-	seen := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		if row.ID == "" || seen[row.ID] {
-			return nil, errors.New("invalid or duplicate session summary identity")
+	var rows []session.Summary
+	optionsPage := session.SummaryPageOptions{IncludeChildren: options.IncludeChildren, Limit: api.SessionCatalogMaxLimit}
+	for {
+		page, err := store.GetSessionSummaryPage(ctx, optionsPage)
+		if err != nil {
+			return nil, err
 		}
-		seen[row.ID] = true
-		sessions = append(sessions, &session.Session{ID: row.ID, ParentID: row.ParentID, AgentName: row.Attributes[sessionAgentAttribute], Attributes: row.Attributes})
+		rows = append(rows, page.Summaries...)
+		if !page.HasMore {
+			break
+		}
+		if len(page.Summaries) == 0 {
+			return nil, errors.New("invalid empty continuation page")
+		}
+		last := page.Summaries[len(page.Summaries)-1]
+		if last.CreatedAt.Equal(optionsPage.AfterCreatedAt) && last.ID == optionsPage.AfterID {
+			return nil, errors.New("session summary cursor did not advance")
+		}
+		optionsPage.AfterCreatedAt, optionsPage.AfterID = last.CreatedAt, last.ID
 	}
-	index := newSessionCatalogIndex(sessions)
 	out := make([]runtime.SessionSummaryEntry, 0, len(rows))
+	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if row.ID == "" || seen[row.ID] {
+			return nil, errors.New("invalid or duplicate session summary identity")
+		}
+		seen[row.ID] = true
 		if !options.IncludeChildren && row.ParentID != "" {
 			continue
 		}
-		sess := index.byID[row.ID]
-		entry := runtime.SessionSummaryEntry{SessionID: row.ID, ParentID: row.ParentID, Title: row.Title, AgentName: sess.AgentName, Model: row.AgentModelOverrides[sess.AgentName], Source: row.Attributes[sessionSourceAttribute], CreatedAt: row.CreatedAt, UpdatedAt: row.CreatedAt.Format(time.RFC3339), Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir}
-		if active, loaded := sm.runtimeSessions.Load(row.ID); loaded && active.handle != nil {
-			metadata := active.handle.Metadata()
-			entry.Loaded, entry.Loadable = true, true
-			entry.AgentName, entry.Model = metadata.AgentName, metadata.Model
-		} else if entry.AgentName == "" {
-			entry.RouteError = "session is not attachable"
-		} else if root, rootErr := index.root(sess); rootErr != nil {
-			entry.RouteError = rootErr.Error()
-		} else if root.AgentName == "" {
-			entry.RouteError = "persisted root session agent is unavailable"
-		} else if registry, _, routeErr := sm.sessionRegistryForCreate(root.AttributesSnapshot()[sessionSourceAttribute]); routeErr != nil {
-			entry.RouteError = "persisted session source is unavailable or ambiguous"
-		} else if row.ParentID == "" {
-			entry.Loadable = true
-		} else if _, ok := registry.(runtime.TreeRestorer); !ok {
-			entry.RouteError = "runtime cannot load durable child session tree"
-		} else {
-			entry.RequiresConfirmation = true
-		}
-		out = append(out, entry)
+		out = append(out, sm.summaryEntry(row))
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
@@ -149,9 +129,7 @@ func (sm *SessionManager) ConfirmedSessionViewInfo(ctx context.Context, id strin
 	if err != nil {
 		return runtime.PreparedSessionViewInfo{}, err
 	}
-	reader, ok := registry.(interface {
-		ConfirmedSessionViewInfo(ctx context.Context, sessionID string) (runtime.PreparedSessionViewInfo, error)
-	})
+	reader, ok := registry.(runtime.SessionViewInfoReader)
 	if !ok {
 		return runtime.PreparedSessionViewInfo{}, runtime.UnsupportedSessionOperation(id, "prepare_view")
 	}

@@ -84,6 +84,8 @@ var _ interface {
 	runtime.TreeRestorer
 	runtime.AgentSwitcher
 	runtime.SafetyDefaults
+	runtime.SessionViewInfoReader
+	runtime.SessionViewPreparer
 } = (*controlPlaneSessions)(nil)
 
 func newControlPlaneSessions(primary runtime.SessionRuntime, host ...*runExecFlags) *controlPlaneSessions {
@@ -296,4 +298,58 @@ func (c *controlPlaneSessions) AuthorSafetyDefault(sess *session.Session) sessio
 		return defaults.AuthorSafetyDefault(sess)
 	}
 	return ""
+}
+
+func (c *controlPlaneSessions) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	if c.host != nil && c.host.sessionViewHost != nil {
+		return c.host.sessionViewHost.ConfirmedSessionViewInfo(ctx, id)
+	}
+	owner, release := c.owner(id)
+	defer release()
+	reader, ok := owner.rt.(runtime.SessionViewInfoReader)
+	if !ok {
+		return runtime.PreparedSessionViewInfo{}, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	return reader.ConfirmedSessionViewInfo(ctx, id)
+}
+
+func (c *controlPlaneSessions) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	if c.host != nil && c.host.sessionViewHost != nil {
+		return c.host.sessionViewHost.AcquireSessionView(ctx, id)
+	}
+	owner, release := c.owner(id)
+	preparer, ok := owner.rt.(runtime.SessionViewPreparer)
+	if !ok {
+		release()
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	prepared, err := preparer.PrepareSessionView(ctx, id)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	p := &controlPlanePreparedView{PreparedSessionView: prepared, owner: owner, release: release}
+	context.AfterFunc(ctx, p.Abort)
+	return p, nil
+}
+
+type controlPlanePreparedView struct {
+	runtime.PreparedSessionView
+
+	owner   *controlPlaneRuntime
+	release func()
+	once    sync.Once
+}
+
+func (p *controlPlanePreparedView) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
+	release, ok := p.owner.acquire()
+	if !ok {
+		return runtime.CommittedSessionView{}, runtime.ErrSessionClosed
+	}
+	defer release()
+	return p.PreparedSessionView.Commit(ctx)
+}
+
+func (p *controlPlanePreparedView) Abort() {
+	p.once.Do(func() { p.PreparedSessionView.Abort(); p.release() })
 }

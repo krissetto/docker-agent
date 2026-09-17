@@ -211,7 +211,7 @@ func runWithTerminalFactory(ctx context.Context, cfg Config, factory func(*os.Fi
 			if m.majorNoticeVisible && !m.hasMajorNotice(time.Now()) {
 				m.render()
 			}
-			if m.busy {
+			if m.busy() {
 				m.spinnerFrame++
 				m.render()
 			}
@@ -252,7 +252,6 @@ type model struct {
 	sessionViews          supervisor.SessionViewAcquirer
 	viewAcquireCancel     context.CancelFunc
 	viewAcquireGeneration uint64
-	runtimeStatus         runtime.SessionStatus
 	transcriber           Transcriber
 	speechGeneration      uint64
 	majorEvents           *messagebar.Aggregator
@@ -283,8 +282,6 @@ type model struct {
 	subagentSnapshot      *subagent.Snapshot
 	elicitations          map[string]*runtime.ElicitationRequestEvent
 	maxIterations         map[string]*runtime.MaxIterationsReachedEvent
-	rejectReason          string
-	rejectingTool         bool
 	viewers               *viewerHost
 	draftAttachments      []messages.Attachment
 	app                   *app.App
@@ -300,10 +297,8 @@ type model struct {
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
-	busy                 bool
 	lifecycle            lifecycle.State
 	spinnerFrame         int
-	runCancel            context.CancelFunc
 	cancelMarkerPending  bool
 	queue                []ui.PendingUserMessage
 	pendingUsers         []ui.PendingUserMessage
@@ -311,7 +306,6 @@ type model struct {
 	inputReferences      *subagentindex.Index
 	inputParentSessionID string
 	ownedSkillOperation  string
-	ownedSkillStream     bool
 
 	quitting         bool
 	appName          string
@@ -320,6 +314,17 @@ type model struct {
 	renderImages     bool
 	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
 	hideBanner bool
+}
+
+// busy is presentation derived from the canonical lifecycle projection. A
+// submission, local cancel request or viewer switch cannot invent execution.
+func (m *model) busy() bool {
+	switch m.lifecycle.Status {
+	case runtime.SessionStateRunning, runtime.SessionStateQueued, runtime.SessionStateCancelling:
+		return true
+	default:
+		return m.status.Compacting
+	}
 }
 
 func newModel(term *ui.Terminal, cfg Config) *model {
@@ -387,7 +392,7 @@ func (m *model) render() {
 func (m *model) renderFinal() {
 	m.screen.Transcript.FlushPending()
 	m.render()
-	m.r.EraseBelow(len(m.screen.Transcript.Lines(m.width, m.spinnerFrame, m.busy, m.sessionState, m.pendingUsers)))
+	m.r.EraseBelow(len(m.screen.Transcript.Lines(m.width, m.spinnerFrame, m.busy(), m.sessionState, m.pendingUsers)))
 }
 
 func (m *model) commitWelcome() {

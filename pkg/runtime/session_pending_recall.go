@@ -107,12 +107,12 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 		d.mu.Unlock()
 		return CancelNotActive, err
 	}
-	if turnID != "" && d.activeRequestID == turnID && d.running && d.cancel != nil {
-		if d.cancelling {
+	if turnID != "" && d.activeRequestID == turnID && d.running() && d.cancel != nil {
+		if d.cancelling() {
 			d.mu.Unlock()
 			return CancelAlreadyCancelling, nil
 		}
-		d.cancelling = true
+		d.phase = sessionCancelling
 		d.resolveInteractionsLocked()
 		cancel := d.cancel
 		d.mu.Unlock()

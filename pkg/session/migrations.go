@@ -593,6 +593,7 @@ func getAllMigrations() []Migration {
             `,
 			DownSQL: `ALTER TABLE session_items DROP COLUMN sender_name; ALTER TABLE session_items DROP COLUMN sender_id; ALTER TABLE session_items DROP COLUMN input_origin;`,
 		},
+		{ID: 37, Name: "037_session_input_batches", Description: "Atomic input batch idempotency receipts", UpSQL: `CREATE TABLE session_input_batches (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, request_id TEXT NOT NULL, content_hash TEXT NOT NULL, item_ids TEXT NOT NULL, PRIMARY KEY(session_id,request_id));`, DownSQL: `DROP TABLE session_input_batches;`},
 	}
 }
 

@@ -156,7 +156,7 @@ func TestCoordinationPersistenceAppendRetryIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, SessionStateSettled, status.State)
 	if records[0].Node.State == subagent.NodeFailed {
-		assert.NotEmpty(t, records[0].Error, "canceled/error execution records its explicit outcome")
+		assert.NotEmpty(t, records[0].Node.Error, "canceled/error execution records its explicit outcome")
 	} else {
 		assert.Equal(t, subagent.NodeIdle, records[0].Node.State, "a provider that completed before cancellation may settle cleanly")
 	}

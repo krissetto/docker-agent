@@ -24,7 +24,7 @@ func pendingRecallHandle(t *testing.T, store session.Store) *sessionHandle {
 	}
 	d := r.sessionDrivers.Get(sess)
 	d.events = newSessionEventHubWithLimits(32, 1<<20)
-	d.running = true // retain submissions without invoking a provider
+	d.phase = sessionRunning // retain submissions without invoking a provider
 	d.activeRequestID = "active"
 	return &sessionHandle{runtime: r, driver: d, sessionID: sess.ID}
 }

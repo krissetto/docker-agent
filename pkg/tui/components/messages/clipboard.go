@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -340,7 +341,7 @@ func (m *model) copySelectedMessageToClipboard() tea.Cmd {
 // a toast. Copy buttons that flash an inline "copied" label must use
 // copyTextToClipboardSilent instead to avoid double feedback.
 func copyTextToClipboard(text string) tea.Cmd {
-	return tea.Sequence(
+	return core.Sequence(
 		copyTextToClipboardSilent(text),
 		notification.SuccessCmd("Text copied to clipboard."),
 	)
@@ -349,12 +350,12 @@ func copyTextToClipboard(text string) tea.Cmd {
 // copyTextToClipboardSilent copies text to the system clipboard without a
 // toast notification.
 func copyTextToClipboardSilent(text string) tea.Cmd {
-	return tea.Sequence(
+	return core.Sequence(
 		func() tea.Msg {
 			_ = clipboardWriter()(text)
 			return nil
 		},
-		tea.SetClipboard(text),
+		core.SetClipboard(text),
 	)
 }
 

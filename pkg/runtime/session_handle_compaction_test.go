@@ -47,7 +47,7 @@ func TestRunningSubmitReportsQueuedDisposition(t *testing.T) {
 	require.NoError(t, err)
 	local := handle.(*sessionHandle)
 	local.driver.mu.Lock()
-	local.driver.running = true
+	local.driver.phase = sessionRunning
 	local.driver.mu.Unlock()
 
 	submission, err := handle.Submit(t.Context(), TurnInput{Content: "next"})
@@ -57,7 +57,7 @@ func TestRunningSubmitReportsQueuedDisposition(t *testing.T) {
 	func() {
 		local.driver.mu.Lock()
 		defer local.driver.mu.Unlock()
-		local.driver.running = false
+		local.driver.leave(sessionRunning)
 		local.driver.pending = nil
 	}()
 }
@@ -104,7 +104,7 @@ func TestCompactorRunningRejectsExistingPendingAndSteering(t *testing.T) {
 	require.NoError(t, err)
 	d := handle.(*sessionHandle).driver
 	d.mu.Lock()
-	d.running = true
+	d.phase = sessionRunning
 	d.pending = []QueuedMessage{{Content: "later", RequestID: "pending"}}
 	d.steering = []QueuedMessage{{Content: "guide", RequestID: "steer"}}
 	d.mu.Unlock()
@@ -118,7 +118,7 @@ func TestCompactorRunningRejectsExistingPendingAndSteering(t *testing.T) {
 	assert.False(t, d.compactReserved)
 	assert.Len(t, d.pending, 1)
 	assert.Len(t, d.steering, 1)
-	d.running = false
+	d.leave(sessionRunning)
 }
 
 func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) {
@@ -203,7 +203,7 @@ func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
 	local := handle.(*sessionHandle)
 
 	local.driver.mu.Lock()
-	local.driver.running = true
+	local.driver.phase = sessionRunning
 	first := QueuedMessage{Content: "accepted during compact", RequestID: "first"}
 	require.NoError(t, local.driver.acceptInputLocked(&first))
 	local.driver.pending = append(local.driver.pending, first)
@@ -232,7 +232,7 @@ func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
 		local.driver.mu.Lock()
 		defer local.driver.mu.Unlock()
 		local.driver.pending = nil
-		local.driver.running = false
+		local.driver.leave(sessionRunning)
 	}()
 }
 

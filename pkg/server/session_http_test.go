@@ -229,7 +229,7 @@ func sessionRequest(t *testing.T, s *Server, method, path, body, token string) *
 func TestSessionHTTPCreateUsesStoreAndImmutableBinding(t *testing.T) {
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{}}
 	srv, store := newSessionHTTPServer(t, registry)
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root","model":"provider/model","title":"browser"}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root","model":"provider/model","title":"browser"}`, "")
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &metadata))
@@ -250,20 +250,20 @@ func TestSessionHTTPDelegatesInputsRespondAndCancel(t *testing.T) {
 	srv, _ := newSessionHTTPServer(t, registry)
 	multi := []chat.MessagePart{{Type: chat.MessagePartTypeText, Text: "part"}}
 	for _, mode := range []string{"submit", "steer"} {
-		rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/messages", fmt.Sprintf(`{"content":"hello","mode":%q,"request_id":"browser","multi_content":[{"type":"text","text":"part"}]}`, mode), "")
+		rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/messages", fmt.Sprintf(`{"content":"hello","mode":%q,"request_id":"browser","multi_content":[{"type":"text","text":"part"}]}`, mode), "")
 		assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	}
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/retry", `{}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/retry", `{}`, "")
 	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	rec = sessionRequest(t, srv, http.MethodGet, "/api/sessions/child-session/status", "", "")
+	rec = sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/child-session/status", "", "")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	rec = sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/responses", `{"interaction_id":"request-1","kind":"confirmation","confirmation":"approve"}`, "")
+	rec = sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/responses", `{"interaction_id":"request-1","kind":"confirmation","confirmation":"approve"}`, "")
 	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	rec = sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/cancel", `{"turn_id":"turn-1"}`, "")
+	rec = sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/cancel", `{"turn_id":"turn-1"}`, "")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	rec = sessionRequest(t, srv, http.MethodPatch, "/api/sessions/child-session/title", `{"title":"renamed"}`, "")
+	rec = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/child-session/title", `{"title":"renamed"}`, "")
 	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	rec = sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/messages", `{"content":"hello","mode":"send"}`, "")
+	rec = sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/messages", `{"content":"hello","mode":"send"}`, "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "send is not a mode; submit queues when a turn is running")
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -280,7 +280,7 @@ func TestSessionHTTPTransportsQueuedSteerDisposition(t *testing.T) {
 	a := &httpSession{id: "child-session", agent: "worker", steerDisposition: runtime.SubmissionDispositionQueued}
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{"child-session": a}}
 	srv, _ := newSessionHTTPServer(t, registry)
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/messages", `{"content":"hello","mode":"steer"}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/messages", `{"content":"hello","mode":"steer"}`, "")
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	var submission sessionSubmissionDTO
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&submission))
@@ -291,7 +291,7 @@ func TestSessionHTTPTransportsQueuedRetryDisposition(t *testing.T) {
 	a := &httpSession{id: "child-session", agent: "worker", retryDisposition: runtime.SubmissionDispositionQueued}
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{"child-session": a}}
 	srv, _ := newSessionHTTPServer(t, registry)
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/child-session/retry", `{}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/child-session/retry", `{}`, "")
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	var submission sessionSubmissionDTO
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&submission))
@@ -307,7 +307,7 @@ func TestSessionHTTPAttachSnapshotReplayLiveAndDisconnectOnlyCancelsObservation(
 	httpSrv := httptest.NewServer(srv.e)
 	defer httpSrv.Close()
 	ctx, cancel := context.WithCancel(t.Context())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpSrv.URL+"/api/sessions/root/events?since=1", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpSrv.URL+"/api/v2/sessions/root/events?since=1", http.NoBody)
 	require.NoError(t, err)
 	res, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -387,7 +387,7 @@ func TestSessionHTTPCreateUnsupportedWithoutSingleSourceRuntime(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{})
 	srv := NewWithManager(sm, "")
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	assert.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(runtime.SessionErrorUnsupported))
 	sessions, err := store.GetSessions(t.Context())
@@ -442,7 +442,7 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	srv := httptest.NewServer(handler.e)
 	defer srv.Close()
 
-	createReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/sessions", strings.NewReader(`{"agent_name":"root"}`))
+	createReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/v2/sessions", strings.NewReader(`{"agent_name":"root"}`))
 	require.NoError(t, err)
 	createReq.Header.Set("Content-Type", "application/json")
 	create, err := http.DefaultClient.Do(createReq)
@@ -454,7 +454,7 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	attachReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/sessions/"+metadata.SessionID+"/events", http.NoBody)
+	attachReq, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v2/sessions/"+metadata.SessionID+"/events", http.NoBody)
 	require.NoError(t, err)
 	attached, err := http.DefaultClient.Do(attachReq)
 	require.NoError(t, err)
@@ -492,7 +492,7 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	assert.Equal(t, "snapshot", readMessage()["type"])
 	assert.Equal(t, "ready", readMessage()["type"])
 
-	submitReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/sessions/"+metadata.SessionID+"/messages", strings.NewReader(`{"content":"hello"}`))
+	submitReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/v2/sessions/"+metadata.SessionID+"/messages", strings.NewReader(`{"content":"hello"}`))
 	require.NoError(t, err)
 	submitReq.Header.Set("Content-Type", "application/json")
 	submit, err := http.DefaultClient.Do(submitReq)
@@ -564,7 +564,7 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	}
 	require.Equal(t, int32(1), eventRequests.Load())
 
-	secondReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/sessions/"+metadata.SessionID+"/messages", strings.NewReader(`{"content":"again"}`))
+	secondReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/v2/sessions/"+metadata.SessionID+"/messages", strings.NewReader(`{"content":"again"}`))
 	require.NoError(t, err)
 	secondReq.Header.Set("Content-Type", "application/json")
 	second, err := http.DefaultClient.Do(secondReq)
@@ -654,9 +654,9 @@ func TestSessionHTTPLocalRuntimeCorrelatedCancel(t *testing.T) {
 		return response.StatusCode
 	}
 	var metadata sessionMetadataDTO
-	require.Equal(t, http.StatusCreated, postJSON("/api/sessions", `{"agent_name":"root"}`, &metadata))
+	require.Equal(t, http.StatusCreated, postJSON("/api/v2/sessions", `{"agent_name":"root"}`, &metadata))
 	var submission sessionSubmissionDTO
-	require.Equal(t, http.StatusAccepted, postJSON("/api/sessions/"+metadata.SessionID+"/messages", `{"content":"block"}`, &submission))
+	require.Equal(t, http.StatusAccepted, postJSON("/api/v2/sessions/"+metadata.SessionID+"/messages", `{"content":"block"}`, &submission))
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -667,7 +667,7 @@ func TestSessionHTTPLocalRuntimeCorrelatedCancel(t *testing.T) {
 		TurnID  string                `json:"turn_id"`
 		Outcome runtime.CancelOutcome `json:"outcome"`
 	}
-	require.Equal(t, http.StatusOK, postJSON("/api/sessions/"+metadata.SessionID+"/cancel", `{"turn_id":"`+submission.TurnID+`"}`, &canceled))
+	require.Equal(t, http.StatusOK, postJSON("/api/v2/sessions/"+metadata.SessionID+"/cancel", `{"turn_id":"`+submission.TurnID+`"}`, &canceled))
 	assert.Equal(t, submission.TurnID, canceled.TurnID)
 	assert.Equal(t, runtime.CancelAccepted, canceled.Outcome)
 	require.Eventually(t, func() bool {
@@ -682,7 +682,7 @@ func TestSessionHTTPLocalRuntimeCorrelatedCancel(t *testing.T) {
 	var inactive struct {
 		Outcome runtime.CancelOutcome `json:"outcome"`
 	}
-	require.Equal(t, http.StatusOK, postJSON("/api/sessions/"+metadata.SessionID+"/cancel", `{"turn_id":"`+submission.TurnID+`"}`, &inactive))
+	require.Equal(t, http.StatusOK, postJSON("/api/v2/sessions/"+metadata.SessionID+"/cancel", `{"turn_id":"`+submission.TurnID+`"}`, &inactive))
 	assert.Equal(t, runtime.CancelNotActive, inactive.Outcome)
 }
 
@@ -694,14 +694,14 @@ func TestSessionHTTPRejectsWorkingDirAndRoutesExplicitSource(t *testing.T) {
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntimes(map[string]runtime.SessionRuntime{"first.yaml": first, "second.yaml": second}))
 	srv := NewWithManager(sm, "")
 
-	ambiguous := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	ambiguous := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	assert.Equal(t, http.StatusBadRequest, ambiguous.Code, ambiguous.Body.String())
 	for _, workingDir := range []string{"/tmp/client", "../escape", "sibling", "/tmp/symlink-outside"} {
-		explicitWorkingDir := sessionRequest(t, srv, http.MethodPost, "/api/sessions", fmt.Sprintf(`{"source":"first.yaml","agent_name":"root","working_dir":%q}`, workingDir), "")
+		explicitWorkingDir := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", fmt.Sprintf(`{"source":"first.yaml","agent_name":"root","working_dir":%q}`, workingDir), "")
 		assert.Equal(t, http.StatusBadRequest, explicitWorkingDir.Code, explicitWorkingDir.Body.String())
 	}
 
-	created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"source":"second.yaml","agent_name":"root"}`, "")
+	created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"source":"second.yaml","agent_name":"root"}`, "")
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
@@ -712,7 +712,7 @@ func TestSessionHTTPRejectsWorkingDirAndRoutesExplicitSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "second.yaml", stored.AttributesSnapshot()[sessionSourceAttribute])
 
-	status := sessionRequest(t, srv, http.MethodGet, "/api/sessions/"+metadata.SessionID+"/status", "", "")
+	status := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+metadata.SessionID+"/status", "", "")
 	assert.Equal(t, http.StatusOK, status.Code, status.Body.String())
 }
 
@@ -721,7 +721,7 @@ func TestSessionHTTPCatalogListsForestsSourcesAndPersistedSessions(t *testing.T)
 	secondSession := &httpSession{id: "live-child", agent: "worker", attach: runtime.Observation{Initial: []runtime.SessionSnapshot{{Status: runtime.SessionStatus{SessionID: "live-child", AgentName: "worker", State: runtime.SessionStateRunning, Pending: 2}, PendingInputs: []runtime.PendingInput{{TurnID: "p1"}, {TurnID: "p2"}}, Interactions: []runtime.InteractionSnapshot{{InteractionID: "i1"}}}}, Cancel: func() {}}}
 	second := &httpSessionRegistry{sessions: map[string]*httpSession{"live-child": secondSession}}
 	store := session.NewInMemorySessionStore()
-	root := session.New(session.WithID("stored-root"), session.WithAgentName("root"), session.WithTitle("Stored root"), session.WithAttributes(map[string]string{sessionSourceAttribute: "first.yaml"}))
+	root := session.New(session.WithID("stored-root"), session.WithAgentName("root"), session.WithTitle("Stored root"), session.WithAttributes(map[string]string{sessionSourceAttribute: "first.yaml", sessionAgentAttribute: "root"}))
 	child := session.New(session.WithID("live-child"), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithTitle("Live child"), session.WithAttributes(map[string]string{sessionSourceAttribute: "second.yaml", sessionAgentAttribute: "worker"}))
 	require.NoError(t, store.AddSession(t.Context(), root))
 	require.NoError(t, store.AddSession(t.Context(), child))
@@ -730,13 +730,13 @@ func TestSessionHTTPCatalogListsForestsSourcesAndPersistedSessions(t *testing.T)
 	sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: secondSession, registry: second})
 	srv := NewWithManager(sm, "secret")
 
-	unauthorized := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "")
+	unauthorized := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
 	assert.Equal(t, http.StatusUnauthorized, unauthorized.Code)
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "secret")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?include_children=true", "", "secret")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var catalog sessionCatalogDTO
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
-	assert.Equal(t, 1, catalog.Version)
+	assert.Equal(t, 2, catalog.Version)
 	assert.Equal(t, []sessionCatalogSourceDTO{{Name: "first.yaml", CanCreate: true}, {Name: "second.yaml", CanCreate: true}}, catalog.Sources)
 	require.Len(t, catalog.Sessions, 2)
 	byID := map[string]sessionResourceDTO{}
@@ -766,7 +766,7 @@ func TestSessionHTTPPersistedSessionRestoresUsingServerOwnedSource(t *testing.T)
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntimes(map[string]runtime.SessionRuntime{"first.yaml": first, "second.yaml": second}))
 	srv := NewWithManager(sm, "")
 
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/persisted/status", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/persisted/status", "", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Nil(t, first.created)
 	require.NotNil(t, second.created)
@@ -775,7 +775,7 @@ func TestSessionHTTPPersistedSessionRestoresUsingServerOwnedSource(t *testing.T)
 
 	ambiguous := session.New(session.WithID("ambiguous"), session.WithAgentName("worker"))
 	require.NoError(t, store.AddSession(t.Context(), ambiguous))
-	failed := sessionRequest(t, srv, http.MethodGet, "/api/sessions/ambiguous/status", "", "")
+	failed := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/ambiguous/status", "", "")
 	assert.Equal(t, http.StatusNotImplemented, failed.Code, failed.Body.String())
 	assert.Contains(t, failed.Body.String(), `"error":"unsupported"`)
 	assert.Contains(t, failed.Body.String(), `"operation":"attach"`)
@@ -813,7 +813,7 @@ func TestSessionHTTPLocalRuntimeColdChildRestoresRootTree(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			<-start
-			codes <- sessionRequest(t, srv, http.MethodGet, "/api/sessions/"+child.ID+"/status", "", "").Code
+			codes <- sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+child.ID+"/status", "", "").Code
 		})
 	}
 	close(start)
@@ -823,12 +823,12 @@ func TestSessionHTTPLocalRuntimeColdChildRestoresRootTree(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 	}
 
-	submit := sessionRequest(t, srv, http.MethodPost, "/api/sessions/"+child.ID+"/messages", `{"content":"continue"}`, "")
+	submit := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+child.ID+"/messages", `{"content":"continue"}`, "")
 	require.Equal(t, http.StatusAccepted, submit.Code, submit.Body.String())
 	httpServer := httptest.NewServer(srv.e)
 	defer httpServer.Close()
 	attachCtx, cancelAttach := context.WithCancel(t.Context())
-	attachReq, err := http.NewRequestWithContext(attachCtx, http.MethodGet, httpServer.URL+"/api/sessions/"+child.ID+"/events", http.NoBody)
+	attachReq, err := http.NewRequestWithContext(attachCtx, http.MethodGet, httpServer.URL+"/api/v2/sessions/"+child.ID+"/events", http.NoBody)
 	require.NoError(t, err)
 	attached, err := http.DefaultClient.Do(attachReq)
 	require.NoError(t, err)
@@ -862,7 +862,7 @@ func TestSessionHTTPCatalogDoesNotCreateObserversAndKeepsUnknownStatus(t *testin
 	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: a, registry: registry})
 	srv := NewWithManager(sm, "")
 	for range 3 {
-		rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "")
+		rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions", "", "")
 		require.Equal(t, http.StatusOK, rec.Code)
 		var catalog sessionCatalogDTO
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
@@ -894,7 +894,7 @@ func TestSessionHTTPConcurrentColdRootRestorePublishesOnce(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			<-start
-			codes <- sessionRequest(t, srv, http.MethodGet, "/api/sessions/cold-root/status", "", "").Code
+			codes <- sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/cold-root/status", "", "").Code
 		})
 	}
 	close(start)
@@ -921,6 +921,10 @@ type childCatalogStore struct {
 	ids []string
 }
 
+func (s childCatalogStore) GetSessionSummaryPage(ctx context.Context, options session.SummaryPageOptions) (session.SummaryPage, error) {
+	return s.Store.(session.PagedSummaryStore).GetSessionSummaryPage(ctx, options)
+}
+
 func (s childCatalogStore) GetSessions(ctx context.Context) ([]*session.Session, error) {
 	rows := make([]*session.Session, 0, len(s.ids))
 	for _, id := range s.ids {
@@ -933,7 +937,7 @@ func (s childCatalogStore) GetSessions(ctx context.Context) ([]*session.Session,
 	return rows, nil
 }
 
-func TestSessionCatalogValidatesDurableTreeMembershipAndLoadsOnce(t *testing.T) {
+func TestSessionCatalogDefersDurableMembershipUntilSelection(t *testing.T) {
 	root := session.New(session.WithID("root"), session.WithAgentName("root"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
 	child := session.New(session.WithID("child"), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{sessionAgentAttribute: "worker"}))
 	nested := session.New(session.WithID("nested"), session.WithParentID(child.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{sessionAgentAttribute: "worker"}))
@@ -947,7 +951,7 @@ func TestSessionCatalogValidatesDurableTreeMembershipAndLoadsOnce(t *testing.T) 
 	registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, snapshots: map[string]*subagent.Snapshot{root.ID: snapshot}}
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "")
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var catalog sessionCatalogDTO
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
@@ -958,13 +962,15 @@ func TestSessionCatalogValidatesDurableTreeMembershipAndLoadsOnce(t *testing.T) 
 	require.Contains(t, byID, child.ID)
 	require.Contains(t, byID, nested.ID)
 	require.Contains(t, byID, orphan.ID)
-	assert.True(t, byID[child.ID].Attachable)
-	assert.True(t, byID[nested.ID].Attachable)
+	assert.False(t, byID[child.ID].Attachable)
+	assert.True(t, byID[child.ID].RequiresConfirmation)
+	assert.False(t, byID[nested.ID].Attachable)
+	assert.True(t, byID[nested.ID].RequiresConfirmation)
 	assert.False(t, byID[orphan.ID].Attachable)
-	assert.Equal(t, "session is absent from durable session tree", byID[orphan.ID].RouteError)
+	assert.True(t, byID[orphan.ID].RequiresConfirmation, "catalog rows are candidates; only confirmed selection validates tree membership")
 	registry.muTree.Lock()
 	defer registry.muTree.Unlock()
-	assert.Equal(t, 1, registry.inspects, "one durable tree load per root per catalog request")
+	assert.Zero(t, registry.inspects, "catalog must not inspect durable trees")
 }
 
 func TestSessionCatalogRejectsTreeBindingMismatches(t *testing.T) {
@@ -995,7 +1001,7 @@ func TestSessionCatalogRejectsTreeBindingMismatches(t *testing.T) {
 			snapshot := &subagent.Snapshot{Root: rootNode, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootNode, Agent: "root"}, Children: children}}}
 			registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, snapshots: map[string]*subagent.Snapshot{root.ID: snapshot}}
 			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
-			rec := sessionRequest(t, NewWithManager(sm, ""), http.MethodGet, "/api/sessions", "", "")
+			rec := sessionRequest(t, NewWithManager(sm, ""), http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
 			var catalog sessionCatalogDTO
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
 			foundChild := false
@@ -1003,10 +1009,12 @@ func TestSessionCatalogRejectsTreeBindingMismatches(t *testing.T) {
 				if entry.SessionID == child.ID {
 					foundChild = true
 					assert.False(t, entry.Attachable)
-					assert.Equal(t, tc.want, entry.RouteError)
+					assert.True(t, entry.RequiresConfirmation, "metadata is not an access grant")
 				}
 			}
 			require.True(t, foundChild, "catalog must include child authorization fixture")
+			direct := sessionRequest(t, NewWithManager(sm, ""), http.MethodGet, "/api/v2/sessions/child/status", "", "")
+			assert.Equal(t, http.StatusBadRequest, direct.Code, "confirmed selection must reject the mismatch")
 		})
 	}
 }
@@ -1039,7 +1047,7 @@ func TestSessionTreeRootIdentityAndBindingRejectCatalogAndColdRecovery(t *testin
 			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 			srv := NewWithManager(sm, "")
 
-			catalogRec := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "")
+			catalogRec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
 			var catalog sessionCatalogDTO
 			require.NoError(t, json.Unmarshal(catalogRec.Body.Bytes(), &catalog))
 			foundChild := false
@@ -1047,11 +1055,11 @@ func TestSessionTreeRootIdentityAndBindingRejectCatalogAndColdRecovery(t *testin
 				if entry.SessionID == child.ID {
 					foundChild = true
 					assert.False(t, entry.Attachable)
-					assert.Equal(t, tc.want, entry.RouteError)
+					assert.True(t, entry.RequiresConfirmation, "metadata is not an access grant")
 				}
 			}
 			require.True(t, foundChild, "catalog must include child authorization fixture")
-			direct := sessionRequest(t, srv, http.MethodGet, "/api/sessions/child/status", "", "")
+			direct := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/child/status", "", "")
 			assert.Equal(t, http.StatusBadRequest, direct.Code, direct.Body.String())
 			registry.mu.Lock()
 			assert.Zero(t, registry.createCount)
@@ -1092,8 +1100,8 @@ func TestSessionRestoreLocksCleanupSuccessAndFailure(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), bad))
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "")
-	assert.Equal(t, http.StatusOK, sessionRequest(t, srv, http.MethodGet, "/api/sessions/good/status", "", "").Code)
-	assert.Equal(t, http.StatusNotImplemented, sessionRequest(t, srv, http.MethodGet, "/api/sessions/bad/status", "", "").Code)
+	assert.Equal(t, http.StatusOK, sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/good/status", "", "").Code)
+	assert.Equal(t, http.StatusNotImplemented, sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/bad/status", "", "").Code)
 	assert.Zero(t, sm.sessionRestoreLocks.length())
 }
 
@@ -1109,14 +1117,14 @@ func TestSessionHTTPMultiSourceDeleteLiveAndReloaded(t *testing.T) {
 				return NewWithManager(sm, "")
 			}
 			srv := newServer()
-			created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"source":"second.yaml","agent_name":"root"}`, "")
+			created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"source":"second.yaml","agent_name":"root"}`, "")
 			require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 			var metadata sessionMetadataDTO
 			require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
 			if !live {
 				srv = newServer()
 			}
-			deleted := sessionRequest(t, srv, http.MethodDelete, "/api/sessions/"+metadata.SessionID, "", "")
+			deleted := sessionRequest(t, srv, http.MethodDelete, "/api/v2/sessions/"+metadata.SessionID, "", "")
 			require.Equal(t, http.StatusNoContent, deleted.Code, deleted.Body.String())
 			_, err := store.GetSession(t.Context(), metadata.SessionID)
 			require.Error(t, err)
@@ -1130,11 +1138,11 @@ func TestLegacyExecutionRoutesAbsentSessionStillExecutes(t *testing.T) {
 	a := &httpSession{id: "session", agent: "root"}
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{"session": a}}
 	srv, _ := newSessionHTTPServer(t, registry)
-	for _, path := range []string{"/api/sessions/session/agent/team.yaml", "/api/sessions/session/agent/team.yaml/root"} {
+	for _, path := range []string{"/api/v2/sessions/session/agent/team.yaml", "/api/v2/sessions/session/agent/team.yaml/root"} {
 		rec := sessionRequest(t, srv, http.MethodPost, path, `{}`, "")
 		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	}
-	rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/session/messages", `{"content":"hello"}`, "")
+	rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/session/messages", `{"content":"hello"}`, "")
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	require.Len(t, a.submits, 1)
 }
@@ -1144,14 +1152,14 @@ func TestSessionHTTPStrictBodies(t *testing.T) {
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{"session": a}}
 	srv, _ := newSessionHTTPServer(t, registry)
 	cases := []struct{ method, path, body string }{
-		{http.MethodPost, "/api/sessions/session/messages", `{"content":"x","unknown":true}`},
-		{http.MethodPost, "/api/sessions/session/messages", `{"content":"x","input_origin":"runtime"}`},
-		{http.MethodPost, "/api/sessions/session/messages", `{"content":"x","sender_id":"child","sender_name":"worker"}`},
-		{http.MethodPost, "/api/sessions/session/messages", `{"content":"x"} {}`},
-		{http.MethodPatch, "/api/sessions/session/title", `{"title":"x","unknown":true}`},
-		{http.MethodPost, "/api/sessions/session/responses", `{"interaction_id":"i","kind":"confirmation","confirmation":"approve","unknown":true}`},
-		{http.MethodPost, "/api/sessions/session/cancel", `{"turn_id":"t","unknown":true}`},
-		{http.MethodPost, "/api/sessions/session/retry", `{"unknown":true}`},
+		{http.MethodPost, "/api/v2/sessions/session/messages", `{"content":"x","unknown":true}`},
+		{http.MethodPost, "/api/v2/sessions/session/messages", `{"content":"x","input_origin":"runtime"}`},
+		{http.MethodPost, "/api/v2/sessions/session/messages", `{"content":"x","sender_id":"child","sender_name":"worker"}`},
+		{http.MethodPost, "/api/v2/sessions/session/messages", `{"content":"x"} {}`},
+		{http.MethodPatch, "/api/v2/sessions/session/title", `{"title":"x","unknown":true}`},
+		{http.MethodPost, "/api/v2/sessions/session/responses", `{"interaction_id":"i","kind":"confirmation","confirmation":"approve","unknown":true}`},
+		{http.MethodPost, "/api/v2/sessions/session/cancel", `{"turn_id":"t","unknown":true}`},
+		{http.MethodPost, "/api/v2/sessions/session/retry", `{"unknown":true}`},
 	}
 	for _, tc := range cases {
 		rec := sessionRequest(t, srv, tc.method, tc.path, tc.body, "")
@@ -1168,16 +1176,16 @@ func TestSessionHTTPBodyLimitsAndAttachUnaffected(t *testing.T) {
 	srv := NewWithManager(sm, "", WithMaxRequestBytes(128))
 	oversized := strings.Repeat("x", 256)
 	for _, tc := range []struct{ method, path, body string }{
-		{http.MethodPost, "/api/sessions", fmt.Sprintf(`{"agent_name":"root","title":%q}`, oversized)},
-		{http.MethodPost, "/api/sessions/session/messages", fmt.Sprintf(`{"content":%q}`, oversized)},
-		{http.MethodPost, "/api/sessions/session/responses", fmt.Sprintf(`{"interaction_id":"i","kind":"elicitation","action":"accept","content":{"x":%q}}`, oversized)},
+		{http.MethodPost, "/api/v2/sessions", fmt.Sprintf(`{"agent_name":"root","title":%q}`, oversized)},
+		{http.MethodPost, "/api/v2/sessions/session/messages", fmt.Sprintf(`{"content":%q}`, oversized)},
+		{http.MethodPost, "/api/v2/sessions/session/responses", fmt.Sprintf(`{"interaction_id":"i","kind":"elicitation","action":"accept","content":{"x":%q}}`, oversized)},
 	} {
 		rec := sessionRequest(t, srv, tc.method, tc.path, tc.body, "")
 		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, tc.path+": "+rec.Body.String())
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/sessions/session/events", nil)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v2/sessions/session/events", nil)
 	rec := httptest.NewRecorder()
 	srv.e.ServeHTTP(rec, req)
 	assert.NotEqual(t, http.StatusRequestEntityTooLarge, rec.Code)
@@ -1186,13 +1194,13 @@ func TestSessionHTTPBodyLimitsAndAttachUnaffected(t *testing.T) {
 func TestCanonicalSessionRouteInventoryAndSessionNamespaceAbsent(t *testing.T) {
 	srv, _ := newSessionHTTPServer(t, &httpSessionRegistry{sessions: map[string]*httpSession{}})
 	want := map[string]bool{
-		"GET /api/sessions": true, "POST /api/sessions": true,
-		"GET /api/sessions/:id": true, "GET /api/sessions/:id/status": true,
-		"GET /api/sessions/:id/snapshot": true, "GET /api/sessions/:id/events": true,
-		"POST /api/sessions/:id/messages": true, "POST /api/sessions/:id/retry": true,
-		"POST /api/sessions/:id/responses": true, "POST /api/sessions/:id/cancel": true,
-		"PATCH /api/sessions/:id/title": true, "GET /api/sessions/:id/tree": true,
-		"DELETE /api/sessions/:id": true,
+		"GET /api/v2/sessions": true, "POST /api/v2/sessions": true,
+		"GET /api/v2/sessions/:id": true, "GET /api/v2/sessions/:id/status": true,
+		"GET /api/v2/sessions/:id/snapshot": true, "GET /api/v2/sessions/:id/events": true,
+		"POST /api/v2/sessions/:id/messages": true, "POST /api/v2/sessions/:id/retry": true,
+		"POST /api/v2/sessions/:id/responses": true, "POST /api/v2/sessions/:id/cancel": true,
+		"PATCH /api/v2/sessions/:id/title": true, "GET /api/v2/sessions/:id/tree": true,
+		"DELETE /api/v2/sessions/:id": true,
 	}
 	seen := map[string]int{}
 	for _, route := range srv.e.Routes() {
@@ -1205,14 +1213,14 @@ func TestCanonicalSessionRouteInventoryAndSessionNamespaceAbsent(t *testing.T) {
 	}
 	assert.Empty(t, want)
 	for route, count := range seen {
-		if strings.HasPrefix(route, "GET /api/sessions") || strings.HasPrefix(route, "POST /api/sessions") || strings.HasPrefix(route, "PATCH /api/sessions") || strings.HasPrefix(route, "DELETE /api/sessions") {
+		if strings.HasPrefix(route, "GET /api/v2/sessions") || strings.HasPrefix(route, "POST /api/v2/sessions") || strings.HasPrefix(route, "PATCH /api/v2/sessions") || strings.HasPrefix(route, "DELETE /api/v2/sessions") {
 			assert.Equal(t, 1, count, route)
 		}
 	}
-	for _, old := range []string{"POST /api/sessions/:id/resume", "POST /api/sessions/:id/elicitation", "POST /api/sessions/:id/steer", "POST /api/sessions/:id/followup"} {
+	for _, old := range []string{"POST /api/v2/sessions/:id/resume", "POST /api/v2/sessions/:id/elicitation", "POST /api/v2/sessions/:id/steer", "POST /api/v2/sessions/:id/followup"} {
 		assert.Zero(t, seen[old], old)
 	}
-	assert.Equal(t, http.StatusNotFound, sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions", "", "").Code)
+	assert.Equal(t, http.StatusNotAcceptable, sessionRequest(t, srv, http.MethodGet, "/api/v99/sessions", "", "").Code)
 }
 
 func TestLegacySessionInspectableButNotAttachable(t *testing.T) {
@@ -1221,8 +1229,8 @@ func TestLegacySessionInspectableButNotAttachable(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), legacy))
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(&httpSessionRegistry{sessions: map[string]*httpSession{}}))
 	srv := NewWithManager(sm, "")
-	assert.Equal(t, http.StatusOK, sessionRequest(t, srv, http.MethodGet, "/api/sessions/legacy", "", "").Code)
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/legacy/events", "", "")
+	assert.Equal(t, http.StatusOK, sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/legacy", "", "").Code)
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/legacy/events", "", "")
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"error":"unsupported"`)
 	assert.Contains(t, rec.Body.String(), `"operation":"attach"`)
@@ -1245,7 +1253,7 @@ func TestSessionEventsLastEventIDPrecedenceAndParseErrors(t *testing.T) {
 			srv, handle := newServer()
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
-			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/sessions/s/events?since="+tc.query, nil)
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v2/sessions/s/events?since="+tc.query, nil)
 			req.Header.Set("Last-Event-ID", tc.header)
 			srv.e.ServeHTTP(httptest.NewRecorder(), req)
 			handle.mu.Lock()
@@ -1258,7 +1266,7 @@ func TestSessionEventsLastEventIDPrecedenceAndParseErrors(t *testing.T) {
 
 	for _, tc := range []struct{ query, header string }{{query: "bad"}, {header: "bad"}} {
 		srv, handle := newServer()
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/sessions/s/events?since="+tc.query, nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v2/sessions/s/events?since="+tc.query, nil)
 		req.Header.Set("Last-Event-ID", tc.header)
 		rec := httptest.NewRecorder()
 		srv.e.ServeHTTP(rec, req)
@@ -1279,20 +1287,20 @@ func TestSessionResourcesStableAcrossListGetAndChildren(t *testing.T) {
 		require.NoError(t, store.AddSession(t.Context(), sess))
 	}
 	srv := NewWithManager(NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(&httpSessionRegistry{sessions: map[string]*httpSession{}})), "")
-	list := sessionRequest(t, srv, http.MethodGet, "/api/sessions", "", "")
+	list := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions", "", "")
 	var catalog sessionCatalogDTO
 	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &catalog))
 	byID := map[string]sessionResourceDTO{}
 	for _, resource := range catalog.Sessions {
 		byID[resource.SessionID] = resource
 	}
-	get := sessionRequest(t, srv, http.MethodGet, "/api/sessions/root", "", "")
+	get := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/root", "", "")
 	var rootResource sessionResourceDTO
 	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &rootResource))
 	assert.Equal(t, byID[root.ID].SessionID, rootResource.SessionID)
 	assert.Equal(t, byID[root.ID].CreatedAt, rootResource.CreatedAt)
 	assert.Equal(t, byID[root.ID].UpdatedAt, rootResource.UpdatedAt)
-	children := sessionRequest(t, srv, http.MethodGet, "/api/sessions/root/children", "", "")
+	children := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/root/children", "", "")
 	assert.Equal(t, http.StatusNotFound, children.Code)
 }
 

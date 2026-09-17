@@ -36,7 +36,8 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			Description: "Use this function to hand off the conversation to the selected agent.",
 			Parameters:  tools.MustSchemaFor[Args](),
 			Annotations: tools.ToolAnnotations{
-				ReadOnlyHint: true,
+				// Delegation can execute arbitrary tools in the target agent.
+				ReadOnlyHint: false,
 				Title:        "Handoff Conversation",
 			},
 		},

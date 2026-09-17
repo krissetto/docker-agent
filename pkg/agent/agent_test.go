@@ -1374,3 +1374,17 @@ func TestAgentStopToolSetsStopsLaterToolsetsPastDeadline(t *testing.T) {
 		assert.EqualValues(t, 1, wedged.stops.Load(), "a start that settles after the abandoned shutdown must still be stopped")
 	})
 }
+
+func TestReadOnlyFiltersStaticAndInjectedTools(t *testing.T) {
+	t.Parallel()
+	candidates := []tools.Tool{
+		{Name: "read", Annotations: tools.ToolAnnotations{ReadOnlyHint: true}},
+		{Name: "write"},
+	}
+	a := New("readonly", "", WithReadOnly(true), WithTools(candidates...))
+	listed, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, candidates[:1], listed)
+	assert.Equal(t, candidates[:1], a.FilterTools(candidates))
+	assert.Equal(t, candidates, New("unrestricted", "").FilterTools(candidates))
+}

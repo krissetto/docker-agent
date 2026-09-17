@@ -37,7 +37,7 @@ func bareModel(height int) *model {
 func TestStreamingGrowthScrollsAndRendersMarkdown(t *testing.T) {
 	t.Parallel()
 	m := bareModel(10)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.render() // initial frame
 
 	m.screen.Transcript.AppendAssistant("")
@@ -78,9 +78,9 @@ func TestBuildLinesPlacesCursorOnInput(t *testing.T) {
 func TestBusyActivityIsLocalToStatusFooter(t *testing.T) {
 	t.Parallel()
 	m := bareModel(24)
-	m.busy = true
+	m.lifecycle.Status = runtime.SessionStateRunning
 	m.status.Agent = "worker"
-	assert.Empty(t, m.screen.Transcript.Lines(80, m.spinnerFrame, m.busy, m.sessionState, nil))
+	assert.Empty(t, m.screen.Transcript.Lines(80, m.spinnerFrame, m.busy(), m.sessionState, nil))
 	lines, _, _ := m.buildLines()
 	text := strings.Join(lines, "")
 	assert.Contains(t, text, "worker")
@@ -90,7 +90,7 @@ func TestBusyActivityIsLocalToStatusFooter(t *testing.T) {
 	m.spinnerFrame++
 	next, _, _ := m.buildLines()
 	assert.Equal(t, lines, next, "activity does not redraw just for an animation clock tick")
-	m.busy = false
+	m.lifecycle.Status = runtime.SessionStateSettled
 	idle, _, _ := m.buildLines()
 	assert.Contains(t, strings.Join(idle, ""), "ready")
 }
@@ -124,4 +124,11 @@ func TestBuildLinesConfirmCursorSitsOnOptions(t *testing.T) {
 	require.Less(t, cursorLine, len(lines))
 	assert.Contains(t, lines[cursorLine], "[y] yes")
 	assert.Positive(t, cursorCol)
+}
+
+func (m *model) setTestBusy(busy bool) {
+	m.lifecycle.Status = runtime.SessionStateSettled
+	if busy {
+		m.lifecycle.Status = runtime.SessionStateRunning
+	}
 }

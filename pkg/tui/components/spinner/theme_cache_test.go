@@ -16,7 +16,7 @@ func TestWarmSpinnerThemeRefreshPreservesSharedClock(t *testing.T) {
 	ar := animation.NewRuntime()
 	s := New(ar, ModeBoth, styles.SpinnerDotsAccentStyle).(*spinner)
 	s.SetMessage("Working")
-	require.NotNil(t, s.Init())
+	require.Nil(t, s.Init())
 	t.Cleanup(s.Stop)
 	before, raw, pos := s.View(), s.RawFrame(), s.lightPosition
 	custom := New(ar, ModeSpinnerOnly, lipgloss.NewStyle().Foreground(lipgloss.Color("#123456")))

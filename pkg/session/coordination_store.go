@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 
@@ -19,7 +20,6 @@ type ChildRecord struct {
 	Revision        uint64
 	LastTurnID      string
 	Result          string
-	Error           string
 }
 
 type ChildAdmission struct {
@@ -42,6 +42,11 @@ type ChildReport struct {
 	TurnID          string
 	Content         string
 	Revision        uint64
+}
+
+// ChildCommitBatchStore commits a subtree transition atomically or changes nothing.
+type ChildCommitBatchStore interface {
+	CommitChildren(ctx context.Context, commits []ChildCommit) error
 }
 
 type ChildCommit struct {
@@ -100,6 +105,12 @@ func prepareCommit(c ChildCommit, old ChildRecord) (ChildRecord, error) {
 	}
 	if r.RootSessionID != old.RootSessionID || r.ParentSessionID != old.ParentSessionID || r.Node.ID != old.Node.ID || r.Node.SessionID != old.Node.SessionID {
 		return r, errors.New("child identity cannot change")
+	}
+	if old.Node.State == subagent.NodeStopped && r.Node.State != subagent.NodeStopped {
+		return r, errors.New("stopped child cannot be revived")
+	}
+	if r.Node.State == subagent.NodeStopped && len(c.Reports) != 0 {
+		return r, errors.New("stopped child cannot publish reports")
 	}
 	r.Revision = old.Revision + 1
 	ids := make(map[string]bool, len(c.Reports))
@@ -252,32 +263,50 @@ func (s *InMemorySessionStore) admitChildren(ctx context.Context, admissions []C
 }
 
 func (s *InMemorySessionStore) CommitChild(ctx context.Context, c ChildCommit) error {
+	return s.CommitChildren(ctx, []ChildCommit{c})
+}
+
+func (s *InMemorySessionStore) CommitChildren(ctx context.Context, commits []ChildCommit) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.coordinationMu.Lock()
 	defer s.coordinationMu.Unlock()
-	old, ok := s.children[c.Record.Node.SessionID]
-	if !ok {
-		return ErrNotFound
-	}
-	record, err := prepareCommit(c, old)
-	if err != nil {
-		return err
-	}
-	for _, report := range c.Reports {
-		if _, ok := s.reports[report.ID]; ok {
+	records := make(map[string]ChildRecord, len(commits))
+	reports := make(map[string]acceptedChildReport)
+	for _, c := range commits {
+		id := c.Record.Node.SessionID
+		if _, duplicate := records[id]; duplicate {
 			return ErrAlreadyExists
 		}
+		old, ok := s.children[id]
+		if !ok {
+			return ErrNotFound
+		}
+		record, err := prepareCommit(c, old)
+		if err != nil {
+			return err
+		}
+		records[id] = record
+		for _, report := range c.Reports {
+			if _, ok := s.reports[report.ID]; ok {
+				return ErrAlreadyExists
+			}
+			if _, ok := reports[report.ID]; ok {
+				return ErrAlreadyExists
+			}
+			report.Revision = record.Revision
+			reports[report.ID] = acceptedChildReport{report: report}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if s.reports == nil {
 		s.reports = make(map[string]acceptedChildReport)
 	}
-	for _, report := range c.Reports {
-		report.Revision = record.Revision
-		s.reports[report.ID] = acceptedChildReport{report: report}
-	}
-	s.children[record.Node.SessionID] = record
+	maps.Copy(s.children, records)
+	maps.Copy(s.reports, reports)
 	return nil
 }
 

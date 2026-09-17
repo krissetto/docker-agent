@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -22,7 +23,7 @@ func TestSessionTransportCanonicalCommandsAndReplay(t *testing.T) {
 	var createSource string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath:
 			var request struct {
 				Source string `json:"source"`
 			}
@@ -33,7 +34,7 @@ func TestSessionTransportCanonicalCommandsAndReplay(t *testing.T) {
 			createSource = request.Source
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"session_id":"remote-1","agent_name":"root","capabilities":{}}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions/remote-1/messages":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath+"/remote-1/messages":
 			var request struct {
 				Content string `json:"content"`
 			}
@@ -46,16 +47,16 @@ func TestSessionTransportCanonicalCommandsAndReplay(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusAccepted)
 			fmt.Fprint(w, `{"session_id":"remote-1","turn_id":"turn-1","disposition":"queued"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/remote-1/events":
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/remote-1/events":
 			assert.Equal(t, "7", r.URL.Query().Get("since"))
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher := w.(http.Flusher)
 			writer := bufio.NewWriter(w)
 			frames := []string{
-				`{"version":1,"type":"snapshot","snapshot":{"session":{"id":"remote-1"},"status":{"session_id":"remote-1","agent_name":"root","state":"settled","pending":0},"interactions":[],"pending_inputs":[],"cursor":8,"transcript_position":0}}`,
-				`{"version":1,"type":"event","envelope":{"version":1,"session_id":"remote-1","turn_id":"turn-old","sequence":8,"transcript_position":-1,"event":{"type":"stream_started","session_id":"remote-1","agent_name":"root"}}}`,
-				`{"version":1,"type":"ready","cursor":8}`,
-				`{"version":1,"type":"event","envelope":{"version":1,"session_id":"remote-1","turn_id":"turn-1","sequence":9,"transcript_position":-1,"event":{"type":"stream_stopped","session_id":"remote-1","agent_name":"root","reason":"normal"}}}`,
+				`{"version":2,"type":"snapshot","snapshot":{"session":{"id":"remote-1"},"status":{"session_id":"remote-1","agent_name":"root","state":"settled","pending":0},"interactions":[],"pending_inputs":[],"cursor":8,"transcript_position":0}}`,
+				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-old","sequence":8,"transcript_position":-1,"event":{"type":"stream_started","session_id":"remote-1","agent_name":"root"}}}`,
+				`{"version":2,"type":"ready","cursor":8}`,
+				`{"version":2,"type":"event","envelope":{"version":2,"session_id":"remote-1","turn_id":"turn-1","sequence":9,"transcript_position":-1,"event":{"type":"stream_stopped","session_id":"remote-1","agent_name":"root","reason":"normal"}}}`,
 			}
 			for _, frame := range frames {
 				fmt.Fprintf(writer, "data: %s\n\n", frame)
@@ -109,11 +110,11 @@ func TestRemoteSessionConcurrentMetadataAccessIsIsolated(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/s/status":
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/s/status":
 			fmt.Fprintf(w, `{"metadata":%s,"status":{"session_id":"s","agent_name":"root","state":"settled","pending":0}}`, metadata)
-		case r.Method == http.MethodPatch && r.URL.Path == "/api/sessions/s/model":
+		case r.Method == http.MethodPatch && r.URL.Path == api.SessionAPIPath+"/s/model":
 			fmt.Fprint(w, metadata)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/s/thinking-level":
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/s/thinking-level":
 			fmt.Fprintf(w, `{"levels":["low","high"],"current":"low","metadata":%s}`, metadata)
 		default:
 			http.NotFound(w, r)
@@ -173,8 +174,8 @@ func TestSessionTransportRejectsUnknownEventType(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"interactions\":[],\"pending_inputs\":[],\"cursor\":1,\"transcript_position\":0}}\n\n")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"event\",\"envelope\":{\"version\":1,\"session_id\":\"s\",\"sequence\":1,\"event\":{\"type\":\"future_unregistered_event\"}}}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"interactions\":[],\"pending_inputs\":[],\"cursor\":1,\"transcript_position\":0}}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"sequence\":1,\"event\":{\"type\":\"future_unregistered_event\"}}}\n\n")
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
@@ -225,9 +226,9 @@ func TestSessionTransportAllCommandsDeleteAndReconnect(t *testing.T) {
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath:
 			fmt.Fprint(w, `{"session_id":"s","agent_name":"root","capabilities":{}}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions/s/messages":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath+"/s/messages":
 			var body struct {
 				Mode string `json:"mode"`
 			}
@@ -236,23 +237,23 @@ func TestSessionTransportAllCommandsDeleteAndReconnect(t *testing.T) {
 				return
 			}
 			fmt.Fprintf(w, `{"session_id":"s","turn_id":%q}`, body.Mode+"-turn")
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions/s/retry":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath+"/s/retry":
 			fmt.Fprint(w, `{"session_id":"s","turn_id":"retry-turn","disposition":"queued"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions/s/responses":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath+"/s/responses":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPatch && r.URL.Path == "/api/sessions/s/title":
+		case r.Method == http.MethodPatch && r.URL.Path == api.SessionAPIPath+"/s/title":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/sessions/s/cancel":
+		case r.Method == http.MethodPost && r.URL.Path == api.SessionAPIPath+"/s/cancel":
 			fmt.Fprint(w, `{"session_id":"s","turn_id":"turn","outcome":"accepted"}`)
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/sessions/s":
+		case r.Method == http.MethodDelete && r.URL.Path == api.SessionAPIPath+"/s":
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/s/status":
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/s/status":
 			fmt.Fprint(w, `{"metadata":{"session_id":"s","agent_name":"root","capabilities":{}},"status":{"session_id":"s","agent_name":"root","state":"settled","pending":0}}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/sessions/s/events":
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/s/events":
 			cursor := uint64(2)
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "data: {\"version\":1,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"interactions\":[],\"pending_inputs\":[],\"cursor\":%d,\"transcript_position\":0}}\n\n", cursor)
-			fmt.Fprintf(w, "data: {\"version\":1,\"type\":\"ready\",\"cursor\":%d}\n\n", cursor)
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"interactions\":[],\"pending_inputs\":[],\"cursor\":%d,\"transcript_position\":0}}\n\n", cursor)
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"ready\",\"cursor\":%d}\n\n", cursor)
 		default:
 			http.NotFound(w, r)
 		}
@@ -288,8 +289,8 @@ func TestSessionTransportAllCommandsDeleteAndReconnect(t *testing.T) {
 	require.NoError(t, transport.DeleteSession(t.Context(), "s"))
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Contains(t, requests, "GET /api/sessions/s/events?since=2")
-	assert.Contains(t, requests, "DELETE /api/sessions/s")
+	assert.Contains(t, requests, "GET "+api.SessionAPIPath+"/s/events?since=2")
+	assert.Contains(t, requests, "DELETE "+api.SessionAPIPath+"/s")
 }
 
 func TestRemoteSnapshotPreservesTypedInputMetadata(t *testing.T) {
@@ -329,17 +330,17 @@ func TestSessionSummaryCatalogRemoteRejectsLegacyAndInvalidIdentity(t *testing.T
 		name    string
 		payload string
 	}{
-		{name: "legacy", payload: `{"version":1,"sessions":[{"session_id":"root","messages":[{"content":"legacy transcript"}]}]}`},
-		{name: "duplicate", payload: `{"version":1,"view":"summary","sessions":[{"session_id":"same"},{"session_id":"same"}]}`},
-		{name: "missing", payload: `{"version":1,"view":"summary","sessions":[{}]}`},
-		{name: "wrong-scope", payload: `{"version":1,"view":"summary","sessions":[{"session_id":"child","parent_id":"root"}]}`},
+		{name: "legacy", payload: `{"version":2,"sessions":[{"session_id":"root","messages":[{"content":"legacy transcript"}]}]}`},
+		{name: "duplicate", payload: `{"version":2,"view":"summary","sessions":[{"session_id":"same"},{"session_id":"same"}]}`},
+		{name: "missing", payload: `{"version":2,"view":"summary","sessions":[{}]}`},
+		{name: "wrong-scope", payload: `{"version":2,"view":"summary","sessions":[{"session_id":"child","parent_id":"root"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				assert.Equal(t, http.MethodGet, r.Method)
-				assert.Equal(t, "/api/sessions", r.URL.Path)
+				assert.Equal(t, api.SessionAPIPath, r.URL.Path)
 				assert.Equal(t, "summary", r.URL.Query().Get("view"))
 				assert.Equal(t, "false", r.URL.Query().Get("include_children"))
 				fmt.Fprint(w, tc.payload)
@@ -353,5 +354,35 @@ func TestSessionSummaryCatalogRemoteRejectsLegacyAndInvalidIdentity(t *testing.T
 			require.Error(t, err)
 			assert.Equal(t, 1, calls, "no transcript or per-ID compatibility fallback")
 		})
+	}
+}
+
+func TestSessionTransportRejectsNonCanonicalWireVersions(t *testing.T) {
+	for _, version := range []int{0, 1, api.SessionAPIVersion + 1} {
+		for _, boundary := range []string{"snapshot", "envelope"} {
+			t.Run(fmt.Sprintf("%s/version=%d", boundary, version), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, api.SessionAPIPath+"/s/events", r.URL.Path)
+					w.Header().Set("Content-Type", "text/event-stream")
+					snapshotVersion := api.SessionAPIVersion
+					if boundary == "snapshot" {
+						snapshotVersion = version
+					}
+					fmt.Fprintf(w, "data: {\"version\":%d,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"cursor\":0}}\n\n", snapshotVersion)
+					if boundary == "envelope" {
+						fmt.Fprintf(w, "data: {\"version\":%d,\"type\":\"event\",\"envelope\":{\"version\":%d,\"session_id\":\"s\",\"sequence\":1,\"event\":{\"type\":\"stream_started\",\"session_id\":\"s\"}}}\n\n", api.SessionAPIVersion, version)
+					}
+				}))
+				defer server.Close()
+				client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
+				require.NoError(t, err)
+				transport, err := NewSessionTransport(client)
+				require.NoError(t, err)
+				handle, err := transport.SessionByID("s")
+				require.NoError(t, err)
+				_, err = handle.Observe(t.Context(), ObserveOptions{})
+				require.ErrorContains(t, err, "version")
+			})
+		}
 	}
 }

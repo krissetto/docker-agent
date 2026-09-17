@@ -10,13 +10,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/api"
 )
 
 func writeCanonicalObservationStart(w http.ResponseWriter) http.Flusher {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "data: {\"version\":1,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"cursor\":0,\"transcript_position\":0}}\n\n")
-	fmt.Fprint(w, "data: {\"version\":1,\"type\":\"ready\",\"cursor\":0}\n\n")
+	fmt.Fprintf(w, "data: {\"version\":%d,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"cursor\":0,\"transcript_position\":0}}\n\n", api.SessionAPIVersion)
+	fmt.Fprintf(w, "data: {\"version\":%d,\"type\":\"ready\",\"cursor\":0}\n\n", api.SessionAPIVersion)
 	flusher := w.(http.Flusher)
 	flusher.Flush()
 	return flusher
@@ -30,7 +32,7 @@ func TestClientCanonicalObservationDeliversMultipleEvents(t *testing.T) {
 			if i > 1 {
 				<-proceed
 			}
-			fmt.Fprintf(w, "data: {\"version\":1,\"type\":\"event\",\"envelope\":{\"version\":1,\"session_id\":\"s\",\"sequence\":%d,\"event\":{\"type\":\"session_title\",\"session_id\":\"s\",\"title\":\"t%d\"}}}\n\n", i, i)
+			fmt.Fprintf(w, "data: {\"version\":%d,\"type\":\"event\",\"envelope\":{\"version\":%d,\"session_id\":\"s\",\"sequence\":%d,\"event\":{\"type\":\"session_title\",\"session_id\":\"s\",\"title\":\"t%d\"}}}\n\n", api.SessionAPIVersion, api.SessionAPIVersion, i, i)
 			flusher.Flush()
 		}
 	}))

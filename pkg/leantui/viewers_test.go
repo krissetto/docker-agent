@@ -252,3 +252,76 @@ func TestHostedViewResultAfterShutdownOnlyAbortsPreparation(t *testing.T) {
 	assert.Zero(t, prepared.builds)
 	assert.Zero(t, handle.stops)
 }
+
+func TestConfirmationDraftBelongsToExactInteraction(t *testing.T) {
+	for _, clear := range []string{"resolution", "replacement", "projection", "snapshot"} {
+		t.Run(clear, func(t *testing.T) {
+			m, handle := sessionModel(t)
+			m.handleEvent(t.Context(), &runtime.ToolCallConfirmationEvent{SessionID: handle.id, RequestID: "old"})
+			m.handleConfirmKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune("r")})
+			m.handleConfirmKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune("old reason")})
+			old := m.screen.Confirm
+			require.True(t, old.Rejecting)
+			require.Equal(t, "old reason", old.RejectReason)
+			m.handleEvent(t.Context(), &runtime.ToolCallConfirmationEvent{SessionID: handle.id, RequestID: "old"})
+			require.Same(t, old, m.screen.Confirm, "replayed identity preserves its draft")
+			switch clear {
+			case "resolution":
+				m.handleEvent(t.Context(), &runtime.InteractionResolvedEvent{SessionID: "other", InteractionID: "old"})
+				require.Same(t, old, m.screen.Confirm, "foreign resolution cannot clear the draft")
+				m.handleEvent(t.Context(), &runtime.InteractionResolvedEvent{SessionID: handle.id, InteractionID: "old"})
+			case "projection":
+				event := m.app.CurrentSessionEventIdentity()
+				event.Event = &runtime.InteractionResolvedEvent{SessionID: handle.id, InteractionID: "old"}
+				event.Projection = &app.PresentationState{}
+				m.handleEvent(t.Context(), event)
+			case "snapshot":
+				m.handleEvent(t.Context(), &app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: m.app.Session()}})
+			}
+			if clear != "replacement" {
+				require.Nil(t, m.screen.Confirm)
+			}
+			m.handleEvent(t.Context(), &runtime.ToolCallConfirmationEvent{SessionID: handle.id, RequestID: "new"})
+			require.False(t, m.screen.Confirm.Rejecting)
+			require.Empty(t, m.screen.Confirm.RejectReason)
+			m.handleConfirmKey(t.Context(), ui.Key{Typ: ui.KeyEnter})
+			require.Empty(t, handle.responses, "Enter cannot reject the new interaction with an obsolete draft")
+			m.handleConfirmKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune("y")})
+			require.Len(t, handle.responses, 1)
+			assert.Equal(t, "new", handle.responses[0].InteractionID)
+			assert.Equal(t, runtime.ResumeApprove(), handle.responses[0].Resume)
+		})
+	}
+}
+
+func TestFreshViewerBorrowsServicesNotSessionState(t *testing.T) {
+	m, _ := sessionModel(t)
+	target, _ := sessionModel(t)
+	m.viewers = &viewerHost{views: make(map[*app.App]*model)}
+	m.status.Dormant = true
+	m.status.Pending = 3
+	m.lifecycle.Status = runtime.SessionStateRunning
+	m.lastInterrupt = time.Now()
+	m.screen.Editor.SetText("parent draft")
+	m.screen.Confirm = &ui.ConfirmModel{SessionID: m.app.Session().ID, RequestID: "parent", Rejecting: true, RejectReason: "parent reason"}
+	m.ownedSkillOperation = "parent operation"
+	m.subagentSnapshot = m.app.Session().GetSubagentTree()
+	m.pendingUsers = []ui.PendingUserMessage{{Content: "parent queued"}}
+	fresh := m.newViewer(target.app, "child input")
+	assert.Same(t, m.viewers, fresh.viewers)
+	assert.Same(t, m.r, fresh.r)
+	assert.Same(t, target.app, fresh.app)
+	assert.NotSame(t, m.screen, fresh.screen)
+	assert.NotSame(t, m.usage, fresh.usage)
+	assert.NotSame(t, m.sessionState, fresh.sessionState)
+	assert.False(t, fresh.busy())
+	assert.False(t, fresh.status.Dormant)
+	assert.Zero(t, fresh.status.Pending)
+	assert.True(t, fresh.lastInterrupt.IsZero())
+	assert.Empty(t, fresh.screen.Editor.Text())
+	assert.Nil(t, fresh.screen.Confirm)
+	assert.Empty(t, fresh.pendingUsers)
+	assert.Empty(t, fresh.ownedSkillOperation)
+	assert.Nil(t, fresh.subagentSnapshot)
+	assert.Empty(t, fresh.inputParentSessionID)
+}

@@ -153,7 +153,7 @@ func TestStoppedSubagentAttachSurvivesReload(t *testing.T) {
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		return d.running
+		return d.running()
 	}, 10*time.Second, 10*time.Millisecond)
 	_, err = rtA.subagents.stopChild(sess.ID, id)
 	require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestStoppedSubagentAttachSurvivesReload(t *testing.T) {
 	_, err = rtB.subagents.sendToChild(loaded.ID, id, "hi")
 	require.Error(t, err)
 	_, err = rtB.subagents.stopChild(loaded.ID, id)
-	require.Error(t, err)
+	require.NoError(t, err, "repeated stop is idempotent across restore")
 }
 
 // mustAttachSession resolves a subagent's session id.

@@ -52,6 +52,8 @@ func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.D
 func (m *subagentManager) Restore(ctx context.Context, sess *session.Session, snapshot subagent.Snapshot) (subagent.Snapshot, error) {
 	m.restoreMu.Lock()
 	defer m.restoreMu.Unlock()
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
 	canonical, records, err := m.canonicalSnapshot(ctx, sess, snapshot)
 	if err != nil {
 		return subagent.Snapshot{}, err
@@ -62,14 +64,6 @@ func (m *subagentManager) Restore(ctx context.Context, sess *session.Session, sn
 	}
 	restored, err := m.restoreLockedRecords(ctx, sess, normalized, records)
 	if err == nil {
-		m.mu.Lock()
-		for _, record := range records {
-			if child := m.children[record.Node.ID]; child != nil {
-				child.durable = record
-				child.result = record.Result
-			}
-		}
-		m.mu.Unlock()
 		m.r.sessionDrivers.signalWork()
 	}
 	return restored, err
@@ -351,18 +345,17 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
-		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, agent: entry.childAgent, state: entry.state, errMsg: node.Error, unwatch: entry.unwatch}
+		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, agent: entry.childAgent, durable: session.ChildRecord{Node: node}, unwatch: entry.unwatch}
 		if entry.childSess != nil {
 			rec.parentAgentName = entry.childSess.AttributesSnapshot()[SessionParentAgentAttribute]
 			if rec.parentAgentName == "" && entry.parentSess != nil {
 				rec.parentAgentName = entry.parentSess.AgentName
 			}
-			rec.result = ownAssistantResult(entry.childSess)
+			rec.durable.Result = ownAssistantResult(entry.childSess)
 		}
 		for _, record := range records {
 			if record.Node.ID == node.ID {
 				rec.durable = record
-				rec.result = record.Result
 				break
 			}
 		}
@@ -385,14 +378,33 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 			}
 			node := entry.snapshot.Node
 			node.State = entry.state
-			preview, _ := subagent.PreviewText(rec.result, subagent.PreviewLen)
-			record := session.ChildRecord{RootSessionID: sess.ID, ParentSessionID: entry.parentSessionID, Node: node, Revision: 1, Result: preview, Error: node.Error}
+			preview, _ := subagent.PreviewText(rec.durable.Result, subagent.PreviewLen)
+			record := session.ChildRecord{RootSessionID: sess.ID, ParentSessionID: entry.parentSessionID, Node: node, Revision: 1, Result: preview}
 			admission := entry.childSess.OwnSnapshot()
 			admission.Messages = nil
 			if err := m.coordination().AdmitChild(ctx, session.ChildAdmission{Child: admission, Record: record}); err != nil {
 				return fmt.Errorf("adopt legacy child %s: %w", node.ID, err)
 			}
 			rec.durable = record
+		}
+		// Configuration drift and stopped ancestry are committed, not a
+		// second restore-only lifecycle authority.
+		var commits []session.ChildCommit
+		for _, entry := range prepared {
+			rec := m.children[entry.snapshot.Node.ID]
+			if entry.state == subagent.NodeStopped && rec.durable.Revision != 0 && rec.durable.Node.State != subagent.NodeStopped {
+				record := rec.durable
+				record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
+				commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
+			}
+		}
+		if err := m.commitChildren(ctx, commits); err != nil {
+			return err
+		}
+		for _, commit := range commits {
+			record := commit.Record
+			record.Revision++
+			m.children[record.Node.ID].durable = record
 		}
 		if err := m.tree.AddSubtree(treeNodes); err != nil {
 			return fmt.Errorf("publish restored topology: %w", err)

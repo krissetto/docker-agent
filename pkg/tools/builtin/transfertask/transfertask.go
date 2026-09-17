@@ -39,7 +39,8 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
             You must provide a clear and concise description of the task the member should achieve AND the expected output.`,
 			Parameters: tools.MustSchemaFor[Args](),
 			Annotations: tools.ToolAnnotations{
-				ReadOnlyHint: true,
+				// Delegation can execute arbitrary tools in the target agent.
+				ReadOnlyHint: false,
 				Title:        "Transfer Task",
 			},
 		},

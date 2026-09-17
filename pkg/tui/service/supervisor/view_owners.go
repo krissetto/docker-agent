@@ -466,6 +466,37 @@ func (s *Supervisor) acceptOwner(owner *viewOwner, optional bool) error {
 	return owner.registerErr
 }
 
+// ConfirmedSessionViewInfo borrows an owner only for policy/identity inspection.
+// Unlike a committed view, this read must not retain a temporary owner.
+func (s *Supervisor) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
+	owner, err := s.acquireOwner(ctx, id, true)
+	if err != nil {
+		return runtime.PreparedSessionViewInfo{}, err
+	}
+	if err := s.beginOwnerOperation(); err != nil {
+		s.releaseOwner(owner)
+		return runtime.PreparedSessionViewInfo{}, err
+	}
+	defer s.ownerOperations.Done()
+	defer s.releaseOwner(owner)
+	if err := ctx.Err(); err != nil {
+		return runtime.PreparedSessionViewInfo{}, err
+	}
+	reader, ok := owner.resources.Sessions.(runtime.SessionViewInfoReader)
+	if !ok {
+		return runtime.PreparedSessionViewInfo{}, ownerError(id, runtime.SessionErrorUnsupported, "owner cannot inspect session views")
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.viewContext(), cancel)
+	defer cancel()
+	defer stop()
+	info, err := reader.ConfirmedSessionViewInfo(opCtx, id)
+	if err == nil {
+		err = opCtx.Err()
+	}
+	return info, err
+}
+
 func (s *Supervisor) AcquireSessionView(ctx context.Context, id string) (PreparedHostedView, error) {
 	owner, err := s.acquireOwner(ctx, id, true)
 	if err != nil {

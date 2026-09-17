@@ -60,7 +60,7 @@ func TestCanonicalAuthorSafetyDefaultConsumedOnceAcrossAgentSwitch(t *testing.T)
 		agent.New("worker", "prompt", agent.WithModel(model), agent.WithSafety(latest.SafetyModeStrict)),
 	)
 
-	created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
@@ -68,7 +68,7 @@ func TestCanonicalAuthorSafetyDefaultConsumedOnceAcrossAgentSwitch(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyAutonomous, original.GetSafetyPolicy())
 
-	switched := sessionRequest(t, srv, http.MethodPost, "/api/sessions/"+metadata.SessionID+"/switch-agent", `{"agent_name":"worker"}`, "")
+	switched := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+metadata.SessionID+"/switch-agent", `{"agent_name":"worker"}`, "")
 	require.Equal(t, http.StatusCreated, switched.Code, switched.Body.String())
 	var response struct {
 		Metadata sessionMetadataDTO `json:"metadata"`
@@ -96,7 +96,7 @@ func TestCanonicalSessionModelRollbackOnStoreFailure(t *testing.T) {
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(owner.Runtime()))
 	srv := NewWithManager(sm, "")
 
-	created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
@@ -106,7 +106,7 @@ func TestCanonicalSessionModelRollbackOnStoreFailure(t *testing.T) {
 	stored.CustomModelsUsed = []string{"provider/old"}
 	store.fail = true
 
-	failed := sessionRequest(t, srv, http.MethodPatch, "/api/sessions/"+metadata.SessionID+"/model", `{"model":""}`, "")
+	failed := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/"+metadata.SessionID+"/model", `{"model":""}`, "")
 	assert.Equal(t, http.StatusInternalServerError, failed.Code, failed.Body.String())
 	handle, err := owner.Runtime().SessionByID(metadata.SessionID)
 	require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestCanonicalSessionsReadyImmediateAfterCreateAndTimeout(t *testing.T) {
 			registry := &httpSessionRegistry{sessions: map[string]*httpSession{}}
 			srv, _ := newSessionHTTPServer(t, registry)
 			if tc.create {
-				created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+				created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 				require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 			}
 			started := time.Now()
@@ -152,7 +152,7 @@ func TestCanonicalSessionEventsEmitHeartbeatAfterSnapshotAndReady(t *testing.T) 
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/sessions/heartbeat/events", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v2/sessions/heartbeat/events", http.NoBody)
 	require.NoError(t, err)
 	res, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -192,14 +192,14 @@ func TestCanonicalSessionEventsEmitHeartbeatAfterSnapshotAndReady(t *testing.T) 
 func TestCanonicalDeleteOpenObserverEmitsDeletedThenEOF(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	srv, _ := newCanonicalLocalServer(t, store, agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))
-	created := sessionRequest(t, srv, http.MethodPost, "/api/sessions", `{"agent_name":"root"}`, "")
+	created := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions", `{"agent_name":"root"}`, "")
 	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
 	var metadata sessionMetadataDTO
 	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &metadata))
 	httpServer := httptest.NewServer(srv.e)
 	defer httpServer.Close()
 
-	res, err := http.Get(httpServer.URL + "/api/sessions/" + metadata.SessionID + "/events") //nolint:noctx // bounded local test server
+	res, err := http.Get(httpServer.URL + "/api/v2/sessions/" + metadata.SessionID + "/events") //nolint:noctx // bounded local test server
 	require.NoError(t, err)
 	defer res.Body.Close()
 	reader := bufio.NewReader(res.Body)
@@ -211,7 +211,7 @@ func TestCanonicalDeleteOpenObserverEmitsDeletedThenEOF(t *testing.T) {
 		}
 	}
 
-	deleted := sessionRequest(t, srv, http.MethodDelete, "/api/sessions/"+metadata.SessionID, "", "")
+	deleted := sessionRequest(t, srv, http.MethodDelete, "/api/v2/sessions/"+metadata.SessionID, "", "")
 	require.Equal(t, http.StatusNoContent, deleted.Code, deleted.Body.String())
 	var terminal string
 	for {
@@ -242,7 +242,7 @@ func TestCanonicalForkSiblingNumberingAndNestedDeepCopy(t *testing.T) {
 
 	forkIDs := make([]string, 0, 2)
 	for i, wantTitle := range []string{"Original (fork 1)", "Original (fork 2)"} {
-		rec := sessionRequest(t, srv, http.MethodPost, "/api/sessions/parent/fork", `{"user_message_index":1}`, "")
+		rec := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/parent/fork", `{"user_message_index":1}`, "")
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var fork api.SessionResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &fork))
@@ -269,7 +269,7 @@ func TestCanonicalSnapshotUnknownSessionFromSQLiteIsTyped(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	srv, _ := newCanonicalLocalServer(t, store, agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))
-	rec := sessionRequest(t, srv, http.MethodGet, "/api/sessions/missing/snapshot", "", "")
+	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/missing/snapshot", "", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	var body struct {
 		Error     string `json:"error"`

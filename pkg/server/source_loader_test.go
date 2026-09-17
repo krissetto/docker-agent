@@ -10,6 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/model/provider/providers"
+	"github.com/docker/docker-agent/pkg/teamloader"
 )
 
 type mockSource struct {
@@ -240,4 +244,103 @@ func TestSourceRetryScheduleOutlivesDesktopDetectionCache(t *testing.T) {
 		total += delay
 	}
 	assert.Greater(t, total, time.Minute)
+}
+
+// encryptedMockSource is a mockSource that also carries an agent config
+// envelope, like the URL source a trusted Docker /gordon-agent fetch produces.
+type encryptedMockSource struct {
+	*mockSource
+
+	mu  sync.RWMutex
+	enc string
+}
+
+func (m *encryptedMockSource) EncryptedConfig() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.enc
+}
+
+func (m *encryptedMockSource) setEncryptedConfig(enc string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.enc = enc
+}
+
+// TestSourceLoaderForwardsEncryptedConfig is the regression guard for the bug
+// where API-server mode (Docker Desktop) stopped forwarding the agent config
+// envelope to the models gateway: sourceLoader decorates every source, so losing
+// this passthrough makes teamloader's type assertion fail and the gateway's
+// prompt verification silently no-op (it fails open when no config is sent).
+func TestSourceLoaderForwardsEncryptedConfig(t *testing.T) {
+	t.Parallel()
+	inner := &encryptedMockSource{
+		mockSource: &mockSource{name: "gordon-agent", data: []byte("test data")},
+		enc:        "packed-signed-config",
+	}
+	sl := newSourceLoader(t.Context(), inner, 0)
+
+	// The decorator must expose the capability through the very interface
+	// teamloader asserts on, not merely have a method of the same name.
+	ecs, ok := config.Source(sl).(config.EncryptedConfigSource)
+	require.True(t, ok, "sourceLoader must satisfy config.EncryptedConfigSource")
+	assert.Equal(t, "packed-signed-config", ecs.EncryptedConfig())
+}
+
+// TestSourceLoaderEncryptedConfigFollowsRefresh pins the read-through: the
+// envelope is refreshed by the same Read the refresh loop performs, so a tag
+// repushed under a new signature is picked up without restarting the daemon.
+func TestSourceLoaderEncryptedConfigFollowsRefresh(t *testing.T) {
+	t.Parallel()
+	inner := &encryptedMockSource{
+		mockSource: &mockSource{name: "gordon-agent", data: []byte("test data")},
+		enc:        "first-envelope",
+	}
+	sl := newSourceLoader(t.Context(), inner, 0)
+	require.Equal(t, "first-envelope", sl.EncryptedConfig())
+
+	inner.setEncryptedConfig("second-envelope")
+	assert.Equal(t, "second-envelope", sl.EncryptedConfig())
+}
+
+// TestSourceLoaderEncryptedConfigAbsent covers the ordinary case: a file or
+// bytes source has no envelope, and asking for one must not panic or invent a
+// value — an empty string leaves the request body untouched.
+func TestSourceLoaderEncryptedConfigAbsent(t *testing.T) {
+	t.Parallel()
+	inner := &mockSource{name: "local.yaml", data: []byte("test data")}
+	sl := newSourceLoader(t.Context(), inner, 0)
+
+	assert.Empty(t, sl.EncryptedConfig())
+}
+
+const envelopeTestAgent = `version: "2"
+agents:
+  root:
+    model: gpt
+    instruction: hello
+models:
+  gpt:
+    provider: openai
+    model: gpt-4o
+`
+
+// TestTeamloaderAdoptsEncryptedConfigThroughSourceLoader exercises the real
+// API-server wiring end to end: teamloader discovers the config envelope by
+// type-asserting the source it is handed, and in API-server mode that source is
+// always a sourceLoader. It is the assertion that silently failed before the
+// passthrough existed, leaving the gateway with nothing to verify.
+func TestTeamloaderAdoptsEncryptedConfigThroughSourceLoader(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "DUMMY")
+	inner := &encryptedMockSource{
+		mockSource: &mockSource{name: "gordon-agent", data: []byte(envelopeTestAgent)},
+		enc:        "packed-signed-config",
+	}
+	sl := newSourceLoader(t.Context(), inner, 0)
+
+	res, err := teamloader.LoadWithConfig(t.Context(), sl, &config.RuntimeConfig{},
+		teamloader.WithProviderRegistry(providers.NewDefaultRegistry()))
+	require.NoError(t, err)
+	assert.Equal(t, "packed-signed-config", res.EncryptedConfig,
+		"teamloader must adopt the envelope through the sourceLoader decorator")
 }

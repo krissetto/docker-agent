@@ -546,6 +546,23 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		}
 	}
 
+	// A drained goroutine can still own an uncommitted journal/outcome. Never
+	// discard that authority on release/delete; retry the common barrier first.
+	if d != nil {
+		d.mu.Lock()
+		settling, generation, runErr := d.settling(), d.generation, d.completionRunErr
+		d.mu.Unlock()
+		if settling {
+			d.finishRunContext(ctx, generation, runErr)
+			d.mu.Lock()
+			completionErr := d.completionErr
+			d.mu.Unlock()
+			if completionErr != nil {
+				return completionErr
+			}
+		}
+	}
+
 	if final && d != nil {
 		sess := d.session()
 		agentName := ""
@@ -606,7 +623,7 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	// a later CloseContext can retry without executing accepted work again.
 	for _, d := range drivers {
 		d.mu.Lock()
-		settling := d.settling
+		settling := d.settling()
 		generation, runErr := d.generation, d.completionRunErr
 		d.mu.Unlock()
 		if settling {

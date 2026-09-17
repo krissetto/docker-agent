@@ -18,14 +18,18 @@ type metadataOnlyCatalogStore struct {
 	session.Store
 	session.ScopedSummaryStore
 
-	reads atomic.Int32
+	reads      atomic.Int32
+	allowReads atomic.Bool
 }
 
 func (s *metadataOnlyCatalogStore) GetSessions(context.Context) ([]*session.Session, error) {
 	return nil, errors.New("catalog must not hydrate sessions")
 }
 
-func (s *metadataOnlyCatalogStore) GetSession(context.Context, string) (*session.Session, error) {
+func (s *metadataOnlyCatalogStore) GetSession(ctx context.Context, id string) (*session.Session, error) {
+	if s.allowReads.Load() {
+		return s.Store.GetSession(ctx, id)
+	}
 	return nil, errors.New("catalog must not perform per-ID reads")
 }
 
@@ -67,12 +71,13 @@ func TestSessionSummaryCatalogMetadataOnlyScopeAndDeferredChild(t *testing.T) {
 
 func TestSessionSummaryCatalogReusesLiveBindingWithoutHydration(t *testing.T) {
 	base := session.NewInMemorySessionStore()
-	rt, owner := coordinationRuntime(t, base, coordinationReply("root"), coordinationReply("child"))
+	store := &metadataOnlyCatalogStore{Store: base, ScopedSummaryStore: base.(session.ScopedSummaryStore)}
+	store.allowReads.Store(true)
+	_, owner := coordinationRuntime(t, store, coordinationReply("root"), coordinationReply("child"))
 	handle := coordinationCreate(t, owner.Runtime(), "live", "")
 	driver := handle.(*sessionHandle).driver
 	driver.SetModelBinding("live/provider-model", nil)
-	store := &metadataOnlyCatalogStore{Store: base, ScopedSummaryStore: base.(session.ScopedSummaryStore)}
-	rt.sessionStore = store
+	store.allowReads.Store(false)
 	rows, err := owner.Runtime().(SessionSummaryCatalog).ListSessionSummaries(t.Context(), SessionSummaryOptions{IncludeChildren: true})
 	require.NoError(t, err)
 	require.Len(t, rows, 1)

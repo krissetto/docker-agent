@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -312,7 +313,7 @@ func newRemoteSessionContractFixture(t *testing.T) sessionContractFixture {
 }
 
 func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	const prefix = "/api/sessions/contract-session/"
+	const prefix = api.SessionAPIPath + "/contract-session/"
 	if len(r.URL.Path) < len(prefix) || r.URL.Path[:len(prefix)] != prefix {
 		http.NotFound(w, r)
 		return
@@ -366,7 +367,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 func (s *remoteContractServer) writeEvents(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	writer := bufio.NewWriter(w)
-	snapshot := remoteSessionSnapshot{Session: session.New(session.WithID("contract-session")), Status: SessionStatus{SessionID: "contract-session", AgentName: "contract", State: SessionStateSettled}, Cursor: s.sequence}
+	snapshot := remoteSessionSnapshot{Session: session.New(session.WithID("contract-session")), Status: api.SessionStatus[SessionState]{SessionID: "contract-session", AgentName: "contract", State: SessionStateSettled}, Cursor: s.sequence}
 	writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "snapshot", Snapshot: &snapshot})
 	for i := range s.journal {
 		writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "event", Envelope: &s.journal[i]})
@@ -383,8 +384,8 @@ func writeContractSSE(writer *bufio.Writer, message remoteSessionStreamMessage) 
 func TestRemoteSessionObserveReportsSeveredSSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"cursor\":0}}\n\n")
-		fmt.Fprint(w, "data: {\"version\":1,\"type\":\"ready\",\"cursor\":0}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\",\"state\":\"settled\",\"pending\":0},\"cursor\":0}}\n\n")
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"ready\",\"cursor\":0}\n\n")
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL, WithHTTPClient(server.Client()))

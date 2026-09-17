@@ -266,6 +266,38 @@ func TestEncryptedConfigBodyInjection(t *testing.T) {
 	}
 }
 
+func TestRemoveEncryptedConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removes field and digest", func(t *testing.T) {
+		t.Parallel()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com", strings.NewReader(`{"model":"gpt-4o","encrypted_agent_config":"secret"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(EncryptedConfigDigestHeader, "sha256:secret")
+
+		require.NoError(t, RemoveEncryptedConfig(req))
+		body, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"model":"gpt-4o"}`, string(body))
+		assert.Empty(t, req.Header.Get(EncryptedConfigDigestHeader))
+	})
+
+	t.Run("leaves non-JSON body unchanged", func(t *testing.T) {
+		t.Parallel()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com", strings.NewReader("opaque"))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set(EncryptedConfigDigestHeader, "sha256:secret")
+
+		require.NoError(t, RemoveEncryptedConfig(req))
+		body, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "opaque", string(body))
+		assert.Empty(t, req.Header.Get(EncryptedConfigDigestHeader))
+	})
+}
+
 func TestContextWithSessionID_RoundTrip(t *testing.T) {
 	t.Parallel()
 

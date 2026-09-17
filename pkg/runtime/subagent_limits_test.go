@@ -57,7 +57,16 @@ func admissionTestDriver(m *subagentManager, id, parent string) *sessionDriver {
 func setAdmissionTestState(d *sessionDriver, starting, running, settling bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.starting, d.running, d.settling = starting, running, settling
+	d.phase = sessionIdle
+	if starting {
+		d.phase = sessionStarting
+	}
+	if running {
+		d.phase = sessionRunning
+	}
+	if settling {
+		d.phase = sessionSettling
+	}
 }
 
 func TestSubagentAdmissionDepthAndCount(t *testing.T) {
@@ -205,10 +214,10 @@ func TestFailedSessionMessageableButRunGated(t *testing.T) {
 	failed := session.New(session.WithID("failed"), session.WithParentID(parent.ID), session.WithAsyncSubagent(true))
 	active := session.New(session.WithID("active"), session.WithParentID(parent.ID), session.WithAsyncSubagent(true))
 	m.registerChild(parent, "root", "f0001", "worker", failed)
-	m.children["f0001"].state = subagent.NodeFailed
+	m.children["f0001"].durable.Node.State = subagent.NodeFailed
 	failedDriver := m.r.sessionDrivers.Get(failed)
 	failedDriver.mu.Lock()
-	failedDriver.running = false
+	failedDriver.leave(sessionRunning)
 	failedDriver.closeSettledLocked()
 	failedDriver.mu.Unlock()
 	failedDriver.SetPreStartErrorGate(func() error { return m.admitChildRun("f0001") }, func() { m.abortChildStart("f0001") })
@@ -216,7 +225,7 @@ func TestFailedSessionMessageableButRunGated(t *testing.T) {
 
 	_, err := m.sendToChild(parent.ID, "f0001", "retry")
 	require.NoError(t, err, "durable acceptance remains successful even when execution admission is denied")
-	assert.Equal(t, subagent.NodeFailed, m.children["f0001"].state)
+	assert.Equal(t, subagent.NodeFailed, m.children["f0001"].durable.Node.State)
 	assert.True(t, m.r.sessionDrivers.Get(failed).HasPending())
 }
 
@@ -284,13 +293,13 @@ func TestAccountedActiveMatchesTreeVisibleState(t *testing.T) {
 	for i, state := range states {
 		id := subagent.NodeID(fmt.Sprintf("v%04d", i))
 		m.registerChild(root, "root", id, "worker", session.New(session.WithID(fmt.Sprintf("visible-%d", i))))
-		m.children[id].state = state
+		m.children[id].durable.Node.State = state
 		require.NoError(t, m.tree.Update(id, func(n *subagent.Node) { n.State = state }))
 	}
 
 	accounted := 0
 	for _, rec := range m.children {
-		if activeSubagentState(rec.state) {
+		if activeSubagentState(rec.durable.Node.State) {
 			accounted++
 		}
 	}
@@ -475,8 +484,8 @@ func TestDeniedIdleWakeDoesNotStrandMessageOrMarkRunning(t *testing.T) {
 	assert.True(t, d.HasPending(), "accepted input remains queued for a later wake")
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	assert.False(t, d.running)
-	assert.False(t, d.starting)
+	assert.False(t, d.running())
+	assert.False(t, d.starting())
 }
 
 func TestDeniedIdleWakePreservesUnrelatedQueuedMessages(t *testing.T) {
@@ -561,7 +570,7 @@ func TestReliablePostRetainsDeniedNotesAndLaterProcessesFIFO(t *testing.T) {
 	require.True(t, d.PostReliable(t.Context(), QueuedMessage{Content: "second"}))
 	assert.True(t, d.HasPending(), "admission denial retains accepted notes")
 	d.mu.Lock()
-	assert.False(t, d.running)
+	assert.False(t, d.running())
 	d.mu.Unlock()
 
 	admit.Store(true)
@@ -655,7 +664,7 @@ func TestSessionDriverMailboxBound(t *testing.T) {
 	s := session.New(session.WithID("s"))
 	d := r.sessionDrivers.Get(s)
 	d.mu.Lock()
-	d.running = true
+	d.phase = sessionRunning
 	d.openSettledLocked()
 	d.mu.Unlock()
 	assert.True(t, d.Post(t.Context(), QueuedMessage{Content: "1"}, false))

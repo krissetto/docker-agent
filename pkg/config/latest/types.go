@@ -65,6 +65,8 @@ type Config struct {
 	// only carries the section so it round-trips — see config.applyFlavors
 	// for the merge semantics.
 	Flavors map[string]map[string]any `json:"flavors,omitempty"`
+
+	modelOverrideState any
 }
 
 // BudgetConfig caps what a single run may consume before the agent is
@@ -736,9 +738,10 @@ type AgentConfig struct {
 
 	AddDate            bool `json:"add_date,omitempty"`
 	AddEnvironmentInfo bool `json:"add_environment_info,omitempty"`
-	// ReadOnly makes every one of the agent's toolsets read-only: only
-	// tools whose annotations carry a read-only hint are listed and
-	// callable. Equivalent to setting `readonly: true` on each toolset.
+	// ReadOnly restricts the final tool composition, including generated
+	// delegation tools, to tools annotated with a read-only hint. Deferred
+	// sources and code-mode inner tools obey the same capability policy;
+	// this is independent of interactive safety/approval settings.
 	ReadOnly bool `json:"readonly,omitempty" yaml:"readonly,omitempty"`
 	// Safety is the safety mode new sessions started on this agent
 	// default to when the user has not chosen one (no --safety/--yolo

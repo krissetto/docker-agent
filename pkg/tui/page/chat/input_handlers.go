@@ -104,12 +104,12 @@ func (p *chatPage) persistSessionTitle(newTitle string) tea.Cmd {
 
 // copyWorkingDirToClipboard copies the working directory path to the system clipboard.
 func copyWorkingDirToClipboard(wd string) tea.Cmd {
-	return tea.Sequence(
+	return core.Sequence(
 		func() tea.Msg {
 			_ = clipboard.WriteAll(wd)
 			return nil
 		},
-		tea.SetClipboard(wd),
+		core.SetClipboard(wd),
 		notification.SuccessCmd("Working directory copied to clipboard: "+wd),
 	)
 }

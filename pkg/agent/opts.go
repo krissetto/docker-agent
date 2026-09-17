@@ -305,3 +305,10 @@ func WithCache(c *cache.Cache) Opt {
 		a.cache = c
 	}
 }
+
+// WithReadOnly restricts every final tool composition to read-only tools.
+func WithReadOnly(readOnly bool) Opt {
+	return func(a *Agent) {
+		a.readOnly = readOnly
+	}
+}

@@ -161,7 +161,7 @@ func TestCompletionIdentityLegacyAcceptanceReplayAndRestart(t *testing.T) {
 	r.sessionStore = store
 	r.subagents = &subagentManager{r: r, coord: coord}
 	d := r.sessionDrivers.Get(parent)
-	d.running = true
+	d.phase = sessionRunning
 	require.NoError(t, d.acceptReport(t.Context(), report))
 	require.NoError(t, d.acceptReport(t.Context(), report))
 	require.Len(t, d.pending, 1)
@@ -170,7 +170,7 @@ func TestCompletionIdentityLegacyAcceptanceReplayAndRestart(t *testing.T) {
 	// Reconstructed driver with no local transcript must consult persisted state,
 	// never recreate an already-consumed acceptance from the stale report body.
 	restored := newSessionDriver(r, session.New(session.WithID(parent.ID)))
-	restored.running = true
+	restored.phase = sessionRunning
 	r.maxPendingMailbox = 1
 	restored.pending = []QueuedMessage{{RequestID: "unrelated"}}
 	require.NoError(t, restored.acceptReport(t.Context(), report))
@@ -275,9 +275,9 @@ func TestCompletionIdentitySaturationRetainsUnacknowledgedReport(t *testing.T) {
 	m.registerChild(parent, "root", "worker", "worker", child)
 	d := m.r.sessionDrivers.Get(parent)
 	m.r.maxPendingMailbox = 1
-	d.running = true
+	d.phase = sessionRunning
 	require.True(t, d.Post(t.Context(), QueuedMessage{Content: "older user", RequestID: "user", InputOrigin: session.InputOriginUser}, false))
-	m.children["worker"].result = "done"
+	m.children["worker"].durable.Result = "done"
 	m.reportTurn(t, "worker", subagent.NodeIdle, "")
 	reports, err := m.coordination().PendingReports(t.Context(), parent.ID)
 	require.NoError(t, err)
@@ -319,7 +319,7 @@ func TestCompletionIdentityUncertainAcceptanceRetainsRetryIdentity(t *testing.T)
 	m.r.sessionStore = session.NewInMemorySessionStore()
 	store := &uncertainReportAcceptanceStore{CoordinationStore: m.r.sessionStore.(session.CoordinationStore)}
 	m.coord = store
-	m.children["worker"].result = "done"
+	m.children["worker"].durable.Result = "done"
 	m.reportTurn(t, "worker", subagent.NodeIdle, "")
 	d := m.r.sessionDrivers.Get(parent)
 	require.NotNil(t, d.reportRetry)
@@ -364,16 +364,16 @@ func TestCompletionIdentityAncestorWakeDoesNotRepeatLeafReport(t *testing.T) {
 	leaf := session.New(session.WithID("leaf"))
 	m.registerChild(root, "root", "parent-node", "parent", parent)
 	m.registerChild(parent, "parent", "leaf-node", "leaf", leaf)
-	m.children["leaf-node"].result = "leaf answer"
+	m.children["leaf-node"].durable.Result = "leaf answer"
 	m.reportTurn(t, "leaf-node", subagent.NodeIdle, "")
 	leafDriver := m.r.sessionDrivers.Get(leaf)
 	leafDriver.mu.Lock()
-	leafDriver.running = false
+	leafDriver.leave(sessionRunning)
 	leafDriver.mu.Unlock()
 	parentDriver := m.r.sessionDrivers.Get(parent)
 	guidance := parentDriver.DrainRuntimeNotes()
 	require.Len(t, guidance, 1)
-	m.children["parent-node"].result = "parent answer"
+	m.children["parent-node"].durable.Result = "parent answer"
 	m.reportTurn(t, "parent-node", subagent.NodeIdle, "")
 	rootDriver := m.r.sessionDrivers.Get(root)
 	require.Len(t, rootDriver.pending, 1)

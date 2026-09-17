@@ -532,9 +532,8 @@ func newGatewayServer(t *testing.T, body string) (*httptest.Server, *atomic.Valu
 	return server, &lastAuth
 }
 
-// gatewayTestEnv is the hermetic env for gateway tests: httptest binds to
-// 127.0.0.1, which IsTrustedDockerURL treats as trusted, so discovery
-// requires the Docker Desktop token.
+// gatewayTestEnv is the hermetic env for gateway tests. Loopback recorders
+// accept an optional Desktop token but never require one.
 func gatewayTestEnv(extra map[string]string) map[string]string {
 	env := map[string]string{environment.DockerDesktopTokenEnv: "test-docker-token"}
 	maps.Copy(env, extra)
@@ -714,9 +713,9 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 			env: gatewayTestEnv(map[string]string{"ANTHROPIC_API_KEY": "test-key"}),
 		},
 		{
-			// httptest is localhost, hence Docker-trusted: without the token
-			// the live request must not even be attempted, but the auth
-			// failure must not remove directly usable providers.
+			// A real Docker domain requires Desktop auth; loopback recorders
+			// deliberately do not. Use a domain URL below; auth must fail
+			// before any network request is attempted.
 			name: "missing Docker token",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"openai/mock-gpt"}]}`))
@@ -748,7 +747,11 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 			)
 			cmd.SetOut(&buf)
 			cmd.SetErr(&buf)
-			cmd.SetArgs([]string{"--models-gateway", gateway.URL})
+			gatewayURL := gateway.URL
+			if tt.wantNotQueried {
+				gatewayURL = "https://models.docker.com"
+			}
+			cmd.SetArgs([]string{"--models-gateway", gatewayURL})
 
 			require.NoError(t, cmd.Execute())
 

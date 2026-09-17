@@ -5,8 +5,6 @@ import "time"
 // buildLines produces the entire frame and cursor position.
 func (m *model) buildLines() (lines []string, cursorLine, cursorCol int) {
 	m.screen.Status = m.status
-	m.screen.Status.Dormant = m.runtimeStatus.Dormant
-	m.screen.Status.Pending = m.runtimeStatus.Pending
 	m.screen.TransientNotice = ""
 	m.majorNoticeVisible = false
 	// Warnings and errors remain in the transcript; an armed cancellation or
@@ -17,5 +15,5 @@ func (m *model) buildLines() (lines []string, cursorLine, cursorCol int) {
 			m.majorNoticeVisible = true
 		}
 	}
-	return m.screen.Frame(m.width, m.height, m.spinnerFrame, m.busy, m.sessionState, m.pendingUsers)
+	return m.screen.Frame(m.width, m.height, m.spinnerFrame, m.busy(), m.sessionState, m.pendingUsers)
 }
