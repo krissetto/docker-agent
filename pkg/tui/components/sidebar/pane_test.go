@@ -63,7 +63,7 @@ func TestContinuousPaneOrderWithRecapsAndBoundedSpacing(t *testing.T) {
 	for row := range m.subagentHoverZone {
 		assert.True(t, strings.HasPrefix(ansi.Strip(lines[row]), "  "), "tree results are indented under the recap")
 	}
-	for row := m.todoSummaryLine + 1; row < m.todoEnd; row++ {
+	for row := m.todoSummaryLine + 2; row < m.todoEnd; row++ {
 		assert.True(t, strings.HasPrefix(ansi.Strip(lines[row]), "  "), "every wrapped todo row is indented")
 	}
 	for _, line := range lines {

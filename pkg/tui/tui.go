@@ -244,6 +244,7 @@ type appModel struct {
 	editorHeightTarget  int
 	editorHeightMotion  animation.Transition
 	editorShrinkDelayed bool
+	editorHistoryValue  string
 	isDragging          bool
 	isHoveringHandle    bool
 
@@ -2366,6 +2367,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	m.editorHeightMotion.Cancel()
 	m.editorHeightTarget = 0
 	m.editorShrinkDelayed = true
+	m.editorHistoryValue = ""
 	m.manualEditorHeight = 0
 
 	// Get or create per-session components.
@@ -2784,7 +2786,7 @@ func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 }
 
 const (
-	editorShrinkDelay    = 330 * time.Millisecond
+	editorShrinkDelay    = 500 * time.Millisecond
 	editorShrinkDuration = animation.ShortDuration
 )
 
@@ -2977,9 +2979,13 @@ func (m *appModel) resizeAll() tea.Cmd {
 		m.editorHeight = maxTextHeight
 		m.editorHeightTarget = 0
 	}
-	if targetEditorHeight == m.editorHeight || m.editorHeight == 0 || targetEditorHeight > m.editorHeight || m.manualEditorHeight > 0 {
+	if m.editorHistoryValue != m.editor.Value() {
+		m.editorHistoryValue = ""
+	}
+	if targetEditorHeight == m.editorHeight || m.editorHeight == 0 || (targetEditorHeight > m.editorHeight && m.editorHistoryValue == "") || m.manualEditorHeight > 0 {
 		m.editorHeightMotion.Cancel()
 		m.editorShrinkDelayed = false
+		m.editorHistoryValue = ""
 		m.editorHeight = targetEditorHeight
 		m.editorHeightTarget = targetEditorHeight
 	} else if targetEditorHeight != m.editorHeightTarget {
@@ -2987,10 +2993,13 @@ func (m *appModel) resizeAll() tea.Cmd {
 		if !m.editorHeightMotion.Running() {
 			m.editorHeightMotion.SetRuntime(m.ar)
 		}
-		// Every automatic downsizing uses the same shared-clock hold/ease,
-		// including deletion, history/completion replacement and rewrapping.
-		m.editorShrinkDelayed = true
-		cmds = append(cmds, m.editorHeightMotion.Start(editorShrinkDelay+editorShrinkDuration, delayedEditorShrink))
+		// History growth shares the shrink easing without delaying recalled text.
+		duration, easing := editorShrinkDuration, animation.EaseOutCubic
+		m.editorShrinkDelayed = targetEditorHeight < m.editorHeight
+		if m.editorShrinkDelayed {
+			duration, easing = editorShrinkDelay+editorShrinkDuration, delayedEditorShrink
+		}
+		cmds = append(cmds, m.editorHeightMotion.Start(duration, easing))
 	}
 	if m.editorHeight != allocatedEditorHeight {
 		cmds = append(cmds, m.editor.SetSize(innerWidth, m.editorHeight))

@@ -55,9 +55,21 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 	before := m.editor.Value()
+	historyNavigation := false
+	if key, ok := msg.(tea.KeyPressMsg); ok {
+		historyNavigation = (key.String() == "up" || key.String() == "down") && m.editor.HistoryNavigationActive() && !m.editor.IsHistorySearchActive()
+	}
 	updated, cmd := m.editor.Update(msg)
 	cmd = m.stampEditorSend(cmd)
 	m.editor = updated.(editor.Editor)
+	if before != m.editor.Value() {
+		m.editorHistoryValue = ""
+		if historyNavigation {
+			m.editorHistoryValue = m.editor.Value()
+		} else if m.editorHeightMotion.Running() {
+			cmd = tea.Batch(cmd, m.resizeAll())
+		}
+	}
 	if before != m.editor.Value() && strings.HasPrefix(m.editor.Value(), "/panes ") && !strings.HasPrefix(before, "/panes ") && m.paneCatalogRequest == nil {
 		cmd = tea.Batch(cmd, core.CmdHandler(paneCatalogRefreshMsg{}))
 	}

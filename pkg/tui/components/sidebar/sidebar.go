@@ -2281,6 +2281,7 @@ func (m *model) renderSections(contentWidth int) []string {
 		}
 		m.todoSummaryLine = appendSection(m.todoSummary(contentWidth))
 		if !m.todosCollapsed {
+			lines = append(lines, "")
 			appendSection(cached("todos", false, func(w int) string {
 				indent := min(2, max(0, w-1))
 				m.todoComp.SetSize(max(1, w-indent))

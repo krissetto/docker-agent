@@ -89,7 +89,7 @@ func (m *model) targetRows() []placedRow {
 			row.id = "todo-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true, todos: true}}
 		case y > m.todoSummaryLine && y < m.todoEnd && m.todoSummaryLine >= 0:
-			row.id = fmt.Sprintf("todo:%d", y-m.todoSummaryLine-1)
+			row.id = fmt.Sprintf("todo:%d", y-m.todoSummaryLine-2)
 		case y == m.summaryLine && m.hasTreeContent():
 			row.id = "tree-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true}}
@@ -165,12 +165,12 @@ func (m *model) ReconcileLayout() tea.Cmd {
 	}
 	m.placement.crossSession = false
 	current := m.placement
-	expandingTree := !m.treeCollapsed
-	if previousSummary, ok := findPlaced(current.rows, "tree-summary"); ok {
-		expandingTree = expandingTree && strings.Contains(ansi.Strip(previousSummary.text), "›")
-	} else {
-		expandingTree = false
+	expanding := func(summary string, collapsed bool) bool {
+		previous, ok := findPlaced(current.rows, summary)
+		return !collapsed && ok && strings.Contains(ansi.Strip(previous.text), "›")
 	}
+	expandingTree := expanding("tree-summary", m.treeCollapsed)
+	expandingTodos := expanding("todo-summary", m.todosCollapsed)
 	old := make(map[string]placedRow, len(current.rows))
 	for _, row := range current.rows {
 		old[row.id] = row
@@ -187,7 +187,9 @@ func (m *model) ReconcileLayout() tea.Cmd {
 			if len(rows) > 0 {
 				row.y = rows[len(rows)-1].y + 1
 			}
-			if expandingTree && (strings.HasPrefix(row.id, "node:") || strings.HasPrefix(row.id, "agent:") || strings.HasPrefix(row.id, "gap:node:") || strings.HasPrefix(row.id, "gap:agent:")) {
+			id := strings.TrimPrefix(row.id, "gap:")
+			if (expandingTree && (strings.HasPrefix(id, "node:") || strings.HasPrefix(id, "agent:"))) ||
+				(expandingTodos && strings.HasPrefix(id, "todo:")) {
 				survivors := make([]placedRow, 0, len(current.rows))
 				for _, prior := range current.rows {
 					if prior.target {

@@ -12,7 +12,10 @@ import (
 
 const hoverDuration = 150 * time.Millisecond
 
-type hoverValue struct{ value, target float64 }
+type hoverValue struct {
+	value, target, from float64
+	elapsed             time.Duration
+}
 
 func (m *model) hoverText(text, key string) string {
 	return styles.HoverText(text, m.hoverValues[key].value, styles.TextPrimary)
@@ -34,20 +37,31 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 	if m.hoverValues == nil {
 		m.hoverValues = make(map[string]hoverValue)
 	}
-	for name, state := range m.hoverValues {
-		state.target = 0
-		m.hoverValues[name] = state
-	}
-	activate := func(target string) { state := m.hoverValues[target]; state.target = 1; m.hoverValues[target] = state }
+	active := map[string]bool{}
 	if key == "directory" || key == "directory-open" {
-		activate("directory")
+		active["directory"] = true
 		if key == "directory-open" {
-			activate("directory-open")
+			active["directory-open"] = true
 		} else {
-			activate("directory-copy")
+			active["directory-copy"] = true
 		}
 	} else if key != "" {
-		activate(key)
+		active[key] = true
+	}
+	for name := range active {
+		if _, ok := m.hoverValues[name]; !ok {
+			m.hoverValues[name] = hoverValue{}
+		}
+	}
+	for name, state := range m.hoverValues {
+		target := 0.0
+		if active[name] {
+			target = 1
+		}
+		if state.target != target {
+			state.from, state.target, state.elapsed = state.value, target, 0
+			m.hoverValues[name] = state
+		}
 	}
 	for _, state := range m.hoverValues {
 		if state.value != state.target {
@@ -66,9 +80,14 @@ func (m *model) tickHover(tick animation.TickMsg) {
 	changed, running := false, false
 	for key, state := range m.hoverValues {
 		old := state.value
-		if state.target > state.value {
+		switch {
+		case strings.HasPrefix(key, "directory"):
+			state.elapsed += after - before
+			p := min(1, float64(state.elapsed)/float64(animation.ShortDuration))
+			state.value = state.from + (state.target-state.from)*animation.EaseOutCubic(p)
+		case state.target > state.value:
 			state.value = min(state.target, state.value+step)
-		} else {
+		default:
 			state.value = max(state.target, state.value-step)
 		}
 		changed = changed || old != state.value

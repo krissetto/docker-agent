@@ -76,7 +76,7 @@ func TestDirectoryFolderIconDedicatedRawPathAction(t *testing.T) {
 	result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft, y)
 	assert.Equal(t, ClickWorkingDir, result, "ordinary directory click retains clipboard action")
 	line := m.directoryRow(width)
-	assert.True(t, strings.HasSuffix(ansi.Strip(line), directoryCopyIcon+" "+directoryIcon+" "), "one icon separator and one whole-line trailing cell")
+	assert.True(t, strings.HasSuffix(ansi.Strip(line), directoryCopyIcon+"  "+directoryIcon+" "), "two icon separator cells and one whole-line trailing cell")
 	result, _ = m.HandleClickType(m.layoutCfg.PaddingLeft+width-1, y)
 	assert.Equal(t, ClickNone, result, "final directory margin is inert")
 	result, _ = m.HandleClickType(iconX-1, y)
@@ -96,7 +96,7 @@ func TestDirectoryArrowFadesAtStableSingleCell(t *testing.T) {
 	t.Parallel()
 	m := newHoverSidebar(t)
 	width := 30
-	original := styles.MutedStyle.Render(directoryIcon)
+
 	require.Equal(t, 1, directoryIconWidth())
 	var baseName string
 	for _, progress := range []float64{0, .5, 1, .5, 0} {
@@ -106,7 +106,7 @@ func TestDirectoryArrowFadesAtStableSingleCell(t *testing.T) {
 		require.Len(t, cells, width)
 		arrow := cells[width-2]
 		assert.Equal(t, directoryIcon, arrow.glyph)
-		expected := sidebarCells(styles.FadeLine(styles.HoverText(original, progress, styles.TextPrimary), progress))
+		expected := sidebarCells(directoryActionIcon(directoryIcon, progress, progress))
 		require.Len(t, expected, 1)
 		assert.Equal(t, color.NRGBAModel.Convert(expected[0].fg), color.NRGBAModel.Convert(arrow.fg))
 		assert.Nil(t, arrow.bg, "arrow has no box/background fill")
@@ -126,7 +126,7 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 	y := m.workingDirRow - m.scrollview.ScrollOffset()
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	arrowX := m.layoutCfg.PaddingLeft + width - 2
-	copyX := arrowX - 2
+	copyX := arrowX - 3
 	labelX := m.layoutCfg.PaddingLeft
 	_, cmd := m.Update(tea.MouseMotionMsg{X: labelX, Y: y})
 	settleSidebarHover(t, m, cmd)
@@ -143,11 +143,11 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 		copyBase := styles.MutedStyle.GetForeground()
 		arrowBase := copyBase
 		if x == arrowX {
-			arrowBase = styles.Brighten(arrowBase, .25)
+			arrowBase = styles.TextPrimary
 		} else {
-			copyBase = styles.Brighten(copyBase, .25)
+			copyBase = styles.TextPrimary
 		}
-		assert.Equal(t, color.NRGBAModel.Convert(copyBase), color.NRGBAModel.Convert(cells[width-4].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(copyBase), color.NRGBAModel.Convert(cells[width-5].fg))
 		assert.Equal(t, color.NRGBAModel.Convert(arrowBase), color.NRGBAModel.Convert(cells[width-2].fg))
 		result, payload := m.HandleClickType(x, y)
 		if x == arrowX {
@@ -160,7 +160,7 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 	settleSidebarHover(t, m, m.ClearSubagentHover())
 	assert.Zero(t, m.ar.ActiveCount())
 	cells := sidebarCells(m.directoryRow(width))
-	for _, x := range []int{width - 4, width - 2} {
+	for _, x := range []int{width - 5, width - 2} {
 		assert.Equal(t, color.NRGBAModel.Convert(styles.Background), color.NRGBAModel.Convert(cells[x].fg), "all icons fade out with the row")
 	}
 }

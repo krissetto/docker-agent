@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 )
 
 func TestTodoRecapCollapsePreservesCanonicalUpdatesAndIndent(t *testing.T) {
@@ -24,7 +26,7 @@ func TestTodoRecapCollapsePreservesCanonicalUpdatesAndIndent(t *testing.T) {
 	require.Greater(t, m.todoSummaryLine, m.summaryLine)
 	assert.Empty(t, strings.TrimSpace(ansi.Strip(lines[m.todoSummaryLine-1])), "tree and todos have an explicit gap")
 	assert.Contains(t, ansi.Strip(lines[m.todoSummaryLine]), "0/1 todos")
-	for y := m.todoSummaryLine + 1; y < m.todoEnd; y++ {
+	for y := m.todoSummaryLine + 2; y < m.todoEnd; y++ {
 		assert.True(t, strings.HasPrefix(ansi.Strip(lines[y]), "  "), "wrapped todo row %d is indented", y)
 	}
 	for y := range m.subagentHoverZone {
@@ -151,4 +153,65 @@ func TestHoverRetainsPreparedTopologyAndSettledMotionDoesNoRender(t *testing.T) 
 	assert.Equal(t, beforeInvalidations, afterInvalidations)
 	assert.Equal(t, beforeRenders, afterRenders)
 	assert.Zero(t, m.ar.ActiveCount())
+}
+
+func TestTodoRecapSharedPlacementMotionAndInterruption(t *testing.T) {
+	t.Parallel()
+	m := newPlacementSidebar(t, false)
+	m.SetSize(64, 50)
+	require.NoError(t, m.SetTodos(makeTodos(3)))
+	settlePlacement(t, m, m.ReconcileLayout())
+	summary := requirePlaced(t, m, "todo-summary")
+	body := requirePlaced(t, m, "todo:0")
+	assert.InDelta(t, summary.y+2, body.y, 0, "one blank row separates recap and items")
+	gapY := int(summary.y) + 1
+	assert.Empty(t, strings.TrimSpace(ansi.Strip(m.cachedLines[gapY])))
+	for x := m.layoutCfg.PaddingLeft; x < m.layoutCfg.PaddingLeft+m.contentWidth(false); x++ {
+		action, _ := m.HandleClickType(x, gapY)
+		assert.Equal(t, ClickNone, action)
+		_, hit := m.treeControlAt(x, gapY)
+		assert.False(t, hit, "separator is not a recap hit target")
+	}
+
+	cmd := m.toggleTreeControl(treeControl{whole: true, todos: true})
+	require.True(t, m.placement.running)
+	exiting := requirePlaced(t, m, "todo:0")
+	assert.False(t, exiting.target)
+	assert.Empty(t, exiting.controls)
+	assert.InDelta(t, summary.y, exiting.targetY, 0)
+	initial := m.View()
+	cmd = advancePlacement(t, m, cmd)
+	moving := requirePlaced(t, m, "todo:0")
+	eased := animation.EaseOutCubic(float64(50*time.Millisecond) / float64(animation.ShortDuration))
+	assert.InDelta(t, 1-eased, moving.alpha, 1e-9)
+	assert.InDelta(t, body.y+(summary.y-body.y)*eased, moving.y, 1e-9)
+	assert.NotEqual(t, initial, m.View(), "contraction paints intermediate movement and fading")
+	assertPlacementPaintAndHits(t, m)
+
+	m.toggleTreeControl(treeControl{whole: true, todos: true})
+	reversed := requirePlaced(t, m, "todo:0")
+	assert.InDelta(t, moving.alpha, reversed.fromAlpha, 0)
+	assert.InDelta(t, moving.y, reversed.fromY, 0)
+	settlePlacement(t, m, cmd)
+	assert.InDelta(t, 1, requirePlaced(t, m, "todo:0").alpha, 0)
+
+	settlePlacement(t, m, m.toggleTreeControl(treeControl{whole: true, todos: true}))
+	collapsed := m.View()
+	cmd = m.toggleTreeControl(treeControl{whole: true, todos: true})
+	entering := requirePlaced(t, m, "todo:0")
+	assert.Zero(t, entering.alpha)
+	assert.InDelta(t, summary.y, entering.y, 0, "new todo rows emerge from surviving placement, like subagents")
+	cmd = advancePlacement(t, m, cmd)
+	entering = requirePlaced(t, m, "todo:0")
+	assert.InDelta(t, eased, entering.alpha, 1e-9)
+	assert.Greater(t, entering.y, summary.y)
+	assert.Less(t, entering.y, entering.targetY)
+	assert.NotEqual(t, collapsed, m.View(), "expansion visibly animates")
+	assertPlacementPaintAndHits(t, m)
+	m.SetPresentationActive(false)
+	assert.Zero(t, m.ar.ActiveCount())
+	assert.False(t, m.placement.running)
+	assert.InDelta(t, 1, requirePlaced(t, m, "todo:0").alpha, 0)
+	_, accepted := m.ar.Accept(placementTickMessage(t, cmd))
+	assert.False(t, accepted)
 }
