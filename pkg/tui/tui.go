@@ -50,6 +50,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentview"
 	"github.com/docker/docker-agent/pkg/userconfig"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -225,6 +226,7 @@ type appModel struct {
 	paneSource               *paneSourceTransaction
 	panePicker               *panePickerRequest
 	hostedLoad               *hostedLoadRequest
+	opening                  *sessionOpening
 	legacyPresentationOnly   bool
 	compatScope              *supervisor.ViewOwnerScope
 	compatResolve            func(context.Context, string) (supervisor.ViewOwnerIdentity, error)
@@ -1049,7 +1051,13 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if handled, cmd := m.openingInput(msg); handled {
+		return m, cmd
+	}
 	switch msg := msg.(type) {
+	case subagentOpenedMsg:
+		cmd := m.finishSubagentOpening(msg)
+		return m, cmd
 	case messagebar.SetMessageMsg, messagebar.ClearMessageMsg:
 		m.ensureMessageBar()
 		cmd := m.messageBar.Update(msg)
@@ -1074,7 +1082,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tickPaused {
 			return m, nil
 		}
-		cmds := []tea.Cmd{m.tickVisiblePanes(msg), m.updateDialogCmd(msg), m.tickResponsePrompt(), m.adoptPaneSource()}
+		cmds := []tea.Cmd{m.tickSessionOpening(msg), m.tickVisiblePanes(msg), m.updateDialogCmd(msg), m.tickResponsePrompt(), m.adoptPaneSource()}
 		if m.messageBar != nil {
 			cmds = append(cmds, m.messageBar.Update(msg))
 			if m.messageBar.TakeVisualDirty() {
@@ -2241,30 +2249,32 @@ func (m *appModel) handleOpenSubagent(msg messages.OpenSubagentMsg) (tea.Model, 
 	if node, found := rt.SubagentNodeForSession(string(nodeID)); found {
 		nodeID = node
 	}
-	info, ok := rt.SubagentAttachInfo(nodeID)
-	if !ok || info.Session == nil {
-		return m, notification.WarningCmd("This subagent has no session to open")
+	// Warm tabs are identified without touching transcript storage or restore locks.
+	tabs, _ := m.supervisor.GetTabs()
+	for _, tab := range tabs {
+		open := m.supervisor.GetRunner(tab.SessionID)
+		if open.App != nil {
+			if attached := open.App.AttachedSubagent(); attached != nil && attached.NodeID == nodeID {
+				return m.handleSwitchTab(open.ID)
+			}
+		}
 	}
-
-	// Already open? Just focus its tab.
-	if open := m.supervisor.FindBySession(info.Session.ID); open != nil {
-		return m.handleSwitchTab(open.ID)
+	if tree, ok := runner.App.Runtime().(interface{ SubagentTree() *subagentpkg.Tree }); ok && tree.SubagentTree() != nil {
+		if node, found := tree.SubagentTree().Node(nodeID); found && node.SessionID != "" {
+			if open := m.supervisor.FindBySession(node.SessionID); open != nil {
+				return m.handleSwitchTab(open.ID)
+			}
+			cmd := m.beginSubagentOpening(nodeID, node.SessionID, node.DisplayName(), node.Agent)
+			return m, cmd
+		}
 	}
-
-	services := runner.App.Runtime()
-	sessions := runner.App.SessionRuntime()
-	if sessions == nil {
-		return m, notification.WarningCmd("Subagent sessions can only be opened on a session runtime")
+	if snapshot := runner.App.Session().GetSubagentTree(); snapshot != nil {
+		if node, found := subagentview.Find(snapshot.Nodes, nodeID); found && node.Node.SessionID != "" {
+			cmd := m.beginSubagentOpening(nodeID, node.Node.SessionID, node.Node.DisplayName(), node.Node.Agent)
+			return m, cmd
+		}
 	}
-	binding := runtime.SessionBinding{
-		AgentName: info.Agent,
-		Model:     info.Session.AgentModelOverrides[info.Agent],
-	}
-	a := newAttachedSubagentApp(m.ctx(), sessions, services, info, binding)
-	if _, err := m.supervisor.AddSession(m.ctx(), a, info.Session, runner.WorkingDir, nil); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to open subagent session: %v", err))
-	}
-	return m.handleSwitchTab(info.Session.ID)
+	return m, notification.WarningCmd("This subagent has no session to open")
 }
 
 func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime, services app.Services, info runtime.SubagentAttachInfo, binding runtime.SessionBinding) *app.App {
@@ -2278,6 +2288,12 @@ func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime
 // Existing chat pages and editors are preserved (not recreated) so that in-flight streaming
 // content and draft text are retained when switching back to a tab.
 func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
+	if m.opening != nil {
+		if sessionID == m.opening.target {
+			return m, nil
+		}
+		m.cancelSessionOpening()
+	}
 	if persisted := m.pendingRestores[sessionID]; persisted != "" {
 		cmd := m.beginHostedLoad(persisted, sessionID, nil)
 		return m, cmd
@@ -2655,6 +2671,13 @@ func (m *appModel) requestExitConfirmation() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
+	if m.opening != nil {
+		pending := !m.opening.installed && sessionID == m.opening.target
+		m.cancelSessionOpening()
+		if pending {
+			return m, m.editor.Focus()
+		}
+	}
 	if m.supervisor.Count() == 1 && m.supervisor.GetRunner(sessionID) != nil {
 		return m.requestExitConfirmation()
 	}
@@ -2708,7 +2731,7 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.majorEventWater, persistedID)
 	delete(m.paneDimCache, sessionID)
 
-	nextActiveID := m.supervisor.CloseSession(sessionID)
+	nextActiveID := m.supervisor.CloseSessionAsync(sessionID)
 
 	// Clean up per-session state
 	if page, ok := m.chatPages[sessionID]; ok {
@@ -3869,6 +3892,9 @@ func (m *appModel) View() tea.View {
 
 func (m *appModel) composeView() tea.View {
 	windowTitle := m.windowTitle()
+	if m.opening != nil {
+		windowTitle = "Opening " + m.opening.title
+	}
 
 	if m.err != nil {
 		return toFullscreenView(paneClipped(styles.ErrorStyle.Render(m.err.Error()), m.wWidth, m.wHeight), windowTitle, false, m.leanMode)
@@ -3888,9 +3914,12 @@ func (m *appModel) composeView() tea.View {
 
 	// Content area (messages + sidebar) -- swaps per tab
 	var contentView string
-	if m.panePresentationEnabled() {
+	switch {
+	case m.opening != nil:
+		contentView = m.openingContent()
+	case m.panePresentationEnabled():
 		contentView = m.composePanes()
-	} else {
+	default:
 		contentView = m.chatPage.View()
 	}
 
@@ -3901,10 +3930,10 @@ func (m *appModel) composeView() tea.View {
 		if m.contentHeight > 0 {
 			viewParts = append(viewParts, paneClipped(lipgloss.PlaceVertical(m.contentHeight, lipgloss.Bottom, contentView), m.width, m.contentHeight))
 		}
-		if banner := m.editor.BannerView(m.width); banner != "" {
+		if banner := m.editor.BannerView(m.width); banner != "" && m.opening == nil {
 			viewParts = append(viewParts, banner)
 		}
-		viewParts = append(viewParts, m.editor.View())
+		viewParts = append(viewParts, m.openingComposer())
 		if m.messageBarHeight() > 0 {
 			viewParts = append(viewParts, m.renderMessageBar())
 		}
@@ -3919,7 +3948,7 @@ func (m *appModel) composeView() tea.View {
 		if m.notification.Open() {
 			layers = append(layers, m.notification.GetLayer())
 		}
-		if m.completions.Open() && !m.dialogMgr.Open() {
+		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
 			layers = append(layers, m.completions.GetLayers()...)
 		}
 		return toFullscreenView(paneClipped(composeRootLayers(layers, m.width, m.height), m.width, m.height), windowTitle, m.chatPage.IsWorking(), true)
@@ -3929,14 +3958,14 @@ func (m *appModel) composeView() tea.View {
 	tabBarView := m.tabBar.View()
 
 	// Editor (fixed position, per-session state)
-	editorView := m.composerView()
+	editorView := m.openingComposer()
 
 	// Combine: content | attachments | resize separator | tab bar | editor | context strip
 	var viewParts []string
 	if m.contentHeight > 0 {
 		viewParts = append(viewParts, contentView)
 	}
-	if banner := m.editor.BannerView(m.width); banner != "" {
+	if banner := m.editor.BannerView(m.width); banner != "" && m.opening == nil {
 		viewParts = append(viewParts, banner)
 	}
 	if m.separatorHeight > 0 {
@@ -3949,7 +3978,7 @@ func (m *appModel) composeView() tea.View {
 			Render(tabBarView), m.width, m.tabsHeight))
 	}
 	viewParts = append(viewParts, editorView)
-	if m.contextBar != nil && m.contextHeight > 0 {
+	if m.contextBar != nil && m.contextHeight > 0 && m.opening == nil {
 		viewParts = append(viewParts, paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(m.contextBar.View()), m.width, m.contextHeight))
 	}
 	if m.messageBarHeight() > 0 {
@@ -3993,7 +4022,7 @@ func (m *appModel) composeView() tea.View {
 			allLayers = append(allLayers, m.notification.GetLayer())
 		}
 
-		if m.completions.Open() && !m.dialogMgr.Open() {
+		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
 			allLayers = append(allLayers, m.completions.GetLayers()...)
 		}
 
@@ -4098,6 +4127,11 @@ func (m *appModel) Shutdown() {
 func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
 		m.contextClosed = true
+		m.cancelSessionOpening()
+		if m.hostedLoad != nil {
+			m.hostedLoad.cancel()
+			m.hostedLoad = nil
+		}
 		m.clearResponsePrompt()
 		if m.messageBar != nil {
 			animation.StopView(m.messageBar)

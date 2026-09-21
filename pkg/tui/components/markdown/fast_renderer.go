@@ -272,7 +272,8 @@ func getGlobalStyles() *cachedStyles {
 // FastRenderer is a high-performance markdown renderer optimized for terminal output.
 // It directly parses and renders markdown without building an intermediate AST.
 type FastRenderer struct {
-	width int
+	width        int
+	frozenStyles *cachedStyles
 
 	// hideCopyIcon suppresses the per-code-block copy affordance. Use it for
 	// contexts that render markdown but do not hit-test clicks on the icon
@@ -283,6 +284,13 @@ type FastRenderer struct {
 // NewFastRenderer creates a new fast markdown renderer with the given width.
 func NewFastRenderer(width int) *FastRenderer {
 	return &FastRenderer{width: width}
+}
+
+// FreezeStyles captures the current immutable palette on the UI owner. The
+// resulting renderer can render on a worker without consulting theme globals.
+func (r *FastRenderer) FreezeStyles() *FastRenderer {
+	r.frozenStyles = getGlobalStyles()
+	return r
 }
 
 // HideCopyIcon disables the per-code-block copy affordance and returns the
@@ -318,7 +326,11 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 	input = sanitizeForTerminal(input)
 
 	p := parserPool.Get().(*parser)
-	p.reset(input, r.width)
+	palette := r.frozenStyles
+	if palette == nil {
+		palette = getGlobalStyles()
+	}
+	p.reset(input, r.width, palette)
 	p.hideCopyIcon = r.hideCopyIcon
 	result := p.parse()
 	var blocks []CodeBlock
@@ -342,10 +354,10 @@ type parser struct {
 	hideCopyIcon bool
 }
 
-func (p *parser) reset(input string, width int) {
+func (p *parser) reset(input string, width int, palette *cachedStyles) {
 	p.input = input
 	p.width = width
-	p.styles = getGlobalStyles()
+	p.styles = palette
 	// Reuse lines slice capacity to avoid allocation
 	p.lines = p.lines[:0]
 	for line := range strings.SplitSeq(input, "\n") {

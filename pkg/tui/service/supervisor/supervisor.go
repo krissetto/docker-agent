@@ -70,21 +70,22 @@ type SessionSpawner func(ctx context.Context, workingDir string) (SpawnedSession
 
 // Supervisor manages agent sessions.
 type Supervisor struct {
-	mu              sync.RWMutex
-	runners         map[string]*SessionTab
-	order           []string // Maintains tab order
-	retiredCleanups []func()
-	closed          bool
-	viewConfig      *HostViewConfig
-	viewContext     func() context.Context
-	viewCancel      context.CancelFunc
-	viewOwners      map[viewOwnerKey]*viewOwner
-	ownerResources  []*viewOwner
-	viewLeases      map[*hostedView]struct{}
-	ownerOperations sync.WaitGroup
-	activeID        string
-	spawner         SessionSpawner
-	program         *tea.Program
+	mu                   sync.RWMutex
+	runners              map[string]*SessionTab
+	order                []string // Maintains tab order
+	retiredCleanups      []func()
+	closed               bool
+	viewConfig           *HostViewConfig
+	viewContext          func() context.Context
+	viewCancel           context.CancelFunc
+	viewOwners           map[viewOwnerKey]*viewOwner
+	ownerResources       []*viewOwner
+	viewLeases           map[*hostedView]struct{}
+	ownerOperations      sync.WaitGroup
+	presentationClosures sync.WaitGroup
+	activeID             string
+	spawner              SessionSpawner
+	program              *tea.Program
 
 	// Tab updates are coalesced behind one serialized sender. Runtime tree
 	// snapshots can fan the same invalidation out through several attached Apps;
@@ -878,7 +879,15 @@ func (s *Supervisor) RetainCleanupUntilShutdown(sessionID string) {
 }
 
 // CloseSession closes a session and removes it from the supervisor.
-func (s *Supervisor) CloseSession(sessionID string) string {
+func (s *Supervisor) CloseSession(sessionID string) string { return s.closeSession(sessionID, false) }
+
+// CloseSessionAsync removes the route immediately; shutdown drains its detached
+// presentation before releasing the shared runtime resources.
+func (s *Supervisor) CloseSessionAsync(sessionID string) string {
+	return s.closeSession(sessionID, true)
+}
+
+func (s *Supervisor) closeSession(sessionID string, asynchronous bool) string {
 	s.mu.Lock()
 
 	runner, ok := s.runners[sessionID]
@@ -926,8 +935,23 @@ func (s *Supervisor) CloseSession(sessionID string) string {
 
 	s.notifyTabsUpdated()
 	activeID := s.activeID
+	if asynchronous {
+		s.presentationClosures.Add(1)
+	}
 	s.mu.Unlock()
 
+	if asynchronous {
+		go func() {
+			defer s.presentationClosures.Done()
+			if runner.App != nil {
+				runner.App.Close()
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+		}()
+		return activeID
+	}
 	// Detach and run cleanup outside the lock so callbacks cannot deadlock.
 	if runner.App != nil {
 		runner.App.Close()
@@ -1025,6 +1049,7 @@ func (s *Supervisor) Shutdown() {
 		lease.Abort()
 	}
 	s.ownerOperations.Wait()
+	s.presentationClosures.Wait()
 	s.mu.Lock()
 	for _, owner := range s.ownerResources {
 		owner.removed = true

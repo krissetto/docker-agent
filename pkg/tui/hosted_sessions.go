@@ -24,9 +24,10 @@ var errHostedChild = errors.New("child session requires prepared view acquisitio
 // host admission fence as prepared views. A live winner is never reconciled or
 // tree-restored again. Child sessions use the prepared view path instead.
 type hostedSessionData struct {
-	committed runtime.CommittedSessionView
-	newApp    func(context.Context, runtime.CommittedSessionView) (*app.App, error)
-	prepared  supervisor.PreparedHostedView
+	application *app.App
+	committed   runtime.CommittedSessionView
+	newApp      func(context.Context, runtime.CommittedSessionView) (*app.App, error)
+	prepared    supervisor.PreparedHostedView
 }
 
 func loadHostedRoot(ctx context.Context, owner *supervisor.Supervisor, id string) (*hostedSessionData, error) {
@@ -104,11 +105,13 @@ type hostedLoadResult struct {
 }
 
 func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) tea.Cmd {
+	m.cancelSessionOpening()
 	if m.hostedLoad != nil {
 		m.hostedLoad.cancel()
 	}
 	generation, _ := m.supervisor.RouteGeneration(m.paneFocus())
-	ctx, cancel := context.WithCancel(m.ctx())
+	lifetime := m.ctx()
+	ctx, cancel := context.WithCancel(lifetime)
 	request := &hostedLoadRequest{application: m.application, focus: m.paneFocus(), target: target, persisted: id, generation: generation, cancel: cancel, sidebar: m.chatPage.GetSidebarSettings(), send: send}
 	if target != "" {
 		request.pending = m.pendingRestores[target]
@@ -143,7 +146,8 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 			data := &hostedSessionData{committed: runtime.CommittedSessionView{Info: runtime.PreparedSessionViewInfo{SessionID: id, Session: snapshot, Binding: runtime.SessionBinding{AgentName: snapshot.AgentName, Model: snapshot.AgentModelOverrides[snapshot.AgentName]}}}, newApp: func(viewCtx context.Context, view runtime.CommittedSessionView) (*app.App, error) {
 				return app.New(viewCtx, nil, view.Info.Session, view.Info.Binding, app.WithRuntimeServices(services)), nil
 			}}
-			return hostedLoadResult{request: request, data: data}
+			data.application, err = data.newApp(lifetime, data.committed)
+			return hostedLoadResult{request: request, data: data, err: err}
 		}
 		child, err := hostedSelectionIsChild(ctx, services, sessions, id)
 		var data *hostedSessionData
@@ -167,7 +171,13 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 				data, err = loadHostedRoot(ctx, owner, id)
 			}
 		}
+		if err == nil && data != nil {
+			data.application, err = data.newApp(lifetime, data.committed)
+		}
 		if ctx.Err() != nil && data != nil && data.prepared != nil {
+			if data.application != nil {
+				data.application.Close()
+			}
 			data.prepared.Abort()
 			data = nil
 			err = ctx.Err()
@@ -179,6 +189,10 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 	request := result.request
 	closeResult := func() {
+		if result.data != nil && result.data.application != nil {
+			result.data.application.Close()
+			result.data.application = nil
+		}
 		if result.data != nil && result.data.prepared != nil {
 			result.data.prepared.Abort()
 		}
@@ -206,7 +220,12 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 		closeResult()
 		return notification.ErrorCmd(fmt.Sprintf("Cannot load session; current view unchanged: %v", result.err))
 	}
-	application, err := result.data.newApp(m.ctx(), result.data.committed)
+	application := result.data.application
+	result.data.application = nil
+	var err error
+	if application == nil {
+		application, err = result.data.newApp(m.ctx(), result.data.committed)
+	}
 	if err != nil {
 		closeResult()
 		return notification.ErrorCmd("Cannot attach loaded session: " + err.Error())
@@ -252,6 +271,7 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 			persistenceWarning = notification.WarningCmd("Session opened but tab persistence failed: " + persistErr.Error())
 		}
 	}
+	m.replacePaneWorkspaceRoute(request.target, id)
 	_, focusCmd := m.handleSwitchTab(id)
 	initCmd := m.routePaneCmd(id, tea.Batch(m.chatPages[id].Init(), chat.WatchGitBranch(m.chatPages[id]), m.editors[id].Init()))
 	if request.send != nil {

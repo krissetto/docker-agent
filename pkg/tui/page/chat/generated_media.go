@@ -92,6 +92,10 @@ func (p *chatPage) collectRestoredGeneratedMedia(sess *session.Session) (map[int
 	if !p.app.CanResolveGeneratedFiles() {
 		return nil, nil
 	}
+	return collectGeneratedMedia(sess)
+}
+
+func collectGeneratedMedia(sess *session.Session) (map[int][]types.AssistantMedia, []generatedMediaRequest) {
 	var restored map[int][]types.AssistantMedia
 	var requests []generatedMediaRequest
 	for pos, item := range sess.Messages {

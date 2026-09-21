@@ -255,7 +255,10 @@ type chatPage struct {
 	// message arrives as seed events from the session event hub (captured
 	// atomically with the subscription), so nothing needs repairing after
 	// the fact — and no scroll-disturbing rebuild is needed.
-	snapshotEnd int
+	snapshotEnd      int
+	replay           *pageReplay
+	replayGeneration uint64
+	asyncReplay      bool
 
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
@@ -518,6 +521,10 @@ func agentInfoMode(mode msgtypes.SidebarInfoMode) sidebar.AgentInfoMode {
 
 // Init initializes the chat page
 func (p *chatPage) Init() tea.Cmd {
+	if p.asyncReplay && p.app.Session() != nil {
+		return tea.Batch(p.messages.Init(), p.beginReplay(runtime.SessionSnapshot{Session: p.app.Session(), TranscriptPosition: p.app.Session().ItemCount()}))
+	}
+
 	var cmds []tea.Cmd
 
 	cmds = append(cmds, p.messages.Init())
@@ -646,8 +653,13 @@ func Cleanup(page Page) {
 
 // Update handles messages and updates the page state
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	p.pendingTimers = nil
 	defer p.stopHiddenPresentation()
-	model, cmd := p.update(msg)
+	var model layout.Model = p
+	handled, cmd := p.updateReplay(msg)
+	if !handled {
+		model, cmd = p.update(msg)
+	}
 	// State changes (async sidebar updates, streaming indicators) can move
 	// child components without any resize. Child positions are only applied
 	// in SetSize, so reapply the geometry when the live layout drifted from

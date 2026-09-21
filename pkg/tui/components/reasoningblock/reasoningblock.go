@@ -83,6 +83,7 @@ type expandedToolView interface {
 
 // Model represents a collapsible reasoning + tool calls block.
 type Model struct {
+	prepared            *PreparedReasoning
 	fadeStyles          []lipgloss.Style
 	fadeStylesValid     bool
 	fadeThemeGeneration uint64
@@ -601,32 +602,7 @@ func (m *Model) ensureCache() *renderCache {
 	// canonical contentItems, so retaining the complete stripped document here
 	// needlessly duplicates every historical reasoning block. Clone the preview
 	// lines so substrings cannot keep that document's backing allocation alive.
-	hasExtra := len(m.toolEntries) > 0 || len(lines) > previewLines
-	preview := make([]string, 0, previewLines)
-	nonblank := 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		nonblank++
-		if len(preview) == previewLines {
-			copy(preview, preview[1:])
-			preview = preview[:previewLines-1]
-		}
-		preview = append(preview, line)
-	}
-	for i := range preview {
-		preview[i] = strings.Clone(preview[i])
-	}
-	m.cache = &renderCache{
-		themeGeneration:  styles.ThemeGeneration(),
-		width:            contentWidth,
-		reasoningVersion: m.reasoningVersion,
-		lines:            preview,
-		hasExtra:         hasExtra,
-		truncated:        nonblank > previewLines,
-		hasLines:         len(lines) > 0,
-	}
+	m.cache = reasoningPreviewCache(lines, contentWidth, m.reasoningVersion, styles.ThemeGeneration(), len(m.toolEntries))
 	return m.cache
 }
 
@@ -788,6 +764,11 @@ func (m *Model) renderHeader(expanded bool) string {
 
 // renderReasoningChunk renders a single reasoning chunk with styling.
 func (m *Model) renderReasoningChunk(text string) string {
+	if m.preparedValid() {
+		if chunk, ok := m.prepared.chunks[text]; ok {
+			return chunk
+		}
+	}
 	contentWidth := m.contentWidth()
 	// No copy icon: reasoning is not hit-tested for code block clicks.
 	rendered, err := markdown.NewRendererWithoutCopyIcon(contentWidth).Render(text)

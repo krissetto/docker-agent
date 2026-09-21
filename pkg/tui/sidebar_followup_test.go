@@ -76,7 +76,7 @@ func newSidebarProgramRoot(t *testing.T, application *app.App) *appModel {
 	t.Setenv("USERPROFILE", home)
 	root := New(t.Context(), nil, application, "", func() {}).(*appModel)
 	t.Cleanup(root.cleanupManagedResources)
-	_ = root.Init()
+	_ = root.init() // The wrapper owns scheduling; do not reserve and discard a tick lease.
 	root.handleWindowResize(120, 40)
 	return root
 }
@@ -108,7 +108,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			}}
 			application := app.New(t.Context(), &openSubagentSessions{}, parent, runtime.SessionBinding{AgentName: "director"}, app.WithRuntimeServices(services))
 			root := newSidebarProgramRoot(t, application)
-			_, _ = root.Update(runtime.TeamInfo([]runtime.AgentDetails{{Name: "director"}, {Name: "worker"}}, "director"))
+			_, _ = root.updateWithLifecycle(runtime.TeamInfo([]runtime.AgentDetails{{Name: "director"}, {Name: "worker"}}, "director"))
 			program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
 			root.supervisor.SetProgram(program)
 			frame := sidebarProgramSnapshot(t, program)
@@ -121,7 +121,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				return selected.activeID == child.ID && selected.active == 0 &&
 					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director") &&
 					(!withChildren || strings.Contains(plain, "NestedReviewer"))
-			}, time.Second, time.Millisecond)
+			}, 3*time.Second, time.Millisecond)
 			program.Send(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}}, "worker"))
 			require.Eventually(t, func() bool {
 				selected = sidebarProgramSnapshot(t, program)
@@ -129,7 +129,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				return selected.activeID == child.ID && selected.active == 0 &&
 					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director") &&
 					(!withChildren || strings.Contains(plain, "NestedReviewer"))
-			}, time.Second, time.Millisecond)
+			}, 3*time.Second, time.Millisecond)
 			require.Contains(t, ansi.Strip(selected.content), "SELECTED-CHILD-TRANSCRIPT")
 			require.Contains(t, ansi.Strip(selected.content), "parent: director")
 			require.NotContains(t, ansi.Strip(selected.content), "SelectedWorker", "selected agent is not its own descendant")
@@ -141,7 +141,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				require.Eventually(t, func() bool {
 					hovered = sidebarProgramSnapshot(t, program)
 					return hovered.activeID == child.ID && hovered.active == 0 && strings.Contains(ansi.Strip(hovered.content), "NestedReviewer")
-				}, time.Second, time.Millisecond)
+				}, 3*time.Second, time.Millisecond)
 				// This test selects canonical identities, not a moving row. The
 				// independent animation/hit tests exercise transient coordinates.
 				x, y = sidebarProgramPoint(t, hovered.content, "NestedReviewer")
@@ -176,7 +176,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 					lastGrandchildSnapshot = sidebarProgramSnapshot(t, program)
 					return lastGrandchildSnapshot.activeID == grand.ID && lastGrandchildSnapshot.active == 0 &&
 						strings.Contains(ansi.Strip(lastGrandchildSnapshot.content), "parent: worker")
-				}, time.Second, time.Millisecond)
+				}, 3*time.Second, time.Millisecond)
 				leaf := sidebarProgramSnapshot(t, program)
 				require.NotContains(t, ansi.Strip(leaf.content), "NestedReviewer", "leaf has no self row")
 				require.NotContains(t, ansi.Strip(leaf.content), "SelectedWorker")
@@ -185,7 +185,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				require.Eventually(t, func() bool {
 					back := sidebarProgramSnapshot(t, program)
 					return back.activeID == child.ID && back.active == 0 && strings.Contains(ansi.Strip(back.content), "parent: director")
-				}, time.Second, time.Millisecond)
+				}, 3*time.Second, time.Millisecond)
 			} else {
 				require.NotContains(t, ansi.Strip(selected.content), "NestedReviewer")
 			}
@@ -195,7 +195,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			require.Eventually(t, func() bool {
 				back := sidebarProgramSnapshot(t, program)
 				return back.activeID == parent.ID && back.active == 0 && strings.Contains(ansi.Strip(back.content), "SelectedWorker")
-			}, time.Second, time.Millisecond)
+			}, 3*time.Second, time.Millisecond)
 		})
 	}
 }

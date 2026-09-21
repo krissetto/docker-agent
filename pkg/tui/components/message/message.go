@@ -108,6 +108,7 @@ type messageModel struct {
 	// dominates a long session, and they are not worth keeping for messages
 	// that are unlikely to be re-rendered hot.
 	finalized bool
+	prepared  *PreparedRender
 
 	markdownImages  map[string]tuiimage.Inline
 	loadingImages   map[string]bool
@@ -423,6 +424,9 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 }
 
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	if mv.preparedValid(width) {
+		return AssistantSegments{}, false
+	}
 	mv.ensureTheme()
 	if mv.finalized {
 		defer func() {
@@ -512,6 +516,9 @@ func (mv *messageModel) View() string {
 // calls with the same inputs (very common during streaming, hover tracking,
 // and from Height()) skip the expensive markdown parse.
 func (mv *messageModel) Render(width int) string {
+	if mv.preparedValid(width) {
+		return mv.prepared.output
+	}
 	mv.ensureTheme()
 	msg := mv.message
 

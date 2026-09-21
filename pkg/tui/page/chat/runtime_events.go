@@ -665,8 +665,21 @@ func (p *chatPage) applyLifecycle(event runtime.Event) {
 }
 
 func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
+	if p.asyncReplay && snapshot.Session != nil {
+		return p.beginReplay(snapshot)
+	}
+	return p.applyProjection(snapshot, true)
+}
+
+func (p *chatPage) applyProjectionMetadata(snapshot runtime.SessionSnapshot) tea.Cmd {
+	return p.applyProjection(snapshot, false)
+}
+
+func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript bool) tea.Cmd {
 	p.lifecycle = lifecycle.FromSnapshot(snapshot)
-	p.inputReplay.Reset(snapshot.Session)
+	if transcript {
+		p.inputReplay.Reset(snapshot.Session)
+	}
 	p.messageQueue = nil
 	for _, input := range snapshot.PendingInputs {
 		if !lifecycle.IsUserInput(input.InputOrigin) {
@@ -678,20 +691,22 @@ func (p *chatPage) resetProjection(snapshot runtime.SessionSnapshot) tea.Cmd {
 	if snapshot.Session != nil {
 		p.sessionState.SetYoloMode(snapshot.Session.IsToolsApproved())
 		p.sessionState.SetSessionTitle(snapshot.Session.TitleSnapshot())
-		restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(snapshot.Session)
-		if resetter, ok := p.messages.(interface {
-			ResetFromSession(sess *session.Session, media map[int][]types.AssistantMedia) tea.Cmd
-		}); ok {
-			cmds = append(cmds, resetter.ResetFromSession(snapshot.Session, restoredMedia))
-		} else {
-			cmds = append(cmds, p.messages.LoadFromSession(snapshot.Session, restoredMedia))
+		if transcript {
+			restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(snapshot.Session)
+			if resetter, ok := p.messages.(interface {
+				ResetFromSession(sess *session.Session, media map[int][]types.AssistantMedia) tea.Cmd
+			}); ok {
+				cmds = append(cmds, resetter.ResetFromSession(snapshot.Session, restoredMedia))
+			} else {
+				cmds = append(cmds, p.messages.LoadFromSession(snapshot.Session, restoredMedia))
+			}
+			cmds = append(cmds, p.resolveGeneratedMediaCmd(mediaRequests))
 		}
 		cmds = append(cmds, p.hydrateSidebarSession(snapshot.Session))
 		p.snapshotEnd = snapshot.TranscriptPosition
 		if snapshot.Session.MessageCount() > 0 {
 			p.showStartupBanner = false
 		}
-		cmds = append(cmds, p.resolveGeneratedMediaCmd(mediaRequests))
 	}
 	running := snapshot.Status.State == runtime.SessionStateRunning || snapshot.Status.State == runtime.SessionStateQueued || snapshot.Status.State == runtime.SessionStateCancelling
 	p.streamCancelled = false

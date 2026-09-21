@@ -265,7 +265,8 @@ type model struct {
 	urlSpans           *urlSpanCache             // Cached URL spans per rendered line
 	lineOffsets        []int                     // Prefix-sum: lineOffsets[i] = starting global line of view i
 	totalHeight        int                       // Total height of all content in lines
-	renderDirty        bool                      // True when rendered content needs rebuild
+	replay             *sessionReplay
+	renderDirty        bool // True when rendered content needs rebuild
 
 	themeGeneration    uint64
 	transcriptRebuilds uint64
@@ -1603,6 +1604,9 @@ func (m *model) needsSeparator(index int) bool {
 }
 
 func (m *model) ensureAllItemsRendered() {
+	if m.replay != nil {
+		return
+	}
 	if generation := styles.ThemeGeneration(); m.themeGeneration != generation {
 		m.themeGeneration = generation
 		if m.inlineEditMsgIndex >= 0 {
@@ -1975,7 +1979,7 @@ func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]
 	return m.loadFromSession(sess, generatedMedia, true)
 }
 
-func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, scroll bool) tea.Cmd {
+func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, toolResults map[string]string) {
 	m.inputParentSessionID = sess.ParentID
 	if m.subagents == nil {
 		m.subagents = subagentindex.New()
@@ -2029,40 +2033,19 @@ func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]
 	m.hoveredMessageIndex = -1
 	m.hoveredURL = nil
 
-	var cmds []tea.Cmd
-
-	// One consistent snapshot: rendered items and the recorded length
-	// (loadedItemCount) must come from the same copy, or a message committed
-	// between the two reads would be both rendered and replayed from events.
-	items := sess.ItemsSnapshot()
-	m.loadedItemCount = len(items)
-	defer func() { m.loadedMessageCount = len(m.messages); m.committedMessageCount = len(m.messages) }()
-
-	// First pass: collect tool results by ToolCallID
-	toolResults := make(map[string]string)
-	for _, item := range items {
-		if !item.IsMessage() {
-			continue
-		}
-		smsg := item.Message
-		if lifecycle.VisibleTranscriptMessage(smsg) && smsg.Message.Role == chat.MessageRoleTool && smsg.Message.ToolCallID != "" {
-			toolResults[smsg.Message.ToolCallID] = smsg.Message.Content
-		}
-	}
-
-	for pos, item := range items {
+	apply := func(pos int, item session.Item) {
 		if item.IsError() {
 			errMsg := types.Error(item.Error.Message)
 			appendSessionMessage(errMsg, m.createMessageView(errMsg))
-			continue
+			return
 		}
 		if !item.IsMessage() {
-			continue
+			return
 		}
 
 		smsg := item.Message
 		if !lifecycle.VisibleTranscriptMessage(smsg) {
-			continue
+			return
 		}
 
 		switch smsg.Message.Role {
@@ -2070,7 +2053,7 @@ func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]
 			if !lifecycle.IsUserInput(smsg.InputOrigin) {
 				msg := types.Input(smsg)
 				appendSessionMessage(msg, m.createMessageView(msg))
-				continue
+				return
 			}
 			msg := types.User(smsg.Message.Content)
 			msgPos := pos
@@ -2128,24 +2111,22 @@ func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]
 				}
 			}
 		case chat.MessageRoleTool:
-			continue
+			return
 		}
 	}
 
-	for _, view := range m.views {
-		cmds = append(cmds, view.Init())
-	}
+	m.loadedItemCount = len(sess.Messages)
+	m.replay = &sessionReplay{items: sess.Messages, apply: apply}
+}
 
-	// Finalize all but the last message.Model view: historical assistant
-	// messages will only ever be re-rendered on demand, so there is no need
-	// to keep their renderCache or IncrementalRenderer state resident. The
-	// most recent view is left untouched in case streaming continues into it.
-	for i := range len(m.views) - 1 {
-		if mv, ok := m.views[i].(message.Model); ok {
-			mv.Finalize()
-		}
+func (m *model) loadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia, scroll bool) tea.Cmd {
+	snapshot := sess.Clone()
+	m.startSessionReplay(snapshot, generatedMedia, replayToolResults(snapshot.Messages))
+	var cmds []tea.Cmd
+	for m.replay != nil {
+		_, cmd := m.applySessionReplay(false)
+		cmds = append(cmds, cmd)
 	}
-
 	if scroll {
 		cmds = append(cmds, m.ScrollToBottom())
 	}

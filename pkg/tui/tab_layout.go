@@ -53,6 +53,7 @@ func (m *appModel) tabAgentIdentity(tab messages.TabInfo) (name, nodeID string) 
 }
 
 func (m *appModel) setTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
+	tabs, activeIdx = m.openingTabs(tabs, activeIdx)
 	m.tabInfos = append(m.tabInfos[:0], tabs...)
 	for i := range m.tabInfos {
 		m.tabInfos[i].IsActive = i == activeIdx
