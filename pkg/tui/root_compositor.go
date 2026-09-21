@@ -6,8 +6,42 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
+
+// paintRootBackground resolves terminal-default backgrounds without reserializing
+// cells: image escapes and combining marks split by SGR must survive verbatim.
+func paintRootBackground(content string) string {
+	if content == "" {
+		return ""
+	}
+	background := ansi.Style{}.BackgroundColor(styles.Background).String()
+	parser := ansi.GetParser()
+	defer ansi.PutParser(parser)
+
+	var out strings.Builder
+	out.Grow(len(content) + len(background))
+	out.WriteString(background)
+	pen := uv.Style{Bg: styles.Background}
+	var state byte
+	for content != "" {
+		sequence, _, consumed, next := ansi.DecodeSequence(content, state, parser)
+		out.WriteString(sequence)
+		if ansi.HasCsiPrefix(sequence) && parser.Command() == 'm' {
+			uv.ReadStyle(parser.Params(), &pen)
+			if pen.Bg == nil {
+				out.WriteString(background)
+				pen.Bg = styles.Background
+			}
+		}
+		state, content = next, content[consumed:]
+	}
+	out.WriteString(ansi.ResetStyle)
+	return out.String()
+}
 
 // composeRootLayers composites the shell's flat, positioned layers using the
 // same ANSI row spans as panes. The inherited canvas serializer drops combining

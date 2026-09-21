@@ -3863,7 +3863,7 @@ func (m *appModel) composeView() tea.View {
 	windowTitle := m.windowTitle()
 
 	if m.err != nil {
-		return toFullscreenView(styles.ErrorStyle.Render(m.err.Error()), windowTitle, false, m.leanMode)
+		return toFullscreenView(paneClipped(styles.ErrorStyle.Render(m.err.Error()), m.wWidth, m.wHeight), windowTitle, false, m.leanMode)
 	}
 
 	if !m.ready {
@@ -4223,7 +4223,7 @@ func externalEditorCallback(ed editor.Editor, tmpPath string) func(error) tea.Ms
 }
 
 func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.View {
-	view := tea.NewView(content)
+	view := tea.NewView(paintRootBackground(content))
 	view.AltScreen = !leanMode
 	view.MouseMode = tea.MouseModeAllMotion
 	view.BackgroundColor = styles.Background

@@ -88,8 +88,9 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 					_, height := root.editor.GetSize()
 					y := root.editorTop() + height
 					require.Len(t, rows, 30)
-					editor := chromeCells(rows[y-1])
-					strip := chromeCells(rows[y])
+					frame := chromeCells(root.View().Content)
+					editor := frame[(y-1)*width : y*width]
+					strip := frame[y*width : (y+1)*width]
 					require.Len(t, strip, width)
 					barWidth := width - 2*styles.EditorHMargin
 					label := fmt.Sprintf(" Context %d%%", used)
@@ -112,7 +113,7 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 					if label != "" {
 						require.Contains(t, ansi.Strip(rows[y]), label)
 						for x := styles.EditorHMargin + barWidth; x < width-styles.EditorHMargin; x++ {
-							require.Nil(t, strip[x].bg, "label cutout x=%d", x)
+							require.Equal(t, styles.Background, strip[x].bg, "label cutout x=%d", x)
 						}
 					}
 					require.Equal(t, len(rows)-2, y, "context strip is directly above the stable message row")
