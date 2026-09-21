@@ -2,6 +2,7 @@ package tui
 
 import (
 	"image/color"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -17,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
 const paneMinWidth, paneMinHeight = 24, 6
@@ -42,7 +45,7 @@ func (m *appModel) panePresentationEnabled() bool {
 	return !m.leanMode && supported
 }
 
-// Pane headings belong only to an actually visible split, not its saved tree.
+// Pane bars belong only to an actually visible split, not its saved tree.
 func (m *appModel) paneHeaderHeight() int {
 	if len(m.paneGeometry.Panes) > 1 {
 		return 1
@@ -180,7 +183,7 @@ func (m *appModel) resizePanes() tea.Cmd {
 			continue
 		}
 		header := m.paneHeaderHeight()
-		transcript := splitRect{X: r.X, Y: r.Y + header, W: r.W, H: max(0, r.H-header)}
+		transcript := splitRect{X: r.X, Y: r.Y, W: r.W, H: max(0, r.H-header)}
 		cmds = append(cmds, page.SetSize(m.width, m.contentHeight), page.(chat.SplitPresentation).SetSplitPresentation(&chat.SplitPresentationGeometry{
 			Transcript: presentationRect(transcript), Shell: shell, ShowSidebar: id == m.paneFocus(),
 		}))
@@ -334,7 +337,7 @@ func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Mo
 		// Dispatch against the pane that was actually painted. Switching focus
 		// can replace composer chrome and resize this transcript before the
 		// press reaches it, turning a thumb press into an unrelated track hit.
-		if m.paneHeaderHeight() == 0 || y != m.paneGeometry.Panes[id].Y {
+		if m.paneHeaderHeight() == 0 || y != m.paneGeometry.Panes[id].Y+m.paneGeometry.Panes[id].H-1 {
 			updated, cmd := m.chatPages[id].Update(msg)
 			page := updated.(chat.Page)
 			m.chatPages[id] = page
@@ -344,7 +347,7 @@ func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Mo
 		_, cmd := m.handleSwitchTab(id)
 		return m, tea.Batch(append(cmds, cmd)...)
 	}
-	if m.paneHeaderHeight() > 0 && y == m.paneGeometry.Panes[id].Y {
+	if m.paneHeaderHeight() > 0 && y == m.paneGeometry.Panes[id].Y+m.paneGeometry.Panes[id].H-1 {
 		return m, tea.Batch(cmds...)
 	}
 	if id == m.paneFocus() {
@@ -427,15 +430,15 @@ func (m *appModel) paneTitle(id string, width int) string {
 	prefix := " "
 	background := styles.CardBg
 	if focused {
-		prefix = " Send to "
 		background = styles.EditorBg
-		if width < 24 {
-			prefix = " To "
-		}
 	}
 	activity := m.paneActivity(id)
-	budget := max(0, width-ansi.StringWidth(prefix)-ansi.StringWidth(activity)-5)
-	identity := agentidentity.Label(ref, budget)
+	count := ""
+	if children := m.paneSubagentCount(id, subagent.NodeID(nodeID)); children > 0 {
+		count = " (" + strconv.Itoa(children) + ")"
+	}
+	budget := max(0, width-ansi.StringWidth(prefix)-ansi.StringWidth(activity)-ansi.StringWidth(count)-5)
+	identity := agentidentity.Label(ref, budget) + styles.MutedStyle.Render(count)
 	label := prefix + identity + " " + activity + styles.MutedStyle.Render(" · "+title)
 	if width <= 3 {
 		label = "●"
@@ -447,6 +450,31 @@ func (m *appModel) paneTitle(id string, width int) string {
 		heading = styles.FadeLineCtx(heading, inactivePaneContrast, &context)
 	}
 	return heading
+}
+
+// Count direct subagents in every state, not open views or recursive descendants.
+func (m *appModel) paneSubagentCount(id string, nodeID subagent.NodeID) int {
+	if m.supervisor == nil {
+		return 0
+	}
+	runner := m.supervisor.GetRunner(id)
+	if runner == nil || runner.App == nil {
+		return 0
+	}
+	if provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil {
+		if node, found := subagentview.Find(provider.SubagentTree().Snapshot().Nodes, nodeID); found {
+			return len(node.Children)
+		}
+	}
+	// An initial live tree may not yet contain a restored session's root.
+	if sess := runner.App.Session(); sess != nil {
+		if snapshot := sess.GetSubagentTree(); snapshot != nil {
+			if node, found := subagentview.Find(snapshot.Nodes, nodeID); found {
+				return len(node.Children)
+			}
+		}
+	}
+	return 0
 }
 
 func (m *appModel) hasRunningPane() bool {
@@ -484,7 +512,7 @@ func (m *appModel) paneActivity(id string) string {
 		case messages.TabActivityPending:
 			return styles.MutedStyle.Render("· pending")
 		case messages.TabActivityDescendantRunning:
-			return styles.MutedStyle.Render("◇ children")
+			return styles.MutedStyle.Render("◇")
 		}
 	}
 	if runner := m.supervisor.GetRunner(id); runner != nil && runner.App != nil && runner.App.Session() != nil {
@@ -579,9 +607,9 @@ func (m *appModel) composePanes() string {
 		}
 		header := m.paneHeaderHeight()
 		if header > 0 {
-			add(m.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y, W: r.W, H: header})
+			add(m.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
 		}
-		add(m.paneTranscript(id, p.TranscriptView()), splitRect{X: r.X, Y: r.Y + header, W: r.W, H: r.H - header})
+		add(m.paneTranscript(id, p.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
 	}
 	for _, d := range m.paneGeometry.Dividers {
 		glyph := strings.Repeat("─", d.Rect.W)

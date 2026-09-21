@@ -83,7 +83,7 @@ func startRootScrollbarCapture(t *testing.T, root *appModel, page *scrollbarCapt
 	geometry := page.MeasureSplitShell(root.width, root.contentHeight).TranscriptArea
 	if root.panePresentationEnabled() {
 		r := root.paneGeometry.Panes[root.paneFocus()]
-		geometry = chat.PresentationRect{X: r.X, Y: r.Y + root.paneHeaderHeight(), Width: r.W, Height: r.H - root.paneHeaderHeight()}
+		geometry = chat.PresentationRect{X: r.X, Y: r.Y, Width: r.W, Height: r.H - root.paneHeaderHeight()}
 	}
 	x, y := geometry.X+geometry.Width-1, geometry.Y+geometry.Height-1
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -263,11 +263,11 @@ func TestRootMessagesScrollbarCaptureStartsOnUnfocusedPane(t *testing.T) {
 		Editor: root.editors["second"], ViewportLayout: root.editors["second"].(editor.ViewportLayout), limit: 4,
 	}
 	root.editors["second"].SetValue("UNCHANGED DRAFT")
-	second.Update(messages.WheelCoalescedMsg{Delta: 1_000_000, X: root.paneGeometry.Panes["second"].X, Y: root.paneGeometry.Panes["second"].Y + root.paneHeaderHeight()})
+	second.Update(messages.WheelCoalescedMsg{Delta: 1_000_000, X: root.paneGeometry.Panes["second"].X, Y: root.paneGeometry.Panes["second"].Y})
 	root.View()
 	require.Equal(t, "profile", root.paneFocus())
 	r := root.paneGeometry.Panes["second"]
-	root.Update(tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - 1, Button: tea.MouseLeft})
+	root.Update(tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - root.paneHeaderHeight() - 1, Button: tea.MouseLeft})
 	require.Equal(t, "second", root.paneFocus())
 	require.Equal(t, r, root.paneGeometry.Panes["second"], "focus alone retains the painted thumb geometry")
 	require.True(t, second.IsMessagesScrollbarDragging())
@@ -297,9 +297,9 @@ func TestRootMessagesScrollbarUnfocusedPressUsesPaintedGeometry(t *testing.T) {
 		// banner. Focusing it grows the transcript after the initial press.
 		root.editors["second"].SetValue("destination draft")
 		r := root.paneGeometry.Panes["second"]
-		second.Update(messages.WheelCoalescedMsg{Delta: 1_000_000, X: r.X, Y: r.Y + root.paneHeaderHeight()})
+		second.Update(messages.WheelCoalescedMsg{Delta: 1_000_000, X: r.X, Y: r.Y})
 		root.View()
-		press := tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - 1, Button: tea.MouseLeft}
+		press := tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - root.paneHeaderHeight() - 1, Button: tea.MouseLeft}
 		if !thumb {
 			press.X = r.X + r.W/2
 		}

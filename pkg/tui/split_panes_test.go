@@ -465,9 +465,9 @@ func TestPaneRowCompositionSidebarOverlayMatchesOldCells(t *testing.T) {
 			page := root.chatPages[id].(chat.SplitPresentation)
 			header := root.paneHeaderHeight()
 			if header > 0 {
-				add(root.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y, W: r.W, H: header})
+				add(root.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
 			}
-			add(root.paneTranscript(id, page.TranscriptView()), splitRect{X: r.X, Y: r.Y + header, W: r.W, H: r.H - header})
+			add(root.paneTranscript(id, page.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
 		}
 		for _, divider := range root.paneGeometry.Dividers {
 			glyph := strings.Repeat("─", divider.Rect.W)
@@ -573,9 +573,10 @@ func TestPaneHeaderSurfaceTracksFocusAndThemeWithoutChangingOwners(t *testing.T)
 	focused := root.paneTitle("profile", 60)
 	require.NotContains(t, ansi.Strip(inactive), "Send to")
 	wide := ansi.Strip(root.paneTitle("profile", 60) + root.paneTitle("second", 60))
-	require.Equal(t, 1, strings.Count(wide, "Send to"), "only the focused input recipient is labeled")
+	require.NotContains(t, wide, "Send to")
 	require.NotEqual(t, inactive, focused)
-	require.Contains(t, ansi.Strip(focused), "Send to reviewer")
+	require.Contains(t, ansi.Strip(focused), "reviewer")
+	require.Equal(t, ansi.Strip(inactive), ansi.Strip(focused), "surface contrast identifies focus without a label prefix")
 	for _, cell := range chromeCells(focused) {
 		require.NotNil(t, cell.bg, "header background spans every cell")
 	}
@@ -717,14 +718,14 @@ func TestPureBaseThemesRenderCanonicalPaneShellAndDialog(t *testing.T) {
 			root.dimInactivePanes = true
 			frame := root.View().Content
 			plain := ansi.Strip(frame)
-			require.Equal(t, 1, strings.Count(plain, "Send to"))
+			require.NotContains(t, plain, "Send to")
 			require.Contains(t, plain, "Readable transcript")
 			// Exercise real transcript selection, not a style assembled from raw
 			// YAML: SelectionStyle uses ApplyTheme's effective foreground.
 			pane := root.paneGeometry.Panes[root.paneFocus()]
 			selected := false
 			for row, line := range strings.Split(plain, "\n") {
-				if row <= pane.Y || row >= pane.Y+pane.H {
+				if row < pane.Y || row >= pane.Y+pane.H-root.paneHeaderHeight() {
 					continue
 				}
 				segment := ansi.Cut(line, pane.X, pane.X+pane.W)
