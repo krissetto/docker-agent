@@ -211,6 +211,7 @@ type appModel struct {
 	viewSidebarGeneration    uint64
 	viewPaneGenerations      map[string]uint64
 	panes                    splitLayout
+	paneWorkspaces           paneWorkspaces
 	paneGeometry             splitGeometry
 	paneBounds               splitRect
 	paneShell                chat.SplitShellGeometry
@@ -2687,9 +2688,7 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	m.cancelPaneGesture()
 	wasTiled := m.panesEnabled()
 	hintCmd := m.cancelInteractionHint()
-	if next, ok := m.panes.Remove(sessionID); ok {
-		m.panes = next
-	}
+	m.closePaneWorkspaceRoute(sessionID)
 	if m.tabHasRunningSubagents(sessionID) || len(m.descendantAttachedTabs(sessionID)) > 0 {
 		m.supervisor.RetainCleanupUntilShutdown(sessionID)
 	}

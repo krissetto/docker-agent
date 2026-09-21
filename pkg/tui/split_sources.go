@@ -196,7 +196,7 @@ func (m *appModel) adoptPaneSource() tea.Cmd {
 	m.createSessionComponents(id, application, info.Session)
 	page, editor := m.chatPages[id], m.editors[id]
 	m.capturePaneSidebarSettings()
-	m.panes = tx.next
+	m.commitPaneWorkspace(tx.next)
 	m.paneSource = nil
 	tx.cancel()
 	tx.prepared.Abort()

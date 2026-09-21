@@ -260,7 +260,7 @@ func (m *appModel) splitPane(source, target string, edge splitEdge) tea.Cmd {
 	}
 	m.cancelPaneGesture()
 	m.capturePaneSidebarSettings()
-	m.panes = layout
+	m.commitPaneWorkspace(layout)
 	m.viewCacheValid = false
 	_, cmd := m.handleSwitchTab(source)
 	return cmd
@@ -272,7 +272,7 @@ func (m *appModel) removePane(id string) tea.Cmd {
 		return nil
 	}
 	m.cancelPaneGesture()
-	m.panes = layout
+	m.commitPaneWorkspace(layout)
 	m.viewCacheValid = false
 	if id == m.paneFocus() {
 		_, cmd := m.handleSwitchTab(layout.Sessions()[0])
@@ -283,28 +283,14 @@ func (m *appModel) removePane(id string) tea.Cmd {
 
 func (m *appModel) singlePane() tea.Cmd {
 	m.cancelPaneGesture()
-	m.panes = newSplitLayout(m.paneFocus())
+	m.commitPaneWorkspace(newSplitLayout(m.paneFocus()))
 	m.viewCacheValid = false
 	return m.resizeAll()
 }
 
-// Switching a hidden tab substitutes the focused leaf, preserving the rest of
-// the immutable tree and retaining the outgoing canonical page as a warm tab.
+// Tabs select their assigned workspace rather than replacing a focused leaf.
 func (m *appModel) selectPaneTab(old, next string) {
-	if !m.panesEnabled() {
-		m.panes = newSplitLayout(next)
-		return
-	}
-	if m.panes.Contains(next) {
-		return
-	}
-	if !m.panes.Contains(old) {
-		old = m.panes.Sessions()[0]
-	}
-	layout, ok := m.panes.Insert(next, old, splitRight)
-	if ok {
-		m.panes, _ = layout.Remove(old)
-	}
+	m.switchPaneWorkspace(old, next)
 }
 
 func (m *appModel) paneAt(x, y int) string {

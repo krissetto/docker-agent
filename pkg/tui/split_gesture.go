@@ -306,7 +306,7 @@ func (m *appModel) commitPaneDivider(position int) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	m.panes = next
+	m.commitPaneWorkspace(next)
 	return m.resizeAll()
 }
 

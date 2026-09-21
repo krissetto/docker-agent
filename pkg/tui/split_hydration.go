@@ -135,7 +135,7 @@ func (m *appModel) finishPaneHydration(msg paneHydratedMsg) tea.Cmd {
 	initCmd := tea.Batch(page.Init(), chat.WatchGitBranch(page), ed.Init())
 	delete(m.pendingRestores, tx.source)
 	m.capturePaneSidebarSettings()
-	m.panes = tx.next
+	m.commitPaneWorkspace(tx.next)
 	m.viewCacheValid = false
 	_, focusCmd := m.handleSwitchTab(tx.destination)
 	return tea.Batch(m.routePaneCmd(tx.source, initCmd), focusCmd)
