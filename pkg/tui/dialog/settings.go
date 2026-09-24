@@ -44,6 +44,7 @@ const (
 	rowTools
 	rowTodos
 	rowDimInactivePanes
+	rowWorkspaceCompact
 	rowSplitDiff
 	rowExpandThinking
 	rowHideToolResults
@@ -317,6 +318,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.HideTools = !d.current.Layout.HideTools
 		case rowTodos:
 			d.current.Layout.HideTodos = !d.current.Layout.HideTodos
+		case rowWorkspaceCompact:
+			d.current.WorkspaceCompact = !d.current.WorkspaceCompact
 		case rowDimInactivePanes:
 			d.current.DimInactivePanes = !d.current.DimInactivePanes
 		case rowSplitDiff:
@@ -498,6 +501,7 @@ func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
 	}
 	content.AddSpace().
 		AddContent(d.renderToggleRow(rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)).
+		AddContent(d.renderToggleRow(rowWorkspaceCompact, "Compact workspace tabs", d.current.WorkspaceCompact)).
 		AddContent(d.renderToggleRow(rowSplitDiff, "Split diff view", d.current.SplitDiffView)).
 		AddContent(d.renderToggleRow(rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)).
 		AddContent(d.renderToggleRow(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)).

@@ -74,7 +74,14 @@ func (m *appModel) measurePanes() (chat.SplitShellGeometry, splitRect, bool) {
 	if !ok || m.leanMode {
 		return chat.SplitShellGeometry{}, splitRect{}, false
 	}
-	shell := p.MeasureSplitShell(m.width, m.contentHeight)
+	browserWidth := 0
+	if m.workspaceUI.visible && !m.workspaceUI.fullscreen {
+		browserWidth = m.workspaceUI.browserWidth
+	}
+	shell := p.MeasureSplitShell(max(0, m.width-browserWidth), m.contentHeight)
+	shell.TranscriptArea.X += browserWidth
+	shell.Sidebar.X += browserWidth
+	shell.SidebarHandle.X += browserWidth
 	if m.width > 0 && m.contentHeight > 0 && shell.TranscriptArea.Width == 0 {
 		// Degenerate terminals cannot afford app padding or a sidebar. Keep
 		// the focused leaf visible in the cells that actually exist,

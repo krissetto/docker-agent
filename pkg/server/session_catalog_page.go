@@ -1,12 +1,15 @@
 package server
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -21,6 +24,7 @@ type catalogCursor struct {
 	CreatedAt time.Time `json:"at"`
 	ID        string    `json:"id"`
 	Scope     string    `json:"scope"`
+	QueryHash string    `json:"query_hash,omitempty"`
 }
 
 func (s *Server) sessionCatalog(c echo.Context) error {
@@ -28,6 +32,15 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 	view := c.QueryParam("view")
 	if view != "" && view != "summary" {
 		return sessionRequestError("unknown catalog view")
+	}
+	query := strings.TrimSpace(c.QueryParam("query"))
+	queryHash := ""
+	if query != "" {
+		sum := sha256.Sum256([]byte(query))
+		queryHash = hex.EncodeToString(sum[:])
+	}
+	if query != "" && view != "summary" {
+		return sessionRequestError("query is supported only for summary view")
 	}
 	children := false
 	if raw := c.QueryParam("include_children"); raw != "" {
@@ -59,7 +72,7 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 			return sessionRequestError("invalid catalog cursor")
 		}
 		data, err := base64.RawURLEncoding.DecodeString(raw)
-		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Version != api.SessionAPIVersion || cursor.ID == "" || cursor.CreatedAt.IsZero() || cursor.Scope != scope {
+		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Version != api.SessionAPIVersion || cursor.ID == "" || cursor.CreatedAt.IsZero() || cursor.Scope != scope || cursor.QueryHash != queryHash {
 			return sessionRequestError("invalid catalog cursor or scope")
 		}
 	}
@@ -97,7 +110,7 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 		if !ok {
 			return sessionHTTPError(runtime.UnsupportedSessionOperation("", "session_summaries"))
 		}
-		page, err := store.GetSessionSummaryPage(c.Request().Context(), session.SummaryPageOptions{IncludeChildren: children, Limit: limit, AfterCreatedAt: cursor.CreatedAt, AfterID: cursor.ID})
+		page, err := store.GetSessionSummaryPage(c.Request().Context(), session.SummaryPageOptions{IncludeChildren: children, Query: query, Limit: limit, AfterCreatedAt: cursor.CreatedAt, AfterID: cursor.ID})
 		if err != nil {
 			return sessionHTTPError(err)
 		}
@@ -112,11 +125,11 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 	next := ""
 	if hasMore && len(rows) > 0 {
 		last := rows[len(rows)-1]
-		data, _ := json.Marshal(catalogCursor{Version: api.SessionAPIVersion, CreatedAt: last.CreatedAt, ID: last.SessionID, Scope: scope})
+		data, _ := json.Marshal(catalogCursor{Version: api.SessionAPIVersion, CreatedAt: last.CreatedAt, ID: last.SessionID, Scope: scope, QueryHash: queryHash})
 		next = base64.RawURLEncoding.EncodeToString(data)
 	}
 	if view == "summary" {
-		return c.JSON(http.StatusOK, api.SessionSummaryCatalog[runtime.SessionSummaryEntry]{Version: api.SessionAPIVersion, View: view, Sessions: rows, NextCursor: next})
+		return c.JSON(http.StatusOK, api.SessionSummaryCatalog[runtime.SessionSummaryEntry]{Version: api.SessionAPIVersion, View: view, Query: query, Sessions: rows, NextCursor: next})
 	}
 	catalog := sessionCatalogDTO{Version: api.SessionAPIVersion, NextCursor: next, Sessions: make([]sessionResourceDTO, 0, len(rows))}
 	if len(s.sm.sessionRegistries) == 0 {

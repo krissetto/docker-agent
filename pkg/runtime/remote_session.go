@@ -177,6 +177,32 @@ func (r *SessionTransport) ListSessionSummaries(ctx context.Context, options Ses
 	}
 }
 
+func (r *SessionTransport) ListSessionSummaryPage(ctx context.Context, options SessionSummaryPageOptions) (SessionSummaryPage, error) {
+	options, err := normalizeSummaryPageOptions(options)
+	if err != nil {
+		return SessionSummaryPage{}, err
+	}
+	query := url.Values{"view": {"summary"}, "include_children": {strconv.FormatBool(options.IncludeChildren)}, "limit": {strconv.Itoa(options.Limit)}}
+	if options.Cursor != "" {
+		query.Set("cursor", options.Cursor)
+	}
+	if options.Query != "" {
+		query.Set("query", options.Query)
+	}
+	var catalog api.SessionSummaryCatalog[SessionSummaryEntry]
+	if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"?"+query.Encode(), nil, &catalog); err != nil {
+		return SessionSummaryPage{}, err
+	}
+	if catalog.Version != sessionWireVersion || catalog.View != "summary" || catalog.Query != options.Query {
+		return SessionSummaryPage{}, UnsupportedSessionOperation("", "session_summary_page")
+	}
+	page := SessionSummaryPage{Entries: catalog.Sessions, NextCursor: catalog.NextCursor}
+	if err := validateSummaryPage(page, options); err != nil {
+		return SessionSummaryPage{}, err
+	}
+	return page, nil
+}
+
 // Cursors are opaque base64url tokens. Validate only their transport shape and
 // progress; their contents and ordering belong to the server.
 func advanceSessionCatalog(query url.Values, seen map[string]bool, cursor string, rows int) error {

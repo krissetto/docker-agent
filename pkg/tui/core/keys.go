@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 	"sort"
@@ -16,18 +17,21 @@ import (
 // KeyMap contains the keybindings used across the TUI. Bindings are resolved
 // once from DefaultKeyMap() merged with the user's overrides (see GetKeys).
 type KeyMap struct {
-	Quit                  key.Binding
-	SwitchFocus           key.Binding
-	Commands              key.Binding
-	Help                  key.Binding
-	ToggleYolo            key.Binding
-	ToggleHideToolResults key.Binding
-	CycleAgent            key.Binding
-	ModelPicker           key.Binding
-	Suspend               key.Binding
-	ToggleSidebar         key.Binding
-	EditExternal          key.Binding
-	HistorySearch         key.Binding
+	SessionsBrowser                                                                  key.Binding
+	WorkspaceNext, WorkspacePrevious, WorkspaceCreate, WorkspaceClose, WorkspaceMove key.Binding
+	WorkspaceDirect                                                                  [9]key.Binding
+	Quit                                                                             key.Binding
+	SwitchFocus                                                                      key.Binding
+	Commands                                                                         key.Binding
+	Help                                                                             key.Binding
+	ToggleYolo                                                                       key.Binding
+	ToggleHideToolResults                                                            key.Binding
+	CycleAgent                                                                       key.Binding
+	ModelPicker                                                                      key.Binding
+	Suspend                                                                          key.Binding
+	ToggleSidebar                                                                    key.Binding
+	EditExternal                                                                     key.Binding
+	HistorySearch                                                                    key.Binding
 
 	// EditorSend submits the editor content. EditorNewline inserts a line
 	// break. These are the input bindings referenced by issue #1626. The
@@ -81,7 +85,7 @@ var reservedKeys = []string{
 // overridden them. Newline defaults to ctrl+j only; shift+enter is layered on
 // at runtime by the editor when the terminal supports it.
 func DefaultKeyMap() KeyMap {
-	return KeyMap{
+	keys := KeyMap{
 		Quit:                  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("Ctrl+c", "quit")),
 		SwitchFocus:           key.NewBinding(key.WithKeys("tab"), key.WithHelp("Tab", "switch focus")),
 		Commands:              key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("Ctrl+k", "commands")),
@@ -97,6 +101,17 @@ func DefaultKeyMap() KeyMap {
 		EditorSend:            key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "send message")),
 		EditorNewline:         key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("Ctrl+j", "insert newline")),
 	}
+	keys.SessionsBrowser = key.NewBinding(key.WithKeys("alt+b"), key.WithHelp("Alt+b", "sessions browser"))
+	keys.WorkspaceNext = key.NewBinding(key.WithKeys("alt+]"), key.WithHelp("Alt+]", "next workspace"))
+	keys.WorkspacePrevious = key.NewBinding(key.WithKeys("alt+["), key.WithHelp("Alt+[", "previous workspace"))
+	keys.WorkspaceCreate = key.NewBinding(key.WithKeys("alt+n"), key.WithHelp("Alt+n", "new workspace"))
+	keys.WorkspaceClose = key.NewBinding(key.WithKeys("alt+w"), key.WithHelp("Alt+w", "close workspace"))
+	keys.WorkspaceMove = key.NewBinding(key.WithKeys("alt+m"), key.WithHelp("Alt+m", "move pane to next workspace"))
+	for i := range keys.WorkspaceDirect {
+		combo := fmt.Sprintf("alt+%d", i+1)
+		keys.WorkspaceDirect[i] = key.NewBinding(key.WithKeys(combo), key.WithHelp(combo, fmt.Sprintf("workspace %d", i+1)))
+	}
+	return keys
 }
 
 // actionEntry links an action name to its binding pointer (inside a working
@@ -111,7 +126,7 @@ type actionEntry struct {
 // order also defines conflict-resolution priority: earlier actions keep a
 // contested key, later ones lose it.
 func actionMapFor(keys *KeyMap) []actionEntry {
-	return []actionEntry{
+	entries := []actionEntry{
 		{"quit", &keys.Quit, "quit"},
 		{"switch_focus", &keys.SwitchFocus, "switch focus"},
 		{"commands", &keys.Commands, "commands"},
@@ -127,6 +142,11 @@ func actionMapFor(keys *KeyMap) []actionEntry {
 		{"editor_send", &keys.EditorSend, "send message"},
 		{"editor_newline", &keys.EditorNewline, "insert newline"},
 	}
+	entries = append(entries, actionEntry{"sessions_browser", &keys.SessionsBrowser, "sessions browser"}, actionEntry{"workspace_next", &keys.WorkspaceNext, "next workspace"}, actionEntry{"workspace_previous", &keys.WorkspacePrevious, "previous workspace"}, actionEntry{"workspace_create", &keys.WorkspaceCreate, "new workspace"}, actionEntry{"workspace_close", &keys.WorkspaceClose, "close workspace"}, actionEntry{"workspace_move", &keys.WorkspaceMove, "move pane to next workspace"})
+	for i := range keys.WorkspaceDirect {
+		entries = append(entries, actionEntry{fmt.Sprintf("workspace_%d", i+1), &keys.WorkspaceDirect[i], fmt.Sprintf("workspace %d", i+1)})
+	}
+	return entries
 }
 
 // ValidActions returns the sorted list of action names that can be remapped.

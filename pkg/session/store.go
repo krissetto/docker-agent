@@ -1221,6 +1221,16 @@ func (s *SQLiteSessionStore) sessionSummaries(ctx context.Context, scope Summary
 		stamp := page.AfterCreatedAt.Format(time.RFC3339)
 		args = append(args, stamp, stamp, page.AfterID)
 	}
+	if page != nil && strings.TrimSpace(page.Query) != "" {
+		if scope.IncludeChildren && page.AfterID == "" {
+			query += " WHERE "
+		} else {
+			query += " AND "
+		}
+		query += "(instr(lower(s.title), lower(?)) > 0 OR instr(lower(COALESCE(s.working_dir, '')), lower(?)) > 0)"
+		text := strings.TrimSpace(page.Query)
+		args = append(args, text, text)
+	}
 	query += " ORDER BY s.created_at DESC, s.id ASC"
 	if page != nil {
 		query += " LIMIT ?"

@@ -193,7 +193,9 @@ func TestValidActions(t *testing.T) {
 	assert.Contains(t, actions, "editor_send")
 	assert.Contains(t, actions, "editor_newline")
 	assert.Contains(t, actions, "quit")
-	assert.Len(t, actions, 14)
+	assert.Len(t, actions, 29)
+	assert.Contains(t, actions, "workspace_9")
+	assert.Contains(t, actions, "sessions_browser")
 }
 
 func TestBuildKeysHelpFallbackAndReservedFollowup(t *testing.T) {
@@ -223,4 +225,12 @@ func TestEditorNewlineKeysRespectConfiguredEnhancedOwner(t *testing.T) {
 	}
 	require.Equal(t, []string{"ctrl+j"}, editorNewlineKeys(DefaultKeyMap(), false))
 	require.Equal(t, []string{"shift+enter", "ctrl+j"}, editorNewlineKeys(DefaultKeyMap(), true))
+}
+
+func TestWorkspaceBindingsAreConfigurableAndConflictChecked(t *testing.T) {
+	keys := buildKeys(&userconfig.Settings{Keybindings: []userconfig.Keybinding{{Action: "workspace_1", Keys: []string{"f9"}}, {Action: "workspace_next", Keys: []string{"alt+right"}}, {Action: "workspace_close", Keys: []string{"ctrl+c"}}}})
+	require.Equal(t, []string{"f9"}, keys.WorkspaceDirect[0].Keys())
+	require.Equal(t, []string{"alt+right"}, keys.WorkspaceNext.Keys())
+	require.Equal(t, []string{"alt+w"}, keys.WorkspaceClose.Keys(), "quit cannot be shadowed")
+	require.Equal(t, []string{"alt+b"}, keys.SessionsBrowser.Keys())
 }

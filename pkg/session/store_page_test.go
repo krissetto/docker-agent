@@ -47,3 +47,49 @@ func TestSummaryPagesBoundedStableCursorAndScope(t *testing.T) {
 		})
 	}
 }
+
+func TestSummaryPagesSearchAllMetadataBeforeLimit(t *testing.T) {
+	for name, create := range map[string]func() Store{"memory": NewInMemorySessionStore, "sqlite": func() Store { return openMemoryStore(t) }} {
+		t.Run(name, func(t *testing.T) {
+			store := create()
+			for i := range 12 {
+				row := New(WithID(fmt.Sprintf("s%02d", i)), WithUserMessage("needle only in transcript"))
+				row.CreatedAt = time.Unix(100-int64(i), 0).UTC()
+				row.Title = "unmatched"
+				if i == 8 || i == 10 {
+					row.Title = "NEEDLE in title"
+				}
+				if i == 9 {
+					row.WorkingDir = "/another/project/needle"
+				}
+				if i == 11 {
+					row.Title = "literal %_ characters"
+					row.ParentID = "s00"
+				}
+				require.NoError(t, store.AddSession(t.Context(), row))
+			}
+			paged := store.(PagedSummaryStore)
+			options := SummaryPageOptions{Limit: 1, Query: " needle "}
+			var ids []string
+			for {
+				page, err := paged.GetSessionSummaryPage(t.Context(), options)
+				require.NoError(t, err)
+				require.Len(t, page.Summaries, 1)
+				last := page.Summaries[0]
+				ids = append(ids, last.ID)
+				if !page.HasMore {
+					break
+				}
+				options.AfterCreatedAt, options.AfterID = last.CreatedAt, last.ID
+			}
+			require.Equal(t, []string{"s08", "s09", "s10"}, ids)
+			page, err := paged.GetSessionSummaryPage(t.Context(), SummaryPageOptions{Limit: 2, Query: "%_"})
+			require.NoError(t, err)
+			require.Empty(t, page.Summaries)
+			page, err = paged.GetSessionSummaryPage(t.Context(), SummaryPageOptions{Limit: 2, Query: "%_", IncludeChildren: true})
+			require.NoError(t, err)
+			require.Len(t, page.Summaries, 1)
+			require.Equal(t, "s11", page.Summaries[0].ID)
+		})
+	}
+}

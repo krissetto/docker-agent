@@ -82,3 +82,38 @@ func TestSessionCatalogBoundedMetadataCursorPages(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 	}
 }
+
+func TestSessionSummarySearchPagesAndQueryCursorFence(t *testing.T) {
+	base := session.NewInMemorySessionStore()
+	for i, title := range []string{"unmatched", "TARGET title", "target second"} {
+		row := session.New(session.WithID(title), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
+		row.Title = title
+		row.CreatedAt = time.Unix(100-int64(i), 0).UTC()
+		require.NoError(t, base.AddSession(t.Context(), row))
+	}
+	store := &boundedCatalogStore{Store: base, PagedSummaryStore: base.(session.PagedSummaryStore)}
+	registry := &httpSessionRegistry{sessions: map[string]*httpSession{}}
+	srv := NewWithManager(NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(registry)), "")
+	endpoint := api.SessionAPIPath + "?view=summary&limit=1&query=target"
+	response := sessionRequest(t, srv, http.MethodGet, endpoint, "", "")
+	require.Equal(t, http.StatusOK, response.Code)
+	var page api.SessionSummaryCatalog[runtime.SessionSummaryEntry]
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &page))
+	require.Equal(t, "target", page.Query)
+	require.Len(t, page.Sessions, 1)
+	require.Equal(t, "TARGET title", page.Sessions[0].Title)
+	require.NotEmpty(t, page.NextCursor)
+	require.Len(t, store.limits, 1)
+	for _, scope := range []string{"", "&query=different", "&query=target&include_children=true"} {
+		bad := sessionRequest(t, srv, http.MethodGet, api.SessionAPIPath+"?view=summary&cursor="+url.QueryEscape(page.NextCursor)+scope, "", "")
+		require.Equal(t, http.StatusBadRequest, bad.Code)
+	}
+	response = sessionRequest(t, srv, http.MethodGet, endpoint+"&cursor="+url.QueryEscape(page.NextCursor), "", "")
+	require.Equal(t, http.StatusOK, response.Code)
+	page = api.SessionSummaryCatalog[runtime.SessionSummaryEntry]{}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &page))
+	require.Len(t, page.Sessions, 1)
+	require.Equal(t, "target second", page.Sessions[0].Title)
+	require.Empty(t, page.NextCursor)
+	require.Equal(t, []int{1, 1}, store.limits)
+}

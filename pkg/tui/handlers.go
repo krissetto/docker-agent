@@ -999,6 +999,7 @@ func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) 
 func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	settings := userconfig.Get()
 	preferences := messages.Preferences{
+		WorkspaceCompact:      settings.WorkspaceCompact,
 		Layout:                m.layoutSettings,
 		SendMode:              m.sendMode,
 		SplitDiffView:         settings.GetSplitDiffView(),
@@ -1033,6 +1034,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
 	m.dimInactivePanes = preferences.DimInactivePanes
+	m.workspaceUI.compact = preferences.WorkspaceCompact
 	m.viewCacheValid = false
 	for _, page := range m.chatPages {
 		page.SetSendMode(m.sendMode)
@@ -1109,6 +1111,7 @@ func savePreferences(p messages.Preferences) error {
 		s.SplitDiffView = boolPreference(p.SplitDiffView, true)
 		s.ExpandThinking = boolPreference(p.ExpandThinking, false)
 		s.RestoreTabs = boolPreference(p.RestoreTabs, false)
+		s.WorkspaceCompact = p.WorkspaceCompact
 		s.Snapshot = boolPreference(p.Snapshot, false)
 		s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
 		s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)

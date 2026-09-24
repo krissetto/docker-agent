@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -12,9 +13,11 @@ import (
 // AfterCreatedAt and AfterID form an exclusive cursor. Limit must be positive.
 type SummaryPageOptions struct {
 	IncludeChildren bool
-	Limit           int
-	AfterCreatedAt  time.Time
-	AfterID         string
+	// Query is a literal title/working-directory substring, with ASCII case folding.
+	Query          string
+	Limit          int
+	AfterCreatedAt time.Time
+	AfterID        string
 }
 type SummaryPage struct {
 	Summaries []Summary
@@ -42,12 +45,16 @@ func (s *InMemorySessionStore) GetSessionSummaryPage(ctx context.Context, option
 	defer s.coordinationMu.Unlock()
 	// Retain only limit+1 candidates, rather than materializing the catalog.
 	selected := make([]*Session, 0, options.Limit+1)
+	query := foldSummaryQuery(strings.TrimSpace(options.Query))
 	cursor := Summary{CreatedAt: options.AfterCreatedAt, ID: options.AfterID}
 	s.sessions.Range(func(_ string, sess *Session) bool {
 		if ctx.Err() != nil {
 			return false
 		}
 		if !options.IncludeChildren && sess.ParentID != "" {
+			return true
+		}
+		if query != "" && !strings.Contains(foldSummaryQuery(sess.TitleSnapshot()), query) && !strings.Contains(foldSummaryQuery(sess.WorkingDir), query) {
 			return true
 		}
 		key := Summary{CreatedAt: sess.CreatedAt, ID: sess.ID}
@@ -92,4 +99,14 @@ func (s *SQLiteSessionStore) GetSessionSummaryPage(ctx context.Context, options 
 		page.Summaries = page.Summaries[:options.Limit]
 	}
 	return page, nil
+}
+
+// Match SQLite lower(), which folds ASCII rather than depending on locale.
+func foldSummaryQuery(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, value)
 }
