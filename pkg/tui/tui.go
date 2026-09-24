@@ -213,7 +213,6 @@ type appModel struct {
 	viewPaneGenerations      map[string]uint64
 	panes                    splitLayout
 	paneWorkspaces           paneWorkspaces
-	workspaceUI              workspaceUI
 	paneGeometry             splitGeometry
 	paneBounds               splitRect
 	paneShell                chat.SplitShellGeometry
@@ -682,7 +681,6 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Restore persisted tabs or persist the initial one.
 	m.restoreTabs(ctx, ts, sv, spawner, initialApp, sessID, initialWorkingDir)
-	m.initializeWorkspaces()
 
 	// Initialize tab bar with current tabs
 	tabs, activeIdx := sv.GetTabs()
@@ -903,7 +901,6 @@ func (m *appModel) tourStartupCmd() tea.Cmd {
 }
 
 func (m *appModel) init() tea.Cmd {
-	defer m.prepareWorkspaceControls()
 	tabCmd := m.initialTabCmd
 	m.initialTabCmd = nil
 	shutdownCmd := tea.Batch(m.contextShutdownCmd(), tabCmd)
@@ -946,7 +943,6 @@ func (m *appModel) init() tea.Cmd {
 // even on pointer-wrapper and other early returns.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.updateWithLifecycle(msg)
-	cmd = tea.Batch(cmd, m.prepareWorkspaces(msg))
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -1028,10 +1024,6 @@ func tabVisualGeneration(tabBar *tabbar.TabBar) uint64 {
 }
 
 func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.workspaceMessage(msg); handled {
-		m.viewCacheValid = false
-		return m, cmd
-	}
 	beforeVisual := m.chatPage.VisualGeneration()
 	beforePanesValid := m.visiblePaneCacheValid()
 	beforeSidebarVisual := sidebarVisualGeneration(m.chatPage)
@@ -1497,9 +1489,6 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.editor.Focus()
 
 	case messages.SendMsg:
-		if m.workspaceEmpty() {
-			return m, notification.InfoCmd("Open a session before sending")
-		}
 		// Forward send messages to the active content view.
 		if m.history != nil && !msg.BypassQueue {
 			_ = m.history.Add(msg.Content)
@@ -2027,12 +2016,6 @@ func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg
 
 // handleOpenSessionBrowser opens the session browser dialog.
 func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
-	if _, ok := m.application.SessionRuntime().(runtime.SessionSummaryPager); ok {
-		if !m.workspaceUI.visible {
-			return m, m.toggleSessionsBrowser()
-		}
-		return m, m.workspaceUI.browser.Focus()
-	}
 	var sessions []session.Summary
 	if catalog, ok := m.application.SessionRuntime().(runtime.SessionCatalog); ok {
 		rows, err := catalog.ListSessions(m.ctx())
@@ -2946,7 +2929,6 @@ func messageBarWidth(width int) int {
 }
 
 func (m *appModel) renderMessageBar() string {
-	m.prepareWorkspaceFallback()
 	left := messageBarOrigin(m.width)
 	right := max(0, m.width-left-messageBarWidth(m.width))
 	view := m.messageBar.View()
@@ -3054,7 +3036,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	m.contentHeight = max(0, height-chromeHeight-editorRenderedHeight)
 	// Both shells host canonical dialogs and completions; lean only omits
 	// tab/tour geometry, not nonvisual command functionality.
-	cmds = append(cmds, m.resizeSessionsBrowser(), m.resizePanes(), m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
+	cmds = append(cmds, m.resizePanes(), m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
 
 	if !m.leanMode {
 		m.tour.SetSize(width, height, m.contentHeight)
@@ -3081,9 +3063,6 @@ func (m *appModel) Bindings() []key.Binding {
 
 // handleKeyPress handles all keyboard input with proper priority routing.
 func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea.Cmd) {
-	if handled, cmd := m.workspaceKey(msg); handled {
-		return m, cmd
-	}
 	if gestureCmd, handled := m.handlePaneGestureKey(msg); handled {
 		return m, gestureCmd
 	}
@@ -3438,18 +3417,10 @@ func (m *appModel) composerResizeHit(x, y int) bool {
 		x >= 0 && x < m.width && y >= 0 && y < m.height
 }
 
-func (m *appModel) composerView() string {
-	if m.workspaceEmpty() {
-		return paneClipped("Open a session to compose", m.width, m.editorHeight)
-	}
-	return m.editor.View()
-}
+func (m *appModel) composerView() string { return m.editor.View() }
 
 // handleMouseClick routes mouse clicks to the appropriate component based on Y coordinate.
 func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.workspacePointer(msg, msg.X, msg.Y); handled {
-		return m, cmd
-	}
 	if msg.Button == tea.MouseLeft {
 		m.cancelMessagesScrollbar()
 		m.messagesScrollbar = nil
@@ -3559,9 +3530,6 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.workspacePointer(msg, msg.X, msg.Y); handled {
-		return m, cmd
-	}
 	if cmd, captured := m.routeMessagesScrollbar(msg, false); captured {
 		return m, cmd
 	}
@@ -3720,9 +3688,6 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 
 // handleWheelCoalesced routes coalesced wheel events with adjusted coordinates.
 func (m *appModel) handleWheelCoalesced(msg messages.WheelCoalescedMsg) (tea.Model, tea.Cmd) {
-	if handled, cmd := m.workspacePointer(msg, msg.X, msg.Y); handled {
-		return m, cmd
-	}
 	if msg.Delta == 0 {
 		return m, nil
 	}
@@ -3911,7 +3876,6 @@ func (m *appModel) View() tea.View {
 	}
 	statuses := m.visiblePaneStatuses()
 	m.composingPaneStatuses = statuses
-	m.prepareWorkspaceFallback()
 	view := m.composeView()
 	m.composingPaneStatuses = nil
 	m.viewThemeGeneration = styles.ThemeGeneration()
@@ -3951,8 +3915,6 @@ func (m *appModel) composeView() tea.View {
 	// Content area (messages + sidebar) -- swaps per tab
 	var contentView string
 	switch {
-	case m.workspaceEmpty():
-		contentView = paneClipped("Choose a session from Sessions to open this workspace.", m.width, m.contentHeight)
 	case m.opening != nil:
 		contentView = m.openingContent()
 	case m.panePresentationEnabled():
@@ -3960,8 +3922,6 @@ func (m *appModel) composeView() tea.View {
 	default:
 		contentView = m.chatPage.View()
 	}
-
-	contentView = m.composeSessionsBrowser(contentView)
 
 	// Lean mode: editor appears right after the last message, with empty
 	// space pushed to the top via bottom-alignment.
@@ -4166,10 +4126,6 @@ func (m *appModel) Shutdown() {
 // wedged cleanup or arm parallel safety nets.
 func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
-		m.cancelWorkspaceOpen()
-		if m.workspaceUI.cancel != nil {
-			m.workspaceUI.cancel()
-		}
 		m.contextClosed = true
 		m.cancelSessionOpening()
 		if m.hostedLoad != nil {

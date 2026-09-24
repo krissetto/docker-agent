@@ -56,10 +56,6 @@ type actionBounds struct {
 }
 
 type Model struct {
-	fallback      string
-	controls      []Control
-	controlBounds []controlBounds
-	controlWidth  int
 	width, height int
 	message       Message
 	text          string
@@ -184,9 +180,6 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
-			if cmd := m.ControlClick(msg.X, msg.Y); cmd != nil {
-				return cmd
-			}
 			if index, ok := m.HitTest(msg.X, msg.Y); ok {
 				return m.message.Actions[index].Command
 			}
@@ -239,8 +232,6 @@ func (m *Model) invalidate() {
 
 func (m *Model) layout() {
 	m.bounds = nil
-	m.controlBounds = nil
-	m.controlWidth = 0
 	m.text = ""
 	if m.width == 0 || m.height == 0 {
 		m.focused, m.selected = false, -1
@@ -250,9 +241,6 @@ func (m *Model) layout() {
 	// Reserve a message cell and separator, then fit only complete action pills.
 	actionBudget := available
 	label := m.message.label()
-	if m.message.empty() {
-		label = m.fallback
-	}
 	if label != "" {
 		actionBudget = max(0, actionBudget-2)
 	}
@@ -281,8 +269,6 @@ func (m *Model) layout() {
 			m.bounds[i].end += available - actionWidth
 		}
 	}
-	m.layoutControls(min(m.width/3, max(0, textWidth-2)))
-	textWidth = max(0, textWidth-m.controlWidth)
 	if textWidth > 0 {
 		m.text = ansi.Truncate(label, textWidth, "…")
 	}
@@ -337,7 +323,7 @@ func (m *Model) render() string {
 		out.WriteString(base.Foreground(styles.TextSecondary).Render(ansi.Cut(m.text, nameEnd, idEnd)))
 	}
 	out.WriteString(base.Foreground(m.severityColor()).Render(ansi.Cut(m.text, idEnd, ansi.StringWidth(m.text))))
-	cursor := m.controlWidth + ansi.StringWidth(m.text)
+	cursor := ansi.StringWidth(m.text)
 	for _, bounds := range m.bounds {
 		out.WriteString(base.Render(strings.Repeat(" ", bounds.start-cursor)))
 		pill := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
@@ -356,7 +342,6 @@ func (m *Model) render() string {
 		notice = styles.FadeLine(notice, m.alpha)
 	}
 	out.Reset()
-	out.WriteString(m.renderControls())
 	out.WriteString(notice)
 	out.WriteString(base.Render(strings.Repeat(" ", m.width-cursor)))
 	return out.String()

@@ -177,26 +177,6 @@ type SessionSummaryCatalog interface {
 	ListSessionSummaries(ctx context.Context, options SessionSummaryOptions) ([]SessionSummaryEntry, error)
 }
 
-// SessionSummaryPager reads one bounded metadata page without attaching sessions.
-type SessionSummaryPager interface {
-	ListSessionSummaryPage(ctx context.Context, options SessionSummaryPageOptions) (SessionSummaryPage, error)
-}
-
-type SessionSummaryPageOptions struct {
-	IncludeChildren bool
-	// Limit defaults to 50 and must not exceed 200.
-	Limit int
-	// Cursor is opaque and bound to the query and child scope.
-	Cursor string
-	// Query matches a literal title/working-directory substring with ASCII case folding.
-	Query string
-}
-
-type SessionSummaryPage struct {
-	Entries    []SessionSummaryEntry
-	NextCursor string
-}
-
 // SessionLoader restores/attaches a catalog row under a caller context.
 type SessionLoader interface {
 	LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error)

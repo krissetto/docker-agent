@@ -72,7 +72,6 @@ type Item struct {
 
 func builtInSessionCommands() []Item {
 	cmds := []Item{
-		{ID: "session.workspaces", Label: "Sessions and Workspaces", SlashCommand: "/workspaces", Description: "Browse sessions, switch or rename workspaces", Category: "Session", Immediate: true, Execute: func(string) tea.Cmd { return core.CmdHandler(messages.OpenSessionBrowserMsg{}) }},
 		{
 			ID:           "session.resume",
 			Label:        "Resume",

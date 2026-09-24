@@ -155,7 +155,6 @@ func ParseInterruptMode(raw string) InterruptMode {
 
 // Preferences contains the persistent values managed by the settings dialog.
 type Preferences struct {
-	WorkspaceCompact      bool
 	Layout                LayoutSettings
 	SendMode              SendMode
 	SplitDiffView         bool

@@ -202,8 +202,6 @@ type SessionStreamMessage[State ~string, Kind ~string, Event any] struct {
 }
 
 type SessionSummaryCatalog[Row any] struct {
-	// Query echoes a supported metadata search, allowing older peers to fail closed.
-	Query      string `json:"query,omitempty"`
 	Version    int    `json:"version"`
 	View       string `json:"view"`
 	Sessions   []Row  `json:"sessions"`

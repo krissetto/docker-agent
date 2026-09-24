@@ -30,9 +30,7 @@ func TestRootMessageBarStableBlankRowGeometryAndFocus(t *testing.T) {
 			rows := strings.Split(root.View().Content, "\n")
 			require.Len(t, rows, 40)
 			require.Equal(t, width, ansi.StringWidth(rows[39]))
-			if width >= 40 {
-				require.Contains(t, ansi.Strip(rows[39]), "1 ", "workspace switcher shares the bottom row")
-			}
+			require.Empty(t, strings.TrimSpace(ansi.Strip(rows[39])), "idle message row is the bottom margin, not version text")
 			if !lean {
 				require.Equal(t, regionContextUsage, root.hitTestRegion(38), "context joins message row without an extra gap")
 			}
