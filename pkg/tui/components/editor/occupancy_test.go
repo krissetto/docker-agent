@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,4 +74,98 @@ func TestOccupiedTextCellsNarrowViewport(t *testing.T) {
 			assert.True(t, cell.In(image.Rect(0, 0, e.textarea.Width(), e.textarea.Height())), "%v width=%d", cell, width)
 		}
 	}
+}
+
+func TestOccupiedTextCellsCacheReuseAndOwnership(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(40, 3)
+	e.SetValue("界 e\u0301 👩‍💻\nsecond")
+	first := e.OccupiedTextCells()
+	require.NotEmpty(t, first)
+	cached := &e.occupancy.cells[0]
+	for range 3 {
+		e.Update(struct{}{}) // unrelated updates and Views do not dirty occupancy
+		e.View()
+		assert.Equal(t, first, e.OccupiedTextCells())
+		require.Same(t, cached, &e.occupancy.cells[0])
+	}
+	first[0] = image.Rect(99, 99, 100, 100)
+	assert.NotEqual(t, first, e.OccupiedTextCells(), "callers cannot mutate the cache")
+	previous := e.OccupiedTextCells()
+	e.SetValue("replacement")
+	e.OccupiedTextCells()
+	assert.Equal(t, image.Rect(0, 0, 2, 1), previous[0], "later input cannot mutate retained cells")
+}
+
+func TestOccupiedTextCellsCacheInvalidation(t *testing.T) {
+	for _, mode := range []string{"input", "insert", "resize", "scroll", "cursor", "blur", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			e := New(nil).(*editor)
+			e.SetSize(12, 2)
+			e.SetValue("first\n界 second\nlast")
+			e.OccupiedTextCells()
+			cached := &e.occupancy.cells[0]
+			switch mode {
+			case "input":
+				e.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+			case "insert":
+				e.InsertText(" more")
+			case "resize":
+				e.SetSize(7, 3)
+			case "scroll":
+				e.ScrollByWheel(-10)
+			case "cursor":
+				e.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+			case "blur":
+				e.Blur()
+				require.Empty(t, e.OccupiedTextCells())
+				require.False(t, e.occupancy.valid)
+				e.Focus()
+			case "empty":
+				e.SetValue("")
+				require.Empty(t, e.OccupiedTextCells())
+				require.False(t, e.occupancy.valid)
+				e.SetValue("new")
+			}
+			got := e.OccupiedTextCells()
+			require.NotEmpty(t, got)
+			require.NotSame(t, cached, &e.occupancy.cells[0], "changed state must rescan the viewport")
+			e.occupancy = textOccupancyCache{}
+			assert.Equal(t, e.OccupiedTextCells(), got, "cached output matches a fresh viewport scan")
+		})
+	}
+}
+
+func BenchmarkOccupiedTextCellsUnchanged(b *testing.B) {
+	e := New(nil).(*editor)
+	e.SetSize(100, 5)
+	e.SetValue(strings.Repeat("a moderately long draft with 界 and 👩‍💻 ", 52))
+	e.OccupiedTextCells()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		e.OccupiedTextCells()
+	}
+}
+
+func TestOccupiedTextCellsCursorVisibilityOnlyChangesStyling(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(40, 3)
+	e.SetValue("界 e\u0301 👩‍💻")
+	// A static visible cursor and a hidden cursor exercise the two render
+	// branches also used by blink, including a cursor over a Unicode glyph.
+	e.textarea.MoveToBegin()
+	s := e.textarea.Styles()
+	s.Cursor.Blink = false
+	e.textarea.SetStyles(s)
+	e.textarea.SetVirtualCursor(true)
+	visible := e.OccupiedTextCells()
+	view := ansi.Strip(e.textarea.View())
+	cached := &e.occupancy.cells[0]
+	e.textarea.SetVirtualCursor(false)
+	assert.Equal(t, view, ansi.Strip(e.textarea.View()))
+	assert.Equal(t, visible, e.OccupiedTextCells())
+	require.Same(t, cached, &e.occupancy.cells[0], "cursor visibility need not invalidate glyph occupancy")
+	e.occupancy = textOccupancyCache{}
+	assert.Equal(t, visible, e.OccupiedTextCells(), "hidden cursor's fresh scan agrees with cached visible cursor")
 }

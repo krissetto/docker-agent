@@ -419,8 +419,13 @@ func (m *appModel) paneTitle(id string, width int) string {
 		background = styles.EditorBg
 	}
 	activity := m.paneActivity(id)
+	children := m.paneSubagentCount(id, subagent.NodeID(nodeID))
+	key := paneTitleKey{name: name, nodeID: nodeID, title: title, activity: activity, width: width, children: children, focused: focused, dimmed: m.dimInactivePanes && m.panesEnabled(), theme: styles.ThemeGeneration(), colors: styles.AgentColorGeneration()}
+	if entry, ok := m.paneTitleCache[id]; ok && entry.key == key {
+		return entry.rendered
+	}
 	count := ""
-	if children := m.paneSubagentCount(id, subagent.NodeID(nodeID)); children > 0 {
+	if children > 0 {
 		count = " (" + strconv.Itoa(children) + ")"
 	}
 	budget := max(0, width-ansi.StringWidth(prefix)-ansi.StringWidth(activity)-ansi.StringWidth(count)-5)
@@ -435,6 +440,10 @@ func (m *appModel) paneTitle(id string, width int) string {
 		context := styles.NewFadeContext()
 		heading = styles.FadeLineCtx(heading, inactivePaneContrast, &context)
 	}
+	if m.paneTitleCache == nil {
+		m.paneTitleCache = make(map[string]paneTitleEntry)
+	}
+	m.paneTitleCache[id] = paneTitleEntry{key: key, rendered: heading}
 	return heading
 }
 
@@ -448,8 +457,8 @@ func (m *appModel) paneSubagentCount(id string, nodeID subagent.NodeID) int {
 		return 0
 	}
 	if provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil {
-		if node, found := subagentview.Find(provider.SubagentTree().Snapshot().Nodes, nodeID); found {
-			return len(node.Children)
+		if count, found := provider.SubagentTree().ChildCount(nodeID); found {
+			return count
 		}
 	}
 	// An initial live tree may not yet contain a restored session's root.
@@ -558,28 +567,33 @@ func (m *appModel) composePanes() string {
 	// Pane rectangles are nonoverlapping. Assemble cell-bounded row spans
 	// directly instead of allocating a full terminal cell buffer per layer.
 	rows := make([][]paneRowSpan, max(0, m.contentHeight))
-	add := func(content string, r splitRect) {
-		if r.W <= 0 || r.H <= 0 {
+	used := make(map[string]bool)
+	add := func(key, content string, r splitRect) {
+		if r.W <= 0 || r.H <= 0 || r.X < 0 || r.X >= m.width {
 			return
 		}
-		lines := strings.Split(content, "\n")
-		for offset := 0; offset < r.H && offset < len(lines); offset++ {
+		used[key] = true
+		spans := m.paneRenderCache.prepare(key, content, min(r.W, m.width-r.X), r.H)
+		for offset, span := range spans {
 			y := r.Y + offset
 			if y < 0 || y >= len(rows) || r.X < 0 || r.X >= m.width {
 				continue
 			}
 			width := min(r.W, m.width-r.X)
-			line := ansi.Truncate(lines[offset], width, "")
+
 			// Later shared sidebar handles overlay the rightmost band cell.
 			// Cut the existing span at cell boundaries before adding the handle.
 			for i := range rows[y] {
 				previous := &rows[y][i]
 				if previous.x < r.X && previous.x+previous.width > r.X {
 					previous.width = r.X - previous.x
-					previous.content = ansi.Truncate(previous.content, previous.width, "")
+					clipped := preparedPaneSpan(ansi.Truncate(previous.content, previous.width, ""), previous.width)
+					clipped.x = previous.x
+					*previous = clipped
 				}
 			}
-			rows[y] = append(rows[y], paneRowSpan{x: r.X, width: width, content: line})
+			span.x, span.width = r.X, width
+			rows[y] = append(rows[y], span)
 		}
 	}
 	for _, id := range m.paneLayout().Sessions() {
@@ -593,72 +607,72 @@ func (m *appModel) composePanes() string {
 		}
 		header := m.paneHeaderHeight()
 		if header > 0 {
-			add(m.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
+			add("title:"+id, m.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
 		}
-		add(m.paneTranscript(id, p.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
+		add("transcript:"+id, m.paneTranscript(id, p.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
 	}
-	for _, d := range m.paneGeometry.Dividers {
+	for i, d := range m.paneGeometry.Dividers {
 		glyph := strings.Repeat("─", d.Rect.W)
 		if d.Axis == splitColumns {
 			glyph = strings.Repeat("│\n", d.Rect.H)
 		}
-		add(styles.MutedStyle.Render(glyph), d.Rect)
+		add("divider:"+strconv.Itoa(i), styles.MutedStyle.Render(glyph), d.Rect)
 	}
 	if p, ok := m.chatPage.(chat.SplitPresentation); ok {
-		add(p.SidebarView(), paneRect(m.paneShell.Sidebar))
-		add(p.SidebarHandleView(), paneRect(m.paneShell.SidebarHandle))
+		add("sidebar", p.SidebarView(), paneRect(m.paneShell.Sidebar))
+		add("sidebar-handle", p.SidebarHandleView(), paneRect(m.paneShell.SidebarHandle))
 	}
-	view := renderPaneRows(rows, m.width)
+	m.paneRenderCache.retain(used)
+	for id := range m.paneTitleCache {
+		if !used["title:"+id] {
+			delete(m.paneTitleCache, id)
+		}
+	}
+	for id := range m.paneDimCache {
+		if !used["transcript:"+id] {
+			delete(m.paneDimCache, id)
+		}
+	}
+	view := m.paneRenderCache.render(rows, m.width)
 	m.cachePaneGestureBase(view)
 	return view
 }
 
 type paneRowSpan struct {
-	x, width int
-	content  string
+	x, width   int
+	content    string
+	serialized string
+	prepared   bool
+}
+
+func assemblePaneRow(spans []paneRowSpan, width int) string {
+	var out strings.Builder
+	out.Grow(max(0, width))
+	for i := 1; i < len(spans); i++ {
+		for j := i; j > 0 && spans[j].x < spans[j-1].x; j-- {
+			spans[j], spans[j-1] = spans[j-1], spans[j]
+		}
+	}
+	column := 0
+	for _, span := range spans {
+		if span.x < column {
+			continue
+		}
+		out.WriteString(strings.Repeat(" ", span.x-column))
+		if !span.prepared {
+			prepared := preparedPaneSpan(span.content, span.width)
+			span.serialized = prepared.serialized
+		}
+		out.WriteString(span.serialized)
+		column = span.x + span.width
+	}
+	out.WriteString(strings.Repeat(" ", max(0, width-column)))
+	return out.String()
 }
 
 func renderPaneRows(rows [][]paneRowSpan, width int) string {
-	var out strings.Builder
-	out.Grow(max(0, width+1) * len(rows))
-	for y, spans := range rows {
-		if y > 0 {
-			out.WriteByte('\n')
-		}
-		// Each row has only a handful of spans. Insertion sort avoids a
-		// reflection/slice allocation on every transcript row.
-		for i := 1; i < len(spans); i++ {
-			for j := i; j > 0 && spans[j].x < spans[j-1].x; j-- {
-				spans[j], spans[j-1] = spans[j-1], spans[j]
-			}
-		}
-		column := 0
-		for _, span := range spans {
-			if span.x < column {
-				// Geometry must remain unique; overlapping same-origin spans
-				// are rejected rather than emitting excess terminal cells.
-				continue
-			}
-			out.WriteString(strings.Repeat(" ", span.x-column))
-			out.WriteString(span.content)
-			out.WriteString(strings.Repeat(" ", max(0, span.width-ansi.StringWidth(span.content))))
-			if strings.Contains(span.content, "\x1b") {
-				out.WriteString("\x1b[m")
-				if strings.Contains(span.content, "\x1b]8;") {
-					out.WriteString(ansi.ResetHyperlink())
-				}
-			}
-			column = span.x + span.width
-		}
-		out.WriteString(strings.Repeat(" ", max(0, width-column)))
-	}
-	// Match the terminal compositor's serialization: trailing default cells
-	// are implicit, but styled backgrounds and hyperlink boundaries remain.
-	lines := strings.Split(out.String(), "\n")
-	for i := range lines {
-		lines[i] = trimPaneDefaultPadding(lines[i])
-	}
-	return strings.Join(lines, "\n")
+	var cache paneRenderCache
+	return cache.render(rows, width)
 }
 
 // trimPaneDefaultPadding drops only trailing default-style space cells. Escape

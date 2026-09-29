@@ -120,11 +120,19 @@ func paneReplayRoot(tb testing.TB) (*appModel, []*paneReplayPage, *paneReplaySch
 type paneReplayScheduler struct {
 	now     time.Time
 	pending []tea.Cmd
+	step    time.Duration // optional deterministic benchmark cadence
 }
 
 func (s *paneReplayScheduler) Now() time.Time { return s.now }
 func (s *paneReplayScheduler) Tick(delay time.Duration, create func(time.Time) tea.Msg) tea.Cmd {
-	cmd := func() tea.Msg { s.now = s.now.Add(delay); return create(s.now) }
+	cmd := func() tea.Msg {
+		elapsed := delay
+		if s.step > 0 {
+			elapsed = s.step
+		}
+		s.now = s.now.Add(elapsed)
+		return create(s.now)
+	}
 	s.pending = append(s.pending, cmd)
 	return cmd
 }

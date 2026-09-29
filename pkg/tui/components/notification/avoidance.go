@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 const avoidanceDuration = 350 * time.Millisecond
@@ -25,6 +26,11 @@ func (n *Manager) SetRuntime(ar *animation.Runtime) {
 // SetAvoidance supplies actual occupied input cells in screen coordinates.
 // Inactive or empty input restores the ordinary bottom-right placement.
 func (n *Manager) SetAvoidance(cells []image.Rectangle, active bool) {
+	generation := styles.ThemeGeneration()
+	if n.avoidanceActive == active && n.avoidanceThemeGeneration == generation && slices.Equal(n.occupied, cells) {
+		return
+	}
+	n.avoidanceThemeGeneration = generation
 	n.occupied = slices.Clone(cells)
 	n.avoidanceActive = active
 	n.syncAvoidance()
@@ -39,6 +45,7 @@ func (n *Manager) Cleanup() {
 }
 
 func (n *Manager) syncAvoidance() {
+	n.avoidanceThemeGeneration = styles.ThemeGeneration()
 	if !n.Open() {
 		n.motion.Cancel()
 		n.lift, n.from, n.target = 0, 0, 0

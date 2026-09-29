@@ -127,3 +127,27 @@ func TestTreeNewNodeIDAvoidsExistingIDs(t *testing.T) {
 		assert.Len(t, string(next), 5)
 	}
 }
+
+func TestTreeChildCountTracksDirectTopologyWithoutSnapshot(t *testing.T) {
+	tree := NewTree()
+	n, found := tree.ChildCount("missing")
+	require.Zero(t, n)
+	require.False(t, found)
+	require.NoError(t, tree.AddSubtree([]Node{
+		{ID: "root", Agent: "root"},
+		{ID: "child", Agent: "worker", Parent: "root"},
+		{ID: "grandchild", Agent: "worker", Parent: "child"},
+	}))
+	n, found = tree.ChildCount("root")
+	require.True(t, found)
+	require.Equal(t, 1, n)
+	n, found = tree.ChildCount("grandchild")
+	require.True(t, found)
+	require.Zero(t, n)
+	require.Zero(t, testing.AllocsPerRun(10, func() { tree.ChildCount("root") }))
+	require.NoError(t, tree.Remove("grandchild"))
+	require.NoError(t, tree.Remove("child"))
+	n, found = tree.ChildCount("root")
+	require.True(t, found)
+	require.Zero(t, n)
+}

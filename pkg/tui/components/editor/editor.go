@@ -134,6 +134,7 @@ type historySearchState struct {
 type editor struct {
 	themeGeneration               uint64
 	textarea                      textarea.Model
+	occupancy                     textOccupancyCache
 	hist                          *history.History
 	width                         int
 	height                        int

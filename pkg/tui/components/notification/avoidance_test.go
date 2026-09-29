@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 type avoidanceClock struct{ now time.Time }
@@ -212,4 +213,69 @@ func TestNarrowStackGeometryMatchesRightAlignedLayer(t *testing.T) {
 	assert.False(t, ok, "vertically clipped content is not clickable")
 	_, ok = n.CloseButtonHit(9, 1)
 	assert.False(t, ok, "horizontally clipped content is not clickable")
+}
+
+func TestAvoidanceRetainsOwnedCellsAndReusesUnchangedInput(t *testing.T) {
+	n, ar := avoidanceManager(t)
+	defer n.Cleanup()
+	b := n.itemBounds()[0]
+	cells := []image.Rectangle{image.Rect(b.col, b.row, b.col+1, b.row+1)}
+	n.SetAvoidance(cells, true)
+	require.True(t, ar.HasActive())
+	owned := &n.occupied[0]
+	target := n.target
+	n.SetAvoidance(cells, true)
+	require.Same(t, owned, &n.occupied[0], "unchanged frames need not clone occupancy again")
+	n.avoidanceThemeGeneration-- // simulate a cache from an older theme
+	n.SetAvoidance(cells, true)
+	require.NotSame(t, owned, &n.occupied[0], "theme changes must recompute geometry")
+	cells[0] = image.Rect(0, 0, 1, 1)
+	assert.NotEqual(t, cells, n.occupied, "manager must retain its own copy")
+	assert.Equal(t, target, n.target)
+	n.SetAvoidance(cells, true)
+	assert.Zero(t, n.target, "changed cells must still recompute placement")
+}
+
+func TestAvoidanceUnchangedTicksDoNotRenderRestingGeometry(t *testing.T) {
+	n, ar := avoidanceManager(t)
+	defer n.Cleanup()
+	b := n.itemBounds()[0]
+	n.SetAvoidance([]image.Rectangle{image.Rect(b.col, b.row, b.col+1, b.row+1)}, true)
+	require.Positive(t, n.target)
+	for ar.HasActive() {
+		advanceAvoidance(t, n, ar)
+	}
+	allocs := testing.AllocsPerRun(20, func() {
+		n.Update(animation.TickMsg{})
+	})
+	require.Zero(t, allocs, "unchanged ticks must not render/measure the notification stack again")
+	// A changed theme still requires a solve even when delivered with a tick.
+	n.avoidanceThemeGeneration--
+	n.Update(animation.TickMsg{})
+	assert.Equal(t, styles.ThemeGeneration(), n.avoidanceThemeGeneration)
+	assert.Equal(t, n.avoidanceTarget(), n.target)
+}
+
+func TestAvoidanceStackChangesResyncWithoutNewOccupancy(t *testing.T) {
+	for _, removal := range []string{"hide", "dismiss", "auto-hide"} {
+		t.Run(removal, func(t *testing.T) {
+			n, _ := avoidanceManager(t)
+			defer n.Cleanup()
+			b := n.itemBounds()[0]
+			n.SetAvoidance([]image.Rectangle{image.Rect(b.col, b.row, b.col+1, b.row+1)}, true)
+			n.Update(ShowMsg{Text: "second notification in the stack"})
+			assert.Equal(t, n.avoidanceTarget(), n.target)
+			first := n.items[len(n.items)-1]
+			switch removal {
+			case "hide":
+				n.Update(HideMsg{ID: first.ID})
+			case "dismiss":
+				n.Update(DismissMsg{ID: first.ID})
+			case "auto-hide":
+				n.Update(AutoHideMsg{ID: first.ID, Generation: first.timerGen})
+			}
+			require.Len(t, n.items, 1)
+			assert.Equal(t, n.avoidanceTarget(), n.target)
+		})
+	}
 }

@@ -196,6 +196,17 @@ func (t *Tree) Node(id NodeID) (Node, bool) {
 	return rec.node, true
 }
 
+// ChildCount reads the number of direct children without allocating a full
+// topology snapshot. The boolean distinguishes an absent node from a leaf.
+func (t *Tree) ChildCount(id NodeID) (int, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if _, ok := t.nodes[id]; !ok {
+		return 0, false
+	}
+	return len(t.children[id]), true
+}
+
 // NewNodeID mints a fresh short id that is not currently present in the tree,
 // retrying on the rare collision.
 func (t *Tree) NewNodeID() NodeID {

@@ -1832,6 +1832,16 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		var cmds []tea.Cmd
 		needsInvalidate := false
+		spinnerFrameChanged := false
+		if tick, ok := msg.(animation.TickMsg); ok {
+			// All sidebar spinners (including RAG Reset copies) use Chat in
+			// ModeSpinnerOnly. RawFrame already reads the accepted runtime clock,
+			// so comparing it around Update would miss changes. Compare the local
+			// glyph at the tick bounds instead of the shared Dirty marker, which
+			// may have been set by another component or our hover/placement paths.
+			before, after := tick.ElapsedBounds()
+			spinnerFrameChanged = animation.Chat.FrameAt(before) != animation.Chat.FrameAt(after)
+		}
 
 		// Keep the rail cadence independent of the shared tick frequency.
 		if tick, isTick := msg.(animation.TickMsg); isTick && m.transferAnimation.IsActive() {
@@ -1849,7 +1859,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			model, cmd := m.spinner.Update(msg)
 			m.spinner = model.(spinner.Spinner)
 			cmds = append(cmds, cmd)
-			needsInvalidate = true
+			needsInvalidate = needsInvalidate || spinnerFrameChanged
 		}
 
 		// Update each RAG indexing spinner
@@ -1857,7 +1867,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			model, cmd := state.spinner.Update(msg)
 			state.spinner = model.(spinner.Spinner)
 			cmds = append(cmds, cmd)
-			needsInvalidate = true
+			needsInvalidate = needsInvalidate || spinnerFrameChanged
 		}
 
 		// Update the shared subagent row spinner while any subagent runs.
@@ -1865,7 +1875,7 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			model, cmd := m.subagentSpinner.Update(msg)
 			m.subagentSpinner = model.(spinner.Spinner)
 			cmds = append(cmds, cmd)
-			needsInvalidate = true
+			needsInvalidate = needsInvalidate || spinnerFrameChanged
 		}
 
 		// Invalidate cache when animations advance to show their new frames.

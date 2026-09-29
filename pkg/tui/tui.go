@@ -371,6 +371,10 @@ type appModel struct {
 	layoutSettings            messages.LayoutSettings
 	dimInactivePanes          bool
 	paneDimCache              map[string]paneDimEntry
+	paneRenderCache           paneRenderCache
+	paneTitleCache            map[string]paneTitleEntry
+	tabFrameCache             shellFrameCache
+	contextFrameCache         shellFrameCache
 	paneSidebarSettings       *chat.SidebarSettings
 	interactionHintGeneration uint64
 	interactionHintVisible    bool
@@ -2774,6 +2778,9 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.paneOutcomes, persistedID)
 	delete(m.majorEventWater, persistedID)
 	delete(m.paneDimCache, sessionID)
+	delete(m.paneTitleCache, sessionID)
+	delete(m.paneRenderCache.parts, "transcript:"+sessionID)
+	delete(m.paneRenderCache.parts, "title:"+sessionID)
 
 	nextActiveID := m.supervisor.CloseSessionAsync(sessionID)
 
@@ -4028,14 +4035,18 @@ func (m *appModel) composeView() tea.View {
 		viewParts = append(viewParts, paneClipped(m.renderResizeHandle(m.width), m.width, m.separatorHeight))
 	}
 	if tabBarView != "" && m.tabsHeight > 0 {
-		tabBarView = paneClipped(tabBarView, tabFrameWidth(m.width), m.tabsHeight)
-		viewParts = append(viewParts, paneClipped(lipgloss.NewStyle().
-			Padding(0, styles.EditorStyle.GetMarginRight(), 0, tabFrameOrigin()).
-			Render(tabBarView), m.width, m.tabsHeight))
+		framed := m.tabFrameCache.render(tabBarView, m.width, m.tabsHeight, func() string {
+			clipped := paneClipped(tabBarView, tabFrameWidth(m.width), m.tabsHeight)
+			return paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorStyle.GetMarginRight(), 0, tabFrameOrigin()).Render(clipped), m.width, m.tabsHeight)
+		})
+		viewParts = append(viewParts, framed)
 	}
 	viewParts = append(viewParts, editorView)
 	if m.contextBar != nil && m.contextHeight > 0 {
-		viewParts = append(viewParts, paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(m.contextBar.View()), m.width, m.contextHeight))
+		raw := m.contextBar.View()
+		viewParts = append(viewParts, m.contextFrameCache.render(raw, m.width, m.contextHeight, func() string {
+			return paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(raw), m.width, m.contextHeight)
+		}))
 	}
 	if m.messageBarHeight() > 0 {
 		viewParts = append(viewParts, m.renderMessageBar())

@@ -6,11 +6,14 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -95,4 +98,47 @@ func TestRootNotificationAvoidanceIgnoresLoadingEmptyAndUnfocused(t *testing.T) 
 			root.notification.Cleanup()
 		})
 	}
+}
+
+type countedOccupancyEditor struct {
+	editor.Editor
+	calls int
+}
+
+func (e *countedOccupancyEditor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	model, cmd := e.Editor.Update(msg)
+	e.Editor = model.(editor.Editor)
+	return e, cmd
+}
+
+func (e *countedOccupancyEditor) OccupiedTextCells() []image.Rectangle {
+	e.calls++
+	return e.Editor.(editor.TextOccupancy).OccupiedTextCells()
+}
+
+func TestRootNotificationAvoidanceSkipsClosedAndRefreshesOnShow(t *testing.T) {
+	root, _, _ := harnessRoot(t, 100, 30, animation.NewRuntimeWithScheduler(&rootImmediateScheduler{now: time.Unix(1, 0)}))
+	root.panelSettings = messages.PanelSettings{Elements: []messages.PanelElement{}}
+	root.focusedPanel = PanelEditor
+	root.editor.Focus()
+	root.editor.SetValue(strings.Repeat("界", 42) + "\n" + strings.Repeat("字", 42))
+	root.resizeAll()
+	counted := &countedOccupancyEditor{Editor: root.editor}
+	root.editor = counted
+	for range 3 {
+		root.Update(struct{}{})
+	}
+	require.Zero(t, counted.calls, "closed notifications must not query occupancy")
+	root.Update(notification.ShowMsg{Text: "Notification avoids current input"})
+	require.Positive(t, counted.calls, "Show's own Update epilogue must query current occupancy")
+	require.True(t, root.ar.HasActive(), "first shown frame schedules avoidance without another input event")
+	root.Update(notification.HideMsg{})
+	calls := counted.calls
+	root.editor.SetValue("")
+	root.Update(struct{}{})
+	require.Equal(t, calls, counted.calls)
+	root.Update(notification.ShowMsg{Text: "Reopened over empty input"})
+	require.Greater(t, counted.calls, calls)
+	require.False(t, root.ar.HasActive(), "reopening cannot reuse the previous notification's occupancy")
+	root.notification.Cleanup()
 }

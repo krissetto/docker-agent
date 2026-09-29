@@ -142,14 +142,16 @@ type Manager struct {
 	// fires. Defaulted by New(); tests construct a Manager with a shorter
 	// (or zero) value so their auto-hide timers resolve promptly without
 	// mutating shared state, keeping them parallel-safe.
-	autoHideDuration   time.Duration
-	motion             animation.Transition
-	runtime            *animation.Runtime
-	occupied           []image.Rectangle
-	avoidanceActive    bool
-	lift, from, target int
-	mouseX, mouseY     int
-	mouseKnown         bool
+	autoHideDuration time.Duration
+	motion           animation.Transition
+	runtime          *animation.Runtime
+	occupied         []image.Rectangle
+	avoidanceActive  bool
+	// Theme changes can alter notification geometry even with unchanged input.
+	avoidanceThemeGeneration uint64
+	lift, from, target       int
+	mouseX, mouseY           int
+	mouseKnown               bool
 }
 
 func New() Manager { return Manager{autoHideDuration: defaultDuration} }
@@ -168,6 +170,7 @@ func makeTimerCmd(id, gen uint64, duration time.Duration) tea.Cmd {
 }
 
 func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
+	itemCount := len(n.items)
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -193,7 +196,12 @@ func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
 			}
 		}
 	}
-	n.syncAvoidance()
+	// Only stack mutations or a theme change affect resting geometry. Motion
+	// ticks merely interpolate toward the existing target; hover/copy labels
+	// likewise leave the resting bounds unchanged. SetSize syncs independently.
+	if len(n.items) != itemCount || n.avoidanceThemeGeneration != styles.ThemeGeneration() {
+		n.syncAvoidance()
+	}
 	return *n, cmd
 }
 
