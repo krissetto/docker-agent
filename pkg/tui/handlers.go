@@ -1000,6 +1000,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	settings := userconfig.Get()
 	preferences := messages.Preferences{
 		Layout:                m.layoutSettings,
+		Panel:                 messages.NormalizePanelSettings(m.panelSettings),
 		SendMode:              m.sendMode,
 		SplitDiffView:         settings.GetSplitDiffView(),
 		ExpandThinking:        settings.GetExpandThinking(),
@@ -1028,6 +1029,9 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model, tea.Cmd) {
 	preferences := msg.Preferences
 	model, cmd := m.applyLayoutSettings(preferences.Layout)
+	_, panelCmd := m.applyPanelSettings(preferences.Panel)
+	cmd = tea.Batch(cmd, panelCmd)
+	m.panelPreviewOriginal = nil
 
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
@@ -1093,6 +1097,19 @@ func layoutSettingsFromConfig(l userconfig.LayoutSettings) messages.LayoutSettin
 	}
 }
 
+// panelSettingsFromConfig preserves the distinction between unset defaults
+// and an explicitly empty list (including a present panel with null elements).
+func panelSettingsFromConfig(p *userconfig.PanelSettings) messages.PanelSettings {
+	if p == nil {
+		return messages.DefaultPanelSettings()
+	}
+	elements := make([]messages.PanelElement, len(p.Elements))
+	for i, element := range p.Elements {
+		elements[i] = messages.PanelElement(element)
+	}
+	return messages.NormalizePanelSettings(messages.PanelSettings{Elements: elements})
+}
+
 // savePreferences persists every value managed by the settings dialog.
 // Values matching their defaults are omitted to keep the config minimal.
 func savePreferences(p messages.Preferences) error {
@@ -1101,8 +1118,8 @@ func savePreferences(p messages.Preferences) error {
 			cfg.Settings = &userconfig.Settings{}
 		}
 		s := cfg.Settings
-		if p.SendMode == messages.SendModeQueue {
-			s.BusySendMode = string(messages.SendModeQueue)
+		if p.SendMode == messages.SendModeSteer {
+			s.BusySendMode = string(messages.SendModeSteer)
 		} else {
 			s.BusySendMode = ""
 		}
@@ -1129,6 +1146,17 @@ func savePreferences(p messages.Preferences) error {
 			s.TabTitleMaxLength = 0
 		} else {
 			s.TabTitleMaxLength = p.TabTitleMaxLength
+		}
+
+		panel := messages.NormalizePanelSettings(p.Panel)
+		if panel.Equal(messages.DefaultPanelSettings()) {
+			s.Panel = nil
+		} else {
+			elements := make([]string, len(panel.Elements))
+			for i, element := range panel.Elements {
+				elements[i] = string(element)
+			}
+			s.Panel = &userconfig.PanelSettings{Elements: elements}
 		}
 
 		layout := p.Layout

@@ -1,6 +1,6 @@
 // Steering end-to-end scenarios (issue #3547): messages sent while the agent
-// is streaming attach to the ongoing stream by default, and the /settings
-// Behavior tab switches busy sends to end-of-turn queueing instead.
+// is streaming queue for a later turn by default, and the /settings
+// Behavior tab can opt into steering them into the ongoing stream instead.
 //
 // Both tests replay their cassette through the proxy's simulated-stream mode:
 // the first answer streams one character per chunk with a real delay, so the
@@ -88,6 +88,8 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 	}
 	d := newStreamingTUI(t, options)
 	t.Cleanup(func() { close(release) })
+	d.Send(messages.ApplySettingsMsg{Preferences: messages.Preferences{SendMode: messages.SendModeSteer}}).
+		WaitFor(tuitest.Contains("Settings updated"))
 
 	// Draft the follow-up as a single paste so it costs one Update instead of
 	// one per keystroke (keystrokes are expensive under -race and would eat
@@ -105,7 +107,7 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 		t.Fatal("first response did not reach the replay gate")
 	}
 
-	// Plain Enter while the agent is working steers into the ongoing stream.
+	// Plain Enter with explicit Steer mode injects into the ongoing stream.
 	d.Enter().
 		WaitFor(tuitest.Contains("Message sent to the working agent")).
 		Assert(tuitest.Absent("Message queued"))
@@ -132,6 +134,10 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 		tuitest.WithTimeout(30 * time.Second)(d)
 	}
 
+	// Start with an explicit steering preference, then restore the default.
+	d.Send(messages.ApplySettingsMsg{Preferences: messages.Preferences{SendMode: messages.SendModeSteer}}).
+		WaitFor(tuitest.Contains("Settings updated"))
+
 	// Flip the send mode on the Behavior tab of /settings: open the dialog,
 	// switch tab, cycle Steer → Queue, apply.
 	d.Send(tea.PasteMsg{Content: "/settings"}).
@@ -144,11 +150,6 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 		Enter().
 		WaitFor(tuitest.Contains("Settings updated"))
 
-	// The choice is persisted for future sessions.
-	cfg, err := os.ReadFile(userconfig.Path())
-	require.NoError(t, err)
-	assert.Contains(t, string(cfg), "busy_send_mode: queue")
-
 	// The toast acknowledges persistence, not the end of the modal close fade.
 	select {
 	case deferred := <-closed:
@@ -156,6 +157,11 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("settings did not finish closing before editor input")
 	}
+
+	// The choice is persisted for future sessions.
+	cfg, err := os.ReadFile(userconfig.Path())
+	require.NoError(t, err)
+	assert.NotContains(t, string(cfg), "busy_send_mode:", "queue is the omitted default")
 
 	d.Type("What's 2+2?").
 		Enter().

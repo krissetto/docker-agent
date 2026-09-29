@@ -41,12 +41,20 @@ func TestActualProgramSidebarWholeTreeRevealRetargetAndHiddenCleanup(t *testing.
 	root.supervisor.SetProgram(program)
 	require.Eventually(t, func() bool { return len(model.snapshot()) > 0 }, time.Second, time.Millisecond)
 	initial := model.snapshot()
+	x, y := sidebarProgramPoint(t, initial[len(initial)-1].content, "8 subagents")
+	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.Eventually(t, func() bool {
+		frames := model.snapshot()
+		last := frames[len(frames)-1]
+		return last.active == 0 && strings.Count(ansi.Strip(last.content), "REVEAL-CHILD-") == 8
+	}, time.Second, time.Millisecond, "expand the initially folded fixture before testing collapse retargeting")
+	initial = model.snapshot()
 	base := initial[len(initial)-1].content
 	_, summaryY := sidebarProgramPoint(t, base, "8 subagents")
 	row := ansi.Strip(strings.Split(base, "\n")[summaryY])
 	before, _, found := strings.Cut(row, "⌄")
 	require.True(t, found)
-	x := ansi.StringWidth(before)
+	x = ansi.StringWidth(before)
 	require.Greater(t, x, 110, "whole-tree chevron stays at the sidebar's far-right edge")
 	lookups := services.lookups.Load()
 	program.Send(tea.MouseClickMsg{X: x, Y: summaryY, Button: tea.MouseLeft})

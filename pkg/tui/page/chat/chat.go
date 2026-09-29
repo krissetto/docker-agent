@@ -653,6 +653,9 @@ func Cleanup(page Page) {
 
 // Update handles messages and updates the page state
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if snapshot, ok := msg.(msgtypes.TodosSnapshotMsg); ok {
+		return p, p.forwardToSidebar(snapshot)
+	}
 	p.pendingTimers = nil
 	defer p.stopHiddenPresentation()
 	var model layout.Model = p
@@ -1190,7 +1193,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// While the agent is working, the configured send mode decides the
 	// default: steer injects the message into the ongoing stream; queue
 	// submits it to the session-owned FIFO for a later turn.
-	if msg.Queue || p.sendMode == msgtypes.SendModeQueue {
+	if msg.Queue || msgtypes.ParseSendMode(string(p.sendMode)) == msgtypes.SendModeQueue {
 		cmd := p.followUpResolved(classified)
 		return p, cmd
 	}

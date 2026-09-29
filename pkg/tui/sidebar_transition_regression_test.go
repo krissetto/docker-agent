@@ -110,6 +110,9 @@ func sidebarTransitionRoot(t *testing.T) *sidebarTransitionDriver {
 	for _, id := range []string{"second", "third", "profile"} {
 		d.update(messages.SwitchTabMsg{SessionID: id})
 		d.settle(t)
+		x, y := sidebarProgramPoint(t, root.View().Content, "subagents")
+		d.update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		d.settle(t)
 		root.View()
 	}
 	t.Cleanup(func() {

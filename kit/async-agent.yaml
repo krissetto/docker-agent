@@ -1,0 +1,79 @@
+# syntax=docker/sandbox-kit:3@sha256:11bb68806aef6a68d45c10c0c3b3dc86c2f794a296b5a933661d9dadf760b753
+schemaVersion: "3"
+kind: workload
+displayName: Custom Docker Agent async subagents
+description: Static Docker Agent with the six-agent async hackerspace team.
+sourceUrl: https://github.com/docker/docker-agent
+licenses: [Apache-2.0]
+version: "${{ kit.args.kitVersion }}"
+provides:
+  - "async-agent-kit@${{ kit.args.kitVersion }}"
+dockerfile: ./async-agent.dockerfile
+args:
+  kitVersion:
+    default: "0.1.0"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    buildArg: ASYNC_AGENT_KIT_VERSION
+    description: Kit packaging version, not the Docker Agent application version.
+  diagnostics:
+    default: "off"
+    enum: ["off", "on"]
+    env: ASYNC_AGENT_KIT_DIAGNOSTICS
+    description: Opt in to local install and startup markers; no provider calls.
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - api.openai.com
+  - type: com.docker.sandbox/credential@1
+    config:
+      service: openai
+      phase: runtime
+      apiKey:
+        name: OPENAI_API_KEY
+        proxyManaged: true
+        inject:
+          - domain: api.openai.com
+            header: Authorization
+            format: "Bearer %s"
+  - type: com.docker.sandbox/sbx@1
+  - type: com.docker.sandbox/agent-sessions@1
+    config:
+      prompt: ["--exec", "--", "{{.Prompt}}"]
+      resume: ["--session", "{{.SessionID}}"]
+      continue: ["--session=-1"]
+  - type: com.docker.sandbox/lifecycle@1
+    optional: true
+    config:
+      install:
+        - command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              [ "${ASYNC_AGENT_KIT_DIAGNOSTICS:-off}" = on ] || exit 0
+              umask 077
+              directory=/home/agent/.local/state/async-agent-kit/probe
+              mkdir -p "$directory"
+              printf '%s\n' installed >> "$directory/install.log"
+          user: agent
+          env: [ASYNC_AGENT_KIT_DIAGNOSTICS]
+          description: Record each install invocation when diagnostics are enabled.
+      startup:
+        - command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              [ "${ASYNC_AGENT_KIT_DIAGNOSTICS:-off}" = on ] || exit 0
+              umask 077
+              directory=/home/agent/.local/state/async-agent-kit/probe
+              mkdir -p "$directory"
+              temporary=$(mktemp "$directory/.ready.XXXXXX")
+              trap 'rm -f "$temporary"' EXIT HUP INT TERM
+              printf '%s\n' ready > "$temporary"
+              mv -f "$temporary" "$directory/ready"
+          user: agent
+          env: [ASYNC_AGENT_KIT_DIAGNOSTICS]
+          description: Atomically refresh the same startup marker when diagnostics are enabled.

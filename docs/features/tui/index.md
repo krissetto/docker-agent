@@ -102,7 +102,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/speak`           | Voice input via system speech-to-text (macOS only)                                   |
 | `/exit`            | Exit the application (aliases: `/quit`, `/q`)                                        |
 
-Slash commands (both built-in and named) execute immediately when entered. Regular chat messages sent while the agent is working are steered into the ongoing stream by default: the agent picks them up mid-turn (they appear in the transcript at the point the agent sees them) without breaking the stream. Prefer the previous end-of-turn behavior? Switch **While agent is working** to `Queue` on the **Behavior** tab of `/settings`; queued messages are processed in order once the stream stops.
+Slash commands (both built-in and named) execute immediately when entered. Regular chat messages sent while the agent is working are queued by default and processed in order once the current turn ends. To send messages into the ongoing stream instead, switch **While agent is working** to `Steer` on the **Behavior** tab of `/settings`; the agent picks them up mid-turn, and they appear in the transcript at the point the agent sees them.
 
 Selecting another top-level agent creates a fresh session identity bound to that agent and clones the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
 
@@ -571,7 +571,7 @@ Press <kbd>Enter</kbd> to apply and persist, or <kbd>Escape</kbd> to cancel and 
 ```yaml
 # ~/.config/cagent/config.yaml
 settings:
-  busy_send_mode: queue # steer (default), queue
+  busy_send_mode: queue # queue (default), steer
   layout:
     sidebar_position: left # right (default), left, top, bottom
     sidebar_info_mode: detailed # compact (default, omitted), detailed

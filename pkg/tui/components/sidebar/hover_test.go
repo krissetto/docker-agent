@@ -63,6 +63,8 @@ func newHoverSidebar(t *testing.T) *model {
 	t.Helper()
 	ar := animation.NewRuntimeWithScheduler(&immediateScheduler{now: time.Unix(1, 0)})
 	m := New(ar, t.Context(), &service.SessionState{}).(*model)
+	m.treeCollapsed = false // Hover fixtures need visible descendant rows.
+	m.todosCollapsed = false
 	m.SetSize(80, 30)
 	m.rootSessionID = "hover"
 	m.SetSubagentTree(subagent.Snapshot{Root: "root:hover", Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "root:hover", Agent: "root", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-full-id", Agent: "worker", State: subagent.NodeIdle}}}}}})

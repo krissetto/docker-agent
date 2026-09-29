@@ -23,6 +23,7 @@ type placedRow struct {
 	controls                                         []treeControl
 	target                                           bool
 	queueRemove                                      bool
+	todoControls                                     bool
 }
 type paddedPlacementRow struct {
 	text, padded string
@@ -89,7 +90,12 @@ func (m *model) targetRows() []placedRow {
 			row.id = "todo-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true, todos: true}}
 		case y > m.todoSummaryLine && y < m.todoEnd && m.todoSummaryLine >= 0:
-			row.id = fmt.Sprintf("todo:%d", y-m.todoSummaryLine-2)
+			line := y - m.todoSummaryLine - 2
+			row.id = fmt.Sprintf("todo:%d", line)
+			if item, ok := m.todoComp.TodoAtLine(line); ok {
+				row.payload = item.ID
+				row.todoControls = m.todoComp.ControlsAtLine(line)
+			}
 		case y == m.summaryLine && m.hasTreeContent():
 			row.id = "tree-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true}}

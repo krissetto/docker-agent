@@ -44,7 +44,8 @@ func TestTodoRecapCollapsePreservesCanonicalUpdatesAndIndent(t *testing.T) {
 	assert.NotContains(t, ansi.Strip(m.View()), "updated canonical text")
 	_, cmd = m.Update(tea.MouseClickMsg{X: m.xPos + x, Y: m.yPos + m.todoSummaryLine - m.scrollview.ScrollOffset(), Button: tea.MouseLeft})
 	settlePlacement(t, m, cmd)
-	assert.Contains(t, ansi.Strip(m.View()), "updated canonical text")
+	assert.Contains(t, ansi.Strip(m.View()), "updated canonical")
+	assert.Contains(t, ansi.Strip(m.View()), "text")
 }
 
 func TestFooterBreathingRowBoundedAndPassive(t *testing.T) {

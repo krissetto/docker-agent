@@ -97,6 +97,7 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			"shell":                         func() Event { return &ShellOutputEvent{} },
 			"session_title":                 func() Event { return &SessionTitleEvent{} },
 			"plan_changed":                  func() Event { return &PlanChangedEvent{} },
+			"todos_changed":                 func() Event { return &TodosChangedEvent{} },
 			"session_summary":               func() Event { return &SessionSummaryEvent{} },
 			"session_compaction":            func() Event { return &SessionCompactionEvent{} },
 			"partial_tool_call":             func() Event { return &PartialToolCallEvent{} },

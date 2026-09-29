@@ -88,6 +88,8 @@ type Message struct {
 	SenderID       string
 	SenderName     string
 	InputReference lifecycle.InputReference
+	// ReceivedBody retains the delivered payload, not a fetched subagent transcript.
+	ReceivedBody   string
 	Type           MessageType
 	Content        string
 	Sender         string                // Agent name for assistant messages
@@ -149,19 +151,33 @@ func User(content string) *Message {
 	}
 }
 
-// Input preserves provenance while keeping model-only runtime payloads out of the UI.
+// Input preserves provenance and retains attributed replies for optional display.
 func Input(input *session.Message) *Message {
-	msg := User(input.Message.Content)
+	msg := &Message{Type: MessageTypeUser}
+	if input.InputOrigin != session.InputOriginRuntime {
+		msg.Content = strings.ReplaceAll(input.Message.Content, "\t", "    ")
+	}
 	msg.InputOrigin, msg.InputMode = input.InputOrigin, input.InputMode
 	msg.SenderID, msg.SenderName = input.SenderID, input.SenderName
 	msg.InputReference = lifecycle.ResolveInputReference(nil, "", input.SenderID, input.SenderName)
 	switch input.InputOrigin {
 	case session.InputOriginAgent:
 		msg.Type = MessageTypeAgentInput
+		msg.ReceivedBody = input.Message.Content
 	case session.InputOriginRuntime:
 		msg.Type, msg.Content = MessageTypeRuntimeNotice, ""
+		if input.InputMode == "steer" && input.SenderID != "" {
+			msg.ReceivedBody = input.Message.Content
+		}
 	}
 	return msg
+}
+
+// IsSubagentReply excludes parent instructions and unresolved/generic notices.
+func (m *Message) IsSubagentReply() bool {
+	return m.InputMode == "steer" && m.InputReference.Kind == lifecycle.InputReferenceNode &&
+		((m.Type == MessageTypeAgentInput && m.InputOrigin == session.InputOriginAgent) ||
+			(m.Type == MessageTypeRuntimeNotice && m.InputOrigin == session.InputOriginRuntime))
 }
 
 func Cancelled() *Message {

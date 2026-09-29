@@ -145,6 +145,8 @@ type renderCache struct {
 	inputOrigin    session.InputOrigin
 	valid          bool
 	content        string
+	receivedBody   string
+	inputMode      string
 	msgType        types.MessageType
 	width          int
 	selected       bool
@@ -403,9 +405,39 @@ func (mv *messageModel) Toggle() {
 	mv.renderCache.valid = false
 }
 
+// IsToggleAt preserves existing line-wide controls, but replies toggle only at the chevron.
+func (mv *messageModel) IsToggleAt(lineIdx, col int) bool {
+	if !mv.message.IsSubagentReply() {
+		return mv.IsToggleLine(lineIdx)
+	}
+	lines := strings.Split(mv.replyHeader(mv.width), "\n")
+	if lineIdx != len(lines)-1 {
+		return false
+	}
+	line := strings.TrimRight(ansi.Strip(lines[lineIdx]), " ")
+	return col == ansi.StringWidth(line)-1
+}
+
+// InputReferenceOnLine excludes body hyperlinks, including literal identity OSCs.
+func (mv *messageModel) InputReferenceOnLine(lineIdx int) bool {
+	if mv.message.IsSubagentReply() {
+		return lineIdx >= 0 && lineIdx <= strings.Count(mv.replyHeader(mv.width), "\n")
+	}
+	return mv.message.Type == types.MessageTypeRuntimeNotice || lineIdx == 0
+}
+
+func (mv *messageModel) replyHeader(width int) string {
+	chevron := ">"
+	if mv.expanded {
+		chevron = "v"
+	}
+	return agentidentity.Wrap(styles.ToolCompletedIcon.Render("✓")+" ", mv.message.InputReference,
+		styles.MutedStyle.Render(" has replied "+chevron), width)
+}
+
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
 func (mv *messageModel) IsToggleLine(lineIdx int) bool {
-	if mv.message == nil || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
+	if mv.message == nil || mv.message.IsSubagentReply() || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
 		return false
 	}
 	content := strings.TrimRight(mv.message.Content, "\n\r\t ")
@@ -543,6 +575,8 @@ func (mv *messageModel) Render(width int) string {
 			c.expanded == mv.expanded &&
 			c.editable == (msg.SessionPosition != nil) &&
 			c.content == msg.Content &&
+			c.receivedBody == msg.ReceivedBody &&
+			c.inputMode == msg.InputMode &&
 			c.sameAgent == mv.sameAgentAsPrevious(msg) &&
 			c.imageID == mv.markdownImageID {
 			return c.result
@@ -555,6 +589,8 @@ func (mv *messageModel) Render(width int) string {
 		mv.renderCache = renderCache{
 			valid:          true,
 			content:        msg.Content,
+			receivedBody:   msg.ReceivedBody,
+			inputMode:      msg.InputMode,
 			msgType:        msg.Type,
 			inputOrigin:    msg.InputOrigin,
 			inputReference: msg.InputReference,
@@ -587,6 +623,14 @@ func (mv *messageModel) isSpinnerDriven() bool {
 // render is the uncached rendering core. Render() wraps it with memoization.
 func (mv *messageModel) render(width int) string {
 	msg := mv.message
+	if msg.IsSubagentReply() {
+		header := mv.replyHeader(width)
+		if !mv.expanded {
+			return header
+		}
+		body := strings.ReplaceAll(msg.ReceivedBody, "\t", "    ")
+		return header + "\n" + styles.UserMessageStyle.Bold(false).Width(width).Render(body)
+	}
 	switch msg.Type {
 	case types.MessageTypeSpinner:
 		if msg.Content == "" {

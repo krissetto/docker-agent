@@ -21,6 +21,7 @@ func newLegacyParticipantSidebar(t *testing.T) *model {
 	t.Helper()
 	ar := animation.NewRuntimeWithScheduler(&placementClock{now: time.Unix(1, 0), step: 50 * time.Millisecond})
 	m := New(ar, t.Context(), &service.SessionState{}).(*model)
+	m.treeCollapsed = false // Participant tests exercise visible inspector rows.
 	m.subagentSpinner = &fakeSpinner{m.subagentSpinner}
 	m.rootSessionID = "collapse"
 	m.SetPosition(5, 3)

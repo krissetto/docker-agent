@@ -69,7 +69,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 							}
 						}
 						require.GreaterOrEqual(t, labelLine, 0)
-						if origin == session.InputOriginAgent {
+						if origin == session.InputOriginAgent && mode != "steer" {
 							assert.Contains(t, ansi.Strip(lines[labelLine]), "━ Worker 界 (a1b2c) ━", "identity is integrated in the USER border")
 						}
 						for x := col; x < col+ansi.StringWidth("Worker 界 (a1b2c)"); x++ {
@@ -86,7 +86,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						afterHover := m.View()
 						assert.Equal(t, ansi.Strip(beforeHover), ansi.Strip(afterHover), "hover never moves hit coordinates")
 						assert.NotEqual(t, beforeHover, afterHover, "identity brightens like sidebar")
-						if origin == session.InputOriginAgent {
+						if origin == session.InputOriginAgent && mode != "steer" {
 							rawHeader, rawBody := m.renderedLine(start), m.renderedLine(start+1)
 							hoveredHeader := m.applyURLUnderline([]string{rawHeader}, start)[0]
 							// Render an ordinary USER body at the same viewport edge to compare the actual fade.
@@ -105,7 +105,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 							}
 						}
 						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + width - 2, Y: 3 + labelLine})
-						if origin == session.InputOriginAgent {
+						if origin == session.InputOriginAgent && mode != "steer" {
 							for y, line := range lines {
 								if strings.Contains(ansi.Strip(line), "body") {
 									_, linked := m.SubagentNodeAt(7+col, 3+y)

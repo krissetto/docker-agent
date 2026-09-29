@@ -29,15 +29,24 @@ xx-go build -trimpath -tags no_audio -ldflags "-s -w -linkmode=external -X githu
 xx-verify --static /docker-agent
 EOF_BUILD
 
-FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919
+FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919 AS runtime
+ARG ASYNC_AGENT_KIT_VERSION="0.1.0"
+LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION
 USER root
 COPY --from=builder --chmod=0755 /docker-agent /opt/async-agent/docker-agent
-COPY --chmod=0755 examples/sbx/async-subagents/launch.sh /opt/async-agent/launch.sh
-COPY examples/sbx/async-subagents/hackerspace.yaml /opt/async-agent/hackerspace.yaml
+COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
+COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
 ENV DOCKER_AGENT_AUTO_UPDATE=0 \
     DOCKER_AGENT_NO_TOUR=1 \
     DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 \
     TELEMETRY_ENABLED=false
 USER agent
+
+FROM runtime AS runtime-v2
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD []
+
+# Keep the frontend's default target on the v3 launcher.
+FROM runtime AS runtime-v3
 ENTRYPOINT ["/opt/async-agent/launch.sh"]
 CMD []

@@ -18,3 +18,20 @@ func renderTodoIcon(status string) (string, lipgloss.Style) {
 		return "?", styles.ToBeDoneStyle
 	}
 }
+
+// StatusLabel deliberately includes text as well as color and a symbol.
+func StatusLabel(status string) string {
+	icon, style := renderTodoIcon(status)
+	return style.Render(icon + " " + status)
+}
+
+func NextStatus(status string) string {
+	switch status {
+	case "pending":
+		return "in-progress"
+	case "in-progress":
+		return "completed"
+	default:
+		return "pending"
+	}
+}

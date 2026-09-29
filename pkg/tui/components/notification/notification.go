@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"image"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -140,7 +142,14 @@ type Manager struct {
 	// fires. Defaulted by New(); tests construct a Manager with a shorter
 	// (or zero) value so their auto-hide timers resolve promptly without
 	// mutating shared state, keeping them parallel-safe.
-	autoHideDuration time.Duration
+	autoHideDuration   time.Duration
+	motion             animation.Transition
+	runtime            *animation.Runtime
+	occupied           []image.Rectangle
+	avoidanceActive    bool
+	lift, from, target int
+	mouseX, mouseY     int
+	mouseKnown         bool
 }
 
 func New() Manager { return Manager{autoHideDuration: defaultDuration} }
@@ -149,6 +158,7 @@ func New() Manager { return Manager{autoHideDuration: defaultDuration} }
 func (n *Manager) SetSize(width, height int) {
 	n.width = width
 	n.height = height
+	n.syncAvoidance()
 }
 
 func makeTimerCmd(id, gen uint64, duration time.Duration) tea.Cmd {
@@ -158,26 +168,33 @@ func makeTimerCmd(id, gen uint64, duration time.Duration) tea.Cmd {
 }
 
 func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		n.width = msg.Width
-		n.height = msg.Height
-		return *n, nil
-
+		n.SetSize(msg.Width, msg.Height)
 	case ShowMsg:
-		return n.handleShow(msg)
-
+		_, cmd = n.handleShow(msg)
 	case AutoHideMsg:
-		return n.handleAutoHide(msg)
-
+		_, cmd = n.handleAutoHide(msg)
 	case HideMsg:
-		return n.handleHide(msg)
-
+		_, cmd = n.handleHide(msg)
 	case DismissMsg:
-		return n.removeByID(msg.ID)
+		_, cmd = n.removeByID(msg.ID)
+	case animation.TickMsg:
+		if n.motion.Running() {
+			n.motion.Tick()
+			lift := n.motion.Lerp(n.from, n.target)
+			if lift != n.lift {
+				n.lift = lift
+				msg.MarkDirty()
+				if n.mouseKnown {
+					_, cmd = n.HandleMouseMotion(n.mouseX, n.mouseY)
+				}
+			}
+		}
 	}
-
-	return *n, nil
+	n.syncAvoidance()
+	return *n, cmd
 }
 
 func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
@@ -323,17 +340,31 @@ type notifBounds struct {
 
 // itemBounds computes screen-space bounds in the same order notifications render.
 func (n *Manager) itemBounds() []notifBounds {
+	bounds := n.restingBounds()
+	if len(bounds) > 0 {
+		lift := min(n.lift, bounds[0].row)
+		for i := range bounds {
+			bounds[i].row -= lift
+		}
+	}
+	return bounds
+}
+
+func (n *Manager) restingBounds() []notifBounds {
 	if len(n.items) == 0 || n.width == 0 {
 		return nil
 	}
 
 	mw := n.maxWidth()
-	totalHeight := 0
+	totalHeight, viewWidth := 0, 0
 	for _, item := range n.items {
-		totalHeight += lipgloss.Height(item.render(mw, false, false, false))
+		view := item.render(mw, false, false, false)
+		totalHeight += lipgloss.Height(view)
+		viewWidth = max(viewWidth, lipgloss.Width(view))
 	}
 
 	row := max(0, n.height-totalHeight-notificationPadding)
+	col := max(0, n.width-viewWidth-notificationPadding)
 	bounds := make([]notifBounds, 0, len(n.items))
 	for _, item := range slices.Backward(n.items) {
 		view := item.render(mw, false, false, false)
@@ -341,7 +372,7 @@ func (n *Manager) itemBounds() []notifBounds {
 		bounds = append(bounds, notifBounds{
 			id:     item.ID,
 			row:    row,
-			col:    max(0, n.width-w-notificationPadding),
+			col:    col + viewWidth - w,
 			width:  w,
 			height: lipgloss.Height(view),
 			text:   item.Text,
@@ -358,6 +389,9 @@ func closeButtonPosition(b notifBounds) (x, y int) {
 
 // CloseButtonHit checks if the given screen coordinates hit a notification close glyph.
 func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
+	if !n.onScreen(x, y) {
+		return 0, false
+	}
 	for _, b := range n.itemBounds() {
 		closeX, closeY := closeButtonPosition(b)
 		if x == closeX && y == closeY {
@@ -371,6 +405,9 @@ func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
 // returns its ID and text. The close button is excluded so dismiss priority can
 // stay separate from click-to-copy behavior.
 func (n *Manager) BodyHit(x, y int) (uint64, string, bool) {
+	if !n.onScreen(x, y) {
+		return 0, "", false
+	}
 	for _, b := range n.itemBounds() {
 		if x < b.col || x >= b.col+b.width || y < b.row || y >= b.row+b.height {
 			continue
@@ -406,7 +443,14 @@ func (n *Manager) HandleClick(x, y int) tea.Cmd {
 	return cmd(DismissMsg{ID: id})
 }
 
+func (n *Manager) onScreen(x, y int) bool {
+	return x >= 0 && x < n.width && y >= 0 && y < n.height
+}
+
 func (n *Manager) hitTestNotification(x, y int) uint64 {
+	if !n.onScreen(x, y) {
+		return 0
+	}
 	for _, b := range n.itemBounds() {
 		if x >= b.col && x < b.col+b.width && y >= b.row && y < b.row+b.height {
 			return b.id
@@ -427,6 +471,7 @@ func (n *Manager) findItemIndex(id uint64) int {
 // HandleMouseMotion updates hover state. Entering an auto-hide notification
 // invalidates its pending timer; leaving restarts a generation-safe timer.
 func (n *Manager) HandleMouseMotion(x, y int) (Manager, tea.Cmd) {
+	n.mouseX, n.mouseY, n.mouseKnown = x, y, true
 	newHoveredID := n.hitTestNotification(x, y)
 	newCloseHoveredID, _ := n.CloseButtonHit(x, y)
 

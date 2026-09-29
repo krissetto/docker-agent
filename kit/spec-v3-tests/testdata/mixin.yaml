@@ -1,0 +1,14 @@
+schemaVersion: "3"
+kind: mixin
+licenses: [MIT]
+provides: [fixture-tools@1.0.0]
+requires: ["async-agent-kit >= 0.1.0, < 1.0.0"]
+integrates: ["optional-peer >= 1.0.0"]
+conflicts: [incompatible-tools]
+capabilities:
+  - type: com.docker.sandbox/agent-context@1
+    config: {contentFile: ./context.md}
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install: [{command: [echo, mixin]}]
+      files: [{path: /home/agent/mixin.txt, content: fixture}]

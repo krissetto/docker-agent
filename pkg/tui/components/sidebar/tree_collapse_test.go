@@ -95,7 +95,7 @@ func TestTreeCollapseRestoresBranchesAndTracksHiddenUpdates(t *testing.T) {
 	clickTreeControl(t, m, "branch-full-identity", false)
 	clickTreeControl(t, m, "", true)
 	require.True(t, m.treeCollapsed)
-	assert.Contains(t, ansi.Strip(m.View()), "3 subagents 1 active 1 attention")
+	assert.Contains(t, ansi.Strip(m.View()), "3 subagents 1 active 1 ⚠")
 	assert.Empty(t, m.subagentHoverZone, "hidden identities leave no attach targets")
 	assert.Empty(t, m.agentClickZones, "hidden root leaves no identity target")
 
@@ -104,7 +104,7 @@ func TestTreeCollapseRestoresBranchesAndTracksHiddenUpdates(t *testing.T) {
 	snap.Nodes[0].Children[0].Children = append(snap.Nodes[0].Children[0].Children, subagent.NodeSnapshot{Node: subagent.Node{ID: "arrival-full-id", Agent: "arrival", State: subagent.NodeRunning, NeedsAttention: true}})
 	m.SetSubagentTree(snap)
 	settleTreePresentation(t, m, m.ReconcileLayout())
-	assert.Contains(t, ansi.Strip(m.View()), "4 subagents 1 active 2 attention")
+	assert.Contains(t, ansi.Strip(m.View()), "4 subagents 1 active 2 ⚠")
 	require.True(t, m.collapsedBranches["branch-full-identity"])
 	clickTreeControl(t, m, "", true)
 	require.False(t, m.treeCollapsed)
@@ -218,6 +218,7 @@ func TestTreeCollapseWarmThemeRetainsStateAndColors(t *testing.T) {
 	before := m.View()
 	theme := *original
 	theme.Colors.TextMuted = "#68a2bf"
+	theme.Colors.Warning = "#e88732"
 	styles.ApplyTheme(&theme)
 	after := m.View()
 	assert.Equal(t, ansi.Strip(before), ansi.Strip(after))
@@ -225,7 +226,46 @@ func TestTreeCollapseWarmThemeRetainsStateAndColors(t *testing.T) {
 	assert.True(t, m.treeCollapsed)
 	assert.True(t, m.collapsedBranches["branch-full-identity"])
 	assert.Contains(t, after, styles.TabPrimaryStyle.Render("3 subagents"))
+	assert.Contains(t, after, styles.WarningStyle.Render("1 ⚠"))
+	assert.NotContains(t, ansi.Strip(after), "attention")
 	assert.Equal(t, after, m.View())
+}
+
+func TestCollapsedSummaryWarningCounter(t *testing.T) {
+	t.Parallel()
+	m := newCollapseSidebar(t)
+	m.treeCollapsed = true
+
+	header := m.treeSummary(60)
+	assert.Contains(t, ansi.Strip(header), m.subagentSpinner.RawFrame()+" 3 subagents 1 active 1 ⚠")
+	assert.Contains(t, header, styles.WarningStyle.Render("1 ⚠"))
+	assert.NotContains(t, ansi.Strip(header), "attention")
+	assert.Equal(t, 1, ansi.StringWidth("⚠"), "warning uses the existing single-cell text glyph")
+	assert.Equal(t, 60, ansi.StringWidth(header))
+	assert.True(t, strings.HasSuffix(ansi.Strip(header), "›"))
+
+	for _, alpha := range []float64{0, .5, 1} {
+		m.treeCounters[0] = counterPresentation{value: 1, alpha: alpha, running: true}
+		m.treeCounters[1] = counterPresentation{value: 1, alpha: alpha, running: true}
+		header = m.treeSummary(60)
+		if alpha == 0 {
+			assert.NotContains(t, ansi.Strip(header), "active")
+			assert.NotContains(t, ansi.Strip(header), "⚠")
+		} else {
+			assert.Contains(t, header, styles.FadeLine(styles.MutedStyle.Render("1 active"), alpha))
+			assert.Contains(t, header, styles.FadeLine(styles.WarningStyle.Render("1 ⚠"), alpha))
+		}
+		assert.True(t, strings.HasPrefix(ansi.Strip(header), m.subagentSpinner.RawFrame()+" "))
+	}
+
+	snap := collapseFixture()
+	snap.Nodes[0].Children[0].Children[0].Node.NeedsAttention = false
+	m.SetSubagentTree(snap)
+	settleTreePresentation(t, m, m.ReconcileLayout())
+	header = m.treeSummary(60)
+	assert.NotContains(t, ansi.Strip(header), "⚠")
+	assert.NotContains(t, ansi.Strip(header), "attention")
+	assert.Contains(t, ansi.Strip(header), "1 active")
 }
 
 func TestSidebarScrollbarDragAdmitsFramesWithoutNoopMotion(t *testing.T) {
@@ -267,13 +307,16 @@ func TestPersistentTreeSummaryPositionCountsAndBranchRestore(t *testing.T) {
 	text := strings.TrimSpace(strings.Split(before, "\n")[row])
 	clickTreeControl(t, m, "", true)
 	assert.Equal(t, row, m.treeSectionStart, "summary remains at the same content row")
-	assert.Equal(t, strings.TrimSpace(strings.TrimSuffix(text, "⌄")), strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ansi.Strip(m.cachedLines[row])), "›")), "summary data persists while direction reflects state")
+	collapsedText := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ansi.Strip(m.cachedLines[row])), "›"))
+	collapsedText = strings.TrimSpace(strings.TrimPrefix(collapsedText, m.subagentSpinner.RawFrame()))
+	expandedText := strings.ReplaceAll(strings.TrimSpace(strings.TrimSuffix(text, "⌄")), "attention", "⚠")
+	assert.Equal(t, expandedText, collapsedText, "summary data persists while collapsed activity, warning label, and direction reflect state")
 	assert.NotContains(t, ansi.Strip(m.View()), "planner")
 	snap := collapseFixture()
 	snap.Nodes[0].Children[0].Children[0].Node.State = subagent.NodeIdle
 	m.SetSubagentTree(snap)
 	settleTreePresentation(t, m, m.ReconcileLayout())
-	assert.Contains(t, ansi.Strip(m.View()), "3 subagents 1 attention")
+	assert.Contains(t, ansi.Strip(m.View()), "3 subagents 1 ⚠")
 	clickTreeControl(t, m, "", true)
 	assert.Equal(t, row, m.treeSectionStart)
 	assert.True(t, m.collapsedBranches["branch-full-identity"])

@@ -34,7 +34,7 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 		Layout:   messages.LayoutSettings{SidebarInfoMode: messages.SidebarInfoMode("bogus")},
 	}, true).(*settingsDialog)
 	require.True(t, ok)
-	assert.Equal(t, messages.SendModeSteer, raw.current.SendMode, "unknown send mode normalizes to steer")
+	assert.Equal(t, messages.SendModeQueue, raw.current.SendMode, "unknown send mode normalizes to queue")
 	assert.Equal(t, messages.InfoModeCompact, raw.current.Layout.SidebarInfoMode,
 		"unknown info mode normalizes to compact")
 }
@@ -82,14 +82,16 @@ func TestSettingsDialogTabSwitching(t *testing.T) {
 	assert.Equal(t, tabNotifications, d.tab)
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabNotifications, d.tab, "content stays on its last section while actions are focused")
+	assert.Equal(t, tabPanel, d.tab)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	assert.Equal(t, tabPanel, d.tab, "content stays on its last section while actions are focused")
 	require.True(t, d.ActionsFocused())
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	assert.Equal(t, tabNotifications, d.tab, "shift+tab returns from actions to the previous content section")
+	assert.Equal(t, tabPanel, d.tab, "shift+tab returns from actions to the previous content section")
 	require.False(t, d.ActionsFocused())
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	assert.Equal(t, tabBehavior, d.tab, "content shift+tab cycles backward")
+	assert.Equal(t, tabNotifications, d.tab, "content shift+tab cycles backward")
 }
 
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
@@ -755,4 +757,16 @@ func TestSettingsStructuralLeadingGapOwnedOnlyBySharedHeader(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSettingsDialogDefaultsToQueue(t *testing.T) {
+	t.Parallel()
+
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, messages.SendModeQueue, d.current.SendMode)
+	assert.Contains(t, ansi.Strip(d.View()), "● Queue")
+	assert.Contains(t, ansi.Strip(d.View()), "○ Steer")
 }

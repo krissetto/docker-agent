@@ -790,7 +790,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 			if a, err := r.team.Agent(name); err == nil {
 				for _, toolset := range a.ToolSets() {
 					if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
-						adapter := runtimeTodoStore{store: store}
+						adapter := runtimeTodoStore{store: store, changed: r.publishTodosChanged}
 						if todoSet.Shared() {
 							if sharedTodoStorage == nil {
 								adapter.scope = r.todoRootSessionID

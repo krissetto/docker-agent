@@ -2,8 +2,9 @@ package todo
 
 import (
 	"context"
-	"fmt"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 type SessionStore interface {
@@ -52,14 +53,8 @@ func (s *SessionStorage) mutate(ctx context.Context, fn func([]Todo) ([]Todo, er
 func (s *SessionStorage) AddTodo(ctx context.Context, description string) (Todo, error) {
 	var created Todo
 	err := s.mutate(ctx, func(items []Todo) ([]Todo, error) {
-		var maxID int64
-		for _, item := range items {
-			var n int64
-			if _, err := fmt.Sscanf(item.ID, "todo_%d", &n); err == nil && n > maxID {
-				maxID = n
-			}
-		}
-		created = Todo{ID: fmt.Sprintf("todo_%d", maxID+1), Description: description, Status: "pending"}
+		// Removed IDs must never identify a later item selected by a stale view.
+		created = Todo{ID: "todo_" + uuid.New().String(), Description: description, Status: "pending"}
 		return append(items, created), nil
 	})
 	return created, err

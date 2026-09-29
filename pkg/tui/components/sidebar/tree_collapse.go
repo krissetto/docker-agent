@@ -103,6 +103,13 @@ func (m *model) treeSummary(width int) string {
 		return ""
 	}
 	parts := []string{styles.TabPrimaryStyle.Render(fmt.Sprintf("%d subagents", total))}
+	if m.treeCollapsed && active > 0 {
+		frame := m.subagentSpinner.RawFrame()
+		if !m.subagentSpinnerOn {
+			frame = m.spinner.RawFrame()
+		}
+		parts[0] = styles.MutedStyle.Render(frame) + " " + parts[0]
+	}
 	for i, value := range []int{active, attention} {
 		counter := m.treeCounters[i]
 		alpha := counter.alpha
@@ -114,10 +121,15 @@ func (m *model) treeSummary(width int) string {
 			continue
 		}
 		label := "active"
+		style := styles.MutedStyle
 		if i == 1 {
 			label = "attention"
+			if m.treeCollapsed {
+				label = "⚠"
+				style = styles.WarningStyle
+			}
 		}
-		parts = append(parts, styles.FadeLine(styles.MutedStyle.Render(fmt.Sprintf("%d %s", counter.value, label)), alpha))
+		parts = append(parts, styles.FadeLine(style.Render(fmt.Sprintf("%d %s", counter.value, label)), alpha))
 	}
 	glyph := "⌄"
 	if m.treeCollapsed {

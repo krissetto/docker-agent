@@ -573,6 +573,14 @@ func (s *remoteSession) RemoveAttachment(ctx context.Context, attachmentPath str
 	}{attachmentPath}, nil)
 }
 
+func (s *remoteSession) SetTodoStatus(context.Context, string, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoStatus)
+}
+
+func (s *remoteSession) RemoveTodo(context.Context, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported(s.ID(), SessionOperationRemoveTodo)
+}
+
 func (s *remoteSession) Todos(ctx context.Context) ([]session.Todo, error) {
 	if !s.Metadata().Capabilities.Todos {
 		return nil, sessionUnsupported(s.ID(), SessionOperationTodos)

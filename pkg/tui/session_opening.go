@@ -73,6 +73,9 @@ func (m *appModel) beginSubagentOpening(nodeID subagent.NodeID, target, title, a
 	r.spinner = spinner.NewWithStyleProvider(m.ar, spinner.ModeBoth, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle })
 	r.spinner.SetMessage("Loading...")
 	r.spinner.Init()
+	// Fade the complete loader from its first frame within the existing minimum
+	// loading interval, without delaying acquisition or adding another hold.
+	r.transition.Start(animation.LoadingMinDuration, animation.EaseOutCubic)
 	m.opening = r
 	m.editor.Blur()
 	owner := m.supervisor
@@ -202,6 +205,7 @@ func (m *appModel) tickSessionOpening(tick animation.TickMsg) tea.Cmd {
 	}
 	switch r.phase {
 	case openingWaiting:
+		r.transition.Tick()
 		if r.installed && !chat.Loading(m.chatPage) && m.ar.Now()-r.started >= animation.LoadingMinDuration {
 			r.phase = openingLoaderOut
 			r.transition.Start(animation.ShortDuration, animation.EaseInOutCubic)
@@ -242,25 +246,19 @@ func (m *appModel) openingContent() string {
 	if r == nil {
 		return ""
 	}
+	// Only the transcript fades in; the live composer and footer keep their
+	// normal surfaces and measured rows throughout acquisition and presentation.
 	if r.phase == openingChatIn {
-		var content string
 		if m.panePresentationEnabled() {
-			content = m.composePanes()
-		} else {
-			content = m.chatPage.View()
+			return fadeOpeningContent(m.composePanes(), r.transition.Value())
 		}
-		fade := styles.NewFadeContext()
-		lines := strings.Split(content, "\n")
-		for i := range lines {
-			lines[i] = styles.FadeLineCtx(lines[i], r.transition.Value(), &fade)
-		}
-		return strings.Join(lines, "\n")
+		return fadeOpeningContent(m.chatPage.View(), r.transition.Value())
 	}
-	content := r.spinner.View()
+	alpha := r.transition.Value()
 	if r.phase == openingLoaderOut {
-		fade := styles.NewFadeContext()
-		content = styles.FadeLineCtx(content, 1-r.transition.Value(), &fade)
+		alpha = 1 - alpha
 	}
+	content := fadeOpeningContent(r.spinner.View(), alpha)
 	return paneClipped(lipgloss.Place(m.width, m.contentHeight, lipgloss.Center, lipgloss.Center, content), m.width, m.contentHeight)
 }
 
@@ -300,9 +298,14 @@ func (m *appModel) openingInput(msg tea.Msg) (bool, tea.Cmd) {
 	return false, nil
 }
 
-func (m *appModel) openingComposer() string {
-	if m.opening == nil {
-		return m.composerView()
+func fadeOpeningContent(content string, alpha float64) string {
+	if alpha >= 1 {
+		return content
 	}
-	return paneClipped(lipgloss.Place(m.width, m.editorHeight, lipgloss.Center, lipgloss.Center, styles.MutedStyle.Render("Opening "+m.opening.title+" · Esc cancels")), m.width, m.editorHeight)
+	fade := styles.NewFadeContext()
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = styles.FadeLineCtx(lines[i], alpha, &fade)
+	}
+	return strings.Join(lines, "\n")
 }

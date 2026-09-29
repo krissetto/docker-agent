@@ -44,6 +44,7 @@ func newPlacementSidebar(t *testing.T, collapsed bool) *model {
 	t.Cleanup(m.StopAnimation)
 	m.rootSessionID = "placement"
 	m.treeCollapsed = collapsed
+	m.todosCollapsed = false // Placement fixtures include expanded todo rows.
 	m.workingDirectory, m.gitBranchName = "placement-dir", ""
 	require.Nil(t, m.SetAgentInfo("root", "provider/model-name", "", 1000, "", 0))
 	require.Nil(t, m.SetSubagentTree(subagent.Snapshot{

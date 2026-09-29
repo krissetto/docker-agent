@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -316,6 +317,14 @@ func TestRoutedTimerExpiryDrivesSidebarOnOwnerPage(t *testing.T) {
 		}
 		return nil
 	}
+	// Reveal the recap, then explicitly expand its initially folded rows.
+	for range 30 {
+		layoutCmd = advance(layoutCmd)
+	}
+	summaryY := renderedLineContaining(t, p.sidebar.View(), "subagents")
+	sl := p.computeSidebarLayout()
+	_, expandCmd := p.sidebar.Update(tea.MouseClickMsg{X: styles.AppPadding + sl.sidebarStartX + 2, Y: summaryY, Button: tea.MouseLeft})
+	layoutCmd = tea.Batch(layoutCmd, expandCmd, p.ar.Continue())
 	// The page owner commits the shared spinner registration after the hop.
 	for step := 0; step < 30 && !strings.Contains(ansi.Strip(p.sidebar.View()), "researcher"); step++ {
 		layoutCmd = advance(layoutCmd)

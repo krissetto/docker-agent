@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
@@ -100,6 +101,7 @@ func harnessRoot(tb testing.TB, width, height int, ar *animation.Runtime) (*appM
 	sess := &session.Session{ID: "profile", Title: "profile"}
 	a := app.New(tb.Context(), nil, sess, agentruntime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	m := New(tb.Context(), nil, a, "", func() {}, WithHideSidebar()).(*appModel)
+	m.panelSettings = messages.PanelSettings{Elements: []messages.PanelElement{}}
 	if ar != nil {
 		m.ar = ar
 	}

@@ -57,6 +57,18 @@ func sidebarProgramSnapshot(t *testing.T, program *tea.Program) shellSnapshot {
 	}
 }
 
+func expandProgramSubagents(t *testing.T, program *tea.Program, descendant string) shellSnapshot {
+	t.Helper()
+	frame := sidebarProgramSnapshot(t, program)
+	x, y := sidebarProgramPoint(t, frame.content, "subagents")
+	program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.Eventually(t, func() bool {
+		frame = sidebarProgramSnapshot(t, program)
+		return frame.active == 0 && strings.Contains(ansi.Strip(frame.content), descendant)
+	}, 3*time.Second, time.Millisecond, "explicit expansion reveals the fixture's descendant rows: active=%d frame=%s", frame.active, ansi.Strip(frame.content))
+	return frame
+}
+
 func sidebarProgramPoint(t *testing.T, frame, label string) (x, y int) {
 	t.Helper()
 	for y, line := range strings.Split(frame, "\n") {
@@ -111,7 +123,7 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			_, _ = root.updateWithLifecycle(runtime.TeamInfo([]runtime.AgentDetails{{Name: "director"}, {Name: "worker"}}, "director"))
 			program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
 			root.supervisor.SetProgram(program)
-			frame := sidebarProgramSnapshot(t, program)
+			frame := expandProgramSubagents(t, program, "SelectedWorker")
 			x, y := sidebarProgramPoint(t, frame.content, "SelectedWorker")
 			program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			var selected shellSnapshot
@@ -119,9 +131,11 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				selected = sidebarProgramSnapshot(t, program)
 				plain := ansi.Strip(selected.content)
 				return selected.activeID == child.ID && selected.active == 0 &&
-					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director") &&
-					(!withChildren || strings.Contains(plain, "NestedReviewer"))
+					strings.Contains(plain, "SELECTED-CHILD-TRANSCRIPT") && strings.Contains(plain, "parent: director")
 			}, 3*time.Second, time.Millisecond)
+			if withChildren {
+				selected = expandProgramSubagents(t, program, "NestedReviewer")
+			}
 			program.Send(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}}, "worker"))
 			require.Eventually(t, func() bool {
 				selected = sidebarProgramSnapshot(t, program)
@@ -390,7 +404,7 @@ func TestActualProgramSidebarBranchToggleTwiceRetainsControlIdentity(t *testing.
 	t.Cleanup(coalescer.Stop)
 	program := startTestProgram(t, root, &sidebarDoubleClickProgram{shellProgramModel: &shellProgramModel{root: root}}, tea.WithOutput(&cacheProgramWriter{}), tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg { return coalescer.Filter(msg) }))
 	coalescer.SetSender(program.Send)
-	frame := sidebarProgramSnapshot(t, program)
+	frame := expandProgramSubagents(t, program, "BranchWorker")
 	x, y := sidebarProgramPoint(t, frame.content, "BranchWorker")
 	program.Send(tea.MouseMotionMsg{X: x, Y: y})
 	var index int

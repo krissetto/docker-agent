@@ -135,9 +135,12 @@ type Settings struct {
 	// Layout customizes the TUI chat layout (sidebar position and which
 	// sidebar sections are visible). Managed via the /settings command.
 	Layout *LayoutSettings `yaml:"layout,omitempty"`
+	// Panel customizes the independent bottom panel. Unset uses defaults;
+	// an explicitly empty elements list disables the panel.
+	Panel *PanelSettings `yaml:"panel,omitempty"`
 	// BusySendMode controls what happens to messages sent while the agent is
-	// working: "steer" (default) injects them into the ongoing stream,
-	// "queue" holds them until the current turn ends. Managed via /settings.
+	// working: "queue" (default) holds them until the current turn ends,
+	// "steer" injects them into the ongoing stream. Managed via /settings.
 	BusySendMode string `yaml:"busy_send_mode,omitempty"`
 	// InterruptConfirmation controls how Esc interrupts a running stream:
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
@@ -146,6 +149,22 @@ type Settings struct {
 	// Extra preserves settings keys this version does not know about (e.g.
 	// written by a newer docker-agent) across a load/save round trip.
 	Extra map[string]any `yaml:",inline"`
+}
+
+// PanelSettings stores the enabled bottom-panel elements in display order.
+// Elements intentionally has no omitempty: an empty list means fully off.
+type PanelSettings struct {
+	Elements []string `yaml:"elements"`
+}
+
+// GetPanel returns a detached panel configuration, or nil for defaults.
+func (s *Settings) GetPanel() *PanelSettings {
+	if s == nil || s.Panel == nil {
+		return nil
+	}
+	elements := make([]string, len(s.Panel.Elements))
+	copy(elements, s.Panel.Elements)
+	return &PanelSettings{Elements: elements}
 }
 
 // LayoutSettings customizes the TUI chat layout. The zero value is the

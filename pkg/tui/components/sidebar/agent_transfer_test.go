@@ -189,6 +189,7 @@ func TestTransferPanelNotClickable(t *testing.T) {
 	t.Parallel()
 
 	m := newAgentPanelSidebar(t, 40, transferRoster()...)
+	m.treeCollapsed = false
 	m.SetAgentSwitching(true, "Scout", "Coder")
 	m.ReconcileLayout()
 	m.CancelPresentation()

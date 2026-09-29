@@ -587,6 +587,9 @@ func (d *manager) clearTopPointerState() {
 		return
 	}
 	entry := &d.stack[len(d.stack)-1]
+	if stopper, ok := entry.dialog.(interface{ StopAnimations() }); ok {
+		stopper.StopAnimations()
+	}
 	changed := entry.closeHovered
 	entry.closeHovered = false
 	if chrome, ok := entry.dialog.(interface{ SetCloseHover(hovered bool) }); ok {

@@ -24,6 +24,7 @@ func TestSidebar_HandleClickType_Agent(t *testing.T) {
 	sb := New(animation.NewRuntime(), t.Context(), sessionState)
 
 	m := sb.(*model)
+	m.treeCollapsed = false
 	m.sessionHasContent = true
 	m.titleGenerated = true
 	m.sessionTitle = "Test"

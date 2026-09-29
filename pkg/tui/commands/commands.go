@@ -72,6 +72,7 @@ type Item struct {
 
 func builtInSessionCommands() []Item {
 	cmds := []Item{
+		{ID: "session.todos", Label: "Todos", SlashCommand: "/todos", Description: "Edit todo status or remove items in the current scope", Category: "Session", Immediate: true, Execute: func(string) tea.Cmd { return core.CmdHandler(messages.OpenTodosMsg{}) }},
 		{
 			ID:           "session.resume",
 			Label:        "Resume",

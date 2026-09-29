@@ -97,6 +97,8 @@ const (
 	SessionOperationSwitchAttachedAgent   SessionOperation = "switch_attached_agent"
 	SessionOperationThinkingLevel         SessionOperation = "thinking_level"
 	SessionOperationTodos                 SessionOperation = "todos"
+	SessionOperationSetTodoStatus         SessionOperation = "set_todo_status"
+	SessionOperationRemoveTodo            SessionOperation = "remove_todo"
 	SessionOperationUpdateTitle           SessionOperation = "update_title"
 	SessionOperationWakePending           SessionOperation = "wake_pending"
 )
@@ -264,6 +266,8 @@ type SessionHandle interface {
 	Release(ctx context.Context) error
 	Snapshot(ctx context.Context) (*session.Session, error)
 	Todos(ctx context.Context) ([]session.Todo, error)
+	SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error)
+	RemoveTodo(ctx context.Context, id string) ([]session.Todo, error)
 	Compact(ctx context.Context, additionalPrompt string, sink EventSink) error
 	CompactTarget(ctx context.Context, sessionID, additionalPrompt string, sink EventSink) error
 	ContextBreakdown(ctx context.Context) (*ContextBreakdown, error)
@@ -302,6 +306,14 @@ func (UnsupportedSessionHandle) Snapshot(context.Context) (*session.Session, err
 
 func (UnsupportedSessionHandle) Todos(context.Context) ([]session.Todo, error) {
 	return nil, sessionUnsupported("", SessionOperationTodos)
+}
+
+func (UnsupportedSessionHandle) SetTodoStatus(context.Context, string, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported("", SessionOperationSetTodoStatus)
+}
+
+func (UnsupportedSessionHandle) RemoveTodo(context.Context, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported("", SessionOperationRemoveTodo)
 }
 
 func (UnsupportedSessionHandle) Compact(context.Context, string, EventSink) error {

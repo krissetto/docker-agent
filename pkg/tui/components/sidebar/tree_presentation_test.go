@@ -203,6 +203,7 @@ func TestExpandingChildrenNeverCoverPersistentRecap(t *testing.T) {
 	m := newHoverSidebar(t)
 	snap := collapseFixture()
 	snap.Nodes[0].Children[0].Children[0].Node.State = subagent.NodeIdle
+	snap.Nodes[0].Children[0].Children[0].Node.NeedsAttention = false // isolate stable recap paint from the collapsed-only warning label
 	m.rootSessionID = "collapse"
 	m.SetSubagentTree(snap)
 	m.ReconcileLayout()

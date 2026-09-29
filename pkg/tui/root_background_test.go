@@ -3,7 +3,6 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"image/color"
 	"strings"
 	"testing"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -22,10 +22,12 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 	setupAutoThemeTest(t)
 	refs, err := styles.ListThemeRefs()
 	require.NoError(t, err)
-	for _, lean := range []bool{false, true} {
+	for _, mode := range []struct{ lean, sidebar bool }{{}, {sidebar: true}, {lean: true}} {
+		lean := mode.lean
 		root, _, _ := frozenClockRoot(t, 120, 40)
 		root.leanMode = lean
-		if lean {
+		root.hideSidebar = !mode.sidebar
+		if lean || mode.sidebar {
 			root.initSessionComponents("profile", root.application, root.application.Session())
 			root.chatPage.Init()
 		}
@@ -35,11 +37,12 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 			if !styles.IsBuiltinTheme(ref) {
 				continue
 			}
-			t.Run(fmt.Sprintf("%s/lean=%v", ref, lean), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/lean=%v/sidebar=%v", ref, lean, mode.sidebar), func(t *testing.T) {
 				theme, err := styles.LoadTheme(ref)
 				require.NoError(t, err)
 				styles.ApplyTheme(theme)
-				require.Equal(t, styles.Background, chromeCells(root.View().Content)[0].bg, "theme generation invalidates cached canvas")
+				require.Equal(t, styles.Background, root.View().BackgroundColor, "theme generation invalidates cached terminal default")
+				require.Equal(t, styles.Background, chromeCells(root.View().Content)[0].bg)
 				_, _ = root.Update(messages.ThemeChangedMsg{})
 				for _, popup := range []bool{false, true} {
 					if popup {
@@ -68,6 +71,16 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 						require.Equal(t, styles.Background, cells[119].bg, "right margin row %d", y)
 					}
 					require.Equal(t, styles.Background, frame[60].bg, "page canvas")
+					if mode.sidebar && !popup {
+						geometry := root.chatPage.(chat.SplitPresentation).MeasureSplitShell(root.width, root.contentHeight).Sidebar
+						require.Positive(t, geometry.Width)
+						require.Positive(t, geometry.Height)
+						for y := geometry.Y; y < geometry.Y+geometry.Height; y++ {
+							for _, x := range []int{geometry.X, geometry.X + geometry.Width - 1} {
+								require.Equal(t, styles.Background, frame[y*120+x].bg, "sidebar canvas (%d,%d)", x, y)
+							}
+						}
+					}
 					for _, cell := range frame[39*120:] {
 						require.Equal(t, styles.Background, cell.bg, "blank message/footer row")
 					}
@@ -101,6 +114,8 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 					}
 					require.Equal(t, cell, painted[x], "action background and attributes cell %d", x)
 				}
+				require.Equal(t, styles.Background, painted[styles.AppPadding].Style.Bg, "notice text inherits canvas")
+				require.Equal(t, styles.Background, painted[118].Style.Bg, "notice trailing space inherits canvas")
 				root.messageBar.SetMessage(messagebar.Message{})
 			})
 		}
@@ -117,7 +132,9 @@ func TestRootBackgroundPreservesNestedStylesAndEscapeBytes(t *testing.T) {
 		"\x1b[0;48;2;12;34;56m", "\x1b[48:2::12:34:56m", "\x1b[48;5;123m", "\x1b[104m",
 	} {
 		content := "default " + lipgloss.NewStyle().Background(styles.EditorBg).Render("editor") +
-			lipgloss.NewStyle().Background(styles.CardBg).Bold(true).Render("card") + sequence + " tail"
+			lipgloss.NewStyle().Background(styles.CardBg).Bold(true).Render("card") +
+			lipgloss.NewStyle().Background(lipgloss.Color(*styles.MarkdownStyle().Code.BackgroundColor)).Render("code") +
+			styles.DiffAddStyle.Render("added") + styles.DiffRemoveStyle.Render("removed") + sequence + " tail"
 		before := uv.NewStyledString(content).Lines(ansi.GraphemeWidth)
 		after := uv.NewStyledString(toFullscreenView(content, "title", false, false).Content).Lines(ansi.GraphemeWidth)
 		require.Len(t, after, len(before))
@@ -138,7 +155,7 @@ func TestRootBackgroundPreservesNestedStylesAndEscapeBytes(t *testing.T) {
 		"\x1bPq~?~?\x1b\\",
 	} {
 		content := "e\x1b[7m\x1b[27m\u0301 界 👩‍💻" + opaque
-		painted := paintRootBackground(content)
+		painted := toFullscreenView(content, "title", false, false).Content
 		require.Contains(t, painted, opaque)
 		require.Contains(t, painted, "e\x1b[7m\x1b[27m\u0301 界 👩‍💻")
 		require.Equal(t, ansi.Strip(content), ansi.Strip(painted))
@@ -162,21 +179,5 @@ func TestRootBackgroundLoadingAndError(t *testing.T) {
 				require.Equal(t, styles.Background, cell.bg)
 			}
 		}
-	}
-}
-
-func BenchmarkPaintRootBackground(b *testing.B) {
-	for _, size := range [][2]int{{120, 40}, {240, 80}} {
-		b.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(b *testing.B) {
-			row := lipgloss.NewStyle().Foreground(color.RGBA{R: 123, A: 255}).Render("styled") +
-				lipgloss.NewStyle().Background(styles.EditorBg).Render("editor")
-			content := paneClipped(strings.Repeat(row+"\n", size[1]), size[0], size[1])
-			b.ReportAllocs()
-			b.SetBytes(int64(len(content)))
-			b.ResetTimer()
-			for b.Loop() {
-				paintRootBackground(content)
-			}
-		})
 	}
 }

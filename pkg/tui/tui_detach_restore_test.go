@@ -149,9 +149,9 @@ func TestActualProgramResetHydratesSameSessionCanonicalTree(t *testing.T) {
 			}
 			application := app.New(t.Context(), nil, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
 			root := newSidebarProgramRoot(t, application)
-			_, _ = root.Update(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}, {Name: "reviewer"}}, "root"))
+			_, _ = root.updateWithLifecycle(runtime.TeamInfo([]runtime.AgentDetails{{Name: "root"}, {Name: "worker"}, {Name: "reviewer"}}, "root"))
 			program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
-			require.Contains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "RestoredGrandchild")
+			require.Contains(t, ansi.Strip(expandProgramSubagents(t, program, "RestoredGrandchild").content), "RestoredGrandchild")
 			reset := session.New(session.WithID(sess.ID), session.WithAgentName("root"))
 			reset.AddMessage(session.UserMessage("RESET-TRANSCRIPT"))
 			program.Send(&app.SessionResetEvent{Snapshot: runtime.SessionSnapshot{Session: reset, Status: runtime.SessionStatus{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateSettled}}})

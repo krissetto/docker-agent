@@ -1,9 +1,11 @@
 package todotool
 
 import (
+	"slices"
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
@@ -52,7 +54,7 @@ func (c *SidebarComponent) SetTodos(result *tools.ToolCallResult) error {
 		return nil
 	}
 
-	c.todos = todos
+	c.todos = slices.Clone(todos)
 	c.renderCache = nil // todos changed — drop the stale render cache
 	return nil
 }
@@ -107,7 +109,10 @@ func (c *SidebarComponent) RenderBody() string {
 func (c *SidebarComponent) renderTodoLine(todoItem todo.Todo) string {
 	icon, style := renderTodoIcon(todoItem.Status)
 
-	prefix := icon + " "
+	prefix := "× " + icon + " " + todoItem.Status + " · "
+	if lipgloss.Width(prefix) >= c.width {
+		return style.Render(ansi.Hardwrap(prefix+todoItem.Description, max(1, c.width), true))
+	}
 	prefixWidth := lipgloss.Width(prefix)
 	maxDescWidth := max(1, c.width-prefixWidth)
 
@@ -128,4 +133,31 @@ func (c *SidebarComponent) renderTodoLine(todoItem todo.Todo) string {
 
 func (c *SidebarComponent) renderTab(title, content string) string {
 	return tab.Render(title, content, c.width)
+}
+
+// TodoAtLine maps wrapped body rows back to opaque canonical IDs.
+func (c *SidebarComponent) TodoAtLine(line int) (todo.Todo, bool) {
+	for _, item := range c.todos {
+		height := strings.Count(c.renderTodoLine(item), "\n") + 1
+		if line >= 0 && line < height {
+			return item, true
+		}
+		line -= height
+	}
+	return todo.Todo{}, false
+}
+
+// ControlsAtLine excludes wrapped continuation and narrow hard-wrapped prefixes.
+func (c *SidebarComponent) ControlsAtLine(line int) bool {
+	for _, item := range c.todos {
+		if line == 0 {
+			icon, _ := renderTodoIcon(item.Status)
+			return lipgloss.Width("× "+icon+" "+item.Status+" · ") < c.width
+		}
+		line -= strings.Count(c.renderTodoLine(item), "\n") + 1
+		if line < 0 {
+			return false
+		}
+	}
+	return false
 }

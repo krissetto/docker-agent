@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // timerRecordingPage scripts a chat.Page for the handleRoutedMsg contract:
@@ -140,6 +141,9 @@ func TestHandleRoutedMsg_TransferOnHiddenTabArmsTimersAndStaysLocal(t *testing.T
 		Inner:     runtime.AgentSwitching(true, "root", "scout"),
 	})
 
+	background := m.chatPages[backgroundID]
+	x, y := sidebarProgramPoint(t, background.View(), "subagents")
+	_, _ = background.Update(tea.MouseClickMsg{X: x + styles.AppPadding, Y: y, Button: tea.MouseLeft})
 	assert.NotNil(t, cmd, "the hidden tab's presentation timers survive the UI-cmd discard")
 	assert.Contains(t, ansi.Strip(m.chatPages[backgroundID].View()), transferBoxMarker,
 		"the hop's box shows on its owning tab")

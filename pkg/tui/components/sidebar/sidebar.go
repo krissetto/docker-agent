@@ -345,6 +345,8 @@ type model struct {
 	// because one budget covers the whole run, sub-sessions included.
 	budgetUsage       *runtime.BudgetUsageEvent
 	todoComp          *todotool.SidebarComponent
+	todoScope         messages.TodoScope
+	todoRemoveArmed   string
 	ragIndexing       map[string]*ragIndexingState // strategy name -> indexing state
 	spinner           spinner.Spinner
 	spinnerActive     bool // true when spinner is registered with animation coordinator
@@ -508,6 +510,8 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 
 	m := &model{
 		parentLineZone:     -1,
+		treeCollapsed:      true,
+		todosCollapsed:     true,
 		presentationActive: true,
 		hoveredTreeRow:     -1,
 		ctx:                func() context.Context { return context.WithoutCancel(ctx) },
@@ -966,21 +970,12 @@ func (m *model) SetSubagentTree(snapshot subagent.Snapshot) tea.Cmd {
 	if m.subagentRootNode == "" && (m.parentAgent != "" || m.parentSessionID != "") {
 		return m.syncSubagentSpinner()
 	}
-	// A live tree that has no root for this view says nothing about it: at
-	// process start the bridge publishes the (empty) initial snapshot, which
-	// must not wipe a view just restored from the session store. Only
-	// snapshots that contain the view's root are authoritative.
-	if rid := m.treeRootID(); rid != "" && (len(m.subagentNodes) > 0 || m.delegationRoot != nil) && !hasTreeRoot(snapshot, rid) {
+	root, found := subagentview.Root(snapshot, m.rootSessionID, m.subagentRootNode)
+	// Missing roots are not authoritative over restored session topology.
+	if !found && (len(m.subagentNodes) > 0 || m.delegationRoot != nil) {
 		return m.syncSubagentSpinner()
 	}
-	rootID := m.treeRootID()
-	if rootID == "" {
-		rootID = snapshot.Root
-		if rootID == "" && len(snapshot.Nodes) > 0 {
-			rootID = snapshot.Nodes[0].Node.ID
-		}
-	}
-	if root, ok := subagentview.Find(snapshot.Nodes, rootID); ok && root.Node.Agent != "" {
+	if found && root.Node.Agent != "" {
 		if m.delegationRoot == nil || *m.delegationRoot != root.Node {
 			node := root.Node
 			m.delegationRoot = &node
@@ -1023,13 +1018,10 @@ func (m *model) rootedChildren(snapshot subagent.Snapshot) []subagent.NodeSnapsh
 	if m.subagentRootNode == "" && (m.parentAgent != "" || m.parentSessionID != "") {
 		return nil
 	}
-	if m.subagentRootNode != "" {
-		if node, ok := subagentview.Find(snapshot.Nodes, m.subagentRootNode); ok {
-			return node.Children
-		}
-		return nil
+	if root, ok := subagentview.Root(snapshot, m.rootSessionID, m.subagentRootNode); ok {
+		return root.Children
 	}
-	return flattenRootChildren(snapshot, m.rootSessionID)
+	return nil
 }
 
 // syncSubagentSpinner starts/stops the shared subagent spinner based on
@@ -1060,7 +1052,7 @@ func hasRunningSubagent(nodes []subagent.NodeSnapshot) bool {
 // spinner. Starting is deliberately static pending; animation begins only
 // once the runtime reports actual work.
 func isActiveSubagentState(s subagent.NodeState) bool {
-	return s == subagent.NodeRunning
+	return subagentview.Active(s)
 }
 
 // flattenRootChildren lifts the subagents out from under their synthetic
@@ -1085,18 +1077,7 @@ func flattenRootChildren(snapshot subagent.Snapshot, sessionID string) []subagen
 // sortSubagentNodes orders siblings most-recently-spawned first, recursively,
 // without mutating the shared snapshot slices.
 func sortSubagentNodes(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
-	if len(nodes) == 0 {
-		return nil
-	}
-	sorted := make([]subagent.NodeSnapshot, len(nodes))
-	for i := range nodes {
-		sorted[i] = nodes[i]
-		sorted[i].Children = sortSubagentNodes(nodes[i].Children)
-	}
-	slices.SortStableFunc(sorted, func(a, b subagent.NodeSnapshot) int {
-		return b.Node.CreatedAt.Compare(a.Node.CreatedAt)
-	})
-	return sorted
+	return subagentview.Sorted(nodes)
 }
 
 func sameSubagentNodes(a, b []subagent.NodeSnapshot) bool {
@@ -1557,6 +1538,13 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case messages.TodosSnapshotMsg:
+		if msg.Err == nil {
+			m.todoScope = msg.Scope
+			m.todoRemoveArmed = ""
+			_ = m.SetTodos(&tools.ToolCallResult{Meta: msg.Todos})
+		}
+		return m, nil
 	case gitBranchChangedMsg:
 		m.gitBranchName = string(msg)
 		m.invalidateCache()
@@ -1585,6 +1573,13 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			m.branchCapture = branchCapture{}
 		}
 		if msg.Button == tea.MouseLeft {
+			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
+				return m, cmd
+			}
+			if m.todoRemoveArmed != "" {
+				m.todoRemoveArmed = ""
+				m.invalidateCache()
+			}
 			if control, ok := m.treeControlAt(msg.X-m.xPos, msg.Y-m.yPos); ok {
 				if !control.whole {
 					m.branchCapture = branchCapture{id: control.id, x: msg.X - m.xPos, y: msg.Y - m.yPos}
@@ -2976,6 +2971,10 @@ func (m *model) updateSubagentHover(y int) {
 // ClearSubagentHover resets subagent hover state, e.g. when the mouse leaves
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
+	if m.todoRemoveArmed != "" {
+		m.todoRemoveArmed = ""
+		m.invalidateCache()
+	}
 	changed := m.hoveredTreeRow != -1 || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent
 	m.hoveredTreeRow = -1
 	m.hoveredRegion = ClickNone

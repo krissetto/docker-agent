@@ -264,6 +264,7 @@ func TestRenderSections_SectionGapKeepsAgentClickZones(t *testing.T) {
 	t.Parallel()
 
 	s := newVisibilityTestSidebar(t)
+	s.treeCollapsed = false
 	s.SetSectionGap(3)
 	s.SetTokenUsage(&runtime.TokenUsageEvent{SessionID: "legacy-child", AgentContext: runtime.AgentContext{AgentName: "worker"}, Usage: &runtime.Usage{ContextLength: 10, ContextLimit: 100}})
 	lines := s.renderSections(40)

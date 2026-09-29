@@ -531,7 +531,13 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 	if msgIdx >= 0 {
 		// Check for toggleable blocks (e.g. reasoning block, collapsed long messages)
 		if t, ok := m.views[msgIdx].(toggleableView); ok {
-			if t.IsToggleLine(localLine) {
+			var toggle bool
+			if precise, ok := t.(interface{ IsToggleAt(int, int) bool }); ok {
+				toggle = precise.IsToggleAt(localLine, col)
+			} else {
+				toggle = t.IsToggleLine(localLine)
+			}
+			if toggle {
 				t.Toggle()
 				m.bottomSlack = 0
 				m.invalidateItem(msgIdx)

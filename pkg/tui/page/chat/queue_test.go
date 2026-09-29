@@ -490,7 +490,7 @@ func TestSteerFlow_BusyAgent_UsesSessionSend(t *testing.T) {
 	t.Parallel()
 	sess := session.New()
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
 	p.working = true
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
 	require.NotNil(t, cmd)
@@ -503,7 +503,7 @@ func TestSteerFlow_QueuedAdmissionUsesFollowUpToastPath(t *testing.T) {
 	t.Parallel()
 	sess := session.New()
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, steerQueued: true})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
 	p.working = true
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "after compact"})
 	require.NotNil(t, cmd)
@@ -512,19 +512,26 @@ func TestSteerFlow_QueuedAdmissionUsesFollowUpToastPath(t *testing.T) {
 	assert.Empty(t, handle.submitted(), "queued steer remains a single driver admission")
 }
 
-func TestSteerFlow_ExplicitAndConfiguredQueueSkipSessionSend(t *testing.T) {
+func TestQueueFlow_DefaultExplicitAndConfiguredQueueSkipSessionSend(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		mode     messages.SendMode
 		explicit bool
 	}{
-		{name: "explicit", explicit: true}, {name: "configured", mode: messages.SendModeQueue},
+		{name: "unset"},
+		{name: "unknown", mode: "bogus"},
+		{name: "explicit", mode: messages.SendModeSteer, explicit: true},
+		{name: "configured", mode: messages.SendModeQueue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := session.New()
 			a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(tc.mode)).(*chatPage)
+			var opts []PageOption
+			if tc.mode != "" {
+				opts = append(opts, WithSendMode(tc.mode))
+			}
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), opts...).(*chatPage)
 			p.working = true
 			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: tc.explicit})
 			require.NotNil(t, cmd)
@@ -542,7 +549,7 @@ func TestSteerFlow_SessionSendRejectedDoesNotSubmitOrQueueLocally(t *testing.T) 
 	sess := session.New()
 	rejected := &runtime.SessionError{Kind: runtime.SessionErrorCapacity, SessionID: sess.ID, Operation: "send", Limit: 1}
 	a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning, sendErr: rejected})
-	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(messages.SendModeSteer)).(*chatPage)
 	p.working = true
 	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "extra context"})
 	failed, ok := cmd().(steerFailedMsg)

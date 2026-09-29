@@ -74,6 +74,7 @@ const (
 	PanelContent    FocusedPanel = "content"
 	PanelEditor     FocusedPanel = "editor"
 	PanelMessageBar FocusedPanel = "messagebar"
+	PanelStatus     FocusedPanel = "status"
 
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
 	resizeHandleWidth    = 8
@@ -356,8 +357,17 @@ type appModel struct {
 	// carried by the spawn request still wins.
 	defaultNewSessionDir string
 
-	// layoutSettings is the active TUI layout customization (sidebar position
-	// and section visibility). Shared by every tab and managed via /settings.
+	// The independent panel shares canonical session data, not sidebar presentation.
+	panelSettings            messages.PanelSettings
+	panelPreviewOriginal     *messages.PanelSettings
+	panelData                map[string]*panelSessionData
+	panelWorkingDir          string
+	panelFocused             messages.PanelElement
+	panelAnimation           animation.Subscription
+	panelRevision            uint64
+	panelSelectionOwner      string
+	panelSelectionGeneration uint64
+	// layoutSettings is shared by every tab and managed via /settings.
 	layoutSettings            messages.LayoutSettings
 	dimInactivePanes          bool
 	paneDimCache              map[string]paneDimEntry
@@ -374,7 +384,7 @@ type appModel struct {
 	majorScheduledExpiry      majorNoticeExpiredMsg
 
 	// sendMode is what happens to messages sent while the agent is working:
-	// steer into the ongoing stream (default) or queue until the turn ends.
+	// queue until the turn ends (default) or steer into the ongoing stream.
 	// Shared by every tab and managed via /settings.
 	sendMode messages.SendMode
 
@@ -586,6 +596,10 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Initialize tab bar with configurable title length from user settings
 	userSettings := userconfig.Get()
+	panelWorkingDir := initialWorkingDir
+	if panelWorkingDir == "" {
+		panelWorkingDir, _ = os.Getwd()
+	}
 	tb := tabbar.New(ar, userSettings.GetTabTitleMaxLength())
 
 	// Initialize tab store
@@ -632,6 +646,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		focusedPanel:                  PanelEditor,
 		editorLines:                   3,
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
+		panelSettings:                 panelSettingsFromConfig(userSettings.GetPanel()),
+		panelWorkingDir:               panelWorkingDir,
 		dimInactivePanes:              userSettings.GetDimInactivePanes(),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
@@ -851,7 +867,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
-	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd())
+	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel())
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -943,6 +959,8 @@ func (m *appModel) init() tea.Cmd {
 // even on pointer-wrapper and other early returns.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.updateWithLifecycle(msg)
+	cmd = tea.Batch(cmd, m.preparePanel())
+	m.syncNotificationAvoidance()
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -1055,6 +1073,25 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	switch msg := msg.(type) {
+	case messages.PreviewPanelMsg:
+		if m.panelPreviewOriginal == nil {
+			original := messages.NormalizePanelSettings(m.panelSettings)
+			m.panelPreviewOriginal = &original
+		}
+		return m.applyPanelSettings(msg.Panel)
+	case messages.CancelPanelPreviewMsg:
+		m.panelPreviewOriginal = nil
+		return m.applyPanelSettings(msg.Original)
+	case panelTodosMsg:
+		return m, m.acceptPanelTodos(msg)
+	case panelTitlesMsg:
+		return m, m.acceptPanelTitles(msg)
+	case messages.OpenTodosMsg:
+		return m, m.openTodos(msg)
+	case messages.EditTodoMsg:
+		return m, m.editTodo(msg)
+	case todoMutationMsg:
+		return m, m.finishTodoMutation(msg)
 	case subagentOpenedMsg:
 		cmd := m.finishSubagentOpening(msg)
 		return m, cmd
@@ -1082,7 +1119,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tickPaused {
 			return m, nil
 		}
-		cmds := []tea.Cmd{m.tickSessionOpening(msg), m.tickVisiblePanes(msg), m.updateDialogCmd(msg), m.tickResponsePrompt(), m.adoptPaneSource()}
+		updatedNotification, notificationCmd := m.notification.Update(msg)
+		m.notification = updatedNotification
+		cmds := []tea.Cmd{notificationCmd, m.tickSessionOpening(msg), m.tickVisiblePanes(msg), m.updateDialogCmd(msg), m.tickResponsePrompt(), m.adoptPaneSource()}
 		if m.messageBar != nil {
 			cmds = append(cmds, m.messageBar.Update(msg))
 			if m.messageBar.TakeVisualDirty() {
@@ -1119,6 +1158,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// children, so include their rendered frame boundaries in the shared
 		// dirty decision.
 		before, after := msg.ElapsedBounds()
+		if m.panelAnimation.IsActive() && animation.Card.FrameIndexAt(before) != animation.Card.FrameIndexAt(after) {
+			msg.MarkDirty()
+		}
 		if (m.chatPage.IsWorking() && animation.Chat.FrameIndexAt(before) != animation.Chat.FrameIndexAt(after)) ||
 			(m.hasRunningPane() && animation.Card.FrameIndexAt(before) != animation.Card.FrameIndexAt(after)) {
 			msg.MarkDirty()
@@ -1829,6 +1871,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applyActiveRuntimeEvent applies model-level runtime side effects exactly once
 // before the raw event or metadata envelope is forwarded to the chat page.
 func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
+	m.ingestPanelEvent(m.paneFocus(), event)
 	switch event.(type) {
 	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *app.SessionResetEvent:
 		m.responseRunGeneration++
@@ -1908,6 +1951,7 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 		runtimeEvent, _ = inner.(runtime.Event)
 	}
 	if runtimeEvent != nil {
+		m.ingestPanelEvent(msg.SessionID, runtimeEvent)
 		if runner := m.supervisor.GetRunner(msg.SessionID); runner != nil && runner.App != nil {
 			m.trackContextUsage(runtimeEvent, runner.App.Session())
 		}
@@ -2738,6 +2782,7 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 		chat.Cleanup(page)
 	}
 	delete(m.chatPages, sessionID)
+	delete(m.panelData, sessionID)
 	if ed, ok := m.editors[sessionID]; ok {
 		ed.Cleanup()
 		delete(m.editors, sessionID)
@@ -2931,16 +2976,7 @@ func messageBarWidth(width int) int {
 func (m *appModel) renderMessageBar() string {
 	left := messageBarOrigin(m.width)
 	right := max(0, m.width-left-messageBarWidth(m.width))
-	view := m.messageBar.View()
-	// Existing notices keep priority. An otherwise empty message seam carries
-	// dormant/pause truth when there is no pane heading, without a new row.
-	if m.paneHeaderHeight() == 0 && strings.TrimSpace(ansi.Strip(view)) == "" {
-		if m.focusedSessionDormant() || m.sessionState.PauseState() != service.PauseNone {
-			view = paneClipped(m.paneActivity(m.paneFocus()), messageBarWidth(m.width), 1)
-		} else if m.leanMode && m.chatPage.IsWorking() {
-			view = paneClipped(styles.MutedStyle.Render("active"), messageBarWidth(m.width), 1)
-		}
-	}
+	view := m.panelFrame().Content
 	return strings.Repeat(" ", left) + view + strings.Repeat(" ", right)
 }
 
@@ -3130,10 +3166,16 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m.forwardChat(msg)
 	}
 
+	if handled, cmd := m.panelKey(msg); handled {
+		return m, cmd
+	}
 	if m.messageBar != nil && m.messageBar.Focused() {
 		switch msg.String() {
 		case "tab", "esc":
 			m.messageBar.SetFocused(false)
+			if msg.String() == "tab" && m.focusPanel() {
+				return m, nil
+			}
 			m.focusedPanel = PanelEditor
 			return m, m.editor.Focus()
 		case "shift+tab":
@@ -3340,6 +3382,9 @@ func (m *appModel) switchFocus() (tea.Model, tea.Cmd) {
 			m.chatPage.BlurMessages()
 			return m, nil
 		}
+		if m.focusPanel() {
+			return m, nil
+		}
 		m.focusedPanel = PanelEditor
 		m.chatPage.BlurMessages()
 		return m, m.editor.Focus()
@@ -3458,6 +3503,12 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	region := m.hitTestRegion(msg.Y)
+	if region != regionMessageBar {
+		m.panelFocused = ""
+		if m.focusedPanel == PanelStatus {
+			m.focusedPanel = PanelEditor
+		}
+	}
 	if m.messageBar != nil && region != regionMessageBar {
 		m.messageBar.SetFocused(false)
 		if m.focusedPanel == PanelMessageBar {
@@ -3467,6 +3518,11 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 	switch region {
 	case regionMessageBar:
+		if msg.Button == tea.MouseLeft {
+			if id, ok := m.panelFrame().Hit(msg.X - messageBarOrigin(m.width)); ok {
+				return m, m.openPanelElement(id)
+			}
+		}
 		if msg.X < messageBarOrigin(m.width) || msg.X >= messageBarOrigin(m.width)+messageBarWidth(m.width) {
 			return m, nil
 		}
@@ -3930,10 +3986,10 @@ func (m *appModel) composeView() tea.View {
 		if m.contentHeight > 0 {
 			viewParts = append(viewParts, paneClipped(lipgloss.PlaceVertical(m.contentHeight, lipgloss.Bottom, contentView), m.width, m.contentHeight))
 		}
-		if banner := m.editor.BannerView(m.width); banner != "" && m.opening == nil {
+		if banner := m.editor.BannerView(m.width); banner != "" {
 			viewParts = append(viewParts, banner)
 		}
-		viewParts = append(viewParts, m.openingComposer())
+		viewParts = append(viewParts, m.composerView())
 		if m.messageBarHeight() > 0 {
 			viewParts = append(viewParts, m.renderMessageBar())
 		}
@@ -3958,14 +4014,14 @@ func (m *appModel) composeView() tea.View {
 	tabBarView := m.tabBar.View()
 
 	// Editor (fixed position, per-session state)
-	editorView := m.openingComposer()
+	editorView := m.composerView()
 
 	// Combine: content | attachments | resize separator | tab bar | editor | context strip
 	var viewParts []string
 	if m.contentHeight > 0 {
 		viewParts = append(viewParts, contentView)
 	}
-	if banner := m.editor.BannerView(m.width); banner != "" && m.opening == nil {
+	if banner := m.editor.BannerView(m.width); banner != "" {
 		viewParts = append(viewParts, banner)
 	}
 	if m.separatorHeight > 0 {
@@ -3978,7 +4034,7 @@ func (m *appModel) composeView() tea.View {
 			Render(tabBarView), m.width, m.tabsHeight))
 	}
 	viewParts = append(viewParts, editorView)
-	if m.contextBar != nil && m.contextHeight > 0 && m.opening == nil {
+	if m.contextBar != nil && m.contextHeight > 0 {
 		viewParts = append(viewParts, paneClipped(lipgloss.NewStyle().Padding(0, styles.EditorHMargin).Render(m.contextBar.View()), m.width, m.contextHeight))
 	}
 	if m.messageBarHeight() > 0 {
@@ -4116,6 +4172,8 @@ func (m *appModel) cleanupManagedResources() {
 // cleanup, so calling both is safe: whichever runs second either finds the
 // work done or blocks until it is.
 func (m *appModel) Shutdown() {
+	m.notification.Cleanup()
+	m.panelAnimation.Stop()
 	m.cleanupManagedResources()
 }
 
@@ -4126,6 +4184,8 @@ func (m *appModel) Shutdown() {
 // wedged cleanup or arm parallel safety nets.
 func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
+		m.notification.Cleanup()
+		m.panelAnimation.Stop()
 		m.contextClosed = true
 		m.cancelSessionOpening()
 		if m.hostedLoad != nil {
@@ -4268,6 +4328,7 @@ func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.V
 	view := tea.NewView(paintRootBackground(content))
 	view.AltScreen = !leanMode
 	view.MouseMode = tea.MouseModeAllMotion
+	// Also set the terminal default for cells outside the composed canvas.
 	view.BackgroundColor = styles.Background
 	view.WindowTitle = windowTitle
 	if working {

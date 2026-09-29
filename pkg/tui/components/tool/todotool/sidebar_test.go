@@ -97,7 +97,7 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	c.SetSize(40)
 	require.NoError(t, c.SetTodos(todoResult("alpha task")))
 	body := c.RenderBody()
-	assert.Equal(t, "◯ alpha task", strings.TrimSpace(ansi.Strip(body)))
+	assert.Equal(t, "× ◯ pending · alpha task", strings.TrimSpace(ansi.Strip(body)))
 	assert.NotContains(t, body, "TO-DO")
 	assert.Contains(t, c.Render(), "TO-DO")
 	assert.Equal(t, body, c.RenderBody())

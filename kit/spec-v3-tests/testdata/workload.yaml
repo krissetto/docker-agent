@@ -1,0 +1,38 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: workload
+displayName: Offline synthetic workload
+version: "0.1.0"
+author: Fixture author
+description: Never launched; no model calls or credentials
+sourceUrl: https://example.invalid/source
+iconUrl: https://example.invalid/icon.png
+licenses: [Apache-2.0]
+provides: [async-agent-kit@0.1.0]
+build: |
+  FROM scratch
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: [echo, install]
+          user: "0"
+          env: [WORKSPACE_DIR]
+      startup:
+        - command: 'echo "$HOME"'
+          background: true
+      files:
+        - path: /home/agent/fixture.txt
+          content: synthetic
+          mode: "0644"
+          overwrite: false
+      interactive: [--interactive]
+  - type: com.docker.sandbox/agent-context@1
+    config: {filename: AGENTS.md, content: Synthetic workload guidance}
+  - type: com.docker.sandbox/agent-sessions@1
+    config:
+      prompt: [--prompt, "{{.Prompt}}"]
+      resume: [--resume, "{{.SessionID}}"]
+      continue: [--continue]
+      list: [echo, synthetic-session]
+  - type: com.docker.sandbox/sbx@1

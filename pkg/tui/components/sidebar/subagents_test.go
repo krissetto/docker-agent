@@ -24,6 +24,7 @@ import (
 func newSubagentTestModel(t *testing.T) *model {
 	t.Helper()
 	m := New(animation.NewRuntime(), t.Context(), &service.SessionState{}).(*model)
+	m.treeCollapsed = false // These tests exercise expanded descendant rows.
 	m.subagentSpinner = &fakeSpinner{m.subagentSpinner}
 	return m
 }

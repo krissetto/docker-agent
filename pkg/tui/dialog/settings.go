@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,10 +28,11 @@ const (
 	tabAppearance = iota
 	tabBehavior
 	tabNotifications
+	tabPanel
 	tabCount
 )
 
-var settingsTabLabels = [tabCount]string{"Appearance", "Behavior", "Notifications"}
+var settingsTabLabels = [tabCount]string{"Appearance", "Behavior", "Notifications", "Panel"}
 
 const (
 	rowTheme = iota
@@ -122,14 +124,16 @@ var interruptConfirmationLabels = map[messages.InterruptMode]string{
 type settingsDialog struct {
 	BaseDialog
 
-	original    messages.Preferences
-	current     messages.Preferences
-	showVisuals bool
-	tab         int
-	selected    [tabCount]int
-	confirmYOLO bool
-	rowText     map[int]string
-	rowLines    map[int]int
+	original       messages.Preferences
+	current        messages.Preferences
+	showVisuals    bool
+	tab            int
+	selected       [tabCount]int
+	panelOrder     []messages.PanelElement
+	panelPreviewed bool
+	confirmYOLO    bool
+	rowText        map[int]string
+	rowLines       map[int]int
 }
 
 func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialog {
@@ -146,7 +150,16 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 	if preferences.InterruptConfirmation == "" {
 		preferences.InterruptConfirmation = messages.InterruptModeAlways
 	}
-	return &settingsDialog{original: preferences, current: preferences, showVisuals: showVisuals}
+	preferences.Panel = messages.NormalizePanelSettings(preferences.Panel)
+	current := preferences
+	current.Panel = messages.NormalizePanelSettings(preferences.Panel)
+	order := slices.Clone(current.Panel.Elements)
+	for _, element := range messages.DefaultPanelSettings().Elements {
+		if !slices.Contains(order, element) {
+			order = append(order, element)
+		}
+	}
+	return &settingsDialog{original: preferences, current: current, showVisuals: showVisuals, panelOrder: order}
 }
 
 func (d *settingsDialog) Init() tea.Cmd { return nil }
@@ -218,6 +231,8 @@ func (d *settingsDialog) rowCount() int {
 		return behaviorRowCount
 	case tabNotifications:
 		return notificationsRowCount
+	case tabPanel:
+		return len(d.panelOrder)
 	default:
 		return appearanceRowCount
 	}
@@ -255,6 +270,10 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "shift+tab":
 		d.confirmYOLO = false
 		d.tab = (d.tab + tabCount - 1) % tabCount
+	case "ctrl+up":
+		return d.reorderPanel(-1)
+	case "ctrl+down":
+		return d.reorderPanel(1)
 	case "up", "k", "ctrl+k":
 		d.confirmYOLO = false
 		d.moveSelection(-1)
@@ -291,6 +310,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 		return nil
 	}
 	switch d.tab {
+	case tabPanel:
+		return d.togglePanel()
 	case tabAppearance:
 		switch d.selected[d.tab] {
 		case rowTheme:
@@ -396,19 +417,28 @@ func stepValue(current, delta, step, minimum, maximum int) int {
 }
 
 func (d *settingsDialog) apply() tea.Cmd {
-	if d.current == d.original {
-		return closeDialogCmd()
+	if d.current.Equal(d.original) {
+		return d.cancel()
 	}
-	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.ApplySettingsMsg{Preferences: d.current}))
+	preferences := d.current
+	preferences.Panel = messages.NormalizePanelSettings(preferences.Panel)
+	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.ApplySettingsMsg{Preferences: preferences}))
 }
 
 func (d *settingsDialog) CancelDialogCmd() tea.Cmd { return d.cancel() }
 
 func (d *settingsDialog) cancel() tea.Cmd {
-	if d.current.Layout == d.original.Layout {
-		return closeDialogCmd()
+	cmds := []tea.Cmd{closeDialogCmd()}
+	if d.current.Layout != d.original.Layout {
+		cmds = append(cmds, core.CmdHandler(messages.CancelLayoutPreviewMsg{Original: d.original.Layout}))
 	}
-	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.CancelLayoutPreviewMsg{Original: d.original.Layout}))
+	if d.panelPreviewed || !d.current.Panel.Equal(d.original.Panel) {
+		cmds = append(cmds, core.CmdHandler(messages.CancelPanelPreviewMsg{Original: messages.NormalizePanelSettings(d.original.Panel)}))
+	}
+	if len(cmds) == 1 {
+		return cmds[0]
+	}
+	return tea.Sequence(cmds...)
 }
 
 func (d *settingsDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
@@ -425,6 +455,8 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	local.rowText = make(map[int]string)
 	content := NewContent(inner)
 	switch local.tab {
+	case tabPanel:
+		local.renderPanelTab(content)
 	case tabBehavior:
 		local.renderBehaviorTab(content, inner)
 	case tabNotifications:
@@ -503,6 +535,59 @@ func (d *settingsDialog) renderAppearanceTab(content *Content, inner int) {
 		AddContent(d.renderToggleRow(rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)).
 		AddContent(d.renderToggleRow(rowRenderImages, "Render images", d.current.RenderImages)).
 		AddContent(d.renderToggleRow(rowShowBanner, "Show startup banner", d.current.ShowBanner))
+}
+
+var panelElementLabels = map[messages.PanelElement]string{
+	messages.PanelWorkspace: "Workspace",
+	messages.PanelSubagents: "Subagents",
+	messages.PanelTodos:     "Todos",
+}
+
+func (d *settingsDialog) renderPanelTab(content *Content) {
+	content.AddContent(styles.MutedStyle.Render("Bottom panel · independent of the sidebar")).AddSpace()
+	for row, element := range d.panelOrder {
+		content.AddContent(d.renderToggleRow(row, panelElementLabels[element], slices.Contains(d.current.Panel.Elements, element)))
+	}
+	content.AddSpace().AddContent(styles.MutedStyle.Render("Ctrl+↑/↓ reorders elements. Disable all to hide."))
+}
+
+func (d *settingsDialog) panelPreview() tea.Cmd {
+	d.panelPreviewed = true
+	return core.CmdHandler(messages.PreviewPanelMsg{Panel: messages.NormalizePanelSettings(d.current.Panel)})
+}
+
+func (d *settingsDialog) togglePanel() tea.Cmd {
+	element := d.panelOrder[d.selected[tabPanel]]
+	enabled := !slices.Contains(d.current.Panel.Elements, element)
+	elements := make([]messages.PanelElement, 0, len(d.panelOrder))
+	for _, candidate := range d.panelOrder {
+		if (candidate == element && enabled) || (candidate != element && slices.Contains(d.current.Panel.Elements, candidate)) {
+			elements = append(elements, candidate)
+		}
+	}
+	d.current.Panel.Elements = elements
+	return d.panelPreview()
+}
+
+func (d *settingsDialog) reorderPanel(delta int) tea.Cmd {
+	if d.tab != tabPanel {
+		return nil
+	}
+	row := d.selected[tabPanel]
+	next := row + delta
+	if next < 0 || next >= len(d.panelOrder) {
+		return nil
+	}
+	d.panelOrder[row], d.panelOrder[next] = d.panelOrder[next], d.panelOrder[row]
+	d.selected[tabPanel] = next
+	elements := make([]messages.PanelElement, 0, len(d.current.Panel.Elements))
+	for _, element := range d.panelOrder {
+		if slices.Contains(d.current.Panel.Elements, element) {
+			elements = append(elements, element)
+		}
+	}
+	d.current.Panel.Elements = elements
+	return d.panelPreview()
 }
 
 func (d *settingsDialog) renderBehaviorTab(content *Content, inner int) {
@@ -771,6 +856,15 @@ func (d *settingsDialog) actions() []Action {
 			}
 			actions = append(actions, actionsForKeys("right", label)...)
 		}
+	}
+	if d.tab == tabPanel {
+		moves := []Action{
+			{Label: "Move up", Key: tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl}},
+			{Label: "Move down", Key: tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl}},
+		}
+		moves[0].Disabled = row == 0
+		moves[1].Disabled = row == len(d.panelOrder)-1
+		actions = append(actions, moves...)
 	}
 	actions = append(actions, actionsForKeys("esc", "Cancel", "ctrl+s", "Apply")...)
 	for i := range actions {

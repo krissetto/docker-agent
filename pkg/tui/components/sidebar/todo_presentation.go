@@ -19,6 +19,13 @@ func (m *model) todoSummary(width int) string {
 		return styles.MutedStyle.Render(glyph)
 	}
 	text := styles.TabPrimaryStyle.Render(fmt.Sprintf("%d/%d todos", completed, total))
+	if !m.todosCollapsed && width > 22 {
+		hint := " · ◯ status · /todos"
+		if m.todoRemoveArmed != "" {
+			hint = " · click × again to remove"
+		}
+		text += styles.MutedStyle.Render(hint)
+	}
 	text = ansi.Truncate(text, width-2, "…")
 	return m.hoverText(text+strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1))+styles.MutedStyle.Render(glyph), "todo-summary")
 }

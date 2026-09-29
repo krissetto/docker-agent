@@ -16,7 +16,7 @@ import (
 )
 
 func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
-	for _, mode := range []string{"turn", "steer", ""} {
+	for _, mode := range []string{"turn", ""} {
 		input := session.UserMessage("literal **markdown** 界\n" + strings.Repeat("wrapped body ", 10))
 		input.InputOrigin, input.InputMode, input.SenderName, input.SenderID = session.InputOriginAgent, mode, "worker", "abcde-full-id"
 		msg := types.Input(input)

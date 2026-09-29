@@ -31,7 +31,7 @@ func (m *model) referenceForMessage(index, localLine int) (lifecycle.InputRefere
 	}
 	msg := m.messages[index]
 	if msg.Type == types.MessageTypeAgentInput || msg.Type == types.MessageTypeRuntimeNotice {
-		if msg.Type == types.MessageTypeAgentInput && localLine != 0 {
+		if view, ok := m.views[index].(interface{ InputReferenceOnLine(int) bool }); ok && !view.InputReferenceOnLine(localLine) {
 			return lifecycle.InputReference{}, false
 		}
 		return msg.InputReference, msg.InputReference.Kind != lifecycle.InputReferenceUnknown

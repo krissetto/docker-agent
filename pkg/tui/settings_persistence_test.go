@@ -92,11 +92,11 @@ func TestSaveSettingsToUserConfig_DefaultsClearEntry(t *testing.T) {
 
 	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarTop,
-	}, messages.SendModeQueue))
+	}, messages.SendModeSteer))
 	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
-	}, messages.SendModeSteer))
+	}, messages.SendModeQueue))
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -179,7 +179,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 
 	require.NoError(t, savePreferences(messages.Preferences{
 		Layout:             messages.LayoutSettings{SidebarPosition: messages.SidebarLeft},
-		SendMode:           messages.SendModeQueue,
+		SendMode:           messages.SendModeSteer,
 		SplitDiffView:      false,
 		ExpandThinking:     true,
 		RestoreTabs:        true,
@@ -191,7 +191,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 	}))
 	require.NoError(t, savePreferences(messages.Preferences{
 		Layout:            messages.LayoutSettings{SidebarPosition: messages.SidebarRight, SectionSpacing: messages.SpacingNormal},
-		SendMode:          messages.SendModeSteer,
+		SendMode:          messages.SendModeQueue,
 		SplitDiffView:     true,
 		ShowBanner:        true,
 		TabTitleMaxLength: userconfig.DefaultTabTitleMaxLength,
@@ -312,4 +312,36 @@ func TestDimInactivePanesPreferenceRoundTrip(t *testing.T) {
 	require.NoError(t, savePreferences(preferences))
 	require.True(t, userconfig.Get().GetDimInactivePanes())
 	require.Nil(t, userconfig.Get().DimInactivePanes)
+}
+
+func TestBusySendModeConfigDefaultsAndRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		raw    string
+		want   messages.SendMode
+		stored string
+	}{
+		{name: "new user", want: messages.SendModeQueue},
+		{name: "unset", want: messages.SendModeQueue},
+		{name: "unknown", raw: "bogus", want: messages.SendModeQueue},
+		{name: "explicit steer", raw: "steer", want: messages.SendModeSteer, stored: "steer"},
+		{name: "explicit queue", raw: "queue", want: messages.SendModeQueue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSettingsConfigTest(t)
+			if tc.name != "new user" {
+				require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
+					cfg.Settings = &userconfig.Settings{BusySendMode: tc.raw}
+					return nil
+				}))
+			}
+			mode := messages.ParseSendMode(userconfig.Get().GetBusySendMode())
+			require.Equal(t, tc.want, mode)
+			require.NoError(t, saveTestSettings(messages.LayoutSettings{}, mode))
+			cfg, err := userconfig.Load()
+			require.NoError(t, err)
+			assert.Equal(t, tc.stored, cfg.GetSettings().GetBusySendMode())
+			assert.Equal(t, tc.want, messages.ParseSendMode(cfg.GetSettings().GetBusySendMode()))
+		})
+	}
 }

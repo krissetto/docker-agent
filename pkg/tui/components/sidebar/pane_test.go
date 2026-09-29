@@ -23,6 +23,7 @@ import (
 func TestContinuousPaneOrderWithRecapsAndBoundedSpacing(t *testing.T) {
 	t.Parallel()
 	m := newVisibilityTestSidebar(t).model
+	m.treeCollapsed, m.todosCollapsed = false, false
 	m.sessionTitle = "Title"
 	m.workingDirectory = "/full/path/project"
 	m.gitBranchName = "main"

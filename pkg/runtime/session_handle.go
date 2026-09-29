@@ -427,14 +427,84 @@ func (r *LocalRuntime) SessionByID(sessionID string) (SessionHandle, error) {
 }
 
 func (h *sessionHandle) Todos(ctx context.Context) ([]session.Todo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ctx = httpclient.ContextWithSessionID(ctx, h.sessionID)
-	a := h.runtime.resolveSessionAgent(h.driver.session())
-	for _, toolset := range a.ToolSets() {
-		if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
-			return todoSet.Todos(ctx)
-		}
+	if todoSet := h.todoToolSet(); todoSet != nil {
+		return todoSet.Todos(ctx)
 	}
 	return []session.Todo{}, nil
+}
+
+func (h *sessionHandle) todoToolSet() *todotool.ToolSet {
+	a := h.runtime.resolveSessionAgent(h.driver.session())
+	if a != nil {
+		for _, toolset := range a.ToolSets() {
+			if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
+				return todoSet
+			}
+		}
+	}
+	return nil
+}
+
+func (h *sessionHandle) SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error) {
+	switch status {
+	case "pending", "in-progress", "completed":
+	default:
+		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: SessionOperationSetTodoStatus, Detail: "invalid todo status"}
+	}
+	return h.mutateTodo(ctx, id, SessionOperationSetTodoStatus, func(items []session.Todo, index int) []session.Todo {
+		items[index].Status = status
+		return items
+	})
+}
+
+func (h *sessionHandle) RemoveTodo(ctx context.Context, id string) ([]session.Todo, error) {
+	return h.mutateTodo(ctx, id, SessionOperationRemoveTodo, func(items []session.Todo, index int) []session.Todo {
+		return slices.Delete(items, index, index+1)
+	})
+}
+
+func (h *sessionHandle) mutateTodo(ctx context.Context, id string, operation SessionOperation, mutate func([]session.Todo, int) []session.Todo) ([]session.Todo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: operation, Detail: "todo ID is required"}
+	}
+	todoSet := h.todoToolSet()
+	store, ok := h.runtime.sessionStore.(session.TodoStore)
+	if !ok || todoSet == nil {
+		return nil, sessionUnsupported(h.sessionID, operation)
+	}
+	key := h.sessionID
+	if todoSet.Shared() {
+		key = h.runtime.todoRootSessionID(key)
+	}
+	items, err := func() ([]session.Todo, error) {
+		h.driver.mu.Lock()
+		defer h.driver.mu.Unlock()
+		if err := h.driver.admitLocked(operation); err != nil {
+			return nil, err
+		}
+		if h.driver.reclaiming {
+			return nil, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: operation}
+		}
+		return store.MutateTodos(ctx, key, func(items []session.Todo) ([]session.Todo, error) {
+			index := slices.IndexFunc(items, func(item session.Todo) bool { return item.ID == id })
+			if index < 0 {
+				return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: h.sessionID, Operation: operation, Detail: "todo ID not found"}
+			}
+			return mutate(items, index), nil
+		})
+	}()
+	if err != nil {
+		return nil, err
+	}
+	h.runtime.publishTodosChanged(key)
+	return items, nil
 }
 
 func (h *sessionHandle) ID() string        { return h.sessionID }

@@ -20,8 +20,8 @@
 !pkg/safety/safety_patterns.json
 !pkg/tools/builtin/mcpcatalog/servers.json
 !pkg/tui/styles/themes/*.yaml
-!examples/sbx/async-subagents/launch.sh
-!examples/sbx/async-subagents/hackerspace.yaml
+!kit/launch.sh
+!kit/hackerspace.yaml
 **/*_test.go
 **/testdata/**
 **/fixtures/**
