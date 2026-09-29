@@ -64,16 +64,18 @@ func (s State) wordLeft(p Position) Position {
 	return p
 }
 func (s State) wordRight(p Position) Position {
+	// Forward word motion skips leading whitespace, then stops at the end
+	// of the following word. Deletion shares this exact boundary.
 	for {
 		next := s.next(p)
-		if next == p || s.spaceAt(p) {
+		if next == p || !s.spaceAt(p) {
 			break
 		}
 		p = next
 	}
 	for {
 		next := s.next(p)
-		if next == p || !s.spaceAt(p) {
+		if next == p || s.spaceAt(p) {
 			break
 		}
 		p = next

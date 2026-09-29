@@ -230,14 +230,14 @@ func TestActionsAndSanitation(t *testing.T) {
 	}
 	s.Apply(Action{Kind: MoveDocumentStart})
 	s.Apply(Action{Kind: MoveWordRight})
-	if s.Column() != 5 {
+	if s.Column() != 3 {
 		t.Fatal(s.Cursor())
 	}
-	if s.Word() != "three" {
+	if s.Word() != "one" {
 		t.Fatal(s.Word())
 	}
 	s.Apply(Action{Kind: DeleteToEnd})
-	if s.Value() != "one  " {
+	if s.Value() != "one" {
 		t.Fatal(s.Value())
 	}
 	s.Apply(Action{Kind: DeleteToStart})
@@ -431,5 +431,41 @@ func TestNarrowHorizontalViewportBoundaries(t *testing.T) {
 				s.Apply(Action{Kind: MoveLeft})
 			}
 		}
+	}
+}
+
+func TestForwardWordBoundaries(t *testing.T) {
+	tests := []struct {
+		name, value string
+		start, want Position
+		deleted     string
+	}{
+		{"word start", "one  two", Position{}, Position{0, 3}, "  two"},
+		{"inside word", "one  two", Position{0, 1}, Position{0, 3}, "o  two"},
+		{"leading spaces", "  one  two", Position{}, Position{0, 5}, "  two"},
+		{"between words", "one  two", Position{0, 3}, Position{0, 8}, "one"},
+		{"trailing spaces", "one  ", Position{0, 3}, Position{0, 5}, "one"},
+		{"document end", "one", Position{0, 3}, Position{0, 3}, "one"},
+		{"newline", "one\n  two\nlast", Position{0, 3}, Position{1, 5}, "one\nlast"},
+		{"word before newline", "one\ntwo", Position{0, 1}, Position{0, 3}, "o\ntwo"},
+		{"blank line", "\n\nword", Position{}, Position{2, 4}, ""},
+		{"graphemes", " \t界e\u0301👩‍💻 next", Position{}, Position{0, 8}, " next"},
+		{"one grapheme", "界 next", Position{}, Position{0, 1}, " next"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(Options{Multiline: true})
+			s.SetValue(tc.value)
+			s.SetCursor(tc.start)
+			original := s.Clone()
+			s.Apply(Action{Kind: MoveWordRight})
+			if s.Cursor() != tc.want || s.Value() != tc.value {
+				t.Fatalf("move got %v %q want %v", s.Cursor(), s.Value(), tc.want)
+			}
+			original.Apply(Action{Kind: DeleteWordForward})
+			if original.Value() != tc.deleted || original.Cursor() != tc.start {
+				t.Fatalf("delete got %q at %v want %q at %v", original.Value(), original.Cursor(), tc.deleted, tc.start)
+			}
+		})
 	}
 }
