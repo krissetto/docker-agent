@@ -5,14 +5,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // closeDialogCmd is a shorthand used by every picker for sending CloseDialogMsg.

@@ -1,9 +1,10 @@
 package widget
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // Textinput owns the history-query widget and its last immutable ANSI artifact.

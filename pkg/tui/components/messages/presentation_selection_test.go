@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
 
 func TestClearPresentationSelectionPreservesReaderAndDraft(t *testing.T) {

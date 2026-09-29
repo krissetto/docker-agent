@@ -1,11 +1,10 @@
 package tui
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
-
 	"github.com/docker/docker-agent/pkg/tui/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // inputHelp uses the inherited canonical maps. Current is filtered by root

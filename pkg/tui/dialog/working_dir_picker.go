@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -22,6 +20,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // dirSection identifies which section of the picker is active.

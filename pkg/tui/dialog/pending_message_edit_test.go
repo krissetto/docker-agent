@@ -237,3 +237,27 @@ func TestPendingMessageEditUnsupportedCallbackRetainsDraft(t *testing.T) {
 	assert.False(t, d.closed)
 	assert.Equal(t, "draft", d.input.Value())
 }
+
+func TestPendingMessageEditHitTestUsesScrolledGraphemeGeometry(t *testing.T) {
+	d := NewPendingMessageEditDialog("session", "turn", "first\nsecond\n界e\u0301👩‍💻tail", 1, nil).(*pendingMessageEditDialog)
+	d.input.SetWidth(20)
+	d.input.SetHeight(1)
+	d.input.MoveToEnd()
+	require.Equal(t, 2, d.input.ScrollYOffset())
+	value := d.input.Value()
+	// Cell 4 is inside the two-cell emoji; snap before the entire cluster.
+	d.placeCursor(4, 0)
+	require.Equal(t, 2, d.input.Line())
+	require.Equal(t, 3, d.input.Column())
+	d.input, _ = d.input.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModShift})
+	require.Equal(t, "👩‍💻", d.input.SelectedText())
+	before := d.input.Layout()
+	for range 3 {
+		_ = d.input.View()
+		require.Equal(t, before, d.input.Layout())
+	}
+	require.Equal(t, value, d.input.Value())
+	d.placeCursor(2, 0)
+	require.Equal(t, 1, d.input.Column(), "wide glyph ends at cell two")
+	require.Empty(t, d.input.SelectedText(), "click starts a new cursor placement")
+}

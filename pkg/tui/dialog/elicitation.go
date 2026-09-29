@@ -7,19 +7,17 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/rivo/uniseg"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 const (
@@ -858,34 +856,7 @@ func renderMarkdownMessage(message string, contentWidth int) string {
 // SetTextInputCursorAtCell maps a cell inside the text area (excluding its prompt)
 // to a rune position without losing the input's history-dependent viewport.
 func SetTextInputCursorAtCell(input *textinput.Model, cell int) {
-	probe := *input
-	probeStyles := probe.Styles()
-	prefixRunes, captured := 0, false
-	capture := func(prefix string) string {
-		if !captured {
-			prefixRunes, captured = utf8.RuneCountInString(prefix), true
-		}
-		return prefix
-	}
-	// View renders the visible text before its cursor first. Probe a value copy
-	// so neither its appearance nor the editor's viewport changes during hit testing.
-	probeStyles.Focused.Text = lipgloss.NewStyle().Transform(capture)
-	probeStyles.Blurred.Text = probeStyles.Focused.Text
-	probe.SetStyles(probeStyles)
-	_ = probe.View()
-	value := []rune(input.Value())
-	position := min(len(value), max(0, input.Position()-prefixRunes))
-	graphemes := uniseg.NewGraphemes(string(value[position:]))
-	remaining := max(0, cell)
-	for graphemes.Next() {
-		width := graphemes.Width()
-		if width > remaining {
-			break
-		}
-		remaining -= width
-		position += len(graphemes.Runes())
-	}
-	input.SetCursor(position)
+	input.SetCursor(input.PositionAtCell(cell))
 }
 
 func (d *ElicitationDialog) SetSize(width, height int) tea.Cmd {

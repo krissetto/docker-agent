@@ -64,7 +64,7 @@ func pickerStartDir(hint string) string {
 
 func newDirPicker(start string) *dirPicker {
 	ti := textinput.New()
-	ti.SetStyles(styles.DialogInputStyle)
+	ti.SetStyles(boardTextinputStyles())
 	ti.Placeholder = "Type to filter directories…"
 	ti.Focus()
 	p := &dirPicker{filter: ti}

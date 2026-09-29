@@ -77,7 +77,7 @@ type cardDialog struct {
 // The selector starts on lastProject (by name) when it is still configured.
 func newCardDialog(projects []board.Project, lastProject string) *cardDialog {
 	ta := textarea.New()
-	ta.SetStyles(styles.InputStyle)
+	ta.SetStyles(boardTextareaStyles())
 	ta.Placeholder = "Describe the task for the agent…"
 	ta.ShowLineNumbers = false
 	ta.SetHeight(6)
@@ -205,7 +205,7 @@ func newPromptDialog(column board.Column) *promptDialog {
 	column.Emoji = strings.Join(strings.Fields(sanitize(column.Emoji)), " ")
 
 	ta := textarea.New()
-	ta.SetStyles(styles.InputStyle)
+	ta.SetStyles(boardTextareaStyles())
 	ta.Placeholder = "Prompt sent to a card's agent when it enters " + column.Name + "…"
 	ta.ShowLineNumbers = false
 	ta.SetHeight(10)
@@ -314,7 +314,7 @@ func (d *columnsDialog) startForm(editing board.Column) tea.Cmd {
 	d.inputs = make([]textinput.Model, len(columnFields))
 	for i, f := range columnFields {
 		ti := textinput.New()
-		ti.SetStyles(styles.DialogInputStyle)
+		ti.SetStyles(boardTextinputStyles())
 		ti.Placeholder = f.placeholder
 		ti.SetWidth(56)
 		d.inputs[i] = ti
@@ -562,7 +562,7 @@ func (d *projectsDialog) startForm(editing, name, path, agent string) tea.Cmd {
 	d.inputs = make([]textinput.Model, len(projectFields))
 	for i, f := range projectFields {
 		ti := textinput.New()
-		ti.SetStyles(styles.DialogInputStyle)
+		ti.SetStyles(boardTextinputStyles())
 		ti.Placeholder = f.placeholder
 		ti.SetWidth(56)
 		d.inputs[i] = ti

@@ -13,12 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"github.com/goccy/go-yaml"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 

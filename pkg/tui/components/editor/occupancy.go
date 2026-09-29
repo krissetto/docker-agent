@@ -6,9 +6,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/charmbracelet/x/ansi"
-	"github.com/rivo/uniseg"
-
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -30,7 +27,7 @@ type TextOccupancyAppender interface {
 // motion can change the rendered viewport without changing the text. Blinking
 // and suggestions only change styling/non-input surfaces, not occupied glyphs.
 type textOccupancyKey struct {
-	value                 string
+	contentRevision       uint64
 	width, height, offset int
 	row, column           int
 	themeGeneration       uint64
@@ -60,15 +57,7 @@ func (e *editor) occupiedTextCells() []image.Rectangle {
 		e.occupancy = textOccupancyCache{}
 		return nil
 	}
-	// Value builds a string from textarea rune lines. Reuse its exact snapshot
-	// until Update or a direct content-mutating API is called; geometry and
-	// viewport state below are still read on every query (including after View).
-	if !e.occupancyValueValid {
-		e.occupancyValue = e.textarea.Value()
-		e.occupancyValueValid = true
-	}
-	value := e.occupancyValue
-	if value == "" {
+	if e.textarea.Value() == "" {
 		e.occupancy = textOccupancyCache{}
 		return nil
 	}
@@ -76,8 +65,8 @@ func (e *editor) occupiedTextCells() []image.Rectangle {
 		e.refreshTheme()
 	}
 	key := textOccupancyKey{
-		value: value,
-		width: e.textarea.Width(), height: e.textarea.Height(),
+		contentRevision: e.textarea.ContentRevision(),
+		width:           e.textarea.Width(), height: e.textarea.Height(),
 		offset: e.textarea.ScrollYOffset(),
 		row:    e.textarea.Line(), column: e.textarea.Column(),
 		themeGeneration: e.themeGeneration,
@@ -86,28 +75,26 @@ func (e *editor) occupiedTextCells() []image.Rectangle {
 		return e.occupancy.cells
 	}
 
-	// Use the actual viewport so wrapping, wheel scrolling, and Unicode clipping
-	// follow textarea rendering rather than a second approximation of its layout.
+	// Source runs exclude presentation-only prompts, placeholder, padding and ghosts.
+	geometry := e.textarea.Layout()
 	var cells []image.Rectangle
-	for y, line := range strings.Split(ansi.Strip(e.textarea.View()), "\n") {
-		if y >= e.textarea.Height() {
+	for index, row := range geometry.Rows {
+		y := index - geometry.ScrollY
+		if y < 0 {
+			continue
+		}
+		if y >= geometry.Height {
 			break
 		}
-		x := 0
-		graphemes := uniseg.NewGraphemes(line)
-		for graphemes.Next() {
-			width := graphemes.Width()
-			end := min(x+width, e.textarea.Width())
-			if end > x && strings.TrimFunc(graphemes.Str(), unicode.IsSpace) != "" {
-				if last := len(cells) - 1; last >= 0 && cells[last].Min.Y == y && cells[last].Max.X == x {
-					cells[last].Max.X = end
-				} else {
-					cells = append(cells, image.Rect(x, y, end, y+1))
-				}
+		for _, run := range row.Runs {
+			x, end := max(0, run.Cell-geometry.ScrollX), min(geometry.Width, run.Cell+run.Width-geometry.ScrollX)
+			if end <= x || strings.TrimFunc(run.Text, unicode.IsSpace) == "" {
+				continue
 			}
-			x += width
-			if x >= e.textarea.Width() {
-				break
+			if last := len(cells) - 1; last >= 0 && cells[last].Min.Y == y && cells[last].Max.X == x {
+				cells[last].Max.X = end
+			} else {
+				cells = append(cells, image.Rect(x, y, end, y+1))
 			}
 		}
 	}

@@ -235,7 +235,7 @@ func TestOccupiedTextCellsValueSnapshotMutationPaths(t *testing.T) {
 				require.NoError(t, e.AttachFile(path))
 			}
 			got := e.OccupiedTextCells()
-			e.occupancy, e.occupancyValueValid = textOccupancyCache{}, false
+			e.occupancy = textOccupancyCache{}
 			require.Equal(t, e.OccupiedTextCells(), got, "snapshot result agrees with fresh textarea scan")
 		})
 	}
@@ -249,11 +249,11 @@ func TestOccupiedTextCellsThemeAndOverlayPreserveActualViewport(t *testing.T) {
 	e.SetValue("first\nlast 界")
 	e.suggestion, e.hasSuggestion = " suggested words wrapping below", true
 	e.OccupiedTextCells()
-	e.View() // suggestion rendering may reposition the real viewport
+	e.View() // suggestion rendering must preserve the real viewport
 	theme := *original
 	theme.Colors.TextMuted = "#123456"
 	styles.ApplyTheme(&theme)
 	got := e.OccupiedTextCells()
-	e.occupancy, e.occupancyValueValid = textOccupancyCache{}, false
+	e.occupancy = textOccupancyCache{}
 	require.Equal(t, e.OccupiedTextCells(), got)
 }

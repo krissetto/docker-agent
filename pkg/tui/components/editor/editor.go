@@ -10,11 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
@@ -33,6 +29,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	textcore "github.com/docker/docker-agent/pkg/tui/text"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 // ansiRegexp matches ANSI escape sequences so they can be removed when
@@ -137,8 +137,6 @@ type editor struct {
 	rendering                     editorRendering
 	textarea                      *widget.Textarea
 	occupancy                     textOccupancyCache
-	occupancyValue                string
-	occupancyValueValid           bool
 	hist                          *history.History
 	width                         int
 	height                        int
@@ -294,48 +292,18 @@ func extractLineText(line, prompt string) string {
 	return strings.TrimRight(plain, " ")
 }
 
-// computeWrappedLines uses a textarea to compute how text would be wrapped,
-// matching the textarea's word-wrap behavior exactly.
-func (e *editor) computeWrappedLines(text string, startOffset int) []string {
-	// Create a temporary textarea with the same settings
-	ta := widget.NewTextarea()
-	ta.SetPrompt(e.textarea.Prompt())
-	ta.SetShowLineNumbers(e.textarea.ShowLineNumbers())
-	ta.SetWidth(e.textarea.Width())
-	ta.SetHeight(max(1, e.textarea.Height())) // Preview owns only its allocated rows
-
-	// For the first line, we need to account for the cursor position.
-	// We do this by prefixing with spaces to simulate the existing text.
-	prefix := strings.Repeat(" ", startOffset)
-	ta.SetValue(prefix + text)
-	ta.MoveToBegin()
-	_ = ta.View()
-	ta.SetHeight(ta.Height())
-
-	view := ta.View()
-	viewLines := strings.Split(view, "\n")
-
-	// Extract the text content from each visual line
-	var result []string
-	for i, line := range viewLines {
-		plain := extractLineText(line, ta.Prompt())
-		if i == 0 {
-			// First line: remove the prefix spaces we added
-			if len(plain) >= startOffset {
-				plain = plain[startOffset:]
-			}
-		}
-		// Stop at empty lines (end of content)
-		if plain == "" && i > 0 {
-			break
-		}
-		result = append(result, plain)
+// computeWrappedLines uses immutable preview input and the same layout as editing.
+func (e *editor) computeWrappedLines(value string, startOffset int) []string {
+	preview := textcore.New(textcore.Options{Multiline: true})
+	preview.SetValue(strings.Repeat(" ", startOffset) + value)
+	rows := preview.Layout(textcore.Config{Width: max(1, e.textarea.Width()), Wrap: true}).Rows
+	result := make([]string, len(rows))
+	for i, row := range rows {
+		result[i] = row.Text
 	}
-
-	if len(result) == 0 {
-		result = []string{text}
+	if len(result) > 0 {
+		result[0] = strings.TrimPrefix(result[0], strings.Repeat(" ", startOffset))
 	}
-
 	return result
 }
 
@@ -344,26 +312,11 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 // cursor styling (reverse video) so it's visible inside the cursor block.
 // Multi-line suggestions are rendered across multiple visual lines.
 func (e *editor) applySuggestionOverlay(view string) string {
-	// Direct value/size changes can precede the first textarea Update. Repair
-	// the real viewport rather than placing a ghost on an unrelated visible row.
-	offset := e.textarea.ScrollYOffset()
-	e.fixViewportScroll()
-	if e.textarea.ScrollYOffset() != offset {
-		view = e.textarea.View()
-	}
 	lines := strings.Split(view, "\n")
 	promptWidth := runewidth.StringWidth(stripANSI(e.textarea.Prompt()))
-	lineInfo := e.textarea.LineInfo()
-	textWidth := lineInfo.CharOffset
-	// Use the same wrapping and scroll origin as the real textarea. Logical
-	// row counts (or the last nonblank rendered row) misplace a wrapped cursor.
-	targetLine := lineInfo.RowOffset - e.textarea.ScrollYOffset()
-	for i, line := range strings.Split(e.textarea.Value(), "\n") {
-		if i >= e.textarea.Line() {
-			break
-		}
-		targetLine += wrappedLineCount([]rune(line), max(1, e.textarea.Width()))
-	}
+	geometry := e.textarea.Layout()
+	textWidth := geometry.Cursor.Column
+	targetLine := geometry.Cursor.Row - geometry.ScrollY
 	if targetLine < 0 || targetLine >= len(lines) {
 		return view
 	}
@@ -400,7 +353,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 
 		if i == 0 {
 			// First line: first character gets cursor styling, rest gets ghost styling
-			firstRune, restOfLine := splitFirstRune(suggLine)
+			firstRune, restOfLine := splitFirstGrapheme(suggLine)
 			cursorChar := styles.SuggestionCursorStyle.Render(firstRune)
 
 			overlays = append(overlays, overlay{x: xOffset, y: currentY, content: cursorChar})
@@ -408,7 +361,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 			if restOfLine != "" {
 				ghostRest := styles.SuggestionGhostStyle.Render(restOfLine)
 				overlays = append(overlays, overlay{
-					x:       xOffset + runewidth.StringWidth(firstRune),
+					x:       xOffset + uniseg.StringWidth(firstRune),
 					y:       currentY,
 					content: ghostRest,
 				})
@@ -463,13 +416,14 @@ func spliceLine(line, overlay string, x int) string {
 	return left + overlay + right
 }
 
-// splitFirstRune splits a string into its first rune and the rest.
-func splitFirstRune(s string) (string, string) {
-	if s == "" {
+// splitFirstGrapheme keeps a suggested cursor glyph intact across style spans.
+func splitFirstGrapheme(s string) (string, string) {
+	graphemes := uniseg.NewGraphemes(s)
+	if !graphemes.Next() {
 		return "", ""
 	}
-	runes := []rune(s)
-	return string(runes[0]), string(runes[1:])
+	_, end := graphemes.Positions()
+	return s[:end], s[end:]
 }
 
 // deleteLastGraphemeCluster removes the last grapheme cluster from the string.
@@ -555,7 +509,6 @@ func (e *editor) isCursorAtEnd() bool {
 // AcceptSuggestion applies the current suggestion into the textarea value and
 // returns a command to update the completion query, or nil if no suggestion was applied.
 func (e *editor) AcceptSuggestion() tea.Cmd {
-	e.occupancyValueValid = false
 	if !e.hasSuggestion || e.suggestion == "" {
 		return nil
 	}
@@ -597,7 +550,6 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 }
 
 func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
-	e.occupancyValueValid = false
 	e.tryAddFileRef(e.pendingFileRef)
 	e.pendingFileRef = ""
 	attachments := e.collectAttachments(content)
@@ -641,7 +593,6 @@ func (e *editor) configureNewlineKeybinding() {
 
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	e.occupancyValueValid = false
 	defer e.updateAttachmentBanner()
 
 	var cmds []tea.Cmd
@@ -810,9 +761,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return e.handleClipboardPaste()
 		}
 
-		// Handle backspace with grapheme cluster awareness.
-		// The default textarea.Model only deletes a single rune, which breaks
-		// multi-codepoint characters like emoji (e.g., ⚠️ = U+26A0 + U+FE0F).
+		// Editing owns grapheme-safe deletion; the editor refreshes completion state.
 		if key.Matches(msg, e.textarea.BackspaceBinding()) {
 			return e.handleGraphemeBackspace()
 		}
@@ -969,108 +918,12 @@ func (e *editor) handleClipboardPaste() (layout.Model, tea.Cmd) {
 	return e, textarea.Blink
 }
 
-// handleGraphemeBackspace implements backspace with grapheme cluster awareness.
-// It removes the entire last grapheme cluster, not just the last rune.
-// This fixes deletion of multi-codepoint characters like emoji sequences.
+// handleGraphemeBackspace delegates one deletion to the shared editing model.
 func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
-	value := e.textarea.Value()
-	if value == "" {
-		return e, nil
-	}
-
-	// Get cursor position info
-	lines := strings.Split(value, "\n")
-	currentLine := e.textarea.Line()
-	lineInfo := e.textarea.LineInfo()
-
-	// CharOffset within the current visual line segment
-	colPos := lineInfo.CharOffset + lineInfo.StartColumn
-
-	if currentLine < 0 || currentLine >= len(lines) {
-		return e, nil
-	}
-
-	if colPos == 0 && currentLine > 0 {
-		// At beginning of line but not first line - let textarea handle line merge
-		var cmd tea.Cmd
-		e.textarea, cmd = e.textarea.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
-		e.refreshSuggestion()
-		return e, tea.Batch(cmd, e.updateCompletionQuery())
-	}
-
-	if colPos == 0 {
-		// At beginning of first line - nothing to delete
-		return e, nil
-	}
-
-	// Delete the last grapheme cluster from the text before the cursor
-	currentLineText := lines[currentLine]
-
-	// Convert column position (based on display width) to rune position
-	runePos := 0
-	width := 0
-	for _, r := range currentLineText {
-		if width >= colPos {
-			break
-		}
-		width += runewidth.RuneWidth(r)
-		runePos++
-	}
-
-	// Text before cursor
-	runes := []rune(currentLineText)
-	if runePos > len(runes) {
-		runePos = len(runes)
-	}
-	beforeCursor := string(runes[:runePos])
-	afterCursor := string(runes[runePos:])
-
-	// Delete the last grapheme cluster from text before cursor
-	newBeforeCursor := deleteLastGraphemeCluster(beforeCursor)
-
-	// Rebuild the line
-	lines[currentLine] = newBeforeCursor + afterCursor
-	newValue := strings.Join(lines, "\n")
-
-	// Calculate new cursor column position within the current line
-	newCol := len([]rune(newBeforeCursor))
-
-	// Build text before cursor position (all lines before current + new before cursor)
-	var beforeParts []string
-	for i := range currentLine {
-		beforeParts = append(beforeParts, lines[i])
-	}
-	beforeParts = append(beforeParts, newBeforeCursor)
-	textBeforeCursor := strings.Join(beforeParts, "\n")
-
-	// Build text after cursor position (after cursor on current line + remaining lines)
-	var textAfterCursorSb strings.Builder
-	textAfterCursorSb.WriteString(afterCursor)
-	for i := currentLine + 1; i < len(lines); i++ {
-		textAfterCursorSb.WriteByte('\n')
-		textAfterCursorSb.WriteString(lines[i])
-	}
-	textAfterCursor := textAfterCursorSb.String()
-
-	// Set the text before cursor and move to end
-	e.textarea.SetValue(textBeforeCursor)
-	e.textarea.MoveToEnd()
-
-	// Now insert the text after cursor - this positions cursor correctly
-	if textAfterCursor != "" {
-		e.textarea.SetValue(newValue)
-		e.textarea.MoveToBegin()
-
-		// Keep calling CursorDown until we're on the target logical line
-		for e.textarea.Line() < currentLine {
-			e.textarea.CursorDown()
-		}
-
-		e.textarea.SetCursorColumn(newCol)
-	}
-
+	var cmd tea.Cmd
+	e.textarea, cmd = e.textarea.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	e.refreshSuggestion()
-	return e, tea.Batch(textarea.Blink, e.updateCompletionQuery())
+	return e, tea.Batch(cmd, e.updateCompletionQuery())
 }
 
 // updateCompletionQuery sends the appropriate completion message based on current editor state.
@@ -1366,10 +1219,7 @@ func (e *editor) updateTextareaHeight() {
 	}
 }
 
-// fixViewportScroll adapts bubbles v2.2.1's public sizing API temporarily:
-// dynamic reflow clamps against real content, whereas SetHeight alone only
-// keeps the cursor visible against a viewport padded with extra end rows.
-// Restore the policy before any input: MaxHeight also limits logical newlines.
+// fixViewportScroll explicitly normalizes the editable allocation and viewport.
 func (e *editor) fixViewportScroll() {
 	width := e.width
 	if width == 0 {
@@ -1384,63 +1234,13 @@ func (e *editor) fixViewportScroll() {
 // content, including soft wraps and explicit newlines. It derives the count
 // directly from the content so querying layout cannot move the cursor or
 // viewport.
-func (e *editor) ContentLineCount() int {
-	width := e.textarea.Width()
-	lines := strings.Split(e.textarea.Value(), "\n")
-	if width <= 0 {
-		return max(len(lines), 1)
-	}
+func (e *editor) ContentLineCount() int { return e.textarea.ContentLineCount() }
 
-	total := 0
-	for _, line := range lines {
-		total += wrappedLineCount([]rune(line), width)
-	}
-	return max(total, 1)
-}
-
-// wrappedLineCount mirrors textarea's word-wrapping rules without touching its
-// cursor, viewport, or memoization cache.
+// wrappedLineCount queries shared layout without editing or moving a viewport.
 func wrappedLineCount(runes []rune, width int) int {
-	lines := [][]rune{{}}
-	word := []rune{}
-	row := 0
-	spaces := 0
-
-	for _, r := range runes {
-		if unicode.IsSpace(r) {
-			spaces++
-		} else {
-			word = append(word, r)
-		}
-
-		if spaces > 0 {
-			if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces > width {
-				row++
-				lines = append(lines, append(word, []rune(strings.Repeat(" ", spaces))...))
-			} else {
-				lines[row] = append(lines[row], word...)
-				lines[row] = append(lines[row], []rune(strings.Repeat(" ", spaces))...)
-			}
-			spaces = 0
-			word = nil
-		} else {
-			lastCharWidth := runewidth.RuneWidth(word[len(word)-1])
-			if uniseg.StringWidth(string(word))+lastCharWidth > width {
-				if len(lines[row]) > 0 {
-					row++
-					lines = append(lines, []rune{})
-				}
-				lines[row] = append(lines[row], word...)
-				word = nil
-			}
-		}
-	}
-
-	if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces >= width {
-		lines = append(lines, append(word, []rune(strings.Repeat(" ", spaces+1))...))
-	}
-
-	return len(lines)
+	preview := textcore.New(textcore.Options{Multiline: true})
+	preview.SetValue(string(runes))
+	return preview.VisualLineCount(textcore.Config{Width: max(1, width), Wrap: true})
 }
 
 // BannerHeightLimit is an optional shell capability. Set the available rows
@@ -1561,7 +1361,6 @@ func (e *editor) Value() string {
 
 // SetValue updates the editor content and moves cursor to end
 func (e *editor) SetValue(content string) {
-	e.occupancyValueValid = false
 	e.textarea.SetValue(content)
 	e.fixViewportScroll()
 	e.textarea.MoveToEnd()
@@ -1571,7 +1370,6 @@ func (e *editor) SetValue(content string) {
 
 // InsertText inserts text at the current cursor position
 func (e *editor) InsertText(text string) {
-	e.occupancyValueValid = false
 	e.textarea.InsertString(text)
 	e.userTyped = true
 	e.refreshSuggestion()
@@ -1579,7 +1377,6 @@ func (e *editor) InsertText(text string) {
 
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
 func (e *editor) AttachFile(filePath string) error {
-	e.occupancyValueValid = false
 	placeholder := "@" + filePath
 	if err := e.addFileAttachment(placeholder); err != nil {
 		return fmt.Errorf("failed to attach %s: %w", filePath, err)
@@ -1888,7 +1685,6 @@ func createPasteAttachment(content string, num int) (attachment, error) {
 }
 
 func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
-	e.occupancyValueValid = false
 	e.historySearch = historySearchState{
 		active:                   true,
 		origTextValue:            e.textarea.Value(),

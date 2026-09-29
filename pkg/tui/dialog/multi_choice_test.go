@@ -1236,13 +1236,12 @@ func TestMultiChoiceDialog_CustomInputFocus(t *testing.T) {
 	// Initially not focused
 	d.selected = selection(0)
 	d.updateFocus()
-	// Note: bubbles textinput Focused() might not be directly testable without
-	// checking internal state, but we can verify the selection-based logic
+	assert.False(t, d.customInput.Focused())
 
 	// Select custom - should focus
 	d.selected = selectionCustom
 	d.updateFocus()
-	// The input should be focused (verified by the fact that typing works)
+	assert.True(t, d.customInput.Focused())
 
 	// Select option - should blur
 	d.selected = selection(0)

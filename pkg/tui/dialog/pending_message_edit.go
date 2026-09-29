@@ -1,17 +1,14 @@
 package dialog
 
 import (
-	"strings"
-
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/rivo/uniseg"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
 
 // PendingMessageSaveResultMsg answers one queued-message editor's save request.
@@ -242,24 +239,10 @@ func (d *pendingMessageEditDialog) View() string {
 func (d *pendingMessageEditDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
 
 func (d *pendingMessageEditDialog) placeCursor(cell, row int) {
-	target := d.input.ScrollYOffset() + max(0, row)
-	d.input, _ = d.input.Update(tea.KeyPressMsg{Code: tea.KeyHome, Mod: tea.ModCtrl})
-	for range target {
-		d.input.CursorDown()
-	}
-	info := d.input.LineInfo()
-	lines := strings.Split(d.input.Value(), "\n")
-	runes := []rune(lines[d.input.Line()])
-	position := min(info.StartColumn, len(runes))
-	graphemes := uniseg.NewGraphemes(string(runes[position:]))
-	for graphemes.Next() {
-		if graphemes.Width() > cell {
-			break
-		}
-		cell -= graphemes.Width()
-		position += len(graphemes.Runes())
-	}
-	d.input.SetCursorColumn(position)
+	inputStyle := d.input.Styles().Focused.Base
+	cell -= inputStyle.GetBorderLeftSize() + inputStyle.GetPaddingLeft() + inputStyle.GetMarginLeft() + lipgloss.Width(d.input.Prompt)
+	row -= inputStyle.GetBorderTopSize() + inputStyle.GetPaddingTop() + inputStyle.GetMarginTop()
+	d.input.SetCursorPosition(d.input.PositionAtCell(max(0, row), max(0, cell)))
 }
 
 func (d *pendingMessageEditDialog) scrollInput(x, y, delta int) {

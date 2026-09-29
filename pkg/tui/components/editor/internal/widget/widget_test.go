@@ -4,10 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/cursor"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/widgets/cursor"
 )
 
 func TestTextareaOwnsMutationAndVirtualCursor(t *testing.T) {
@@ -35,8 +36,11 @@ func TestTextareaOwnsMutationAndVirtualCursor(t *testing.T) {
 	require.Equal(t, hidden, w.FreshView())
 
 	binding := w.NewlineBinding()
-	binding.Keys()[0] = "tampered"
-	require.NotEqual(t, binding.Keys(), w.NewlineBinding().Keys(), "binding slice is detached")
+	keys := binding.Keys()
+	keys[0] = "tampered"
+	require.NotEqual(t, keys, w.NewlineBinding().Keys(), "binding slice is detached")
+	binding.SetKeys("tampered")
+	require.NotEqual(t, binding.Keys(), w.NewlineBinding().Keys(), "binding value is detached")
 	original := w.Styles().Focused.Text.GetBold()
 	style = w.Styles()
 	style.Focused.Text = style.Focused.Text.Bold(!original)

@@ -527,3 +527,11 @@ func TestLongSuggestionWrapping(t *testing.T) {
 	assert.True(t, strings.HasPrefix(line0, "L"), "first line should start with L")
 	assert.Contains(t, line0, "ook", "first line should contain start of suggestion")
 }
+
+func TestSuggestionCursorPreservesGrapheme(t *testing.T) {
+	for _, value := range []string{"e\u0301", "👩‍💻", "界"} {
+		first, rest := splitFirstGrapheme(value + "tail")
+		require.Equal(t, value, first)
+		require.Equal(t, "tail", rest)
+	}
+}

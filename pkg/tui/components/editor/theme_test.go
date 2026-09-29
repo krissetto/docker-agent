@@ -68,11 +68,13 @@ func TestWarmEditorThemeSwitchWithoutNotification(t *testing.T) { //nolint:paral
 	e.SetValue("kept draft")
 	e.Blur()
 	e.View()
+	before := e.textarea.Layout()
 	for _, ref := range []string{"default-light", "nord", "default"} {
 		theme, err := styles.LoadTheme(ref)
 		require.NoError(t, err)
 		styles.ApplyTheme(theme)
 		got := e.View()
+		assert.Equal(t, before, e.textarea.Layout(), "theme refresh changes presentation, not editing geometry")
 		fresh := New(nil).(*editor)
 		fresh.SetSize(36, 3)
 		fresh.SetValue("kept draft")

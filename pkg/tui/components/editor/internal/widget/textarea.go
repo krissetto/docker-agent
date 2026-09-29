@@ -1,11 +1,13 @@
-// Package widget owns mutable Charm widgets. No widget model or mutable cursor
+// Package widget owns mutable text widgets. No widget model or mutable cursor
 // escapes these adapters: readers receive immutable, owner-materialized ANSI.
 package widget
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/docker/docker-agent/pkg/tui/text"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
 
 // Textarea is a single-owner widget, not a copyable snapshot.
@@ -19,10 +21,12 @@ type Textarea struct {
 	normalizedWidth, normalizedRows int
 }
 
-func NewTextarea() *Textarea           { return &Textarea{model: textarea.New()} }
-func (w *Textarea) changed()           { w.generation++; w.valid = false; w.normalized = false }
-func (w *Textarea) Generation() uint64 { return w.generation }
-func (w *Textarea) Renders() uint64    { return w.renders }
+func NewTextarea() *Textarea                { return &Textarea{model: textarea.New()} }
+func (w *Textarea) changed()                { w.generation++; w.valid = false; w.normalized = false }
+func (w *Textarea) Generation() uint64      { return w.generation }
+func (w *Textarea) ContentRevision() uint64 { return w.model.ContentRevision() }
+func (w *Textarea) ContentLineCount() int   { return w.model.ContentLineCount() }
+func (w *Textarea) Renders() uint64         { return w.renders }
 func (w *Textarea) View() string {
 	if !w.valid {
 		w.view = w.FreshView()
@@ -39,23 +43,16 @@ func (w *Textarea) Update(msg tea.Msg) (*Textarea, tea.Cmd) {
 }
 func (w *Textarea) Focus() tea.Cmd { w.changed(); return w.model.Focus() }
 
-// Normalize repairs Bubbles' viewport against real wrapped content, preserving
-// the logical-newline policy. View mutates its shared viewport, so perform it
-// here before publishing any artifact, never on a retained presentation hit.
+// Normalize explicitly reflows the viewport before publishing presentation artifacts.
 func (w *Textarea) Normalize(width, rows int) {
 	if w.normalized && w.normalizedWidth == width && w.normalizedRows == rows {
 		return
 	}
 	w.changed()
-	dynamic, minHeight, maxHeight := w.model.DynamicHeight, w.model.MinHeight, w.model.MaxHeight
-	w.model.DynamicHeight = true
-	w.model.MinHeight, w.model.MaxHeight = rows, rows
-	w.model.SetWidth(width)
-	_ = w.FreshView()
-	w.model.SetHeight(rows)
-	w.model.DynamicHeight, w.model.MinHeight, w.model.MaxHeight = dynamic, minHeight, maxHeight
+	w.model.Normalize(width, rows)
 	w.normalized, w.normalizedWidth, w.normalizedRows = true, width, rows
 }
+func (w *Textarea) Layout() text.Layout { return w.model.Layout() }
 func (w *Textarea) SetNewlineKeys(keys ...string) {
 	w.changed()
 	w.model.KeyMap.InsertNewline.SetKeys(keys...)
@@ -65,7 +62,7 @@ func (w *Textarea) SetNewlineEnabled(enabled bool) {
 	w.model.KeyMap.InsertNewline.SetEnabled(enabled)
 }
 
-// Return a detached binding: key.Binding contains a mutable slice.
+// Return detached bindings so callers cannot change the owner's keymap.
 func copyBinding(b key.Binding) key.Binding {
 	b.SetKeys(append([]string(nil), b.Keys()...)...)
 	return b
@@ -158,6 +155,6 @@ func (w *Textarea) SetCursorColumn(v int)       { w.changed(); w.model.SetCursor
 func (w *Textarea) SetStyles(v textarea.Styles) { w.changed(); w.model.SetStyles(v) }
 func (w *Textarea) SetVirtualCursor(v bool)     { w.changed(); w.model.SetVirtualCursor(v) }
 
-// Cursor returns Bubbles' detached public cursor description, not its private
+// Cursor returns a detached public cursor description, not its private
 // virtual cursor. Callers cannot mutate the widget through this value.
 func (w *Textarea) Cursor() *tea.Cursor { return w.model.Cursor() }

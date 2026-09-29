@@ -8,9 +8,8 @@ import (
 )
 
 // RenderDiagnostics counts actual widget materializations and presentation
-// draws, including forced-fresh draws. Textarea includes viewport normalization
-// paints: Bubbles View itself mutates the owned viewport. Body counts full frame
-// paints on every View; Composition counts retained inner textarea/history joins.
+// draws, including forced-fresh draws. Body counts full frame paints on every
+// View; Composition counts retained inner textarea/history joins.
 type RenderDiagnostics struct{ Textarea, Search, Body, Banner, Composition uint64 }
 
 // RetainedRendering is an optional diagnostic capability, not a requirement on
@@ -26,7 +25,7 @@ type RetainedRendering interface {
 // scrolling and suggestions have already been materialized by the widget owner
 // into Textarea; history state is represented by the optional History artifact.
 // This is retained owner-materialized output, not an independent editable model
-// or a second implementation of Bubbles' private cursor/wrapping machinery.
+// or a second implementation of editing and wrapping geometry.
 type editorInput struct {
 	Textarea, History string
 }
@@ -55,16 +54,13 @@ type editorRendering struct {
 	suggestion  suggestionArtifact
 }
 
-// captureInput synchronizes theme and normalizes widget side effects before
+// captureInput synchronizes presentation theme before
 // publishing immutable artifacts. The retained renderer never sees a widget.
 func (e *editor) captureInput(fresh bool) editorInput {
 	if e.themeGeneration != styles.ThemeGeneration() {
 		e.refreshTheme()
 	}
 	showSuggestion := e.textarea.Focused() && e.hasSuggestion && e.suggestion != ""
-	if showSuggestion {
-		e.fixViewportScroll()
-	}
 	var view string
 	if fresh {
 		view = e.textarea.FreshView()

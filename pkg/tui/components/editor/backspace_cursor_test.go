@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
 )
 
 func splitLines(s string) []string {
@@ -152,4 +154,15 @@ func TestBackspaceOnSoftWrappedLine(t *testing.T) {
 		// Cursor should still be on logical line 1 (the line after the newline)
 		assert.Equal(t, 1, e.textarea.Line(), "cursor should stay on line 1")
 	})
+}
+
+func TestBackspaceDeletesSelectedGraphemeExactlyOnce(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(20, 2)
+	e.SetValue("prefix 👩‍💻")
+	e.Update(tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModShift})
+	require.Equal(t, "👩‍💻", e.textarea.SelectedText())
+	e.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	require.Equal(t, "prefix ", e.Value())
+	require.Empty(t, e.textarea.SelectedText())
 }

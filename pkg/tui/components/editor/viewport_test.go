@@ -90,3 +90,20 @@ func TestViewportResizePreservesTextareaSelection(t *testing.T) {
 		require.Equal(t, col, e.textarea.Column())
 	}
 }
+
+func TestSuggestionAndOccupancyViewsPreserveEditingGeometry(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(12, 2)
+	e.SetValue("first 界 line\nsecond e\u0301 line\nlast 👩‍💻")
+	e.Update(tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModShift})
+	e.hasSuggestion, e.suggestion = true, " ghost\nmore"
+	before, selected, value := e.textarea.Layout(), e.textarea.SelectedText(), e.Value()
+	for range 4 {
+		_ = e.View()
+		_ = e.FreshView()
+		_ = e.OccupiedTextCells()
+		require.Equal(t, before, e.textarea.Layout())
+		require.Equal(t, selected, e.textarea.SelectedText())
+		require.Equal(t, value, e.Value())
+	}
+}

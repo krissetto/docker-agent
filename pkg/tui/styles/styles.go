@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
 	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 
 	"github.com/docker/docker-agent/pkg/compaction"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
+	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
 const (
