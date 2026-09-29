@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/key"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
@@ -26,6 +24,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/viewport"
 )
 
 // agentPickerDefaultsSpec is the --agent-picker sentinel meaning "use the
@@ -252,12 +252,9 @@ type agentPickerModel struct {
 }
 
 func newAgentPickerModel(choices []agentChoice) *agentPickerModel {
+	// The viewport truncates long instruction blocks rather than wrapping;
+	// horizontal scrolling keeps the full YAML available.
 	vp := viewport.New()
-	vp.FillHeight = true
-	// Truncate long lines instead of soft-wrapping them: the config's long
-	// instruction blocks would otherwise wrap across dozens of rows and bloat
-	// the viewer. Horizontal scrolling remains available.
-	vp.SoftWrap = false
 	return &agentPickerModel{
 		choices:        choices,
 		details:        vp,

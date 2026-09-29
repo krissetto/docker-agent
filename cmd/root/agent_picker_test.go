@@ -248,6 +248,40 @@ func TestAgentPickerDetailsFixedSize(t *testing.T) {
 	assert.Equal(t, topH, h, "height changed at bottom")
 }
 
+func TestAgentPickerDetailsScrollAndResize(t *testing.T) {
+	t.Parallel()
+
+	m := newAgentPickerModel([]agentChoice{{
+		ref: "default", yaml: strings.Repeat("instruction: "+strings.Repeat("x", 180)+"\n", 100),
+	}})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.openDetails()
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	assert.Equal(t, m.details.Height()/2, m.details.YOffset())
+	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	assert.Equal(t, m.details.Height()/2+3, m.details.YOffset())
+	assert.Equal(t, m.details.YOffset(), m.detailsBar.GetScrollOffset())
+
+	before := m.details.View()
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.NotEqual(t, before, m.details.View(), "long YAML lines must scroll horizontally")
+	assert.Zero(t, m.cursor, "dialog keys must not move the card selection")
+
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	w, h := m.viewportSize()
+	assert.Equal(t, w, lipgloss.Width(m.details.View()))
+	assert.Equal(t, h, lipgloss.Height(m.details.View()))
+	assert.Equal(t, m.details.YOffset(), m.detailsBar.GetScrollOffset())
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.False(t, m.showDetails)
+	assert.False(t, m.cancelled)
+	m.openDetails()
+	assert.Zero(t, m.details.YOffset(), "reopening must start at the top")
+	assert.Zero(t, m.detailsBar.GetScrollOffset())
+}
+
 func TestAgentPickerDetailsHelpNeverWraps(t *testing.T) {
 	t.Parallel()
 
