@@ -83,11 +83,15 @@ func (s State) wordRight(p Position) Position {
 	return p
 }
 
-// Word returns the whitespace-delimited word containing (or immediately before)
-// the insertion position. It does not change the cursor or selection.
+// Word returns the whitespace-delimited word immediately before the insertion
+// position, including any remainder after it. At a line start or immediately
+// after whitespace it returns empty. It never changes cursor or selection.
 func (s State) Word() string {
 	value := []rune(s.line(s.cursor.Line).text)
 	start, end := s.cursor.Column, s.cursor.Column
+	if start == 0 || unicode.IsSpace(value[start-1]) {
+		return ""
+	}
 	for start > 0 && !unicode.IsSpace(value[start-1]) {
 		start--
 	}

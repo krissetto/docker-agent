@@ -469,3 +469,37 @@ func TestForwardWordBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestWordBeforeCursor(t *testing.T) {
+	tests := []struct {
+		name, value string
+		cursor      Position
+		want        string
+	}{
+		{"line start", "hello", Position{}, ""},
+		{"after ASCII space", "one two", Position{0, 4}, ""},
+		{"after Unicode space", "one\u2003two", Position{0, 4}, ""},
+		{"after tab", "one\ttwo", Position{0, 4}, ""},
+		{"inside word", "one two", Position{0, 5}, "two"},
+		{"word end", "one two", Position{0, 3}, "one"},
+		{"document end", "one two", Position{0, 7}, "two"},
+		{"empty", "", Position{}, ""},
+		{"second line start", "one\ntwo", Position{1, 0}, ""},
+		{"second line inside", "one\ntwo", Position{1, 1}, "two"},
+		{"grapheme word", "界e\u0301👩‍💻", Position{0, 3}, "界e\u0301👩‍💻"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(Options{Multiline: true})
+			s.SetValue(tc.value)
+			s.Select(Position{}, tc.cursor)
+			before, content, cursor, selection := s.Revision(), s.ContentRevision(), s.Cursor(), s.SelectedText()
+			if got := s.Word(); got != tc.want {
+				t.Fatalf("Word()=%q want %q", got, tc.want)
+			}
+			if s.Revision() != before || s.ContentRevision() != content || s.Cursor() != cursor || s.SelectedText() != selection {
+				t.Fatal("Word changed state")
+			}
+		})
+	}
+}
