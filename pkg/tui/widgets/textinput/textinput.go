@@ -62,7 +62,7 @@ func New() Model {
 	return Model{Prompt: "> ", EchoCharacter: '*', KeyMap: DefaultKeyMap(), state: text.New(text.Options{}), virtual: true, styles: DefaultDarkStyles()}
 }
 func Blink() tea.Msg { return cursor.Blink() }
-func (m Model) config() text.Config {
+func (m *Model) config() text.Config {
 	width := m.width + 1
 	if m.width <= 0 {
 		width = max(1, ansi.StringWidth(m.Value())+1)
@@ -77,7 +77,7 @@ func (m Model) config() text.Config {
 	c.EchoNone = m.EchoMode == EchoNone
 	return c
 }
-func (m Model) active() StyleState {
+func (m *Model) active() StyleState {
 	if m.focused {
 		return m.styles.Focused
 	}
@@ -90,7 +90,7 @@ func (m *Model) normalize() {
 		m.Err = m.Validate(m.Value())
 	}
 }
-func (m Model) Value() string { return m.state.Value() }
+func (m *Model) Value() string { return m.state.Value() }
 func (m *Model) SetValue(value string) {
 	oldValue, pos := m.Value(), m.Position()
 	m.state.SetCharLimit(m.CharLimit)
@@ -106,8 +106,8 @@ func (m *Model) InsertString(value string) {
 	m.state.Insert(strings.ReplaceAll(value, "\t", " "))
 	m.normalize()
 }
-func (m *Model) Reset()    { m.SetValue("") }
-func (m Model) Width() int { return m.width }
+func (m *Model) Reset()     { m.SetValue("") }
+func (m *Model) Width() int { return m.width }
 func (m *Model) SetWidth(width int) {
 	if m.width != max(0, width) {
 		m.generation++
@@ -115,18 +115,18 @@ func (m *Model) SetWidth(width int) {
 	m.width = max(0, width)
 	m.normalize()
 }
-func (m Model) Position() int { return m.state.Column() }
+func (m *Model) Position() int { return m.state.Column() }
 func (m *Model) SetCursor(position int) {
 	m.state.SetCursor(text.Position{Column: position})
 	m.normalize()
 }
 func (m *Model) CursorStart() { m.SetCursor(0) }
 func (m *Model) CursorEnd()   { m.SetCursor(len([]rune(m.Value()))) }
-func (m Model) PositionAtCell(cell int) int {
+func (m *Model) PositionAtCell(cell int) int {
 	return m.state.PositionAtCell(m.config(), 0, cell).Column
 }
-func (m Model) Layout() text.Layout { return m.state.Layout(m.config()) }
-func (m Model) Focused() bool       { return m.focused }
+func (m *Model) Layout() text.Layout { return m.state.Layout(m.config()) }
+func (m *Model) Focused() bool       { return m.focused }
 func (m *Model) Focus() tea.Cmd {
 	m.focused = true
 	m.generation++
@@ -134,16 +134,16 @@ func (m *Model) Focus() tea.Cmd {
 	return m.blink.Reset(m.styles.Cursor)
 }
 func (m *Model) Blur()                         { m.focused = false; m.generation++; m.blink.Stop() }
-func (m Model) Styles() Styles                 { return m.styles }
+func (m *Model) Styles() Styles                { return m.styles }
 func (m *Model) SetStyles(styles Styles)       { m.styles = styles; m.generation++ }
-func (m Model) VirtualCursor() bool            { return m.virtual }
+func (m *Model) VirtualCursor() bool           { return m.virtual }
 func (m *Model) SetVirtualCursor(enabled bool) { m.virtual = enabled; m.generation++ }
 
 // Revision covers mutation methods; direct exported-field assignments must also
 // invalidate an owning presentation cache.
-func (m Model) Revision() uint64        { return m.state.Revision() + m.generation }
-func (m Model) ContentRevision() uint64 { return m.state.ContentRevision() }
-func (m Model) Cursor() *tea.Cursor {
+func (m *Model) Revision() uint64        { return m.state.Revision() + m.generation }
+func (m *Model) ContentRevision() uint64 { return m.state.ContentRevision() }
+func (m *Model) Cursor() *tea.Cursor {
 	if m.virtual || !m.focused {
 		return nil
 	}

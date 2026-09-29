@@ -59,16 +59,16 @@ func New() Model {
 	return m
 }
 func Blink() tea.Msg { return cursor.Blink() }
-func (m Model) config() text.Config {
+func (m *Model) config() text.Config {
 	return text.Config{Width: m.width, Height: m.height, Wrap: true, TabWidth: 4}
 }
-func (m Model) active() StyleState {
+func (m *Model) active() StyleState {
 	if m.focused {
 		return m.styles.Focused
 	}
 	return m.styles.Blurred
 }
-func (m Model) gutterWidth() int {
+func (m *Model) gutterWidth() int {
 	if !m.ShowLineNumbers {
 		return 0
 	}
@@ -88,7 +88,7 @@ func (m *Model) normalize() {
 
 // Normalize applies the allocated outer width and editable height without rendering.
 func (m *Model) Normalize(width, rows int) { m.SetWidth(width); m.SetHeight(rows) }
-func (m Model) Width() int                 { return m.width }
+func (m *Model) Width() int                { return m.width }
 func (m *Model) SetWidth(width int) {
 	if m.MaxWidth > 0 {
 		width = min(width, m.MaxWidth)
@@ -100,7 +100,7 @@ func (m *Model) SetWidth(width int) {
 	}
 	m.normalize()
 }
-func (m Model) Height() int { return m.height }
+func (m *Model) Height() int { return m.height }
 func (m *Model) SetHeight(height int) {
 	if m.MaxContentHeight > 0 {
 		height = min(height, m.MaxContentHeight)
@@ -112,7 +112,7 @@ func (m *Model) SetHeight(height int) {
 	}
 	m.state.NormalizeViewport(m.config())
 }
-func (m Model) Value() string { return m.state.Value() }
+func (m *Model) Value() string { return m.state.Value() }
 func (m *Model) SetValue(value string) {
 	value = normalizeNewlines(value)
 	if m.MaxContentHeight > 0 {
@@ -164,17 +164,17 @@ func normalizeNewlines(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
 }
 
-func (m *Model) Reset()               { m.SetValue("") }
-func (m Model) Word() string          { return m.state.Word() }
-func (m Model) SelectedText() string  { return m.state.SelectedText() }
-func (m Model) Line() int             { return m.state.Line() }
-func (m Model) Column() int           { return m.state.Column() }
-func (m Model) LineCount() int        { return m.state.LineCount() }
-func (m Model) ScrollYOffset() int    { return m.state.ScrollYOffset() }
-func (m Model) LineInfo() LineInfo    { return m.state.LineInfo(m.config()) }
-func (m Model) Layout() text.Layout   { return m.state.Layout(m.config()) }
-func (m Model) ContentLineCount() int { return m.state.VisualLineCount(m.config()) }
-func (m Model) PositionAtCell(row, column int) text.Position {
+func (m *Model) Reset()                { m.SetValue("") }
+func (m *Model) Word() string          { return m.state.Word() }
+func (m *Model) SelectedText() string  { return m.state.SelectedText() }
+func (m *Model) Line() int             { return m.state.Line() }
+func (m *Model) Column() int           { return m.state.Column() }
+func (m *Model) LineCount() int        { return m.state.LineCount() }
+func (m *Model) ScrollYOffset() int    { return m.state.ScrollYOffset() }
+func (m *Model) LineInfo() LineInfo    { return m.state.LineInfo(m.config()) }
+func (m *Model) Layout() text.Layout   { return m.state.Layout(m.config()) }
+func (m *Model) ContentLineCount() int { return m.state.VisualLineCount(m.config()) }
+func (m *Model) PositionAtCell(row, column int) text.Position {
 	return m.state.PositionAtCell(m.config(), row, column)
 }
 func (m *Model) SetCursorPosition(p text.Position) { m.state.SetCursor(p); m.normalize() }
@@ -185,13 +185,13 @@ func (m *Model) apply(kind text.ActionKind, selecting bool) {
 	m.state.Apply(text.Action{Kind: kind, Select: selecting, Config: m.config()})
 	m.normalize()
 }
-func (m *Model) MoveToBegin() { m.apply(text.MoveDocumentStart, false) }
-func (m *Model) MoveToEnd()   { m.apply(text.MoveDocumentEnd, false) }
-func (m *Model) CursorUp()    { m.apply(text.MoveUp, false) }
-func (m *Model) CursorDown()  { m.apply(text.MoveDown, false) }
-func (m *Model) CursorStart() { m.apply(text.MoveHome, false) }
-func (m *Model) CursorEnd()   { m.apply(text.MoveEnd, false) }
-func (m Model) Focused() bool { return m.focused }
+func (m *Model) MoveToBegin()  { m.apply(text.MoveDocumentStart, false) }
+func (m *Model) MoveToEnd()    { m.apply(text.MoveDocumentEnd, false) }
+func (m *Model) CursorUp()     { m.apply(text.MoveUp, false) }
+func (m *Model) CursorDown()   { m.apply(text.MoveDown, false) }
+func (m *Model) CursorStart()  { m.apply(text.MoveHome, false) }
+func (m *Model) CursorEnd()    { m.apply(text.MoveEnd, false) }
+func (m *Model) Focused() bool { return m.focused }
 func (m *Model) Focus() tea.Cmd {
 	m.focused = true
 	m.generation++
@@ -199,16 +199,16 @@ func (m *Model) Focus() tea.Cmd {
 	return m.blink.Reset(m.styles.Cursor)
 }
 func (m *Model) Blur()                         { m.focused = false; m.generation++; m.blink.Stop() }
-func (m Model) Styles() Styles                 { return m.styles }
+func (m *Model) Styles() Styles                { return m.styles }
 func (m *Model) SetStyles(styles Styles)       { m.styles = styles; m.generation++ }
-func (m Model) VirtualCursor() bool            { return m.virtual }
+func (m *Model) VirtualCursor() bool           { return m.virtual }
 func (m *Model) SetVirtualCursor(enabled bool) { m.virtual = enabled; m.generation++ }
 
 // Revision covers mutation methods. Owners assigning exported configuration fields
 // directly must also invalidate their presentation cache.
-func (m Model) Revision() uint64        { return m.state.Revision() + m.generation }
-func (m Model) ContentRevision() uint64 { return m.state.ContentRevision() }
-func (m Model) Cursor() *tea.Cursor {
+func (m *Model) Revision() uint64        { return m.state.Revision() + m.generation }
+func (m *Model) ContentRevision() uint64 { return m.state.ContentRevision() }
+func (m *Model) Cursor() *tea.Cursor {
 	if m.virtual || !m.focused {
 		return nil
 	}
