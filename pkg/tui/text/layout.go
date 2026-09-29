@@ -129,6 +129,31 @@ func (s State) rows(c Config) []Row {
 	return rows
 }
 
+// VisualLineCount returns the number of wrapped rows, including an insertion
+// row at a full-width line ending. Cached reads do not allocate a snapshot.
+func (s State) VisualLineCount(config Config) int {
+	c := normalizedConfig(config)
+	count := 0
+	for line := 0; line < s.LineCount(); line++ {
+		count += len(s.line(line).wrapped(c))
+	}
+	return count
+}
+
+// CursorCell returns absolute visual coordinates without changing the viewport
+// or assembling a layout snapshot. Cached reads do not allocate.
+func (s State) CursorCell(config Config) Cell {
+	c := normalizedConfig(config)
+	row := 0
+	for line := 0; line < s.cursor.Line; line++ {
+		row += len(s.line(line).wrapped(c))
+	}
+	// Cached per-line rows have no document line index.
+	cell := rowCursor(s.line(s.cursor.Line).wrapped(c), Position{Column: s.cursor.Column})
+	cell.Row += row
+	return cell
+}
+
 // Layout returns a detached snapshot. Its slices may be modified by callers
 // without affecting this State, its copies, or future layouts. It never scrolls.
 func (s State) Layout(config Config) Layout {
@@ -140,9 +165,22 @@ func (s State) Layout(config Config) Layout {
 	}
 	out.Cursor = rowCursor(rows, s.cursor)
 	a, b, selected := s.selection()
+	runCount := 0
+	for _, r := range rows {
+		runCount += len(r.Runs)
+	}
+	// One snapshot-owned backing array avoids an allocation for every visual
+	// row. Full slice expressions keep appending to one row from corrupting the
+	// next row in this same snapshot.
+	runs := make([]Run, runCount)
+	offset := 0
 	for i := range out.Rows {
 		r := &out.Rows[i]
-		r.Runs = append([]Run(nil), r.Runs...)
+		if n := len(r.Runs); n > 0 {
+			copy(runs[offset:], r.Runs)
+			r.Runs = runs[offset : offset+n : offset+n]
+			offset += n
+		}
 		start, end := -1, -1
 		for j := range r.Runs {
 			run := &r.Runs[j]
@@ -189,9 +227,10 @@ func (s State) LineInfo(config Config) LineInfo {
 func positionInRow(row Row, column int) Position {
 	p := Position{row.Line, row.StartColumn}
 	for _, run := range row.Runs {
-		// The leading cell (and the left half of a wide grapheme) selects its start.
-		// This rounds a click in the right half to the following insertion position.
-		if column < run.Cell+(run.Width+1)/2 {
+		// Every occupied cell belongs to the grapheme's leading insertion
+		// boundary. In particular, a click on a wide glyph's trailing cell must
+		// not skip that glyph (or split an emoji sequence).
+		if column < run.Cell+run.Width {
 			return Position{row.Line, run.StartColumn}
 		}
 		p.Column = run.EndColumn
@@ -268,7 +307,8 @@ func (s *State) ScrollBy(delta int, config Config) {
 }
 
 // RuneToCell returns the display column at or before a grapheme boundary.
-// CellToRune returns the nearest rune boundary in display cells. They use the
+// CellToRune returns the leading rune boundary of the grapheme occupying a
+// display cell. They use the
 // same tab, mask and hidden-text policy as Layout, without wrapping.
 func RuneToCell(value string, column int, config Config) int {
 	c := normalizedConfig(config)

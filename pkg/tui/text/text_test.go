@@ -328,3 +328,108 @@ func BenchmarkEditAndScroll(b *testing.B) {
 		s.ScrollBy(-1, config)
 	}
 }
+
+func TestLayoutMetadataParity(t *testing.T) {
+	for _, value := range []string{"", "abcde", "a界e\u0301\n👩🏽‍💻\txyz\n", strings.Repeat("long words 界\n", 20)} {
+		s := New(Options{Multiline: true})
+		s.SetValue(value)
+		for _, config := range []Config{{Width: 5, Height: 2, Wrap: true}, {Width: 1, Wrap: true}, {Width: 4}, {Width: 3, Wrap: true, Mask: '*'}, {Width: 2, EchoNone: true}} {
+			s.Apply(Action{Kind: MoveDocumentEnd})
+			for {
+				before := s.Revision()
+				layout := s.Layout(config)
+				if got := s.VisualLineCount(config); got != len(layout.Rows) {
+					t.Fatalf("count %d != %d", got, len(layout.Rows))
+				}
+				if got := s.CursorCell(config); got != layout.Cursor {
+					t.Fatalf("cursor %v != %v, %q at %v", got, layout.Cursor, value, s.Cursor())
+				}
+				if s.Revision() != before {
+					t.Fatal("metadata read changed state")
+				}
+				if s.Cursor() == (Position{}) {
+					break
+				}
+				s.Apply(Action{Kind: MoveLeft})
+			}
+			if got := testing.AllocsPerRun(20, func() { _ = s.VisualLineCount(config); _ = s.CursorCell(config) }); got != 0 {
+				t.Fatalf("cached metadata allocated %v", got)
+			}
+		}
+	}
+}
+
+func TestLayoutRunAppendIsolation(t *testing.T) {
+	s := New(Options{Multiline: true})
+	s.SetValue("ab\ncd")
+	layout := s.Layout(Config{Width: 10})
+	next := layout.Rows[1].Runs[0]
+	layout.Rows[0].Runs = append(layout.Rows[0].Runs, Run{Text: "overwrite"})
+	if layout.Rows[1].Runs[0] != next {
+		t.Fatal("append changed neighboring row")
+	}
+}
+
+func BenchmarkLayoutMetadata(b *testing.B) {
+	s := New(Options{Multiline: true})
+	s.SetValue(strings.Repeat("Unicode 界 e\u0301 👩🏽‍💻 words and wrapping text\n", 1000))
+	config := Config{Width: 30, Height: 8, Wrap: true}
+	_ = s.VisualLineCount(config)
+	_ = s.CursorCell(config)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = s.VisualLineCount(config)
+		_ = s.CursorCell(config)
+	}
+}
+
+func TestHitEveryOccupiedCellStartsGrapheme(t *testing.T) {
+	s := New(Options{})
+	s.SetValue("界e\u0301👩‍💻tail")
+	config := Config{Width: 20, Height: 1}
+	for _, row := range s.Layout(config).Rows {
+		for _, run := range row.Runs {
+			for cell := run.Cell; cell < run.Cell+run.Width; cell++ {
+				if got := s.PositionAtCell(config, 0, cell); got.Column != run.StartColumn {
+					t.Fatalf("cell %d: rune %d want %d", cell, got.Column, run.StartColumn)
+				}
+			}
+		}
+	}
+	if got := s.PositionAtCell(config, 0, 4); got.Column != 3 {
+		t.Fatalf("emoji trailing cell: %v", got)
+	}
+}
+
+func TestNarrowHorizontalViewportBoundaries(t *testing.T) {
+	for _, value := range []string{"界界界界界", "界e\u0301👩‍💻tail", "a\t界"} {
+		for width := 1; width <= 6; width++ {
+			s := New(Options{})
+			s.SetValue(value)
+			config := Config{Width: width, Height: 1}
+			for {
+				s.NormalizeViewport(config)
+				layout := s.Layout(config)
+				x := layout.ScrollX
+				if layout.Cursor.Column < x || layout.Cursor.Column >= x+width {
+					t.Fatalf("cursor outside width%d: %+v", width, layout)
+				}
+				for _, run := range layout.Rows[0].Runs {
+					if x > run.Cell && x < run.Cell+run.Width {
+						t.Fatalf("offset %d splits %+v", x, run)
+					}
+					for cell := max(x, run.Cell); cell < min(x+width, run.Cell+run.Width); cell++ {
+						if got := s.PositionAtCell(config, 0, cell-x); got.Column != run.StartColumn {
+							t.Fatalf("viewport cell %d maps %v not %d", cell-x, got, run.StartColumn)
+						}
+					}
+				}
+				if s.Column() == 0 {
+					break
+				}
+				s.Apply(Action{Kind: MoveLeft})
+			}
+		}
+	}
+}
