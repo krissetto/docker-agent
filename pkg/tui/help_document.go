@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"charm.land/bubbles/v2/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"charm.land/bubbles/v2/textarea"
 
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"

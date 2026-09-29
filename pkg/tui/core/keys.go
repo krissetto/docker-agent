@@ -8,7 +8,7 @@ import (
 	"sync"
 	"unicode"
 
-	"charm.land/bubbles/v2/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/userconfig"
 )

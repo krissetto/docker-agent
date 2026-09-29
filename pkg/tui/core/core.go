@@ -3,8 +3,8 @@ package core
 import (
 	"fmt"
 
-	"charm.land/bubbles/v2/help"
-	"charm.land/bubbles/v2/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 )
 

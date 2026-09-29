@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -19,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	tuidialog "github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 

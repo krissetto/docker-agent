@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"charm.land/bubbles/v2/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 

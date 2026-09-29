@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	tuikey "github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // Run starts the board TUI and blocks until the user quits.
@@ -600,7 +601,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The global quit binding (ctrl+c by default, user-remappable)
 		// always quits, even while a dialog captures the keyboard. Plain q
 		// stays with the dialog: it may be typed text.
-		if press, ok := msg.(tea.KeyPressMsg); ok && key.Matches(press, core.GetKeys().Quit) {
+		if press, ok := msg.(tea.KeyPressMsg); ok && tuikey.Matches(press, core.GetKeys().Quit) {
 			return m, tea.Quit
 		}
 		var cmd tea.Cmd
@@ -634,7 +635,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
 
-	case key.Matches(msg, core.GetKeys().Suspend):
+	case tuikey.Matches(msg, core.GetKeys().Suspend):
 		return m, tea.Suspend
 
 	case key.Matches(msg, keys.Left):

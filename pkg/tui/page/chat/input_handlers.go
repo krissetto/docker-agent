@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"charm.land/bubbles/v2/key"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
