@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func TestRootNotificationAvoidanceBothCompositorsAndHitGeometry(t *testing.T) {
@@ -140,5 +141,78 @@ func TestRootNotificationAvoidanceSkipsClosedAndRefreshesOnShow(t *testing.T) {
 	root.Update(notification.ShowMsg{Text: "Reopened over empty input"})
 	require.Greater(t, counted.calls, calls)
 	require.False(t, root.ar.HasActive(), "reopening cannot reuse the previous notification's occupancy")
+	root.notification.Cleanup()
+}
+
+func TestRootNotificationAvoidanceStableStorageAndLegacyFallback(t *testing.T) {
+	root, _, _ := harnessRoot(t, 156, 48, animation.NewRuntimeWithScheduler(&rootImmediateScheduler{now: time.Unix(1, 0)}))
+	root.focusedPanel = PanelEditor
+	root.editor.Focus()
+	root.editor.SetValue(strings.Repeat("work item 界 unicode words ", 80))
+	root.resizeAll()
+	root.Update(notification.ShowMsg{Text: "Stable notification above draft"})
+	root.syncNotificationAvoidance()
+	require.NotEmpty(t, root.notificationOccupied)
+	require.Zero(t, testing.AllocsPerRun(20, root.syncNotificationAvoidance), "warm root sync reuses value snapshot and caller-owned coordinates")
+	want := append([]image.Rectangle(nil), root.notificationOccupied...)
+	// Optional append support must not be required of existing Editor wrappers.
+	legacy := &countedOccupancyEditor{Editor: root.editor}
+	root.editor = legacy
+	root.syncNotificationAvoidance()
+	require.Equal(t, 1, legacy.calls)
+	require.Equal(t, want, root.notificationOccupied)
+	root.notification.Cleanup()
+}
+
+func TestRootNotificationAvoidanceTransitionsMatchCompleteFreshView(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	root, _, scheduler := paneReplayRoot(t)
+	root.singlePane()
+	root.focusedPanel = PanelEditor
+	root.editor.Focus()
+	root.editor.SetValue(strings.Repeat("界", 70) + "\n" + strings.Repeat("字", 70))
+	root.resizeAll()
+	check := func() {
+		t.Helper()
+		cached := root.View()
+		root.viewCacheValid = false
+		require.Equal(t, root.View(), cached, "full tea.View parity includes overlay and terminal metadata")
+	}
+	for _, step := range []struct {
+		name string
+		run  func()
+	}{
+		{"show", func() { root.Update(notification.ShowMsg{Text: "Notification transition parity"}) }},
+		{"edit", func() { root.Update(tea.KeyPressMsg{Code: 'x', Text: "x"}) }},
+		{"paste", func() { root.Update(tea.PasteMsg{Content: " pasted 界"}) }},
+		{"resize", func() { root.Update(tea.WindowSizeMsg{Width: 130, Height: 42}) }},
+		{"theme", func() {
+			theme := *original
+			theme.Colors.TextMuted = "#123456"
+			styles.ApplyTheme(&theme)
+			root.Update(messages.ThemeChangedMsg{})
+		}},
+		{"blur", func() { root.editor.Blur(); root.focusedPanel = PanelContent; root.Update(struct{}{}) }},
+		{"focus", func() { root.editor.Focus(); root.focusedPanel = PanelEditor; root.Update(struct{}{}) }},
+		{"clear", func() { root.editor.SetValue(""); root.Update(struct{}{}) }},
+		{"hide", func() { root.Update(notification.HideMsg{}) }},
+		{"reopen", func() {
+			root.editor.SetValue(strings.Repeat("new text ", 30))
+			root.resizeAll()
+			root.Update(notification.ShowMsg{Text: "Reopened notification"})
+		}},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			step.run()
+			check()
+			for i := 0; i < 80 && len(scheduler.pending) > 0; i++ {
+				cmd := scheduler.pending[0]
+				scheduler.pending = scheduler.pending[1:]
+				root.Update(cmd())
+				check()
+			}
+		})
+	}
 	root.notification.Cleanup()
 }

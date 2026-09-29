@@ -228,14 +228,15 @@ type TabBar struct {
 	dragSeq int // monotonic counter incremented on each mouse-down
 
 	// View cache: avoids re-rendering the tab bar every frame when nothing changed.
-	cachedView           string
-	cachedRender         renderedTabbar
-	themeGeneration      uint64
-	agentColorGeneration uint64
-	viewDirty            bool
-	visualDirty          bool
-	lastOverlayX         int
-	hadOverlay           bool
+	renderedIndicatorFrame int
+	cachedView             string
+	cachedRender           renderedTabbar
+	themeGeneration        uint64
+	agentColorGeneration   uint64
+	viewDirty              bool
+	visualDirty            bool
+	lastOverlayX           int
+	hadOverlay             bool
 
 	visualGeneration uint64
 }
@@ -439,6 +440,13 @@ func (t *TabBar) SetVisible(visible bool) tea.Cmd {
 
 // Tick advances local tab bar transitions and reports only visible frame changes.
 func (t *TabBar) Tick() tea.Cmd {
+	// Setters and pointer updates install authoritative geometry and reconcile
+	// subscriptions synchronously. Between those updates, a settled strip can
+	// only change at the next indicator glyph. Avoid rendering every tab merely
+	// to rediscover identical geometry and bytes on sub-frame owner ticks.
+	if t.unchangedTick() {
+		return nil
+	}
 	defer t.recordVisualState()
 	if t.Height() == 0 {
 		return nil
@@ -500,6 +508,16 @@ func (t *TabBar) Tick() tea.Cmd {
 		}
 	}
 	return cmd
+}
+
+// unchangedTick is deliberately narrower than the View cache: finite motion,
+// delayed scrolling, and pointer capture must still advance their lifecycles.
+func (t *TabBar) unchangedTick() bool {
+	return !t.viewDirty && t.cachedView != "" &&
+		t.themeGeneration == styles.ThemeGeneration() && t.agentColorGeneration == styles.AgentColorGeneration() &&
+		!t.plusHoverAnim.Running() && !t.plusAnim.Running() && !t.hasTabMotion() &&
+		!t.drag.active && !t.drag.pending && t.settlingDrop == nil && !t.scrollPending &&
+		(!t.indicatorSub.IsActive() || t.renderedIndicatorFrame == animation.Card.FrameIndexAt(t.ar.Now()))
 }
 
 // StopAnimations synchronously cancels every tab-owned transition and releases
@@ -1147,6 +1165,7 @@ func (t *TabBar) rendered() renderedTabbar {
 		return t.cachedRender
 	}
 	t.cachedRender = t.render()
+	t.renderedIndicatorFrame = animation.Card.FrameIndexAt(t.ar.Now())
 	t.cachedView = t.cachedRender.view
 	t.viewDirty = false
 	t.themeGeneration = styles.ThemeGeneration()

@@ -18,6 +18,13 @@ type TextOccupancy interface {
 	OccupiedTextCells() []image.Rectangle
 }
 
+// TextOccupancyAppender appends screen-space cells to caller-owned storage.
+// Unlike borrowing the editor's cache, the returned cells can safely be retained
+// or modified by the caller across subsequent editor updates.
+type TextOccupancyAppender interface {
+	AppendOccupiedTextCells(dst []image.Rectangle, origin image.Point) []image.Rectangle
+}
+
 // textOccupancyKey uses textarea state rather than editor messages: input can
 // also change via completions, history, paste, and direct host calls. Cursor
 // motion can change the rendered viewport without changing the text. Blinking
@@ -36,11 +43,31 @@ type textOccupancyCache struct {
 }
 
 func (e *editor) OccupiedTextCells() []image.Rectangle {
+	return slices.Clone(e.occupiedTextCells())
+}
+
+func (e *editor) AppendOccupiedTextCells(dst []image.Rectangle, origin image.Point) []image.Rectangle {
+	cells := e.occupiedTextCells()
+	dst = slices.Grow(dst, len(cells))
+	for _, cell := range cells {
+		dst = append(dst, cell.Add(origin))
+	}
+	return dst
+}
+
+func (e *editor) occupiedTextCells() []image.Rectangle {
 	if !e.textarea.Focused() {
 		e.occupancy = textOccupancyCache{}
 		return nil
 	}
-	value := e.textarea.Value()
+	// Value builds a string from textarea rune lines. Reuse its exact snapshot
+	// until Update or a direct content-mutating API is called; geometry and
+	// viewport state below are still read on every query (including after View).
+	if !e.occupancyValueValid {
+		e.occupancyValue = e.textarea.Value()
+		e.occupancyValueValid = true
+	}
+	value := e.occupancyValue
 	if value == "" {
 		e.occupancy = textOccupancyCache{}
 		return nil
@@ -56,7 +83,7 @@ func (e *editor) OccupiedTextCells() []image.Rectangle {
 		themeGeneration: e.themeGeneration,
 	}
 	if e.occupancy.valid && e.occupancy.key == key {
-		return slices.Clone(e.occupancy.cells)
+		return e.occupancy.cells
 	}
 
 	// Use the actual viewport so wrapping, wheel scrolling, and Unicode clipping
@@ -85,6 +112,5 @@ func (e *editor) OccupiedTextCells() []image.Rectangle {
 		}
 	}
 	e.occupancy = textOccupancyCache{key: key, cells: cells, valid: true}
-	// Keep callers' slices independent of the cache and later editor updates.
-	return slices.Clone(cells)
+	return cells
 }

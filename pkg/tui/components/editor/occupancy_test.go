@@ -2,6 +2,8 @@ package editor
 
 import (
 	"image"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func TestOccupiedTextCellsExcludeNonInputSurfaces(t *testing.T) {
@@ -168,4 +174,86 @@ func TestOccupiedTextCellsCursorVisibilityOnlyChangesStyling(t *testing.T) {
 	require.Same(t, cached, &e.occupancy.cells[0], "cursor visibility need not invalidate glyph occupancy")
 	e.occupancy = textOccupancyCache{}
 	assert.Equal(t, visible, e.OccupiedTextCells(), "hidden cursor's fresh scan agrees with cached visible cursor")
+}
+
+func TestAppendOccupiedTextCellsReuseAndOwnership(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(100, 5)
+	e.SetValue(strings.Repeat("work item 界 unicode words ", 80))
+	origin := image.Pt(3, 20)
+	cells := e.AppendOccupiedTextCells(nil, origin)
+	want := e.OccupiedTextCells()
+	for i := range want {
+		want[i] = want[i].Add(origin)
+	}
+	require.Equal(t, want, cells)
+	require.Zero(t, testing.AllocsPerRun(20, func() {
+		cells = e.AppendOccupiedTextCells(cells[:0], origin)
+	}), "stable occupancy must not rebuild the value or allocate coordinate slices")
+	cells[0] = image.Rect(99, 99, 100, 100)
+	require.Equal(t, want, e.AppendOccupiedTextCells(nil, origin), "caller storage cannot mutate cached cells")
+	e.SetValue("replacement")
+	e.AppendOccupiedTextCells(nil, origin)
+	require.Equal(t, image.Rect(99, 99, 100, 100), cells[0], "editor updates cannot mutate retained caller storage")
+}
+
+func TestOccupiedTextCellsValueSnapshotMutationPaths(t *testing.T) {
+	for _, mode := range []string{"replace same length", "insert", "paste", "completion", "suggestion", "history", "search", "send", "attachment"} {
+		t.Run(mode, func(t *testing.T) {
+			h, err := history.New(t.TempDir())
+			require.NoError(t, err)
+			require.NoError(t, h.Add("history replacement"))
+			e := New(h).(*editor)
+			e.SetSize(40, 3)
+			e.SetValue("abc def")
+			e.OccupiedTextCells()
+			switch mode {
+			case "replace same length":
+				e.SetValue("a bcdef")
+			case "insert":
+				e.InsertText(" new")
+			case "paste":
+				e.Update(tea.PasteMsg{Content: " pasted"})
+			case "completion":
+				e.Update(completion.SelectedMsg{Value: "completed"})
+			case "suggestion":
+				e.suggestion, e.hasSuggestion = " suggestion", true
+				e.AcceptSuggestion()
+			case "history":
+				e.userTyped = false
+				e.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+			case "search":
+				e.EnterHistorySearch()
+				require.Empty(t, e.OccupiedTextCells())
+				e.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
+				e.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			case "send":
+				e.SendContent()
+			case "attachment":
+				path := filepath.Join(t.TempDir(), "file.txt")
+				require.NoError(t, os.WriteFile(path, []byte("contents"), 0o600))
+				require.NoError(t, e.AttachFile(path))
+			}
+			got := e.OccupiedTextCells()
+			e.occupancy, e.occupancyValueValid = textOccupancyCache{}, false
+			require.Equal(t, e.OccupiedTextCells(), got, "snapshot result agrees with fresh textarea scan")
+		})
+	}
+}
+
+func TestOccupiedTextCellsThemeAndOverlayPreserveActualViewport(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	e := New(nil).(*editor)
+	e.SetSize(12, 2)
+	e.SetValue("first\nlast 界")
+	e.suggestion, e.hasSuggestion = " suggested words wrapping below", true
+	e.OccupiedTextCells()
+	e.View() // suggestion rendering may reposition the real viewport
+	theme := *original
+	theme.Colors.TextMuted = "#123456"
+	styles.ApplyTheme(&theme)
+	got := e.OccupiedTextCells()
+	e.occupancy, e.occupancyValueValid = textOccupancyCache{}, false
+	require.Equal(t, e.OccupiedTextCells(), got)
 }

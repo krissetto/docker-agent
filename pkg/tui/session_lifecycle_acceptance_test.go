@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -99,6 +101,20 @@ func (h *lifecycleHandle) Cancel(context.Context, string) (runtime.CancelResult,
 }
 func (h *lifecycleHandle) Release(context.Context) error { h.releases.Add(1); return nil }
 
+// lifecycleProgramProbe executes observations and cleanup on the model owner,
+// rather than racing asynchronous restore from the test goroutine.
+type lifecycleProgramProbe struct{ inspect func(*appModel) }
+type lifecycleProgramModel struct{ *appModel }
+
+func (m *lifecycleProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if probe, ok := msg.(lifecycleProgramProbe); ok {
+		probe.inspect(m.appModel)
+		return m, nil
+	}
+	_, cmd := m.appModel.Update(msg)
+	return m, cmd
+}
+
 func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 	dir := t.TempDir()
 	paths.SetDataDir(dir)
@@ -131,16 +147,26 @@ func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 	// Drive the model through a real program: session loading now finishes
 	// asynchronously (git-branch watching, transcript restore), so a
 	// synchronous cmd-feeding loop would block on the watcher.
-	driver := tuitest.New(t, model, 120, 40)
+	driver := tuitest.New(t, &lifecycleProgramModel{m}, 120, 40)
 	driver.Send(messages.LoadSessionMsg{SessionID: persisted.ID})
 	driver.WaitFor(tuitest.Contains("a"))
-	require.Eventually(t, func() bool { return m.application.Session().ID == persisted.ID }, 5*time.Second, 10*time.Millisecond)
+	var restoredApp *app.App
+	require.Eventually(t, func() bool {
+		loaded := false
+		driver.Send(lifecycleProgramProbe{inspect: func(owner *appModel) {
+			loaded = owner.application.Session().ID == persisted.ID
+			if loaded {
+				restoredApp = owner.application
+			}
+		}})
+		return loaded
+	}, 5*time.Second, 10*time.Millisecond)
 	assert.Zero(t, ownerCleanup.Load(), "borrowed replacement must not close the shared runtime")
 
 	// Replacement cancels only the blank/transient observations. The restored
 	// session accepts its first and subsequent turns, including after another
 	// view observation is attached and cancelled.
-	_, err := m.application.FollowUpMessage(t.Context(), "first after restore", nil)
+	_, err := restoredApp.FollowUpMessage(t.Context(), "first after restore", nil)
 	require.NoError(t, err)
 	restored := sessions.handles[persisted.ID]
 	require.NotNil(t, restored)
@@ -149,11 +175,11 @@ func TestColdRestoreWorkingDirReplacementRetainsSharedRuntime(t *testing.T) {
 	require.NoError(t, err)
 	cancel()
 	obs.Cancel()
-	_, err = m.application.FollowUpMessage(t.Context(), "second after view cancel", nil)
+	_, err = restoredApp.FollowUpMessage(t.Context(), "second after view cancel", nil)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), restored.submits.Load())
 
-	m.cleanupManagedResources()
+	driver.Send(lifecycleProgramProbe{inspect: func(owner *appModel) { owner.cleanupManagedResources() }})
 	assert.Equal(t, int32(1), ownerCleanup.Load())
 }
 

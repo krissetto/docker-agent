@@ -472,26 +472,48 @@ func (m *appModel) paneSubagentCount(id string, nodeID subagent.NodeID) int {
 	return 0
 }
 
+// hasRunningPane reports an animated activity glyph in an actually drawn
+// pane header, not merely a running session in the saved layout.
 func (m *appModel) hasRunningPane() bool {
-	for _, tab := range m.tabInfos {
-		if tab.Activity == messages.TabActivityRunning && m.paneVisible(tab.SessionID) {
+	if !m.panePresentationEnabled() || m.paneHeaderHeight() == 0 {
+		return false
+	}
+	for id := range m.paneGeometry.Panes {
+		if _, ok := m.chatPages[id].(chat.SplitPresentation); !ok {
+			continue
+		}
+		if m.paneActivityKind(id) == paneActivityRunning {
 			return true
 		}
 	}
 	return false
 }
 
-// paneActivity reads canonical per-session state; headers never acquire leases.
-func (m *appModel) paneActivity(id string) string {
+type paneActivityKind uint8
+
+const (
+	paneActivityOutcome paneActivityKind = iota
+	paneActivityDormant
+	paneActivityPaused
+	paneActivityPausing
+	paneActivityAttention
+	paneActivityRunning
+	paneActivityPending
+	paneActivityDescendantRunning
+)
+
+// paneActivityKind shares the precedence of static activity labels and the
+// running indicator with animation invalidation, without rendering labels.
+func (m *appModel) paneActivityKind(id string) paneActivityKind {
 	if status, exists := m.paneRenderStatus(id); exists && status.Dormant {
-		return styles.WarningStyle.Render("Restored · paused · /resume")
+		return paneActivityDormant
 	}
 	if state := m.sessionStates[id]; state != nil {
 		switch state.PauseState() {
 		case service.PausePaused:
-			return styles.WarningStyle.Render("⏸ paused")
+			return paneActivityPaused
 		case service.PausePausing:
-			return styles.WarningStyle.Render("⏸ pausing")
+			return paneActivityPausing
 		}
 	}
 	for _, tab := range m.tabInfos {
@@ -499,16 +521,37 @@ func (m *appModel) paneActivity(id string) string {
 			continue
 		}
 		if tab.NeedsAttention {
-			return styles.WarningStyle.Render("! attention")
+			return paneActivityAttention
 		}
 		switch tab.Activity {
 		case messages.TabActivityRunning:
-			return styles.SpinnerDotsHighlightStyle.Render(animation.Card.FrameAt(m.ar.Now()) + " running")
+			return paneActivityRunning
 		case messages.TabActivityPending:
-			return styles.MutedStyle.Render("· pending")
+			return paneActivityPending
 		case messages.TabActivityDescendantRunning:
-			return styles.MutedStyle.Render("◇")
+			return paneActivityDescendantRunning
 		}
+	}
+	return paneActivityOutcome
+}
+
+// paneActivity reads canonical per-session state; headers never acquire leases.
+func (m *appModel) paneActivity(id string) string {
+	switch m.paneActivityKind(id) {
+	case paneActivityDormant:
+		return styles.WarningStyle.Render("Restored · paused · /resume")
+	case paneActivityPaused:
+		return styles.WarningStyle.Render("⏸ paused")
+	case paneActivityPausing:
+		return styles.WarningStyle.Render("⏸ pausing")
+	case paneActivityAttention:
+		return styles.WarningStyle.Render("! attention")
+	case paneActivityRunning:
+		return styles.SpinnerDotsHighlightStyle.Render(animation.Card.FrameAt(m.ar.Now()) + " running")
+	case paneActivityPending:
+		return styles.MutedStyle.Render("· pending")
+	case paneActivityDescendantRunning:
+		return styles.MutedStyle.Render("◇")
 	}
 	if runner := m.supervisor.GetRunner(id); runner != nil && runner.App != nil && runner.App.Session() != nil {
 		switch m.paneOutcomes[runner.App.Session().ID] {

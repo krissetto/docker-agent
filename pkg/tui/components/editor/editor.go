@@ -135,6 +135,8 @@ type editor struct {
 	themeGeneration               uint64
 	textarea                      textarea.Model
 	occupancy                     textOccupancyCache
+	occupancyValue                string
+	occupancyValueValid           bool
 	hist                          *history.History
 	width                         int
 	height                        int
@@ -551,6 +553,7 @@ func (e *editor) isCursorAtEnd() bool {
 // AcceptSuggestion applies the current suggestion into the textarea value and
 // returns a command to update the completion query, or nil if no suggestion was applied.
 func (e *editor) AcceptSuggestion() tea.Cmd {
+	e.occupancyValueValid = false
 	if !e.hasSuggestion || e.suggestion == "" {
 		return nil
 	}
@@ -592,6 +595,7 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 }
 
 func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
+	e.occupancyValueValid = false
 	e.tryAddFileRef(e.pendingFileRef)
 	e.pendingFileRef = ""
 	attachments := e.collectAttachments(content)
@@ -635,6 +639,7 @@ func (e *editor) configureNewlineKeybinding() {
 
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	e.occupancyValueValid = false
 	defer e.updateAttachmentBanner()
 
 	var cmds []tea.Cmd
@@ -1577,6 +1582,7 @@ func (e *editor) Value() string {
 
 // SetValue updates the editor content and moves cursor to end
 func (e *editor) SetValue(content string) {
+	e.occupancyValueValid = false
 	e.textarea.SetValue(content)
 	e.fixViewportScroll()
 	e.textarea.MoveToEnd()
@@ -1586,6 +1592,7 @@ func (e *editor) SetValue(content string) {
 
 // InsertText inserts text at the current cursor position
 func (e *editor) InsertText(text string) {
+	e.occupancyValueValid = false
 	e.textarea.InsertString(text)
 	e.userTyped = true
 	e.refreshSuggestion()
@@ -1593,6 +1600,7 @@ func (e *editor) InsertText(text string) {
 
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
 func (e *editor) AttachFile(filePath string) error {
+	e.occupancyValueValid = false
 	placeholder := "@" + filePath
 	if err := e.addFileAttachment(placeholder); err != nil {
 		return fmt.Errorf("failed to attach %s: %w", filePath, err)
@@ -1901,6 +1909,7 @@ func createPasteAttachment(content string, num int) (attachment, error) {
 }
 
 func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
+	e.occupancyValueValid = false
 	e.historySearch = historySearchState{
 		active:                   true,
 		origTextValue:            e.textarea.Value(),

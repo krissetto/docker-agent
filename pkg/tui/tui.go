@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -188,10 +189,11 @@ type appModel struct {
 	history *history.History
 
 	// UI components
-	notification notification.Manager
-	dialogMgr    dialog.Manager
-	completions  completion.Manager
-	messageBar   *messagebar.Model
+	notification         notification.Manager
+	notificationOccupied []image.Rectangle
+	dialogMgr            dialog.Manager
+	completions          completion.Manager
+	messageBar           *messagebar.Model
 
 	// Speech-to-text
 	transcriber  Transcriber
