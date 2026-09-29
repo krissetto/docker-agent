@@ -1,6 +1,8 @@
 package textarea
 
 import (
+	uv "github.com/charmbracelet/ultraviolet"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -129,4 +131,72 @@ func TestFocusAndBlink(t *testing.T) {
 	hidden := m.View()
 	m, _ = m.Update(next())
 	require.Equal(t, hidden, m.View())
+}
+
+func TestAdvertisedWordActions(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, key, want string
+		column                 int
+	}{
+		{"lowercase skips spaces", "  HELLO next", "l", "  hello next", 7},
+		{"uppercase skips spaces", "  hello next", "u", "  HELLO next", 7},
+		{"capitalize preserves remainder", "  hELLO next", "c", "  HELLO next", 7},
+		{"capitalize punctuation only", "  'hello next", "c", "  'hello next", 8},
+		{"forward stops at word end", "  hello next", "f", "  hello next", 7},
+		{"delete skips spaces and word", "  hello next", "d", " next", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := plainArea(30, 2)
+			m.SetValue(tc.value)
+			m.MoveToBegin()
+			m.Focus()
+			m, _ = m.Update(tea.KeyPressMsg{Code: []rune(tc.key)[0], Mod: tea.ModAlt})
+			require.Equal(t, tc.want, m.Value())
+			require.Equal(t, tc.column, m.Column())
+		})
+	}
+	m := plainArea(30, 2)
+	m.SetValue("  HELLO")
+	m.MoveToBegin()
+	m.Focus()
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModAlt | tea.ModShift})
+	require.Equal(t, "  HELLO", m.SelectedText())
+}
+func TestCopyWithoutSelectionDoesNotTouchClipboard(t *testing.T) {
+	m := plainArea(20, 1)
+	m.SetValue("abc")
+	m.Focus()
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl | tea.ModShift})
+	require.Nil(t, cmd)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft, Mod: tea.ModShift})
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl | tea.ModShift})
+	require.NotNil(t, cmd)
+}
+func TestSetValueObeysVisualLimit(t *testing.T) {
+	m := plainArea(10, 2)
+	m.MaxContentHeight = 2
+	m.SetValue("one\ntwo\nthree")
+	require.Equal(t, "one\ntwo", m.Value())
+	require.LessOrEqual(t, m.ContentLineCount(), 2)
+	m.SetValue(strings.Repeat("x", 30))
+	require.Empty(t, m.Value(), "an oversized single insertion is rejected without truncating a grapheme")
+}
+
+func TestPlaceholderForegroundSurvivesCursorReset(t *testing.T) {
+	m := plainArea(12, 1)
+	m.Placeholder = "Type here"
+	m.Focus()
+	s := m.Styles()
+	s.Focused.Base = lipgloss.NewStyle().Foreground(lipgloss.Color("#c0c0c0")).Background(lipgloss.Color("#25252c"))
+	s.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+	s.Cursor.Color = lipgloss.Color("#ff0000")
+	s.Cursor.Blink = false
+	m.SetStyles(s)
+	cells := uv.NewStyledString(m.View()).Lines(ansi.GraphemeWidth)[0]
+	for i := 1; i < len(m.Placeholder); i++ {
+		require.Equal(t, color.RGBA{R: 128, G: 128, B: 128, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "placeholder cell %d", i)
+	}
+	for i := len(m.Placeholder); i < m.Width(); i++ {
+		require.Equal(t, color.RGBA{R: 192, G: 192, B: 192, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "padding cell %d", i)
+	}
 }

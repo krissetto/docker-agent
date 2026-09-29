@@ -89,3 +89,31 @@ func TestOpaqueStylesAndWidth(t *testing.T) {
 	c.X = 999
 	require.NotEqual(t, c.X, m.Cursor().X)
 }
+
+func TestWordActionsAndMaskedPrivacy(t *testing.T) {
+	m := New()
+	m.SetValue("  hello world")
+	m.CursorStart()
+	m.Focus()
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModAlt})
+	require.Equal(t, 7, m.Position())
+	m.CursorStart()
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModAlt})
+	require.Equal(t, " world", m.Value())
+	for _, mode := range []EchoMode{EchoPassword, EchoNone} {
+		m := New()
+		m.EchoMode = mode
+		m.SetValue("one two three")
+		m.CursorStart()
+		m.Focus()
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModAlt})
+		require.Equal(t, len([]rune(m.Value())), m.Position())
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModAlt})
+		require.Zero(t, m.Position())
+		m.SetCursor(4)
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModAlt})
+		require.Equal(t, "one ", m.Value())
+		m, _ = m.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
+		require.Empty(t, m.Value())
+	}
+}

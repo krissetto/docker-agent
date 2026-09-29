@@ -115,6 +115,12 @@ func (m *Model) SetHeight(height int) {
 func (m Model) Value() string { return m.state.Value() }
 func (m *Model) SetValue(value string) {
 	value = normalizeNewlines(value)
+	if m.MaxContentHeight > 0 {
+		m.state.SetValue("")
+		m.InsertString(value)
+		m.normalize()
+		return
+	}
 	m.state.SetCharLimit(m.CharLimit)
 	if m.MaxHeight > 0 {
 		lines := strings.Split(value, "\n")
@@ -243,7 +249,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, Paste
 		}
 		if key.Matches(v, m.KeyMap.CopySelection) {
-			return m, copySelection(m.SelectedText())
+			if selected := m.SelectedText(); selected != "" {
+				return m, copySelection(selected)
+			}
+			return m, nil
 		}
 		if key.Matches(v, m.KeyMap.InsertNewline) {
 			m.InsertString("\n")
@@ -318,11 +327,11 @@ func (m *Model) changeWord(msg tea.KeyPressMsg) {
 	default:
 		first := true
 		value = strings.Map(func(r rune) rune {
-			if unicode.IsLetter(r) && first {
+			if !unicode.IsSpace(r) && first {
 				first = false
-				return unicode.ToUpper(r)
+				return unicode.ToTitle(r)
 			}
-			return unicode.ToLower(r)
+			return r
 		}, value)
 	}
 	if value == "" {
@@ -397,7 +406,7 @@ func (m Model) View() string {
 			lineStyle = s.CursorLine.Inherit(s.Text)
 		}
 		if placeholder {
-			lineStyle = s.Placeholder
+			lineStyle = s.Placeholder.Inherit(s.Base).Inline(true)
 		}
 		var body strings.Builder
 		cells := 0
@@ -431,9 +440,21 @@ func (m Model) View() string {
 		}
 		content := ""
 		if placeholder {
-			content = lineStyle.Render(ansi.Truncate(body.String(), m.width, ""))
+			// A cursor emits an SGR reset. Paint the remaining placeholder as
+			// its own span so the outer Base cannot replace its foreground.
+			if visible && cursorDrawn && rowIndex < len(l.Rows) && len(l.Rows[rowIndex].Runs) > 0 {
+				runs := l.Rows[rowIndex].Runs
+				content = lineStyle.Render(cursor.Render(runs[0].Text, m.styles.Cursor))
+				var rest strings.Builder
+				for _, run := range runs[1:] {
+					rest.WriteString(run.Text)
+				}
+				content += lineStyle.Render(ansi.Truncate(rest.String(), max(0, m.width-runs[0].Width), ""))
+			} else {
+				content = lineStyle.Render(ansi.Truncate(body.String(), m.width, ""))
+			}
 			body.Reset()
-			lineStyle = s.Text
+			lineStyle = s.Text.Inherit(s.Base).Inline(true)
 		}
 		if cells < m.width {
 			if visible && !cursorDrawn && l.Cursor.Column >= cells && l.Cursor.Column < m.width {

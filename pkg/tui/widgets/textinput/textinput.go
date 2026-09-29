@@ -180,6 +180,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		if key.Matches(v, m.KeyMap.Paste) {
 			return m, Paste
 		}
+		// Masked inputs must not disclose word boundaries through cursor movement
+		// or deletion; these bindings act on the entire hidden remainder.
+		if m.EchoMode != EchoNormal {
+			masked := []struct {
+				binding key.Binding
+				kind    text.ActionKind
+			}{
+				{m.KeyMap.WordForward, text.MoveEnd}, {m.KeyMap.WordBackward, text.MoveHome},
+				{m.KeyMap.DeleteWordForward, text.DeleteToEnd}, {m.KeyMap.DeleteWordBackward, text.DeleteToStart},
+			}
+			for _, a := range masked {
+				if key.Matches(v, a.binding) {
+					m.state.Apply(text.Action{Kind: a.kind, Config: m.config()})
+					m.normalize()
+					return m, m.blink.Reset(m.styles.Cursor)
+				}
+			}
+		}
 		actions := []struct {
 			binding key.Binding
 			kind    text.ActionKind
