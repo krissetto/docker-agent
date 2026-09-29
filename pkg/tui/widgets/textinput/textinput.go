@@ -244,7 +244,7 @@ func (m Model) View() string {
 		c.EchoNone = false
 		l.Rows = preview.Layout(c).Rows
 	}
-	var body strings.Builder
+	var body, span strings.Builder
 	style := s.Text
 	if placeholder {
 		style = s.Placeholder
@@ -254,16 +254,24 @@ func (m Model) View() string {
 	cells := 0
 	for _, run := range l.Rows[0].Runs {
 		value := run.Text
-		if visible && run.Cell == l.Cursor.Column {
-			value = cursor.Render(value, m.styles.Cursor)
+		if visible && run.Cell == l.Cursor.Column && !cursorDrawn {
+			if span.Len() > 0 {
+				body.WriteString(style.Render(span.String()))
+				span.Reset()
+			}
+			body.WriteString(style.Render(cursor.Render(value, m.styles.Cursor)))
 			cursorDrawn = true
+		} else {
+			span.WriteString(value)
 		}
-		body.WriteString(value)
 		cells += run.Width
+	}
+	if span.Len() > 0 {
+		body.WriteString(style.Render(span.String()))
 	}
 	// Preserve the trailing insertion cell even when the text fills Width().
 	if !cursorDrawn && visible {
-		body.WriteString(cursor.Render(" ", m.styles.Cursor))
+		body.WriteString(style.Render(cursor.Render(" ", m.styles.Cursor)))
 		cells++
 	}
 	target := cells
@@ -271,11 +279,11 @@ func (m Model) View() string {
 		target = m.width + 1 + l.ScrollX
 	}
 	if cells < target {
-		body.WriteString(strings.Repeat(" ", target-cells))
+		body.WriteString(style.Render(strings.Repeat(" ", target-cells)))
 	}
 	result := body.String()
 	if m.width > 0 {
 		result = ansi.Cut(result, l.ScrollX, l.ScrollX+m.width+1)
 	}
-	return s.Prompt.Render(m.Prompt) + style.Render(result)
+	return s.Prompt.Render(m.Prompt) + result
 }

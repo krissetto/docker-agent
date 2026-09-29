@@ -200,3 +200,27 @@ func TestPlaceholderForegroundSurvivesCursorReset(t *testing.T) {
 		require.Equal(t, color.RGBA{R: 192, G: 192, B: 192, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "padding cell %d", i)
 	}
 }
+
+func TestTextAndSelectionForegroundSurviveResets(t *testing.T) {
+	m := plainArea(8, 1)
+	m.SetValue("abcdef")
+	m.SetCursorColumn(2)
+	m.Focus()
+	s := m.Styles()
+	s.Focused.Base = lipgloss.NewStyle().Foreground(lipgloss.Color("#c0c0c0")).Background(lipgloss.Color("#25252c"))
+	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+	s.Focused.Selection = lipgloss.NewStyle().Foreground(lipgloss.Color("#0000ff"))
+	s.Cursor.Color = lipgloss.Color("#ff0000")
+	s.Cursor.Blink = false
+	m.SetStyles(s)
+	cells := uv.NewStyledString(m.View()).Lines(ansi.GraphemeWidth)[0]
+	for _, i := range []int{0, 1, 3, 4, 5, 6, 7} {
+		require.Equal(t, color.RGBA{G: 255, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "text cell %d", i)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight, Mod: tea.ModShift})
+	cells = uv.NewStyledString(m.View()).Lines(ansi.GraphemeWidth)[0]
+	require.Equal(t, color.RGBA{B: 255, A: 255}, color.RGBAModel.Convert(cells[2].Style.Fg))
+	for _, i := range []int{0, 1, 4, 5, 6, 7} {
+		require.Equal(t, color.RGBA{G: 255, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "text after selection cell %d", i)
+	}
+}

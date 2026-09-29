@@ -1,6 +1,8 @@
 package textinput
 
 import (
+	uv "github.com/charmbracelet/ultraviolet"
+	"image/color"
 	"strings"
 	"testing"
 
@@ -115,5 +117,23 @@ func TestWordActionsAndMaskedPrivacy(t *testing.T) {
 		require.Equal(t, "one ", m.Value())
 		m, _ = m.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
 		require.Empty(t, m.Value())
+	}
+}
+
+func TestTextForegroundSurvivesCursorReset(t *testing.T) {
+	m := New()
+	m.Prompt = ""
+	m.SetWidth(8)
+	m.SetValue("abcdef")
+	m.SetCursor(2)
+	m.Focus()
+	s := m.Styles()
+	s.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Background(lipgloss.Color("#25252c"))
+	s.Cursor.Color = lipgloss.Color("#ff0000")
+	s.Cursor.Blink = false
+	m.SetStyles(s)
+	cells := uv.NewStyledString(m.View()).Lines(ansi.GraphemeWidth)[0]
+	for _, i := range []int{0, 1, 3, 4, 5, 6, 7, 8} {
+		require.Equal(t, color.RGBA{G: 255, A: 255}, color.RGBAModel.Convert(cells[i].Style.Fg), "text cell %d", i)
 	}
 }

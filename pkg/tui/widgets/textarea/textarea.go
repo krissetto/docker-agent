@@ -401,74 +401,74 @@ func (m Model) View() string {
 			}
 			prefix += style.Render(fmt.Sprintf("%*s  ", m.gutterWidth()-2, number))
 		}
-		lineStyle := s.Text
+		lineStyle := s.Text.Inherit(s.Base).Inline(true)
 		if rowIndex < len(l.Rows) && l.Rows[rowIndex].Line == m.Line() {
-			lineStyle = s.CursorLine.Inherit(s.Text)
+			lineStyle = s.CursorLine.Inherit(s.Text).Inherit(s.Base).Inline(true)
 		}
+		if rowIndex >= len(l.Rows) {
+			lineStyle = s.EndOfBuffer.Inherit(s.Base).Inline(true)
+		}
+		contentStyle := lineStyle
 		if placeholder {
-			lineStyle = s.Placeholder.Inherit(s.Base).Inline(true)
+			contentStyle = s.Placeholder.Inherit(s.Base).Inline(true)
 		}
-		var body strings.Builder
+		selectionStyle := s.Selection.Inherit(s.Text).Inherit(s.Base).Inline(true)
+		var body, span strings.Builder
 		cells := 0
-		cursorDrawn := false
+		selected := false
 		visible := m.focused && m.virtual && m.blink.Visible(m.styles.Cursor) && rowIndex == l.Cursor.Row
-		// Keep ordinary text in one styled span. In particular, a caller's
-		// Lip Gloss Transform must see text, not separate individual graphemes.
-		var selected strings.Builder
-		flushSelection := func() {
-			if selected.Len() > 0 {
-				body.WriteString(s.Selection.Inherit(lineStyle).Render(selected.String()))
-				selected.Reset()
+		// Each style transition owns a complete span, including a reset. Never
+		// enclose a cursor/selection reset in one outer text span: that would
+		// silently discard the text foreground following the decorated cell.
+		flush := func() {
+			if span.Len() == 0 {
+				return
 			}
+			style := contentStyle
+			if selected {
+				style = selectionStyle
+			}
+			body.WriteString(style.Render(span.String()))
+			span.Reset()
 		}
 		if rowIndex < len(l.Rows) {
 			for _, run := range l.Rows[rowIndex].Runs {
-				value := run.Text
-				if visible && run.Cell == l.Cursor.Column {
-					value = cursor.Render(value, m.styles.Cursor)
-					cursorDrawn = true
+				isSelected := run.Selected && !placeholder
+				if isSelected != selected {
+					flush()
+					selected = isSelected
 				}
-				if run.Selected && !placeholder {
-					selected.WriteString(value)
+				if visible && run.Cell == l.Cursor.Column && !isSelected {
+					flush()
+					body.WriteString(contentStyle.Render(cursor.Render(run.Text, m.styles.Cursor)))
 				} else {
-					flushSelection()
-					body.WriteString(value)
+					span.WriteString(run.Text)
 				}
 				cells += run.Width
 			}
-			flushSelection()
 		}
-		content := ""
-		if placeholder {
-			// A cursor emits an SGR reset. Paint the remaining placeholder as
-			// its own span so the outer Base cannot replace its foreground.
-			if visible && cursorDrawn && rowIndex < len(l.Rows) && len(l.Rows[rowIndex].Runs) > 0 {
-				runs := l.Rows[rowIndex].Runs
-				content = lineStyle.Render(cursor.Render(runs[0].Text, m.styles.Cursor))
-				var rest strings.Builder
-				for _, run := range runs[1:] {
-					rest.WriteString(run.Text)
-				}
-				content += lineStyle.Render(ansi.Truncate(rest.String(), max(0, m.width-runs[0].Width), ""))
-			} else {
-				content = lineStyle.Render(ansi.Truncate(body.String(), m.width, ""))
+		flush()
+		// A selected newline occupies the cell immediately after the text.
+		newlineSelected := false
+		for _, selection := range l.Selection {
+			if selection.Row == rowIndex && selection.End > cells {
+				newlineSelected = true
+				break
 			}
-			body.Reset()
-			lineStyle = s.Text.Inherit(s.Base).Inline(true)
+		}
+		if cells < m.width && newlineSelected && !placeholder {
+			body.WriteString(selectionStyle.Render(" "))
+			cells++
 		}
 		if cells < m.width {
-			if visible && !cursorDrawn && l.Cursor.Column >= cells && l.Cursor.Column < m.width {
-				body.WriteString(strings.Repeat(" ", l.Cursor.Column-cells))
-				body.WriteString(cursor.Render(" ", m.styles.Cursor))
+			if visible && l.Cursor.Column >= cells && l.Cursor.Column < m.width && !newlineSelected {
+				body.WriteString(lineStyle.Render(strings.Repeat(" ", l.Cursor.Column-cells)))
+				body.WriteString(lineStyle.Render(cursor.Render(" ", m.styles.Cursor)))
 				cells = l.Cursor.Column + 1
 			}
-			body.WriteString(strings.Repeat(" ", m.width-cells))
+			body.WriteString(lineStyle.Render(strings.Repeat(" ", m.width-cells)))
 		}
-		if rowIndex >= len(l.Rows) {
-			lineStyle = s.EndOfBuffer
-		}
-
-		lines[y] = prefix + content + lineStyle.Render(ansi.Truncate(body.String(), m.width, ""))
+		lines[y] = prefix + ansi.Truncate(body.String(), m.width, "")
 	}
 	return s.Base.Render(strings.Join(lines, "\n"))
 }
