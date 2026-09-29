@@ -29,12 +29,12 @@ func TestConfigureNewlineKeybinding(t *testing.T) {
 
 	e.keyboardEnhancementsSupported = false
 	e.configureNewlineKeybinding()
-	assert.Equal(t, want, e.textarea.KeyMap.InsertNewline.Keys(),
+	assert.Equal(t, want, e.textarea.NewlineBinding().Keys(),
 		"without keyboard enhancements the newline keys should match the configured binding")
 
 	e.keyboardEnhancementsSupported = true
 	e.configureNewlineKeybinding()
-	got := e.textarea.KeyMap.InsertNewline.Keys()
+	got := e.textarea.NewlineBinding().Keys()
 	require.NotEmpty(t, got)
 	assert.Equal(t, "shift+enter", got[0], "shift+enter should be offered first on capable terminals")
 	assert.Subset(t, got, want, "configured newline keys must remain available")

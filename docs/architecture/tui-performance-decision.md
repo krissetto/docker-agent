@@ -245,3 +245,11 @@ are not normalized. Source inventory:
 `/tmp/docker-agent-architecture-fresh/INVENTORY.md`.
 Temporary artifacts are evaluation provenance, not portable release assets;
 archive the corrected empirical report with the implementation handoff.
+
+## Subsequent bounded editor/pane experiment
+
+A later authorized, scoped explicit-input retained editor/pane experiment is
+tracked in [its separate evidence note](../performance/tui-retained-experiment.md).
+That experiment preserves the existing toolkit/backend and does not erase this
+historical decision or authorize a blanket option B/C migration. Its same-fixture
+baseline is `301d2e290`; candidate acceptance is recorded separately in that note.

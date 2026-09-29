@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -17,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
+	"github.com/docker/docker-agent/pkg/tui/rendering/retained"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
@@ -407,43 +407,42 @@ func (m *appModel) paneTitle(id string, width int) string {
 	if name == "" {
 		name = "agent"
 	}
-	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: nodeID, Name: name, Agent: name, DisplayID: paneDisplayNodeID(nodeID)}
 	title := "New Session"
 	if state := m.sessionStates[id]; state != nil && state.SessionTitle() != "" {
 		title = state.SessionTitle()
 	}
 	focused := id == m.paneFocus()
-	prefix := " "
 	background := styles.CardBg
 	if focused {
 		background = styles.EditorBg
 	}
+	// Materialize the complete authoritative styles in the adapter, including
+	// future style properties. Retention starts at exact ANSI artifacts; it
+	// avoids layout/paint below, not identity or caption materialization.
 	activity := m.paneActivity(id)
 	children := m.paneSubagentCount(id, subagent.NodeID(nodeID))
-	key := paneTitleKey{name: name, nodeID: nodeID, title: title, activity: activity, width: width, children: children, focused: focused, dimmed: m.dimInactivePanes && m.panesEnabled(), theme: styles.ThemeGeneration(), colors: styles.AgentColorGeneration()}
-	if entry, ok := m.paneTitleCache[id]; ok && entry.key == key {
-		return entry.rendered
-	}
 	count := ""
 	if children > 0 {
 		count = " (" + strconv.Itoa(children) + ")"
 	}
-	budget := max(0, width-ansi.StringWidth(prefix)-ansi.StringWidth(activity)-ansi.StringWidth(count)-5)
+	budget := max(0, width-1-ansi.StringWidth(activity)-ansi.StringWidth(count)-5)
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: nodeID, Name: name, Agent: name, DisplayID: paneDisplayNodeID(nodeID)}
 	identity := agentidentity.Label(ref, budget) + styles.MutedStyle.Render(count)
-	label := prefix + identity + " " + activity + styles.MutedStyle.Render(" · "+title)
-	if width <= 3 {
-		label = "●"
+	caption := styles.MutedStyle.Render(" · " + title)
+	entry := m.paneTitleCache[id]
+	label := entry.layout.Render(paneTitleLayoutInput{identity: identity, activity: activity, title: caption, width: width}, drawPaneTitleLayout)
+	in := paneTitlePaintInput{
+		content: label, foreground: snapshotPaneColor(styles.TextPrimary), background: snapshotPaneColor(background),
+		dimmed: m.dimInactivePanes && m.panesEnabled() && !focused,
 	}
-	surface := lipgloss.NewStyle().Foreground(styles.TextPrimary).Background(background)
-	heading := styles.RenderComposite(surface, paneClipped(label, width, 1))
-	if m.dimInactivePanes && m.panesEnabled() && !focused {
-		context := styles.NewFadeContext()
-		heading = styles.FadeLineCtx(heading, inactivePaneContrast, &context)
+	if in.dimmed {
+		in.fade = styles.NewFadeContext()
 	}
+	heading := entry.paint.Render(in, drawPaneTitlePaint)
 	if m.paneTitleCache == nil {
 		m.paneTitleCache = make(map[string]paneTitleEntry)
 	}
-	m.paneTitleCache[id] = paneTitleEntry{key: key, rendered: heading}
+	m.paneTitleCache[id] = entry
 	return heading
 }
 
@@ -571,30 +570,36 @@ func (m *appModel) paneActivity(id string) string {
 // relying on terminal faint support, on both dark and light themes.
 const inactivePaneContrast = 0.62
 
+type paneDimInput struct {
+	content string
+	fade    styles.FadeContext
+}
+
 type paneDimEntry struct {
-	content, rendered string
-	theme             uint64
+	slot  retained.Slot[paneDimInput]
+	theme uint64 // Diagnostic only; resolved fade values are the retained input.
+}
+
+func drawPaneDim(in paneDimInput) string {
+	lines := strings.Split(in.content, "\n")
+	for i, line := range lines {
+		lines[i] = styles.FadeLineCtx(line, inactivePaneContrast, &in.fade)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *appModel) paneTranscript(id, content string) string {
 	if !m.dimInactivePanes || !m.panesEnabled() || id == m.paneFocus() {
 		return content
 	}
-	generation := styles.ThemeGeneration()
-	if entry, ok := m.paneDimCache[id]; ok && entry.theme == generation && entry.content == content {
-		return entry.rendered
-	}
 	if m.paneDimCache == nil {
 		m.paneDimCache = make(map[string]paneDimEntry)
 	}
 	// Cache only the current bounded viewport, never transcript histories.
-	fc := styles.NewFadeContext()
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		lines[i] = styles.FadeLineCtx(line, inactivePaneContrast, &fc)
-	}
-	rendered := strings.Join(lines, "\n")
-	m.paneDimCache[id] = paneDimEntry{content: content, rendered: rendered, theme: generation}
+	entry := m.paneDimCache[id]
+	rendered := entry.slot.Render(paneDimInput{content: content, fade: styles.NewFadeContext()}, drawPaneDim)
+	entry.theme = styles.ThemeGeneration()
+	m.paneDimCache[id] = entry
 	for cached := range m.paneDimCache {
 		if !m.paneVisible(cached) {
 			delete(m.paneDimCache, cached)

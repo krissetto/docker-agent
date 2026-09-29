@@ -2,6 +2,7 @@ package editor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -21,13 +22,16 @@ const (
 // contextBar renders the expandable bar above the editor that displays
 // attachment pills.
 type contextBar struct {
-	attachments []bannerItem
-	height      int
-	maxHeight   int
-	width       int
-	regions     []bannerRegion
-	expanded    bool
-	focused     bool
+	attachments     []bannerItem
+	height          int
+	maxHeight       int
+	width           int
+	regions         []bannerRegion
+	expanded        bool
+	focused         bool
+	themeGeneration uint64
+	view            string
+	renders         uint64
 }
 
 type bannerItem struct {
@@ -47,12 +51,16 @@ func newContextBar() *contextBar {
 }
 
 func (b *contextBar) SetItems(items []bannerItem) {
-	b.attachments = items
+	if slices.Equal(b.attachments, items) {
+		return
+	}
+	b.attachments = slices.Clone(items)
 	b.regions = nil
 	if len(items) == 0 {
 		b.focused = false
 	}
 	b.updateHeight()
+	b.reflow()
 }
 
 func (b *contextBar) Height() int {
@@ -67,10 +75,16 @@ func (b *contextBar) Toggle() {
 	b.expanded = !b.expanded
 	b.regions = nil
 	b.updateHeight()
+	b.reflow()
 }
 
 func (b *contextBar) SetFocused(focused bool) {
-	b.focused = focused && b.hasContent() && b.height > 0
+	focused = focused && b.hasContent() && b.height > 0
+	if b.focused == focused {
+		return
+	}
+	b.focused = focused
+	b.reflow()
 }
 
 func (b *contextBar) hasContent() bool {
@@ -99,17 +113,37 @@ func (b *contextBar) SetMaxHeight(height int) {
 	b.maxHeight = height
 	b.regions = nil
 	b.updateHeight()
+	b.reflow()
 }
 
 func (b *contextBar) summaryY() int {
 	return min(2, max(0, b.height-1))
 }
 
+// SetSize prepares hit regions and immutable paint input at the owner mutation
+// boundary. Painting retained input never changes hit-testing geometry.
+func (b *contextBar) SetSize(totalWidth int) {
+	width := max(0, totalWidth)
+	if b.width == width && b.themeGeneration == styles.ThemeGeneration() {
+		return
+	}
+	b.width = width
+	b.reflow()
+}
+
 func (b *contextBar) View(totalWidth int) string {
-	b.width = max(0, totalWidth)
+	b.SetSize(totalWidth)
+	return b.view
+}
+
+func (b *contextBar) reflow() {
+	b.renders++
+	totalWidth := b.width
+	b.themeGeneration = styles.ThemeGeneration()
 	b.regions = nil
 	if !b.hasContent() || b.height == 0 || totalWidth <= 0 {
-		return ""
+		b.view = ""
+		return
 	}
 
 	leftPadding := min(styles.AppPadding, totalWidth)
@@ -138,7 +172,7 @@ func (b *contextBar) View(totalWidth int) string {
 	if b.focused {
 		padStyle = padStyle.Background(styles.Selected)
 	}
-	return padStyle.Render(strings.Join(rows, "\n"))
+	b.view = padStyle.Render(strings.Join(rows, "\n"))
 }
 
 func (b *contextBar) renderTopBorder(innerWidth int) string {

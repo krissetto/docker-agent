@@ -23,8 +23,8 @@ func TestContentLineCountVisualWrappedUnicode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := New(nil).(*editor)
-			e.textarea.Prompt = ""
-			e.textarea.ShowLineNumbers = false
+			e.textarea.SetPrompt("")
+			e.textarea.SetShowLineNumbers(false)
 			e.textarea.SetWidth(10)
 			e.textarea.SetHeight(10)
 			e.SetValue(tt.value)

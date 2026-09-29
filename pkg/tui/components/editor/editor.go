@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/internal/termfeatures"
@@ -133,7 +134,8 @@ type historySearchState struct {
 // editor implements [Editor]
 type editor struct {
 	themeGeneration               uint64
-	textarea                      textarea.Model
+	rendering                     editorRendering
+	textarea                      *widget.Textarea
 	occupancy                     textOccupancyCache
 	occupancyValue                string
 	occupancyValueValid           bool
@@ -190,7 +192,7 @@ type editor struct {
 	// historySearch holds state for history search mode
 	historySearch historySearchState
 	// searchInput is the input field for history search queries
-	searchInput textinput.Model
+	searchInput *widget.Textinput
 }
 
 // Option configures the Editor.
@@ -206,8 +208,8 @@ func WithCompletions(comps ...completions.Completion) Option {
 // WithReadOnly disables the editor so no new messages can be composed.
 func WithReadOnly() Option {
 	return func(e *editor) {
-		e.textarea.Placeholder = "Session is read-only"
-		e.textarea.KeyMap.InsertNewline.SetEnabled(false)
+		e.textarea.SetPlaceholder("Session is read-only")
+		e.textarea.SetNewlineEnabled(false)
 	}
 }
 
@@ -219,7 +221,7 @@ const defaultPlaceholder = "Type your message here…"
 func WithPlaceholder(placeholder string) Option {
 	return func(e *editor) {
 		e.placeholder = placeholder
-		e.textarea.Placeholder = placeholder
+		e.textarea.SetPlaceholder(placeholder)
 	}
 }
 
@@ -237,19 +239,19 @@ func searchInputStyles() textinput.Styles {
 
 // New creates a new editor component
 func New(hist *history.History, opts ...Option) Editor {
-	ta := textarea.New()
+	ta := widget.NewTextarea()
 	ta.SetStyles(styles.InputStyle)
-	ta.Placeholder = defaultPlaceholder
-	ta.Prompt = ""
-	ta.CharLimit = -1
+	ta.SetPlaceholder(defaultPlaceholder)
+	ta.SetPrompt("")
+	ta.SetCharLimit(-1)
 	ta.SetWidth(50)
 	ta.SetHeight(3) // Set minimum 3 lines for multi-line input
 	ta.Focus()
-	ta.ShowLineNumbers = false
+	ta.SetShowLineNumbers(false)
 
-	si := textinput.New()
-	si.Prompt = ""
-	si.Placeholder = "Type to search..."
+	si := widget.NewTextinput()
+	si.SetPrompt("")
+	si.SetPlaceholder("Type to search...")
 	si.SetStyles(searchInputStyles())
 
 	e := &editor{
@@ -296,9 +298,9 @@ func extractLineText(line, prompt string) string {
 // matching the textarea's word-wrap behavior exactly.
 func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 	// Create a temporary textarea with the same settings
-	ta := textarea.New()
-	ta.Prompt = e.textarea.Prompt
-	ta.ShowLineNumbers = e.textarea.ShowLineNumbers
+	ta := widget.NewTextarea()
+	ta.SetPrompt(e.textarea.Prompt())
+	ta.SetShowLineNumbers(e.textarea.ShowLineNumbers())
 	ta.SetWidth(e.textarea.Width())
 	ta.SetHeight(max(1, e.textarea.Height())) // Preview owns only its allocated rows
 
@@ -316,7 +318,7 @@ func (e *editor) computeWrappedLines(text string, startOffset int) []string {
 	// Extract the text content from each visual line
 	var result []string
 	for i, line := range viewLines {
-		plain := extractLineText(line, ta.Prompt)
+		plain := extractLineText(line, ta.Prompt())
 		if i == 0 {
 			// First line: remove the prefix spaces we added
 			if len(plain) >= startOffset {
@@ -350,7 +352,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		view = e.textarea.View()
 	}
 	lines := strings.Split(view, "\n")
-	promptWidth := runewidth.StringWidth(stripANSI(e.textarea.Prompt))
+	promptWidth := runewidth.StringWidth(stripANSI(e.textarea.Prompt()))
 	lineInfo := e.textarea.LineInfo()
 	textWidth := lineInfo.CharOffset
 	// Use the same wrapping and scroll origin as the real textarea. Logical
@@ -633,8 +635,8 @@ func (e *editor) resetAndSendMode(content string, followUp bool) tea.Cmd {
 // historical defaults intact while letting users replace the ctrl+j fallback
 // that conflicts with common editor/terminal shortcuts (see issue #1626).
 func (e *editor) configureNewlineKeybinding() {
-	e.textarea.KeyMap.InsertNewline.SetKeys(core.EditorNewlineKeys(e.keyboardEnhancementsSupported)...)
-	e.textarea.KeyMap.InsertNewline.SetEnabled(true)
+	e.textarea.SetNewlineKeys(core.EditorNewlineKeys(e.keyboardEnhancementsSupported)...)
+	e.textarea.SetNewlineEnabled(true)
 }
 
 // Update handles messages and updates the component state
@@ -654,7 +656,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if e.recordingDotPhase == 0 {
 			dots = ""
 		}
-		e.textarea.Placeholder = "🎤 Listening" + dots
+		e.textarea.SetPlaceholder("🎤 Listening" + dots)
 		cmd := e.tickRecordingDots()
 		return e, cmd
 	case tea.PasteMsg:
@@ -804,14 +806,14 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return e.handleHistorySearchKey(msg)
 		}
 
-		if key.Matches(msg, e.textarea.KeyMap.Paste) {
+		if key.Matches(msg, e.textarea.PasteBinding()) {
 			return e.handleClipboardPaste()
 		}
 
 		// Handle backspace with grapheme cluster awareness.
 		// The default textarea.Model only deletes a single rune, which breaks
 		// multi-codepoint characters like emoji (e.g., ⚠️ = U+26A0 + U+FE0F).
-		if key.Matches(msg, e.textarea.KeyMap.DeleteCharacterBackward) {
+		if key.Matches(msg, e.textarea.BackspaceBinding()) {
 			return e.handleGraphemeBackspace()
 		}
 
@@ -834,7 +836,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// - EditorNewline (ctrl+j by default) / shift+enter: insert a newline,
 		//   handled by the textarea's InsertNewline binding.
 		isSend := key.Matches(msg, core.GetKeys().EditorSend)
-		if isSend || key.Matches(msg, e.textarea.KeyMap.InsertNewline) {
+		if isSend || key.Matches(msg, e.textarea.NewlineBinding()) {
 			if !e.textarea.Focused() {
 				return e, nil
 			}
@@ -1297,21 +1299,7 @@ func (e *editor) refreshTheme() {
 
 // View renders the component.
 func (e *editor) View() string {
-	if e.themeGeneration != styles.ThemeGeneration() {
-		e.refreshTheme()
-	}
-	view := e.textarea.View()
-
-	if e.textarea.Focused() && e.hasSuggestion && e.suggestion != "" {
-		view = e.applySuggestionOverlay(view)
-	}
-
-	if e.historySearch.active && e.height > 1 {
-		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
-	}
-
-	frame := e.Frame()
-	return styles.RenderComposite(frame.Width(e.width+frame.GetHorizontalPadding()+frame.GetHorizontalBorderSize()), view)
+	return e.materializeFrame(e.rendering.composition.Render(e.captureInput(false), drawEditor))
 }
 
 // ViewportLayout is an optional shell capability. Limits apply before textarea
@@ -1389,16 +1377,7 @@ func (e *editor) fixViewportScroll() {
 		width = e.textarea.Width()
 	}
 	rows := e.textareaRows()
-	dynamic, minHeight, maxHeight := e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight
-	e.textarea.DynamicHeight = true
-	e.textarea.MinHeight, e.textarea.MaxHeight = rows, rows
-	// Pass the requested outer width, not Width(), which excludes reserves.
-	e.textarea.SetWidth(width)
-	// A narrow rewrap can reposition against stale viewport content. Refresh
-	// it before the final cursor-visible positioning, without moving the cursor.
-	_ = e.textarea.View()
-	e.textarea.SetHeight(rows)
-	e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight = dynamic, minHeight, maxHeight
+	e.textarea.Normalize(width, rows)
 }
 
 // ContentLineCount returns the number of visual rows occupied by the current
@@ -1739,10 +1718,10 @@ func (e *editor) SetRecording(recording bool) tea.Cmd {
 	e.recording = recording
 	if recording {
 		e.recordingDotPhase = 0
-		e.textarea.Placeholder = "🎤 Listening"
+		e.textarea.SetPlaceholder("🎤 Listening")
 		return e.tickRecordingDots()
 	}
-	e.textarea.Placeholder = e.placeholder
+	e.textarea.SetPlaceholder(e.placeholder)
 	return nil
 }
 
@@ -1913,13 +1892,13 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 	e.historySearch = historySearchState{
 		active:                   true,
 		origTextValue:            e.textarea.Value(),
-		origTextPlaceholderValue: e.textarea.Placeholder,
+		origTextPlaceholderValue: e.textarea.Placeholder(),
 		matchIndex:               -1,
 	}
 
 	e.searchInput.SetValue("")
 	e.textarea.SetValue("")
-	e.textarea.Placeholder = ""
+	e.textarea.SetPlaceholder("")
 	e.textarea.Blur()
 	e.clearSuggestion()
 	return e, tea.Batch(
@@ -1930,11 +1909,11 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 
 func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, e.searchInput.KeyMap.PrevSuggestion):
+	case key.Matches(msg, e.searchInput.PrevSuggestionBinding()):
 		e.cycleMatch(e.hist.FindPrevContains, len(e.hist.Messages))
 		return e, nil
 
-	case key.Matches(msg, e.searchInput.KeyMap.NextSuggestion):
+	case key.Matches(msg, e.searchInput.NextSuggestionBinding()):
 		e.cycleMatch(e.hist.FindNextContains, -1)
 		return e, nil
 
@@ -1996,7 +1975,7 @@ func (e *editor) historySearchComputeMatch() {
 		e.historySearch.matchIndex = -1
 		e.historySearch.failing = false
 		e.textarea.SetValue("")
-		e.textarea.Placeholder = ""
+		e.textarea.SetPlaceholder("")
 		return
 	}
 
@@ -2012,13 +1991,13 @@ func (e *editor) historySearchComputeMatch() {
 		e.historySearch.match = ""
 		e.historySearch.matchIndex = -1
 		e.textarea.SetValue("")
-		e.textarea.Placeholder = "No matching entry in history"
+		e.textarea.SetPlaceholder("No matching entry in history")
 	}
 }
 
 func (e *editor) exitHistorySearch() tea.Cmd {
 	e.textarea.SetValue(e.historySearch.origTextValue)
-	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
+	e.textarea.SetPlaceholder(e.historySearch.origTextPlaceholderValue)
 	e.historySearch = historySearchState{matchIndex: -1}
 	return e.textarea.Focus()
 }

@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,7 +29,7 @@ var _ completions.Completion = (*mockCompletion)(nil)
 
 // newTestEditor creates an editor with slash completion active for testing
 func newTestEditor(value, completionWord string) *editor {
-	ta := textarea.New()
+	ta := widget.NewTextarea()
 	ta.SetWidth(80)
 	ta.SetHeight(10)
 	ta.Focus()

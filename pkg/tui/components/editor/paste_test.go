@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
 	"github.com/docker/go-units"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -663,7 +663,7 @@ func TestAddFileAttachment_SizeLimit(t *testing.T) {
 }
 
 func newPasteTestEditor() *editor {
-	ta := textarea.New()
+	ta := widget.NewTextarea()
 	ta.Focus()
 	return &editor{
 		textarea: ta,

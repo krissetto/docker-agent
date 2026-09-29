@@ -15,6 +15,7 @@ func requireComposerCursorVisible(t *testing.T, e *editor) {
 	probe := e.textarea
 	probe.SetVirtualCursor(false)
 	cursor := probe.Cursor()
+	probe.SetVirtualCursor(true)
 	require.NotNil(t, cursor)
 	require.GreaterOrEqual(t, cursor.Y, 0)
 	require.Less(t, cursor.Y, e.textarea.Height())
@@ -77,17 +78,17 @@ func TestComposerViewportAdapterPreservesSelectionPolicyAndHistoryRow(t *testing
 	selection := e.textarea.SelectedText()
 	require.NotEmpty(t, selection)
 	value, row, col := e.Value(), e.textarea.Line(), e.textarea.Column()
-	dynamic, minH, maxH, maxContent := e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight, e.textarea.MaxContentHeight
+	dynamic, minH, maxH, maxContent := e.textarea.DynamicHeight(), e.textarea.MinHeight(), e.textarea.MaxHeight(), e.textarea.MaxContentHeight()
 	for _, size := range [][2]int{{9, 1}, {50, 8}, {50, 8}} {
 		e.SetSize(size[0], size[1])
 		require.Equal(t, value, e.Value())
 		require.Equal(t, row, e.textarea.Line())
 		require.Equal(t, col, e.textarea.Column())
 		require.Equal(t, selection, e.textarea.SelectedText())
-		require.Equal(t, dynamic, e.textarea.DynamicHeight)
-		require.Equal(t, minH, e.textarea.MinHeight)
-		require.Equal(t, maxH, e.textarea.MaxHeight)
-		require.Equal(t, maxContent, e.textarea.MaxContentHeight)
+		require.Equal(t, dynamic, e.textarea.DynamicHeight())
+		require.Equal(t, minH, e.textarea.MinHeight())
+		require.Equal(t, maxH, e.textarea.MaxHeight())
+		require.Equal(t, maxContent, e.textarea.MaxContentHeight())
 		requireComposerCursorVisible(t, e)
 	}
 	e.EnterHistorySearch()
@@ -102,7 +103,7 @@ func TestComposerViewportAdapterPreservesSelectionPolicyAndHistoryRow(t *testing
 func TestComposerViewportAdapterRetainsLegacyLogicalLineLimit(t *testing.T) {
 	e := New(nil).(*editor)
 	e.SetSize(8, 1)
-	require.Equal(t, 99, e.textarea.MaxHeight)
+	require.Equal(t, 99, e.textarea.MaxHeight())
 	for inserted := range 98 {
 		e.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 		e.SetSize(8, 1)
@@ -112,7 +113,7 @@ func TestComposerViewportAdapterRetainsLegacyLogicalLineLimit(t *testing.T) {
 	// Rejected newlines still pass through the real editor. They must not
 	// fall through to submission/reset once the logical-line cap is reached.
 	value, selection := e.Value(), e.textarea.SelectedText()
-	dynamic, minH, maxH, maxContent := e.textarea.DynamicHeight, e.textarea.MinHeight, e.textarea.MaxHeight, e.textarea.MaxContentHeight
+	dynamic, minH, maxH, maxContent := e.textarea.DynamicHeight(), e.textarea.MinHeight(), e.textarea.MaxHeight(), e.textarea.MaxContentHeight()
 	for range 12 {
 		_, cmd := e.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 		require.Nil(t, cmd, "a rejected newline must not emit a send command")
@@ -121,12 +122,12 @@ func TestComposerViewportAdapterRetainsLegacyLogicalLineLimit(t *testing.T) {
 		require.Equal(t, selection, e.textarea.SelectedText())
 		require.Equal(t, 99, e.textarea.LineCount())
 	}
-	require.Equal(t, dynamic, e.textarea.DynamicHeight)
-	require.Equal(t, minH, e.textarea.MinHeight)
-	require.Equal(t, maxH, e.textarea.MaxHeight)
-	require.Equal(t, maxContent, e.textarea.MaxContentHeight)
-	require.Equal(t, 99, e.textarea.MaxHeight)
-	require.Zero(t, e.textarea.MaxContentHeight)
+	require.Equal(t, dynamic, e.textarea.DynamicHeight())
+	require.Equal(t, minH, e.textarea.MinHeight())
+	require.Equal(t, maxH, e.textarea.MaxHeight())
+	require.Equal(t, maxContent, e.textarea.MaxContentHeight())
+	require.Equal(t, 99, e.textarea.MaxHeight())
+	require.Zero(t, e.textarea.MaxContentHeight())
 	require.Positive(t, e.textarea.ScrollYOffset())
 	requireComposerCursorVisible(t, e)
 	_, send := e.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -140,12 +141,12 @@ func TestComposerViewportAdapterRetainsLegacyLogicalLineLimit(t *testing.T) {
 	require.Equal(t, 2, e.textarea.LineCount())
 	e.SetSize(8, 105)
 	require.Equal(t, 105, e.textarea.Height(), "allocation is not clamped to the input's 99-line policy")
-	require.Equal(t, 99, e.textarea.MaxHeight)
+	require.Equal(t, 99, e.textarea.MaxHeight())
 }
 
 func TestComposerViewportWidthMessageUsesOuterWidth(t *testing.T) {
 	e := New(nil).(*editor)
-	e.textarea.Prompt = "> "
+	e.textarea.SetPrompt("> ")
 	e.SetSize(30, 3)
 	e.SetValue("FIRST\nEND")
 	for range 3 {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/rendering/retained"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -18,14 +19,19 @@ type paneRenderCache struct {
 }
 
 type panePreparedPart struct {
-	raw           string
-	width, height int
-	theme, colors uint64
-	spans         []paneRowSpan
-	builds        uint64
+	input  panePreparationInput
+	spans  []paneRowSpan
+	builds uint64
 }
 
-type panePreparedRow struct{ raw, rendered string }
+// Preparation consumes exact authoritative bytes and dimensions, not revisions.
+// No palette is consulted after this boundary: ANSI paint is already in raw.
+type panePreparationInput struct {
+	raw           string
+	width, height int
+}
+
+type panePreparedRow struct{ slot retained.Slot[string] }
 
 func (c *paneRenderCache) prepare(key, raw string, width, height int) []paneRowSpan {
 	if c.parts == nil {
@@ -36,11 +42,11 @@ func (c *paneRenderCache) prepare(key, raw string, width, height int) []paneRowS
 		part = &panePreparedPart{}
 		c.parts[key] = part
 	}
-	theme, colors := styles.ThemeGeneration(), styles.AgentColorGeneration()
-	if part.spans != nil && part.raw == raw && part.width == width && part.height == height && part.theme == theme && part.colors == colors {
+	in := panePreparationInput{raw: raw, width: width, height: height}
+	if part.spans != nil && part.input == in {
 		return part.spans
 	}
-	part.raw, part.width, part.height, part.theme, part.colors = raw, width, height, theme, colors
+	part.input = in
 	part.spans = make([]paneRowSpan, 0, max(0, height))
 	for line := range strings.SplitSeq(raw, "\n") {
 		if len(part.spans) >= height {
@@ -79,23 +85,9 @@ func (c *paneRenderCache) render(rows [][]paneRowSpan, width int) string {
 	lines := make([]string, len(rows))
 	for y, spans := range rows {
 		raw := assemblePaneRow(spans, width)
-		if c.rows[y].raw != raw {
-			c.rows[y] = panePreparedRow{raw: raw, rendered: trimPaneDefaultPadding(raw)}
-		}
-		lines[y] = c.rows[y].rendered
+		lines[y] = c.rows[y].slot.Render(raw, trimPaneDefaultPadding)
 	}
 	return strings.Join(lines, "\n")
-}
-
-type paneTitleKey struct {
-	name, nodeID, title, activity string
-	width, children               int
-	focused, dimmed               bool
-	theme, colors                 uint64
-}
-type paneTitleEntry struct {
-	key      paneTitleKey
-	rendered string
 }
 
 // shellFrameCache keeps one value per fixed shell component, not per session.

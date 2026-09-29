@@ -62,6 +62,7 @@ func TestViewportEditorKeepsCursorAndDraftAcrossTinyResize(t *testing.T) {
 		probe := e.textarea
 		probe.SetVirtualCursor(false)
 		cursor := probe.Cursor()
+		probe.SetVirtualCursor(true)
 		require.NotNil(t, cursor)
 		require.Equal(t, cursorRow, cursor.Y, "independent public cursor API agrees with the row count")
 		require.GreaterOrEqual(t, cursor.Y, 0)
