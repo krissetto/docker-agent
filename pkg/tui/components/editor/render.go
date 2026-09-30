@@ -97,7 +97,7 @@ func (e *editor) captureInput(fresh bool) editorInput {
 func (e *editor) materializeFrame(view string) string {
 	e.rendering.body++
 	frame := e.Frame()
-	return styles.RenderComposite(frame.Width(e.width+frame.GetHorizontalPadding()+frame.GetHorizontalBorderSize()), view)
+	return renderInputFrame(frame, e.width, view)
 }
 func (e *editor) FreshView() string {
 	return e.materializeFrame(e.rendering.composition.Fresh(e.captureInput(true), drawEditor))

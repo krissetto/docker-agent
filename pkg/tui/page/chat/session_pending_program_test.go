@@ -57,7 +57,7 @@ func (b *lockedBuffer) SidebarString() string {
 func standaloneQueueRows(view, text string) int {
 	count := 0
 	for row := range strings.SplitSeq(view, "\n") {
-		if strings.TrimSpace(row) == "- "+text {
+		if strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(row), "✎ ×")) == "- "+text {
 			count++
 		}
 	}

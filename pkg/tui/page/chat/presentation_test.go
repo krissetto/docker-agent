@@ -254,3 +254,54 @@ func TestPresentationViewClipsANSIAndWideCells(t *testing.T) {
 	require.Empty(t, presentationView(view, 0, 4))
 	require.Empty(t, presentationView(view, 4, 0))
 }
+
+func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
+	p := newLayoutTestPage(t, msgtypes.SidebarLeft)
+	p.app = newTestChatPage(t).app
+	p.ctx = t.Context
+	p.messageQueue = []queuedMessage{{turnID: "exact-turn", content: "editable content"}}
+	p.sidebar.SetQueuedMessages([]sidebar.QueuedMessage{{ID: "exact-turn", Text: "editable content"}})
+	p.SetSize(160, 40)
+	g := SplitPresentationGeometry{Transcript: PresentationRect{70, 12, 50, 20}, Shell: screenShell(p.MeasureSplitShell(160, 40), 17, 8), ShowSidebar: true}
+	p.SetSplitPresentation(&g)
+	point := func(target MouseTarget) tea.MouseClickMsg {
+		t.Helper()
+		for y := g.Shell.Sidebar.Y; y < g.Shell.Sidebar.Y+g.Shell.Sidebar.Height; y++ {
+			for x := g.Shell.Sidebar.X; x < g.Shell.Sidebar.X+g.Shell.Sidebar.Width; x++ {
+				hit := NewHitTest(p)
+				if hit.At(x, y) == target && hit.QueueTurnID == "exact-turn" {
+					return tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+				}
+			}
+		}
+		t.Fatalf("missing target %v", target)
+		return tea.MouseClickMsg{}
+	}
+	remove := point(TargetSidebarRemoveQueuedMessage)
+	_, cmd := p.handleMouseClick(remove)
+	require.Nil(t, cmd, "first click only arms removal")
+	edit := point(TargetSidebarEditQueuedMessage)
+	_, cmd = p.handleMouseClick(edit)
+	require.NotNil(t, cmd, "edit glyph opens on single click")
+	var opened []msgtypes.OpenPendingEditMsg
+	var collect func(tea.Cmd)
+	collect = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		switch msg := cmd().(type) {
+		case tea.BatchMsg:
+			for _, child := range msg {
+				collect(child)
+			}
+		case msgtypes.OpenPendingEditMsg:
+			opened = append(opened, msg)
+		}
+	}
+	collect(cmd)
+	require.Equal(t, []msgtypes.OpenPendingEditMsg{{SessionID: p.app.Session().ID, TurnID: "exact-turn", Content: "editable content"}}, opened)
+	_, cmd = p.handleMouseClick(remove)
+	require.Nil(t, cmd, "edit click disarms earlier removal")
+	_, cmd = p.handleMouseClick(remove)
+	require.NotNil(t, cmd, "second removal click alone dispatches cancel")
+}

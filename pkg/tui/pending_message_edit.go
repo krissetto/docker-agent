@@ -28,7 +28,7 @@ func (m *appModel) openPendingMessageEdit(msg messages.OpenPendingEditMsg) (tea.
 			return core.CmdHandler(dialog.PendingMessageSaveResultMsg{EditorID: editorID, SessionID: msg.SessionID, TurnID: msg.TurnID, Err: errors.New("the session changed; the queued message was not edited")})
 		}
 		return func() tea.Msg {
-			err := origin.EditPendingMessage(ctx, msg.SessionID, msg.TurnID, content)
+			err := origin.EditPendingMessage(ctx, msg.SessionID, msg.TurnID, content, msg.Content)
 			return pendingEditResult{editorID: editorID, sessionID: msg.SessionID, turnID: msg.TurnID, err: err}
 		}
 	}

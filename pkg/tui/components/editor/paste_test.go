@@ -663,7 +663,7 @@ func TestAddFileAttachment_SizeLimit(t *testing.T) {
 }
 
 func newPasteTestEditor() *editor {
-	ta := widget.NewTextarea()
+	ta := &Input{Textarea: widget.NewTextarea()}
 	ta.Focus()
 	return &editor{
 		textarea: ta,

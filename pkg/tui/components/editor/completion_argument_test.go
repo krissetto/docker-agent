@@ -63,7 +63,7 @@ var _ completions.ArgumentCompleter = (*dynamicArgumentCompletion)(nil)
 // completion sources, mirroring newTestEditor but without pre-seeding any
 // active completion session.
 func newArgumentTestEditor(value string, comps ...completions.Completion) *editor {
-	ta := widget.NewTextarea()
+	ta := &Input{Textarea: widget.NewTextarea()}
 	ta.SetWidth(80)
 	ta.SetHeight(10)
 	ta.Focus()

@@ -158,3 +158,15 @@ func (w *Textarea) SetVirtualCursor(v bool)     { w.changed(); w.model.SetVirtua
 // Cursor returns a detached public cursor description, not its private
 // virtual cursor. Callers cannot mutate the widget through this value.
 func (w *Textarea) Cursor() *tea.Cursor { return w.model.Cursor() }
+
+func (w *Textarea) SetMaxWidth(v int) {
+	if w.model.MaxWidth != v {
+		w.changed()
+		w.model.MaxWidth = v
+	}
+}
+
+func (w *Textarea) PlaceCursor(cell, row int) {
+	w.changed()
+	w.model.SetCursorPosition(w.model.PositionAtCell(row, cell))
+}

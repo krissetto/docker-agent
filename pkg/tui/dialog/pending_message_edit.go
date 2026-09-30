@@ -4,11 +4,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/widgets/textarea"
 )
 
 // PendingMessageSaveResultMsg answers one queued-message editor's save request.
@@ -29,7 +29,7 @@ type pendingMessageEditDialog struct {
 	turnID    string
 	editorID  uint64
 	save      func(string) tea.Cmd
-	input     textarea.Model
+	input     *editor.Input
 	saving    bool
 	closed    bool
 	saveError string
@@ -38,20 +38,13 @@ type pendingMessageEditDialog struct {
 
 // NewPendingMessageEditDialog edits a queued message without replacing its identity.
 func NewPendingMessageEditDialog(sessionID, turnID, content string, editorID uint64, save func(string) tea.Cmd) Dialog {
-	input := textarea.New()
-	input.SetStyles(styles.InputStyle)
-	input.Prompt = ""
-	input.ShowLineNumbers = false
-	input.CharLimit = 0
-	input.MaxHeight = 0
-	input.MaxWidth = 0
-	input.MaxContentHeight = 0
+	input := editor.NewInput(editor.InputConfig{Unlimited: true, NewlineKeys: []string{"enter", "ctrl+j", "shift+enter"}})
 	input.SetValue(content)
 	input.Focus()
 	return &pendingMessageEditDialog{sessionID: sessionID, turnID: turnID, editorID: editorID, save: save, input: input}
 }
 
-func (d *pendingMessageEditDialog) Init() tea.Cmd { return nil }
+func (d *pendingMessageEditDialog) Init() tea.Cmd { return d.input.Init() }
 
 // PendingEditID identifies this editor across asynchronous save results.
 func (d *pendingMessageEditDialog) PendingEditID() uint64 { return d.editorID }
@@ -112,10 +105,10 @@ func (d *pendingMessageEditDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		x, y, width, height := d.BodyScrollBounds()
 		inputY := y + d.inputRow - d.BodyScrollOffset()
-		if !d.saving && msg.X >= x && msg.X < x+max(1, width-2) && msg.Y >= max(y, inputY) && msg.Y < min(y+height, inputY+d.input.Height()) {
+		if !d.saving && msg.X >= x && msg.X < x+max(1, width-2) && msg.Y >= max(y, inputY) && msg.Y < min(y+height, inputY+d.input.SurfaceHeight()) {
 			d.BlurActions()
 			d.input.Focus()
-			d.placeCursor(msg.X-x, msg.Y-inputY)
+			d.input.PlaceSurfaceCursor(msg.X-x, msg.Y-inputY)
 			d.prepareLayout()
 		}
 		return d, nil
@@ -174,6 +167,12 @@ func (d *pendingMessageEditDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if handled, cmd := d.UpdateBodyScroll(msg); handled {
 		return d, cmd
 	}
+	if !d.saving && !d.ActionsFocused() {
+		var cmd tea.Cmd
+		d.input, cmd = d.input.Update(msg)
+		d.prepareLayout()
+		return d, cmd
+	}
 	return d, nil
 }
 
@@ -202,9 +201,7 @@ func (d *pendingMessageEditDialog) beginSave() tea.Cmd {
 func (d *pendingMessageEditDialog) content() (width int, header, body, footer string) {
 	width = d.ComputeDialogWidth(85, 50, 110)
 	header = RenderDialogHeader("Edit queued message", d.ContentWidth(width, 2), styles.DialogTitleStyle)
-	input := d.input
-	input.SetStyles(styles.InputStyle)
-	body = input.View()
+	body = d.input.SurfaceView()
 	if d.saveError != "" {
 		body = styles.DialogContentStyle.Foreground(styles.Error).Width(d.BodyContentWidth(width)).Render(d.saveError) + "\n" + body
 	}
@@ -212,21 +209,26 @@ func (d *pendingMessageEditDialog) content() (width int, header, body, footer st
 	if d.saving {
 		label = "Saving…"
 	}
-	footer = d.RenderActions(d.ContentWidth(width, 2), Action{Label: label, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: d.saving})
+	footer = d.RenderActions(d.ContentWidth(width, 2), Action{Label: label, HideShortcut: true, Primary: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: d.saving}, Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}})
+	hint := styles.MutedStyle.Width(d.ContentWidth(width, 2)).Render("Enter newline · Ctrl+Enter Save")
+	footer = hint + "\n" + footer
+	d.actionRows = append(make([]dialogActionRow, lipgloss.Height(hint)), d.actionRows...)
+	for i := range d.actionLines {
+		d.actionLines[i] += lipgloss.Height(hint)
+	}
 	return width, header, body, footer
 }
 
 func (d *pendingMessageEditDialog) prepareLayout() {
 	width := d.ComputeDialogWidth(85, 50, 110)
-	d.input.SetWidth(d.BodyContentWidth(width))
 	d.inputRow = 0
 	if d.saveError != "" {
 		d.inputRow = lipgloss.Height(styles.DialogContentStyle.Width(d.BodyContentWidth(width)).Render(d.saveError))
 	}
-	d.input.SetHeight(max(1, d.Height()-d.inputRow))
+	d.input.SetSize(d.BodyContentWidth(width), max(1, d.Height()-d.inputRow))
 	width, header, body, footer := d.content()
 	d.PrepareScrollableBody(styles.DialogStyle, width, header, body, footer)
-	d.input.SetHeight(max(1, d.bodyScroll.VisibleHeight()-d.inputRow))
+	d.input.SetSize(d.BodyContentWidth(width), max(1, d.bodyScroll.VisibleHeight()-d.inputRow))
 	width, header, body, footer = d.content()
 	d.PrepareScrollableBody(styles.DialogStyle, width, header, body, footer)
 }
@@ -239,10 +241,7 @@ func (d *pendingMessageEditDialog) View() string {
 func (d *pendingMessageEditDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
 
 func (d *pendingMessageEditDialog) placeCursor(cell, row int) {
-	inputStyle := d.input.Styles().Focused.Base
-	cell -= inputStyle.GetBorderLeftSize() + inputStyle.GetPaddingLeft() + inputStyle.GetMarginLeft() + lipgloss.Width(d.input.Prompt)
-	row -= inputStyle.GetBorderTopSize() + inputStyle.GetPaddingTop() + inputStyle.GetMarginTop()
-	d.input.SetCursorPosition(d.input.PositionAtCell(max(0, row), max(0, cell)))
+	d.input.PlaceCursor(cell, row)
 }
 
 func (d *pendingMessageEditDialog) scrollInput(x, y, delta int) {
@@ -250,16 +249,6 @@ func (d *pendingMessageEditDialog) scrollInput(x, y, delta int) {
 	if d.saving || x < left || x >= left+width || y < top || y >= top+height || delta == 0 {
 		return
 	}
-	steps := delta
-	if steps < 0 {
-		steps = -steps
-	}
-	for range steps {
-		if delta < 0 {
-			d.input.CursorUp()
-		} else {
-			d.input.CursorDown()
-		}
-	}
+	d.input.ScrollByWheel(delta)
 	d.prepareLayout()
 }

@@ -131,7 +131,7 @@ type historySearchState struct {
 type editor struct {
 	themeGeneration               uint64
 	rendering                     editorRendering
-	textarea                      *widget.Textarea
+	textarea                      *Input
 	occupancy                     textOccupancyCache
 	hist                          *history.History
 	width                         int
@@ -241,15 +241,7 @@ func searchInputStyles() textinput.Styles {
 
 // New creates a new editor component
 func New(hist *history.History, opts ...Option) Editor {
-	ta := widget.NewTextarea()
-	ta.SetStyles(styles.InputStyle)
-	ta.SetPlaceholder(defaultPlaceholder)
-	ta.SetPrompt("")
-	ta.SetCharLimit(-1)
-	ta.SetWidth(50)
-	ta.SetHeight(3) // Set minimum 3 lines for multi-line input
-	ta.Focus()
-	ta.SetShowLineNumbers(false)
+	ta := NewInput(InputConfig{Placeholder: defaultPlaceholder})
 
 	si := widget.NewTextinput()
 	si.SetPrompt("")
@@ -529,22 +521,7 @@ func (e *editor) AcceptSuggestion() tea.Cmd {
 }
 
 func (e *editor) ScrollByWheel(delta int) {
-	if delta == 0 {
-		return
-	}
-
-	steps := delta
-	if steps < 0 {
-		steps = -steps
-		for range steps {
-			e.textarea.CursorUp()
-		}
-		return
-	}
-
-	for range steps {
-		e.textarea.CursorDown()
-	}
+	e.textarea.ScrollByWheel(delta)
 }
 
 // resetAndSend prepares a message for sending: processes pending file refs,
@@ -1174,17 +1151,10 @@ func (e *editor) SetViewportSize(width, height int) {
 // Frame retains the themed editor surface, giving up decoration only when
 // necessary to leave a real text cell. The same frame supplies mouse offsets.
 func (e *editor) Frame() lipgloss.Style {
-	frame := styles.EditorStyle
 	if !e.viewportLimited {
-		return frame
+		return styles.EditorStyle
 	}
-	if e.viewportWidth <= frame.GetHorizontalFrameSize() {
-		frame = frame.Margin(0).PaddingLeft(0).PaddingRight(0)
-	}
-	if e.viewportHeight <= frame.GetVerticalFrameSize() {
-		frame = frame.PaddingTop(0).PaddingBottom(0)
-	}
-	return frame
+	return inputFrame(e.viewportWidth, e.viewportHeight)
 }
 
 // SetSize sets the dimensions of the component

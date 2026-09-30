@@ -19,6 +19,7 @@ const (
 	TargetSidebarModel
 	TargetSidebarThinkingLevel
 	TargetSidebarQueuedMessage
+	TargetSidebarEditQueuedMessage
 	TargetSidebarRemoveQueuedMessage
 	TargetSidebarAgent
 	TargetSidebarUsageContext
@@ -152,6 +153,9 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarModel
 	case sidebar.ClickThinkingLevel:
 		return TargetSidebarThinkingLevel
+	case sidebar.ClickEditQueuedMessage:
+		h.QueueTurnID = agentName
+		return TargetSidebarEditQueuedMessage
 	case sidebar.ClickQueuedMessage:
 		h.QueueTurnID = agentName
 		return TargetSidebarQueuedMessage

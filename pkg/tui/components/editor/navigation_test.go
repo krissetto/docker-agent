@@ -16,7 +16,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("left arrow navigation in multi-line content", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -64,7 +64,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("right arrow navigation in multi-line content", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -105,7 +105,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("up arrow navigation in multi-line content when userTyped is true", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -143,7 +143,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("down arrow navigation in multi-line content when userTyped is true", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -181,7 +181,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("backspace after navigating left in multi-line content", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -232,7 +232,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("backspace with wide characters", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -268,7 +268,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("backspace in middle of text with emoji", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()
@@ -304,7 +304,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("navigation in soft-wrapped text", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(10) // Narrow width to force wrapping
 		ta.SetHeight(10)
 		ta.Focus()
@@ -356,7 +356,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("up arrow in soft-wrapped text", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(10) // Narrow width to force wrapping
 		ta.SetHeight(10)
 		ta.Focus()
@@ -395,7 +395,7 @@ func TestMultiLineNavigation(t *testing.T) {
 	t.Run("backspace with CJK characters", func(t *testing.T) {
 		t.Parallel()
 
-		ta := widget.NewTextarea()
+		ta := &Input{Textarea: widget.NewTextarea()}
 		ta.SetWidth(80)
 		ta.SetHeight(10)
 		ta.Focus()

@@ -29,7 +29,7 @@ var _ completions.Completion = (*mockCompletion)(nil)
 
 // newTestEditor creates an editor with slash completion active for testing
 func newTestEditor(value, completionWord string) *editor {
-	ta := widget.NewTextarea()
+	ta := &Input{Textarea: widget.NewTextarea()}
 	ta.SetWidth(80)
 	ta.SetHeight(10)
 	ta.Focus()

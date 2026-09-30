@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // handleKeyPress handles keyboard input events for the chat page.
@@ -186,9 +186,10 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, core.CmdHandler(msgtypes.OpenModelPickerMsg{})
 		}
 
-	case TargetSidebarQueuedMessage:
+	case TargetSidebarQueuedMessage, TargetSidebarEditQueuedMessage:
 		if msg.Button == tea.MouseLeft {
-			if doubleClick {
+			p.sidebar.ConfirmQueuedRemoval("")
+			if doubleClick || target == TargetSidebarEditQueuedMessage {
 				for _, queued := range p.messageQueue {
 					if queued.turnID == hit.QueueTurnID {
 						return p, tea.Batch(core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: sessionID}), core.CmdHandler(msgtypes.OpenPendingEditMsg{SessionID: sessionID, TurnID: queued.turnID, Content: queued.content}))
@@ -200,6 +201,9 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 		}
 	case TargetSidebarRemoveQueuedMessage:
 		if msg.Button == tea.MouseLeft {
+			if !p.sidebar.ConfirmQueuedRemoval(hit.QueueTurnID) {
+				return p, nil
+			}
 			application, turnID, ctx := p.app, hit.QueueTurnID, p.ctx()
 			return p, func() tea.Msg {
 				removed, err := application.CancelPendingMessage(ctx, turnID)

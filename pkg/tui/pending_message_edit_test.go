@@ -40,16 +40,17 @@ func (s *pendingEditSessions) SessionByID(string) (runtime.SessionHandle, error)
 }
 
 func TestActualProgramQueuedEditRetainsIdentityOrderAndFailureDraft(t *testing.T) {
-	for _, fail := range []bool{false, true} {
+	for _, failure := range []string{"", "message no longer pending", "queued message changed since editing began"} {
+		fail := failure != ""
 		name := "success"
 		if fail {
-			name = "stale"
+			name = failure
 		}
 		t.Run(name, func(t *testing.T) {
 			sess := session.New(session.WithID("pending-edit-owner"), session.WithTitle("PENDING-EDITOR"))
 			handle := &pendingEditHandle{lifecycleHandle: &lifecycleHandle{id: sess.ID}, edits: make(chan runtime.SessionEdit, 1)}
 			if fail {
-				handle.failure = errors.New("message no longer pending")
+				handle.failure = errors.New(failure)
 			}
 			application := app.New(t.Context(), &pendingEditSessions{openSubagentSessions: &openSubagentSessions{}, handle: handle}, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 			root := newSidebarProgramRoot(t, application)
@@ -76,11 +77,13 @@ func TestActualProgramQueuedEditRetainsIdentityOrderAndFailureDraft(t *testing.T
 			}
 			require.Equal(t, runtime.SessionEditPendingMessage, edit.Kind)
 			require.Equal(t, "second-turn-ID", edit.PendingMessage.TurnID)
+			require.NotNil(t, edit.PendingMessage.ExpectedContent)
+			require.Equal(t, "Original full text", *edit.PendingMessage.ExpectedContent)
 			require.Contains(t, edit.PendingMessage.Content, "EDITED")
 			if fail {
 				require.Eventually(t, func() bool {
 					s := sidebarProgramSnapshot(t, program)
-					return s.open && strings.Contains(ansi.Strip(s.content), "message no longer pending")
+					return s.open && strings.Contains(ansi.Strip(s.content), failure)
 				}, time.Second, time.Millisecond)
 				require.Contains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "EDITED", "failure keeps editor draft")
 				program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})

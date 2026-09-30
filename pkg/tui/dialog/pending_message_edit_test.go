@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -158,6 +160,9 @@ func TestPendingMessageEditMousePlacesMultilineCursor(t *testing.T) {
 	d.SetSize(80, 20)
 	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyHome, Mod: tea.ModCtrl})
 	x, y, _, _ := d.BodyScrollBounds()
+	frame := d.input.Frame()
+	x += frame.GetMarginLeft() + frame.GetPaddingLeft() + frame.GetBorderLeftSize()
+	y += frame.GetMarginTop() + frame.GetPaddingTop() + frame.GetBorderTopSize()
 	_, _ = d.Update(tea.MouseClickMsg{X: x + 2, Y: y + 1, Button: tea.MouseLeft})
 	assert.Equal(t, 1, d.input.Line())
 	assert.Equal(t, 1, d.input.Column(), "second cell boundary follows the wide glyph")
@@ -260,4 +265,56 @@ func TestPendingMessageEditHitTestUsesScrolledGraphemeGeometry(t *testing.T) {
 	d.placeCursor(2, 0)
 	require.Equal(t, 1, d.input.Column(), "wide glyph ends at cell two")
 	require.Empty(t, d.input.SelectedText(), "click starts a new cursor placement")
+}
+
+func TestEditDialogsShareLiteralComposerSurface(t *testing.T) {
+	for _, kind := range []string{"todo", "queued"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			content := "@/tmp/image.png\n" + strings.Repeat("界é👩‍💻 literal text\n", 120) + " tail "
+			var d Dialog
+			var input *editor.Input
+			if kind == "todo" {
+				td := NewTodoEditDialog(messages.TodoScope{}, "todo", "", 1, func(_ uint64, _, value string) tea.Cmd {
+					calls++
+					require.Equal(t, content+"\n", value)
+					return func() tea.Msg { return nil }
+				}).(*todoEditDialog)
+				d, input = td, td.input
+			} else {
+				pd := NewPendingMessageEditDialog("s", "t", "", 1, func(value string) tea.Cmd {
+					calls++
+					require.Equal(t, content+"\n", value)
+					return func() tea.Msg { return nil }
+				}).(*pendingMessageEditDialog)
+				d, input = pd, pd.input
+			}
+			d.SetSize(80, 24)
+			d.Update(tea.PasteMsg{Content: content})
+			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+			require.Zero(t, calls)
+			require.Equal(t, content+"\n", input.Value())
+			view := ansi.Strip(d.View())
+			require.Contains(t, view, "Enter newline · Ctrl+Enter Save")
+			require.Contains(t, view, "Cancel")
+			require.NotContains(t, strings.ToLower(view), "esc")
+			require.NotContains(t, view, "@paste-")
+			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+			require.Equal(t, 1, calls)
+		})
+	}
+}
+
+func TestEditDialogIsolatedRenderedSurface(t *testing.T) {
+	d := NewPendingMessageEditDialog("s", "t", "First line\nSecond line", 1, nil).(*pendingMessageEditDialog)
+	d.SetSize(70, 16)
+	view := ansi.Strip(d.View())
+	t.Log("isolated queued editor (normal input surface, no tab bar):\n" + view)
+	require.Contains(t, view, "Edit queued message")
+	require.Contains(t, view, "First line")
+	require.Contains(t, view, "Second line")
+	require.Contains(t, view, "Cancel")
+	require.NotContains(t, view, "Attachments")
+	require.NotContains(t, view, "History")
 }
