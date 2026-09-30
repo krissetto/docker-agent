@@ -1191,3 +1191,7 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 	p.committed = &result
 	return CommittedSessionView{SessionHandle: handle, Info: cloneSessionViewInfo(info)}, nil
 }
+
+func (s *remoteSession) SetTodoDescription(context.Context, string, string, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoDescription)
+}

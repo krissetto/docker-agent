@@ -86,6 +86,8 @@ func (m *model) placementText(row placedRow, width int) string {
 		return text
 	}
 	switch {
+	case strings.HasPrefix(row.id, "todo:") && row.payload != "":
+		text = m.todoHoverText(row)
 	case row.id == "active-agent":
 		text = m.agentIdentityView(width)
 	case row.action == ClickModel:

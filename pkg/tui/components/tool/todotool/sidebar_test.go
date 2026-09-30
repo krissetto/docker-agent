@@ -1,6 +1,8 @@
 package todotool
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -97,7 +99,7 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	c.SetSize(40)
 	require.NoError(t, c.SetTodos(todoResult("alpha task")))
 	body := c.RenderBody()
-	assert.Equal(t, "× ◯ pending · alpha task", strings.TrimSpace(ansi.Strip(body)))
+	assert.Equal(t, "○ × ✎ alpha task", strings.TrimSpace(ansi.Strip(body)))
 	assert.NotContains(t, body, "TO-DO")
 	assert.Contains(t, c.Render(), "TO-DO")
 	assert.Equal(t, body, c.RenderBody())
@@ -106,6 +108,7 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	c.SetSize(40)
 	theme := *original
 	theme.Colors.TextPrimary = "#abcdef"
+	theme.Colors.TextSecondary = "#abcdef"
 	styles.ApplyTheme(&theme)
 	c.InvalidateCache()
 	after := c.RenderBody()
@@ -114,4 +117,63 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	require.NoError(t, c.SetTodos(todoResult("beta task")))
 	assert.Contains(t, c.RenderBody(), "beta")
 	assert.NotContains(t, c.RenderBody(), "alpha")
+}
+
+func TestTodoGeometryCacheDoesNotWrapForHitsOrUnchangedRows(t *testing.T) {
+	c := NewSidebarComponent()
+	c.SetSize(32)
+	items := make([]todo.Todo, 100)
+	for i := range items {
+		items[i] = todo.Todo{ID: fmt.Sprint(i), Description: strings.Repeat("long 世界é description ", 4), Status: "completed"}
+	}
+	require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: items}))
+	body := c.RenderBody()
+	require.Equal(t, uint64(100), c.wraps)
+	for range 10 {
+		for line := range strings.Count(body, "\n") + 1 {
+			item, ok := c.TodoAtLine(line)
+			require.True(t, ok)
+			require.NotEmpty(t, item.ID)
+			c.ControlsAtLine(line)
+		}
+	}
+	require.Equal(t, uint64(100), c.wraps, "hit geometry never renders or wraps")
+	items[20].Description = "edited description"
+	require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: items}))
+	c.RenderBody()
+	require.Equal(t, uint64(101), c.wraps, "one changed ID replaces only its current row")
+	require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: items}))
+	c.RenderBody()
+	require.Equal(t, uint64(101), c.wraps, "identical event does not invalidate")
+	slices.Reverse(items)
+	require.NoError(t, c.SetTodos(&tools.ToolCallResult{Meta: items}))
+	c.RenderBody()
+	require.Equal(t, uint64(101), c.wraps, "reordering reuses rows by stable ID")
+	c.SetSize(31)
+	c.RenderBody()
+	require.Equal(t, uint64(201), c.wraps)
+	require.Len(t, c.renderCache, 1, "retain only current width")
+	require.Len(t, c.rows, 100)
+}
+
+func TestCompactTodoRowsShareDescriptionStyleAndGeometry(t *testing.T) {
+	for _, status := range []string{"pending", "in-progress", "completed"} {
+		for _, selected := range []bool{false, true} {
+			rows := RowLines("first words 世界é 👩‍💻\nsecond line", status, 24, selected)
+			require.Greater(t, len(rows), 1)
+			for i, row := range rows {
+				require.LessOrEqual(t, ansi.StringWidth(row), 24)
+				description := ansi.Cut(row, 6, 24)
+				require.True(t, strings.HasSuffix(description, Description(ansi.Strip(description), status, selected)), "all wrapped description cells carry identical style")
+				if i > 0 {
+					require.Equal(t, "      ", ansi.Strip(ansi.Cut(row, 0, 6)))
+				}
+			}
+		}
+	}
+	for width := 1; width < 12; width++ {
+		for _, row := range RowLines("界é 👩‍💻 long words", "completed", width, false) {
+			require.LessOrEqual(t, ansi.StringWidth(row), width, "width=%d row=%q plain=%q", width, row, ansi.Strip(row))
+		}
+	}
 }

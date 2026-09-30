@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -17,6 +18,7 @@ import (
 func todoScope(owner string, data *panelSessionData) messages.TodoScope {
 	return messages.TodoScope{Owner: owner, SessionID: data.sessionID, Generation: data.generation, Epoch: data.epoch}
 }
+
 func (m *appModel) prepareTodos() tea.Cmd {
 	if m.application == nil || m.supervisor == nil || m.contextClosed {
 		return nil
@@ -60,6 +62,7 @@ func (m *appModel) prepareTodos() tea.Cmd {
 	}
 	return tea.Batch(cmds...)
 }
+
 func (m *appModel) publishTodos(owner string, data *panelSessionData, err error) tea.Cmd {
 	data.publishedRevision = data.revision
 	snapshot := messages.TodosSnapshotMsg{Scope: todoScope(owner, data), Todos: slices.Clone(data.todos), Err: err}
@@ -71,6 +74,7 @@ func (m *appModel) publishTodos(owner string, data *panelSessionData, err error)
 	cmds = append(cmds, m.updateDialogCmd(snapshot))
 	return tea.Batch(cmds...)
 }
+
 func (m *appModel) openTodos(msg messages.OpenTodosMsg) tea.Cmd {
 	owner := m.paneFocus()
 	data := m.panelOwnerData(owner)
@@ -120,6 +124,7 @@ func (m *appModel) editTodo(msg messages.EditTodoMsg) tea.Cmd {
 		return result
 	}
 }
+
 func (m *appModel) finishTodoMutation(msg todoMutationMsg) tea.Cmd {
 	data := m.panelData[msg.scope.Owner]
 	if data == nil || data != msg.data || todoScope(msg.scope.Owner, data) != msg.scope {
@@ -161,4 +166,76 @@ func (m *appModel) syncPanelTreeDialog() {
 		return
 	}
 	m.updateDialogCmd(dialog.SubagentsRefreshMsg{Dialog: top, Nodes: data.nodes})
+}
+
+var todoEditorSequence atomic.Uint64
+
+func (m *appModel) openTodoEditor(msg messages.OpenTodoEditMsg) tea.Cmd {
+	data := m.panelOwnerData(msg.Scope.Owner)
+	if data == nil || msg.Scope.Owner != m.paneFocus() || todoScope(msg.Scope.Owner, data) != msg.Scope {
+		return nil
+	}
+	for _, item := range data.todos {
+		if item.ID != msg.ID {
+			continue
+		}
+		editorID := todoEditorSequence.Add(1)
+		d := dialog.NewTodoEditDialog(msg.Scope, item.ID, item.Description, editorID, func(requestID uint64, expected, description string) tea.Cmd {
+			return core.CmdHandler(messages.SaveTodoDescriptionMsg{Scope: msg.Scope, ID: msg.ID, EditorID: editorID, RequestID: requestID, ExpectedDescription: expected, Description: description})
+		})
+		data.todoEditor = d
+		return core.CmdHandler(dialog.OpenDialogMsg{Model: d})
+	}
+	return notification.ErrorCmd("Todo no longer exists")
+}
+
+type todoDescriptionResult struct {
+	mutation todoMutationMsg
+	request  messages.SaveTodoDescriptionMsg
+}
+
+func (m *appModel) saveTodoDescription(msg messages.SaveTodoDescriptionMsg) tea.Cmd {
+	data := m.panelOwnerData(msg.Scope.Owner)
+	if data == nil || msg.Scope.Owner != m.paneFocus() || todoScope(msg.Scope.Owner, data) != msg.Scope {
+		return nil
+	}
+	runner := m.supervisor.GetRunner(msg.Scope.Owner)
+	if runner == nil || runner.App != data.application {
+		return nil
+	}
+	handle := runner.App.SessionHandle()
+	if handle == nil {
+		return nil
+	}
+	result := todoDescriptionResult{mutation: todoMutationMsg{data: data, scope: msg.Scope, revision: data.revision}, request: msg}
+	ctx := m.ctx()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		result.mutation.todos, result.mutation.err = handle.SetTodoDescription(ctx, msg.ID, msg.ExpectedDescription, msg.Description)
+		if result.mutation.err != nil {
+			result.mutation.todos, _ = handle.Todos(ctx)
+		}
+		result.mutation.todos = slices.Clone(result.mutation.todos)
+		return result
+	}
+}
+
+func (m *appModel) finishTodoDescription(result todoDescriptionResult) tea.Cmd {
+	msg := result.mutation
+	data := m.panelData[msg.scope.Owner]
+	if data == nil || data != msg.data || todoScope(msg.scope.Owner, data) != msg.scope {
+		return nil
+	}
+	generation, ok := m.supervisor.RouteGeneration(msg.scope.Owner)
+	if !ok || generation != msg.scope.Generation {
+		return nil
+	}
+	save := messages.TodoSaveResultMsg{Scope: msg.scope, ID: result.request.ID, EditorID: result.request.EditorID, RequestID: result.request.RequestID, Todos: msg.todos, Err: msg.err}
+	if msg.err != nil {
+		// A failed CAS still reloads canonical state, without publishing the stale pre-save snapshot.
+		data.attempted = false
+		return tea.Batch(m.updateDialogCmd(save), m.prepareTodos(), notification.ErrorCmd("Failed to update todo: "+msg.err.Error()))
+	}
+	return tea.Batch(m.updateDialogCmd(save), m.finishTodoMutation(msg))
 }

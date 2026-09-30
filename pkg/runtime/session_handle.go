@@ -455,19 +455,32 @@ func (h *sessionHandle) SetTodoStatus(ctx context.Context, id, status string) ([
 	default:
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: SessionOperationSetTodoStatus, Detail: "invalid todo status"}
 	}
-	return h.mutateTodo(ctx, id, SessionOperationSetTodoStatus, func(items []session.Todo, index int) []session.Todo {
+	return h.mutateTodo(ctx, id, SessionOperationSetTodoStatus, func(items []session.Todo, index int) ([]session.Todo, error) {
 		items[index].Status = status
-		return items
+		return items, nil
+	})
+}
+
+func (h *sessionHandle) SetTodoDescription(ctx context.Context, id, expectedDescription, description string) ([]session.Todo, error) {
+	if strings.TrimSpace(description) == "" {
+		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: SessionOperationSetTodoDescription, Detail: "todo description is required"}
+	}
+	return h.mutateTodo(ctx, id, SessionOperationSetTodoDescription, func(items []session.Todo, index int) ([]session.Todo, error) {
+		if items[index].Description != expectedDescription {
+			return nil, &SessionError{Kind: SessionErrorConflict, SessionID: h.sessionID, Operation: SessionOperationSetTodoDescription, Detail: "todo description changed; reload before retrying"}
+		}
+		items[index].Description = description
+		return items, nil
 	})
 }
 
 func (h *sessionHandle) RemoveTodo(ctx context.Context, id string) ([]session.Todo, error) {
-	return h.mutateTodo(ctx, id, SessionOperationRemoveTodo, func(items []session.Todo, index int) []session.Todo {
-		return slices.Delete(items, index, index+1)
+	return h.mutateTodo(ctx, id, SessionOperationRemoveTodo, func(items []session.Todo, index int) ([]session.Todo, error) {
+		return slices.Delete(items, index, index+1), nil
 	})
 }
 
-func (h *sessionHandle) mutateTodo(ctx context.Context, id string, operation SessionOperation, mutate func([]session.Todo, int) []session.Todo) ([]session.Todo, error) {
+func (h *sessionHandle) mutateTodo(ctx context.Context, id string, operation SessionOperation, mutate func([]session.Todo, int) ([]session.Todo, error)) ([]session.Todo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -497,7 +510,7 @@ func (h *sessionHandle) mutateTodo(ctx context.Context, id string, operation Ses
 			if index < 0 {
 				return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: h.sessionID, Operation: operation, Detail: "todo ID not found"}
 			}
-			return mutate(items, index), nil
+			return mutate(items, index)
 		})
 	}()
 	if err != nil {

@@ -28,13 +28,7 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 			return nil, false
 		}
 		controls = row.todoControls
-		for line := 0; line < m.todoEnd-m.todoSummaryLine; line++ {
-			candidate, exists := m.todoComp.TodoAtLine(line)
-			if exists && candidate.ID == row.payload {
-				item, ok = candidate, true
-				break
-			}
-		}
+		item, ok = m.todoComp.TodoByID(row.payload)
 	} else {
 		line := y + m.scrollview.ScrollOffset() - m.todoSummaryLine - 2
 		item, ok = m.todoComp.TodoAtLine(line)
@@ -43,7 +37,7 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 	if !ok {
 		return nil, false
 	}
-	if localX == 0 && controls {
+	if localX == 2 && controls {
 		if m.todoRemoveArmed != item.ID {
 			m.todoRemoveArmed = item.ID
 			m.invalidateCache()
@@ -52,8 +46,11 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Remove: true}), true
 	}
 	m.todoRemoveArmed = ""
-	if localX == 2 && controls {
+	if localX == 0 && controls {
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Status: todotool.NextStatus(item.Status)}), true
+	}
+	if localX == 4 && controls {
+		return core.CmdHandler(messages.OpenTodoEditMsg{ID: item.ID, Scope: m.todoScope}), true
 	}
 	return core.CmdHandler(messages.OpenTodosMsg{ID: item.ID, Scope: m.todoScope}), true
 }

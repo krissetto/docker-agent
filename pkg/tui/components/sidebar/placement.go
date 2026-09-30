@@ -93,6 +93,7 @@ func (m *model) targetRows() []placedRow {
 			line := y - m.todoSummaryLine - 2
 			row.id = fmt.Sprintf("todo:%d", line)
 			if item, ok := m.todoComp.TodoAtLine(line); ok {
+				row.id = fmt.Sprintf("todo:%s:%d", item.ID, m.todoComp.OffsetAtLine(line))
 				row.payload = item.ID
 				row.todoControls = m.todoComp.ControlsAtLine(line)
 			}

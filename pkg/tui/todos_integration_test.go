@@ -23,6 +23,7 @@ type editableTodoHandle struct {
 func (h *editableTodoHandle) Todos(ctx context.Context) ([]session.Todo, error) {
 	return h.store.LoadTodos(ctx, h.ID())
 }
+
 func (h *editableTodoHandle) SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error) {
 	return h.store.MutateTodos(ctx, h.ID(), func(items []session.Todo) ([]session.Todo, error) {
 		for i := range items {
@@ -34,6 +35,7 @@ func (h *editableTodoHandle) SetTodoStatus(ctx context.Context, id, status strin
 		return nil, errors.New("missing todo")
 	})
 }
+
 func (h *editableTodoHandle) RemoveTodo(ctx context.Context, id string) ([]session.Todo, error) {
 	return h.store.MutateTodos(ctx, h.ID(), func(items []session.Todo) ([]session.Todo, error) {
 		for i := range items {
@@ -78,7 +80,7 @@ func TestTodoMutationPersistsRefreshesDialogAndHiddenPanelAndFencesReset(t *test
 	result := root.editTodo(messages.EditTodoMsg{Scope: scope, ID: "opaque", Status: "completed"})().(todoMutationMsg)
 	root.finishTodoMutation(result)
 	require.Equal(t, "completed", data.todos[0].Status)
-	require.Contains(t, ansi.Strip(root.dialogMgr.TopDialog().View()), "completed")
+	require.Contains(t, ansi.Strip(root.dialogMgr.TopDialog().View()), "●")
 	stored, err := store.LoadTodos(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Equal(t, "completed", stored[0].Status)
@@ -103,4 +105,62 @@ func TestTodoMutationPersistsRefreshesDialogAndHiddenPanelAndFencesReset(t *test
 	require.True(t, !root.dialogMgr.HasActiveDialog() || root.dialogMgr.Closing(), "reset retires the old scoped inspector before it can emit a stale action")
 	root.finishTodoMutation(result)
 	require.False(t, root.panelData["profile"].todosKnown, "completion cannot overwrite a reset even with identical session ID")
+}
+
+func (h *editableTodoHandle) SetTodoDescription(ctx context.Context, id, expected, description string) ([]session.Todo, error) {
+	return h.store.MutateTodos(ctx, h.ID(), func(items []session.Todo) ([]session.Todo, error) {
+		for i := range items {
+			if items[i].ID == id {
+				if items[i].Description != expected {
+					return nil, errors.New("description conflict")
+				}
+				items[i].Description = description
+				return items, nil
+			}
+		}
+		return nil, errors.New("missing todo")
+	})
+}
+
+func TestTodoEditorSaveRoutesAndFencesResetAndRevision(t *testing.T) {
+	root := panelFixture(t)
+	sess := root.application.Session()
+	store := session.NewInMemorySessionStore().(*session.InMemorySessionStore)
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	require.NoError(t, store.SaveTodos(t.Context(), sess.ID, []session.Todo{{ID: "opaque", Description: "original", Status: "pending"}}))
+	handle := &editableTodoHandle{panelTodoHandle: &panelTodoHandle{lifecycleHandle: &lifecycleHandle{id: sess.ID}, capable: true}, store: store}
+	application := app.New(t.Context(), &editableTodoRuntime{handle: handle}, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(stubRuntime{}))
+	root.application = application
+	root.supervisor.GetRunner("profile").App = application
+	for _, msg := range collectMsgs(root.preparePanel()) {
+		if loaded, ok := msg.(panelTodosMsg); ok {
+			root.acceptPanelTodos(loaded)
+		}
+	}
+	data := root.panelData["profile"]
+	scope := todoScope("profile", data)
+	opened := root.openTodoEditor(messages.OpenTodoEditMsg{Scope: scope, ID: "opaque"})().(dialog.OpenDialogMsg)
+	root.updateDialogCmd(opened)
+	require.Same(t, opened.Model, data.todoEditor)
+	request := messages.SaveTodoDescriptionMsg{Scope: scope, ID: "opaque", EditorID: 1, RequestID: 1, ExpectedDescription: "original", Description: "edited\nsecond line"}
+	stale := request
+	stale.Scope.Epoch++
+	require.Nil(t, root.saveTodoDescription(stale))
+	result := root.saveTodoDescription(request)().(todoDescriptionResult)
+	root.panelRevision++
+	data.revision = root.panelRevision
+	reload := root.finishTodoDescription(result)
+	require.Equal(t, "original", data.todos[0].Description, "racing revision must canonical reload, not replace")
+	for _, msg := range collectMsgs(reload) {
+		if loaded, ok := msg.(panelTodosMsg); ok {
+			root.acceptPanelTodos(loaded)
+		}
+	}
+	require.Equal(t, "edited\nsecond line", data.todos[0].Description, "canonical reload publishes the new revision")
+	stored, err := store.LoadTodos(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Equal(t, "edited\nsecond line", stored[0].Description)
+	root.ingestPanelEvent("profile", &app.SessionResetEvent{})
+	require.True(t, !root.dialogMgr.HasActiveDialog() || root.dialogMgr.Closing(), "reset closes scoped editor")
+	require.Nil(t, root.finishTodoDescription(result), "stale completion cannot publish to reset session")
 }

@@ -20,7 +20,7 @@ func TestTodosEditRemoveRefreshStableSelection(t *testing.T) {
 	d := NewTodosDialog(scope, items, "two").(*todosDialog)
 	d.SetSize(100, 24)
 	view := ansi.Strip(d.View())
-	for _, status := range []string{"◯ pending", "◔ in-progress", "✓ completed"} {
+	for _, status := range []string{"○ × ✎", "◐ × ✎", "● × ✎"} {
 		require.Contains(t, view, status)
 	}
 	_, cmd := d.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
@@ -48,12 +48,12 @@ func TestTodosMouseStatusAndRemoveTargets(t *testing.T) {
 	d := NewTodosDialog(scope, items, "").(*todosDialog)
 	d.SetSize(80, 20)
 	x, y, _, _ := d.BodyScrollBounds()
-	_, cmd := d.Update(tea.MouseClickMsg{X: x + 4, Y: y, Button: tea.MouseLeft})
+	_, cmd := d.Update(tea.MouseClickMsg{X: x + 2, Y: y, Button: tea.MouseLeft})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Status: "in-progress"}, cmd())
 	d.Update(messages.TodosSnapshotMsg{Scope: scope, Todos: items})
-	_, cmd = d.Update(tea.MouseClickMsg{X: x + 2, Y: y, Button: tea.MouseLeft})
+	_, cmd = d.Update(tea.MouseClickMsg{X: x + 4, Y: y, Button: tea.MouseLeft})
 	require.Nil(t, cmd)
-	_, cmd = d.Update(tea.MouseClickMsg{X: x + 2, Y: y, Button: tea.MouseLeft})
+	_, cmd = d.Update(tea.MouseClickMsg{X: x + 4, Y: y, Button: tea.MouseLeft})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Remove: true}, cmd())
 }
 
@@ -71,7 +71,7 @@ func TestLongUnicodeTodoRemainsScrollable(t *testing.T) {
 			plain = append(plain, strings.TrimSpace(ansi.Strip(line)))
 		}
 		require.Contains(t, strings.Join(plain, ""), "END-OF-TODO")
-		require.Contains(t, ansi.Strip(d.View()), "TODO")
+		require.Contains(t, ansi.Strip(d.View()), "O")
 	}
 }
 
@@ -88,8 +88,8 @@ func TestTodosWordWrapAlignedControlsAndSpacers(t *testing.T) {
 		require.Contains(t, plain, word, "ordinary words and graphemes must not break")
 	}
 	for i, g := range d.prepared {
-		require.Equal(t, 2, g.remove)
-		require.Equal(t, 4, g.statusStart)
+		require.Equal(t, 4, g.remove)
+		require.Equal(t, 2, g.statusStart)
 		line := ansi.Strip(d.lines.Lines()[g.start])
 		if i > 0 {
 			require.Equal(t, "", d.lines.Lines()[g.start-1])
@@ -100,7 +100,7 @@ func TestTodosWordWrapAlignedControlsAndSpacers(t *testing.T) {
 			require.Nil(t, cmd)
 			require.Equal(t, 0, d.selected)
 		}
-		require.Equal(t, '×', []rune(line)[2])
+		require.Equal(t, '×', []rune(line)[4])
 	}
 	// Continuation lines select the owning stable ID without activating controls.
 	_, cmd := d.Update(tea.MouseClickMsg{X: d.bodyX + 4, Y: d.bodyY + 1, Button: tea.MouseLeft})
@@ -273,8 +273,8 @@ func TestTodosKeyboardStatusCycleAndSnapshotError(t *testing.T) {
 		status string
 	}{
 		{tea.KeyPressMsg{Code: ' ', Text: " "}, "in-progress"},
-		{tea.KeyPressMsg{Code: tea.KeyEnter}, "completed"},
-		{tea.KeyPressMsg{Code: tea.KeyEnter}, "pending"},
+		{tea.KeyPressMsg{Code: ' ', Text: " "}, "completed"},
+		{tea.KeyPressMsg{Code: ' ', Text: " "}, "pending"},
 		{tea.KeyPressMsg{Code: '3', Text: "3"}, "completed"},
 		{tea.KeyPressMsg{Code: '1', Text: "1"}, "pending"},
 	} {

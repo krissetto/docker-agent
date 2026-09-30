@@ -112,6 +112,12 @@ func TestSessionHandleTodoRootSharingAndAgentInvalidation(t *testing.T) {
 				defer obs.Cancel()
 				observations[h.ID()] = obs
 			}
+			_, err = child.SetTodoDescription(t.Context(), "todo_1", "", "shared description")
+			require.NoError(t, err)
+			requireTodoInvalidation(t, observations[child.ID()], child.ID(), key)
+			if shared {
+				requireTodoInvalidation(t, observations[root.ID()], root.ID(), key)
+			}
 			items, err := child.SetTodoStatus(t.Context(), "todo_1", "completed")
 			require.NoError(t, err)
 			require.Equal(t, "completed", items[0].Status)
@@ -191,12 +197,17 @@ func TestSessionHandleTodoMutationErrors(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = handle.SetTodoStatus(ctx, "todo_1", "completed")
 	require.ErrorIs(t, err, context.Canceled)
+	_, err = handle.SetTodoDescription(ctx, "todo_1", "", "new")
+	require.ErrorIs(t, err, context.Canceled)
 	failure := errors.New("todo commit failed")
 	r.sessionStore = &failingTodoStore{Store: store, TodoStore: store.(session.TodoStore), err: failure}
 	items, err := handle.SetTodoStatus(t.Context(), "todo_1", "completed")
 	require.ErrorIs(t, err, failure)
 	require.Nil(t, items)
 	items, err = handle.RemoveTodo(t.Context(), "todo_1")
+	require.ErrorIs(t, err, failure)
+	require.Nil(t, items)
+	items, err = handle.SetTodoDescription(t.Context(), "todo_1", "", "new")
 	require.ErrorIs(t, err, failure)
 	require.Nil(t, items)
 	r.sessionStore = store
@@ -293,6 +304,8 @@ func TestSessionTransportDecodesTodosChangedEvent(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupported)
 	_, err = handle.RemoveTodo(t.Context(), "todo_1")
 	require.ErrorIs(t, err, ErrUnsupported)
+	_, err = handle.SetTodoDescription(t.Context(), "todo_1", "old", "new")
+	require.ErrorIs(t, err, ErrUnsupported)
 }
 
 func TestSessionHandleTodoMutationsWithoutToolsetUnsupported(t *testing.T) {
@@ -303,4 +316,99 @@ func TestSessionHandleTodoMutationsWithoutToolsetUnsupported(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupported)
 	_, err = handle.RemoveTodo(t.Context(), "todo_1")
 	require.ErrorIs(t, err, ErrUnsupported)
+	_, err = handle.SetTodoDescription(t.Context(), "todo_1", "old", "new")
+	require.ErrorIs(t, err, ErrUnsupported)
+}
+
+func TestTodoDescriptionCompareAndSwap(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			var store session.Store = session.NewInMemorySessionStore()
+			if kind == "sqlite" {
+				var err error
+				store, err = sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "todos.db"))
+				require.NoError(t, err)
+			}
+			_, handle := newTodoHandleFixture(t, store, false)
+			todos := store.(session.TodoStore)
+			initial := []session.Todo{{ID: "a", Description: "original", Status: "pending"}, {ID: "b", Description: "other", Status: "pending"}}
+			require.NoError(t, todos.SaveTodos(t.Context(), handle.ID(), initial))
+			_, err := todos.MutateTodos(t.Context(), handle.ID(), func(items []session.Todo) ([]session.Todo, error) {
+				items[0].Status = "completed"
+				return []session.Todo{items[1], {ID: "new", Description: "appended", Status: "pending"}, items[0]}, nil
+			})
+			require.NoError(t, err)
+			description := "  edited 世界é\nsecond line  "
+			items, err := handle.SetTodoDescription(t.Context(), "a", "original", description)
+			require.NoError(t, err)
+			require.Equal(t, []session.Todo{initial[1], {ID: "new", Description: "appended", Status: "pending"}, {ID: "a", Description: description, Status: "completed"}}, items)
+			for _, tc := range []struct {
+				id, expected, description string
+				kind                      SessionErrorKind
+			}{
+				{"a", "original", "stale", SessionErrorConflict}, {"deleted", "original", "stale", SessionErrorNotFound}, {"a", description, " \n\t\u2003", SessionErrorInvalid}, {" ", description, "text", SessionErrorInvalid},
+			} {
+				result, err := handle.SetTodoDescription(t.Context(), tc.id, tc.expected, tc.description)
+				require.Nil(t, result)
+				require.ErrorIs(t, err, &SessionError{Kind: tc.kind})
+			}
+			stored, err := todos.LoadTodos(t.Context(), handle.ID())
+			require.NoError(t, err)
+			require.Equal(t, items, stored)
+			start := make(chan struct{})
+			errs := make(chan error, 2)
+			for _, text := range []string{"writer one", "writer two"} {
+				go func() { <-start; _, err := handle.SetTodoDescription(t.Context(), "a", description, text); errs <- err }()
+			}
+			close(start)
+			failures := 0
+			for range 2 {
+				if err := <-errs; err != nil {
+					require.ErrorIs(t, err, &SessionError{Kind: SessionErrorConflict})
+					failures++
+				}
+			}
+			require.Equal(t, 1, failures, "only one description CAS may win")
+			_, err = handle.RemoveTodo(t.Context(), "a")
+			require.NoError(t, err)
+			_, err = handle.SetTodoDescription(t.Context(), "a", description, "not resurrected")
+			require.ErrorIs(t, err, &SessionError{Kind: SessionErrorNotFound})
+		})
+	}
+}
+
+func TestTodoDescriptionConcurrentStatusAndAppends(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			var store session.Store = session.NewInMemorySessionStore()
+			if kind == "sqlite" {
+				var err error
+				store, err = sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "todos.db"))
+				require.NoError(t, err)
+			}
+			_, handle := newTodoHandleFixture(t, store, false)
+			storage := todotool.NewSessionStorage(store.(session.TodoStore), func(context.Context) string { return handle.ID() })
+			original, err := storage.AddTodo(t.Context(), "original")
+			require.NoError(t, err)
+			start := make(chan struct{})
+			errs := make(chan error, 12)
+			for range 10 {
+				go func() { <-start; _, err := storage.AddTodo(t.Context(), "concurrent"); errs <- err }()
+			}
+			go func() { <-start; _, err := handle.SetTodoStatus(t.Context(), original.ID, "completed"); errs <- err }()
+			go func() {
+				<-start
+				_, err := handle.SetTodoDescription(t.Context(), original.ID, "original", "edited")
+				errs <- err
+			}()
+			close(start)
+			for range 12 {
+				require.NoError(t, <-errs)
+			}
+			items, err := handle.Todos(t.Context())
+			require.NoError(t, err)
+			require.Len(t, items, 11)
+			require.Equal(t, session.Todo{ID: original.ID, Status: "completed", Description: "edited"}, items[0])
+		})
+	}
 }

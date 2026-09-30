@@ -213,6 +213,7 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 		"Todos": {
 			{SessionOperationTodos, func() error { _, err := handle.Todos(t.Context()); return err }},
 			{SessionOperationSetTodoStatus, func() error { _, err := handle.SetTodoStatus(t.Context(), "missing", "completed"); return err }},
+			{SessionOperationSetTodoDescription, func() error { _, err := handle.SetTodoDescription(t.Context(), "missing", "old", "new"); return err }},
 			{SessionOperationRemoveTodo, func() error { _, err := handle.RemoveTodo(t.Context(), "missing"); return err }},
 		},
 	}

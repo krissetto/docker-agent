@@ -19,19 +19,24 @@ import (
 type todosDialog struct {
 	lines *groupedList
 	pickerCore
-	scope              messages.TodoScope
-	todos              []session.Todo
-	busy               bool
-	removeArmed        string
-	errorText          string
-	prepared           []todoRowGeometry
-	lineRows           []int
-	hover              map[string]todoHover
-	hovered            string
-	hoverAnimation     animation.Subscription
-	animationBound     bool
-	pointerX, pointerY int
-	pointerKnown       bool
+	scope                           messages.TodoScope
+	todos                           []session.Todo
+	busy                            bool
+	removeArmed                     string
+	errorText                       string
+	prepared                        []todoRowGeometry
+	rowCache                        map[string]cachedDialogTodo
+	preparedWidth, preparedSelected int
+	preparedTheme                   uint64
+	rowsDirty                       bool
+	preparedBody                    string
+	lineRows                        []int
+	hover                           map[string]todoHover
+	hovered                         string
+	hoverAnimation                  animation.Subscription
+	animationBound                  bool
+	pointerX, pointerY              int
+	pointerKnown                    bool
 }
 
 func NewTodosDialog(scope messages.TodoScope, todos []session.Todo, selected string) Dialog {
@@ -59,6 +64,7 @@ func (d *todosDialog) edit(status string, remove bool) tea.Cmd {
 	d.errorText = ""
 	return core.CmdHandler(messages.EditTodoMsg{Scope: d.scope, ID: id, Status: status, Remove: remove})
 }
+
 func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	defer func() {
 		if preparesDialogBody(msg) {
@@ -95,6 +101,7 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			id = d.todos[d.selected].ID
 		}
 		d.todos = slices.Clone(msg.Todos)
+		d.rowsDirty = true
 		d.selected = min(d.selected, max(0, len(d.todos)-1))
 		d.removeArmed = ""
 		for i, todo := range d.todos {
@@ -139,7 +146,9 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, d.edit("in-progress", false)
 		case "c", "3":
 			return d, d.edit("completed", false)
-		case "enter", "space":
+		case "enter", "e":
+			return d, d.openEditor()
+		case "space":
 			if len(d.todos) > 0 {
 				return d, d.edit(todotool.NextStatus(d.todos[d.selected].Status), false)
 			}
@@ -164,6 +173,9 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		d.selected = index
 		g := d.prepared[index]
 		if line == g.start {
+			if col == g.edit {
+				return d, d.openEditor()
+			}
 			if col == g.remove {
 				return d, d.edit("", true)
 			}
@@ -178,6 +190,7 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 	return d, nil
 }
+
 func (d *todosDialog) SetSize(w, h int) tea.Cmd {
 	cmd := d.pickerCore.SetSize(w, h)
 	d.renderBody(true)
@@ -195,9 +208,9 @@ func (d *todosDialog) renderBody(prepare bool) string {
 	d.prepareRows(inner)
 	lines := d.lines.Lines()
 	if len(lines) == 0 {
-		lines = []string{styles.MutedStyle.Render("No todos in this scope.")}
+		d.preparedBody = styles.MutedStyle.Render("No todos in this scope.")
 	}
-	hint := "↑↓ choose · Space cycle · p/i/c status · PgUp/Dn scroll · d/× remove"
+	hint := "↑↓ choose · Enter/e edit · Space cycle · p/i/c status · d/× remove"
 	if d.removeArmed != "" {
 		hint = "Press d / click × again to remove"
 	} else if d.busy {
@@ -206,17 +219,41 @@ func (d *todosDialog) renderBody(prepare bool) string {
 		hint = d.errorText
 	}
 	if d.removeArmed == "" && !d.busy && d.errorText == "" && inner < 60 {
-		hint = "↑↓ choose · Space status · d remove"
+		hint = "↑↓ choose · e edit · Space status · d remove"
 	}
 	if inner < 20 && d.removeArmed == "" && !d.busy && d.errorText == "" {
 		hint = "↑↓ · Space · d"
 	}
 	footer := styles.MutedStyle.Render(ansi.Wrap(hint, inner, ""))
 	if prepare {
-		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+		d.PrepareScrollableBody(styles.DialogStyle, width, header, d.preparedBody, footer)
 		return ""
 	}
-	return d.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+	style, width, _, available := d.bodyFrame(styles.DialogStyle, width)
+	headers, footers := bodyChrome(header, footer, available, d.bodyCompactTitle)
+	start := min(d.scrollview.ScrollOffset(), len(lines))
+	end := min(len(lines), start+d.scrollview.VisibleHeight())
+	visible := slices.Clone(lines[start:end])
+	for i := range visible {
+		owner := d.lineRows[start+i]
+		if owner >= 0 {
+			visible[i] = styles.HoverText(visible[i], d.hover[d.todos[owner].ID].value, styles.TextPrimary)
+		}
+	}
+	if len(lines) == 0 {
+		visible = []string{d.preparedBody}
+	}
+	out := d.scrollview.ViewWithRestyledLines(visible)
+	if d.actionScrollActive && d.actionScroll != nil {
+		offset := min(d.actionScroll.ScrollOffset(), len(footers))
+		footers = strings.Split(d.actionScroll.ViewWithRestyledLines(footers[offset:]), "\n")
+	}
+	parts := append(headers, out)
+	if d.bodyFooterGap > 0 {
+		parts = append(parts, "")
+	}
+	parts = append(parts, footers...)
+	return d.RenderCard(style, width, strings.Join(parts, "\n"))
 }
 
 func (d *todosDialog) selectedLine() int {
@@ -228,3 +265,11 @@ func (d *todosDialog) selectedLine() int {
 
 // Let Escape reach Update while a removal confirmation is armed.
 func (d *todosDialog) DialogClosable() bool { return d.removeArmed == "" }
+
+func (d *todosDialog) openEditor() tea.Cmd {
+	if d.busy || d.selected < 0 || d.selected >= len(d.todos) {
+		return nil
+	}
+	d.removeArmed = ""
+	return core.CmdHandler(messages.OpenTodoEditMsg{Scope: d.scope, ID: d.todos[d.selected].ID})
+}

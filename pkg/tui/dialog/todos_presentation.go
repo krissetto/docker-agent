@@ -2,26 +2,41 @@ package dialog
 
 import (
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 type todoRowGeometry struct {
-	start, end, width              int
-	remove, statusStart, statusEnd int
+	start, end, width                    int
+	remove, statusStart, statusEnd, edit int
 }
 
 type todoHover struct {
-	value, from, target float64
-	elapsed             time.Duration
+	value, target float64
+}
+
+type cachedDialogTodo struct {
+	item     session.Todo
+	selected bool
+	rows     []string
 }
 
 func (d *todosDialog) prepareRows(width int) {
+	theme := styles.ThemeGeneration()
+	if d.preparedWidth == width && d.preparedTheme == theme && !d.rowsDirty && d.preparedSelected == d.selected {
+		return
+	}
+	if d.preparedWidth != width || d.preparedTheme != theme {
+		d.rowCache = nil
+	}
+	d.preparedWidth, d.preparedTheme, d.preparedSelected, d.rowsDirty = width, theme, d.selected, false
+	previous := d.rowCache
+	d.rowCache = make(map[string]cachedDialogTodo, len(d.todos))
 	d.lines = newGroupedList()
 	d.prepared = nil
 	d.lineRows = nil
@@ -37,53 +52,28 @@ func (d *todosDialog) prepareRows(width int) {
 		if i > 0 {
 			add("", -1, false)
 		}
-		g := todoRowGeometry{start: len(d.lineRows), width: width, remove: -1, statusStart: -1, statusEnd: -1}
-		lead := "  "
-		if i == d.selected {
-			lead = styles.HighlightWhiteStyle.Render("› ")
+		g := todoRowGeometry{start: len(d.lineRows), width: width, remove: -1, statusStart: -1, statusEnd: -1, edit: -1}
+		gutter := min(2, max(0, width-1))
+		if width-gutter >= 8 {
+			g.statusStart, g.statusEnd, g.remove, g.edit = gutter, gutter+1, gutter+2, gutter+4
 		}
-		hover := d.hover[todo.ID].value
-		status := todotool.StatusLabel(todo.Status)
-		statusWidth := max(13, ansi.StringWidth(status))
-		prefix := lead + styles.MutedStyle.Render("× ") + status + strings.Repeat(" ", statusWidth-ansi.StringWidth(status)+2)
-		indent := ansi.StringWidth(prefix)
-		description := cleanDetail(todo.Description)
-		if width-indent >= 12 {
-			g.remove, g.statusStart, g.statusEnd = 2, 4, 4+ansi.StringWidth(status)
-			wrapped := strings.Split(ansi.Wrap(description, width-indent, ""), "\n")
-			add(lead+styles.HoverText(strings.TrimPrefix(prefix, lead)+wrapped[0], hover, styles.TextPrimary), i, true)
-			for _, line := range wrapped[1:] {
-				add(strings.Repeat(" ", indent)+styles.HoverText(line, hover, styles.TextPrimary), i, false)
+		selected := i == d.selected
+		cached, ok := previous[todo.ID]
+		if !ok || cached.item != todo || cached.selected != selected {
+			cached = cachedDialogTodo{item: todo, selected: selected, rows: todotool.RowLines(ansi.Strip(strings.ReplaceAll(todo.Description, "\r", "")), todo.Status, max(1, width-gutter), selected)}
+		}
+		d.rowCache[todo.ID] = cached
+		for line, text := range cached.rows {
+			lead := strings.Repeat(" ", gutter)
+			if selected && line == 0 && gutter == 2 {
+				lead = styles.HighlightWhiteStyle.Render("› ")
 			}
-		} else {
-			// Compact rows give the description its own width; controls never overlap it.
-			control := lead
-			if width >= 5 {
-				control += styles.MutedStyle.Render("× ")
-				g.remove, g.statusStart = 2, 4
-			} else {
-				control = ""
-			}
-			controlWidth := ansi.StringWidth(control)
-			wrapped := strings.Split(ansi.Wrap(status, max(1, width-controlWidth), ""), "\n")
-			if g.statusStart >= 0 {
-				g.statusEnd = min(width, g.statusStart+ansi.StringWidth(wrapped[0]))
-			}
-			add(control+styles.HoverText(wrapped[0], hover, styles.TextPrimary), i, true)
-			for _, line := range wrapped[1:] {
-				add(strings.Repeat(" ", controlWidth)+styles.HoverText(line, hover, styles.TextPrimary), i, false)
-			}
-			indent = 0
-			if width >= 4 {
-				indent = 2
-			}
-			for _, line := range strings.Split(ansi.Wrap(description, max(1, width-indent), ""), "\n") {
-				add(strings.Repeat(" ", indent)+styles.HoverText(line, hover, styles.TextPrimary), i, false)
-			}
+			add(lead+text, i, line == 0)
 		}
 		g.end = len(d.lineRows)
 		d.prepared = append(d.prepared, g)
 	}
+	d.preparedBody = strings.Join(d.lines.Lines(), "\n")
 }
 
 // Manager coordinates are already drag-adjusted; translate to body cells once.
@@ -134,7 +124,7 @@ func (d *todosDialog) syncHover() {
 			target = 1
 		}
 		if state.target != target {
-			state.from, state.target, state.elapsed = state.value, target, 0
+			state.target = target
 			if !d.animationBound {
 				state.value = target
 			}
@@ -162,9 +152,7 @@ func (d *todosDialog) tickHover(tick animation.TickMsg) {
 	running, changed := false, false
 	for id, state := range d.hover {
 		old := state.value
-		state.elapsed += after - before
-		p := min(1, float64(state.elapsed)/float64(animation.ShortDuration))
-		state.value = state.from + (state.target-state.from)*animation.EaseOutCubic(p)
+		state.value = animation.HoverStep(state.value, state.target, after-before)
 		changed = changed || old != state.value
 		running = running || state.value != state.target
 		if state.value == 0 && state.target == 0 {

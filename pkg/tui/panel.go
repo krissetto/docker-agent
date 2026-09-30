@@ -27,6 +27,7 @@ type panelSessionData struct {
 	epoch                            uint64
 	treeDialog                       dialog.Dialog
 	todoDialog                       dialog.Dialog
+	todoEditor                       dialog.Dialog
 	application                      *app.App
 	publishedRevision                uint64
 	sessionID                        string
@@ -376,7 +377,7 @@ func (m *appModel) closePanelDialogs(data *panelSessionData) {
 	if data == nil || m.dialogMgr == nil {
 		return
 	}
-	for _, d := range []dialog.Dialog{data.treeDialog, data.todoDialog} {
+	for _, d := range []dialog.Dialog{data.treeDialog, data.todoDialog, data.todoEditor} {
 		if d != nil {
 			dialog.CleanupDialog(d)
 			m.updateDialogCmd(dialog.CloseDialogByModelMsg{Model: d})

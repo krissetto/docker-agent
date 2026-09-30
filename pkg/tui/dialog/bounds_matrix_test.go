@@ -47,6 +47,7 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 		{"tool-reason", func() Dialog { return NewToolRejectionReasonDialog("s", "r") }},
 		{"panes", func() Dialog { return NewPanesDialog("Panes", nil) }},
 		{"subagents", func() Dialog { return NewSubagentsDialog(nil, nil) }},
+		{"todo edit", func() Dialog { return NewTodoEditDialog(messages.TodoScope{}, "todo", "draft", 1, nil) }},
 		{"todos", func() Dialog { return NewTodosDialog(messages.TodoScope{}, nil, "") }},
 		{"panel-details", func() Dialog { return NewPanelDetailsDialog("Panel details", []string{"line"}) }},
 		{"image", func() Dialog {

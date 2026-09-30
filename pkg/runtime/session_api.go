@@ -99,6 +99,7 @@ const (
 	SessionOperationTodos                 SessionOperation = "todos"
 	SessionOperationSetTodoStatus         SessionOperation = "set_todo_status"
 	SessionOperationRemoveTodo            SessionOperation = "remove_todo"
+	SessionOperationSetTodoDescription    SessionOperation = "set_todo_description"
 	SessionOperationUpdateTitle           SessionOperation = "update_title"
 	SessionOperationWakePending           SessionOperation = "wake_pending"
 )
@@ -267,6 +268,7 @@ type SessionHandle interface {
 	Snapshot(ctx context.Context) (*session.Session, error)
 	Todos(ctx context.Context) ([]session.Todo, error)
 	SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error)
+	SetTodoDescription(ctx context.Context, id, expectedDescription, description string) ([]session.Todo, error)
 	RemoveTodo(ctx context.Context, id string) ([]session.Todo, error)
 	Compact(ctx context.Context, additionalPrompt string, sink EventSink) error
 	CompactTarget(ctx context.Context, sessionID, additionalPrompt string, sink EventSink) error
@@ -652,4 +654,8 @@ func (UnsupportedSessionHandle) AwaitTurn(context.Context, string) error {
 
 func (UnsupportedSessionHandle) Edit(context.Context, SessionEdit) (*session.Session, error) {
 	return nil, sessionUnsupported("", "edit")
+}
+
+func (UnsupportedSessionHandle) SetTodoDescription(context.Context, string, string, string) ([]session.Todo, error) {
+	return nil, sessionUnsupported("", SessionOperationSetTodoDescription)
 }

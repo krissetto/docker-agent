@@ -1,6 +1,8 @@
 package sidebar
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -59,6 +61,9 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = "parent:" + payload
 	default:
 		region = ClickNone
+	}
+	if row, ok := m.placementRowAt(x, y); ok && strings.HasPrefix(row.id, "todo:") && row.payload != "" {
+		key = m.todoHoverKey(row, x-m.layoutCfg.PaddingLeft)
 	}
 	m.hoveredRegion = region
 	return m.setHoverTarget(key)

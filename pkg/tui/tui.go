@@ -1112,6 +1112,12 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.acceptPanelTodos(msg)
 	case panelTitlesMsg:
 		return m, m.acceptPanelTitles(msg)
+	case messages.OpenTodoEditMsg:
+		return m, m.openTodoEditor(msg)
+	case messages.SaveTodoDescriptionMsg:
+		return m, m.saveTodoDescription(msg)
+	case todoDescriptionResult:
+		return m, m.finishTodoDescription(msg)
 	case messages.OpenTodosMsg:
 		return m, m.openTodos(msg)
 	case messages.EditTodoMsg:
