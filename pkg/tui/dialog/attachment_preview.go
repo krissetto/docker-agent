@@ -64,6 +64,22 @@ func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType stri
 	return &imageAttachmentPreviewDialog{title: title, preview: preview}
 }
 
+// NewCachedImagePreviewDialog takes ownership of a click's existing source lease.
+func NewCachedImagePreviewDialog(ar *animation.Runtime, preview *image.Preview, supported bool) Dialog {
+	if preview == nil {
+		return NewAttachmentPreviewDialog(ar, "Image preview", "Image preview unavailable.")
+	}
+	title := safeAttachmentText(preview.Name())
+	if title == "" {
+		title = "Image preview"
+	}
+	if !supported {
+		preview.Close()
+		return NewAttachmentPreviewDialog(ar, title, "Image preview unavailable: this terminal does not support image rendering.")
+	}
+	return &imageAttachmentPreviewDialog{title: title, preview: preview}
+}
+
 type ImageCellSizeMsg image.CellSize
 
 type imageAttachmentPreviewDialog struct {

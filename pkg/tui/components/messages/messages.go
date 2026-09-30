@@ -247,6 +247,8 @@ func nextBlockID() string {
 
 // model implements Model
 type model struct {
+	imageClick                    *imageClick
+	imageSessionID                string
 	keyboardEnhancementsSupported bool
 	ar                            *animation.Runtime
 	messages                      []*types.Message
@@ -376,6 +378,9 @@ func (m *model) Init() tea.Cmd {
 
 // Update handles messages and updates the component state
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if _, wheel := msg.(tea.MouseWheelMsg); wheel {
+		m.cancelImageClick()
+	}
 	var cmds []tea.Cmd
 	animatedBeforeTick := false
 	if _, ok := msg.(animation.TickMsg); ok {
@@ -403,6 +408,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m.handleMouseRelease(msg)
 
 	case messages.WheelCoalescedMsg:
+		m.cancelImageClick()
 		cmd := m.scrollByWheel(msg.Delta)
 		return m, cmd
 
@@ -508,6 +514,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd tea.Cmd) {
+	m.cancelImageClick()
 	var materializeCmd tea.Cmd
 	defer func() { cmd = tea.Batch(materializeCmd, cmd) }()
 	// Scrollbar hit-testing and thumb geometry must use the exact tail height.
@@ -573,6 +580,10 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 
 	if url := m.urlAt(line, col); url != "" {
 		return m, core.CmdHandler(messages.OpenURLMsg{URL: url})
+	}
+
+	if m.beginImageClick(msg) {
+		return m, nil
 	}
 
 	clickCount := m.selection.detectClickType(line, col)
@@ -657,6 +668,9 @@ func (m *model) globalLineToMessageLineCached(globalLine int) (msgIdx, localLine
 }
 
 func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
+	if m.imageClick != nil && (msg.X != m.imageClick.x || msg.Y != m.imageClick.y) {
+		m.cancelImageClick()
+	}
 	if m.scrollview.IsDragging() {
 		materializeCmd := m.materializeDeferredTailForInteraction()
 		model, cmd := m.handleScrollviewUpdate(msg)
@@ -699,6 +713,9 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 }
 
 func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
+	if cmd, handled := m.releaseImageClick(msg); handled {
+		return m, cmd
+	}
 	if m.scrollview.IsDragging() {
 		// An owned release is consumed even when no command is produced.
 		// Never turn a scrollbar gesture into a text copy or URL click.
@@ -740,6 +757,7 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 }
 
 func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	m.cancelImageClick()
 	// Handle inline editing keys first
 	if m.inlineEditMsgIndex >= 0 {
 		// Check for newline insertion using key.Matches against the textarea's InsertNewline binding
@@ -1016,6 +1034,7 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 	if m.width == width && m.height == height {
 		return nil // Dimensions unchanged — skip expensive cache invalidation
 	}
+	m.cancelImageClick()
 	widthChanged := m.width != width
 	m.width = width
 	m.height = height
@@ -1046,6 +1065,7 @@ func (m *model) SetPosition(x, y int) tea.Cmd {
 	if m.xPos == x && m.yPos == y {
 		return nil
 	}
+	m.cancelImageClick()
 	m.xPos = x
 	m.yPos = y
 	m.scrollview.SetPosition(x, y)
@@ -1077,6 +1097,7 @@ func (m *model) Focus() tea.Cmd {
 
 // Blur removes focus from the component
 func (m *model) Blur() tea.Cmd {
+	m.cancelImageClick()
 	oldIndex := m.selectedMessageIndex
 	m.focused = false
 	m.selectedMessageIndex = -1
@@ -1336,6 +1357,7 @@ func (m *model) setScrollOffset(offset int) {
 	m.scrollOffset = max(0, min(offset, maxOffset))
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	if before != m.scrollOffset {
+		m.cancelImageClick()
 		m.invalidateView()
 	}
 }
@@ -1982,6 +2004,7 @@ func (m *model) ResetFromSession(sess *session.Session, media map[int][]types.As
 }
 
 func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd {
+	m.SetImagePreviewSessionID(sess.ID)
 	return m.loadFromSession(sess, generatedMedia, true)
 }
 
@@ -3151,6 +3174,7 @@ type InlineEditCommittedMsg struct {
 }
 
 func (m *model) StopAnimations() {
+	m.cancelImageClick()
 	m.slackAnimationSub.Stop()
 	for _, v := range m.views {
 		animation.StopView(v)

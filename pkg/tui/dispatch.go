@@ -82,6 +82,11 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	if opened, opening := msg.(dialog.OpenDialogMsg); opening {
+		for _, page := range m.chatPages {
+			if owner, ok := page.(interface{ CancelImagePreviewClick() }); ok {
+				owner.CancelImagePreviewClick()
+			}
+		}
 		if hover, ok := m.editor.(editor.BannerHover); ok && hover.CancelBannerHover() {
 			m.viewCacheValid = false
 		}

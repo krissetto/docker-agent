@@ -400,6 +400,7 @@ func registerImage(id uint32, img Inline) uint32 {
 	for elem := inlineRegistry.order.Front(); elem != nil; elem = elem.Next() {
 		entry := elem.Value.(*registryEntry)
 		if entry.signature == signature && sameImage(entry.image, img) {
+			entry.image.Name = img.Name
 			entry.cached = true
 			inlineRegistry.order.MoveToFront(elem)
 			trimRegistryCacheLocked()

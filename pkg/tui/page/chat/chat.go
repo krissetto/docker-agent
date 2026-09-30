@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/help"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -1577,6 +1577,9 @@ func (p *chatPage) SetShowBanner(show bool) {
 // addressed to. See Page.SetRoutingID.
 func (p *chatPage) SetRoutingID(id string) {
 	p.routingID = id
+	if owner, ok := p.messages.(interface{ SetImagePreviewSessionID(string) }); ok {
+		owner.SetImagePreviewSessionID(id)
+	}
 }
 
 // TakeRoutedTimers returns and clears the routed timer commands armed by the
@@ -1735,4 +1738,11 @@ func (p *chatPage) ScrollToBottom() tea.Cmd {
 // IsTitleEditing reports whether the sidebar title input is active.
 func (p *chatPage) IsTitleEditing() bool {
 	return p.sidebarInteractive() && p.sidebar.IsEditingTitle()
+}
+
+// CancelImagePreviewClick releases a pending image press when a modal takes input.
+func (p *chatPage) CancelImagePreviewClick() {
+	if owner, ok := p.messages.(interface{ CancelImagePreviewClick() }); ok {
+		owner.CancelImagePreviewClick()
+	}
 }

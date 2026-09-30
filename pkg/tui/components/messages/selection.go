@@ -343,5 +343,6 @@ func (m *model) ClearPresentationSelection() {
 
 // clearSelection resets the selection state
 func (m *model) clearSelection() {
+	m.cancelImageClick()
 	m.selection.clear()
 }

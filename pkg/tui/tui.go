@@ -1801,6 +1801,18 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Settings (/settings) ---
 
+	case messages.OpenImagePreviewMsg:
+		if msg.Preview == nil {
+			return m, nil
+		}
+		if msg.SessionID == "" || m.supervisor.FindBySession(msg.SessionID) == nil || m.dialogMgr.Open() {
+			msg.Preview.Close()
+			return m, nil
+		}
+		previewDialog := dialog.NewCachedImagePreviewDialog(m.ar, msg.Preview, m.imageWriter != nil && m.imageWriter.Supported())
+		previewDialog.Update(dialog.ImageCellSizeMsg(m.imageCellSize))
+		return m.forwardDialog(dialog.OpenDialogMsg{Model: previewDialog})
+
 	case messages.OpenSettingsDialogMsg:
 		return m.handleOpenSettingsDialog()
 
@@ -1956,10 +1968,22 @@ func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	if generation, ok := m.supervisor.RouteGeneration(msg.SessionID); !ok || (msg.RouteGeneration != 0 && msg.RouteGeneration != generation) {
+		if image, ok := msg.Inner.(messages.OpenImagePreviewMsg); ok && image.Preview != nil {
+			image.Preview.Close()
+		}
 		if send, ok := msg.Inner.(messages.SendMsg); ok {
 			return m, notification.ErrorCmd("Message was not sent: originating session closed or replaced. Unsent draft: " + send.Content)
 		}
 		return m, nil
+	}
+	if image, ok := msg.Inner.(messages.OpenImagePreviewMsg); ok {
+		if image.SessionID != msg.SessionID {
+			if image.Preview != nil {
+				image.Preview.Close()
+			}
+			return m, nil
+		}
+		return m.updateWithLifecycle(image)
 	}
 	activeID := m.supervisor.ActiveID()
 
