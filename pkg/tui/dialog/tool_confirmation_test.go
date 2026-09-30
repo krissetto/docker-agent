@@ -53,8 +53,8 @@ func TestToolConfirmationDialog_CompactRealShellLSGeometry(t *testing.T) {
 	assert.Contains(t, plain, "Proposed: shell")
 	assert.Contains(t, plain, "cmd:")
 	assert.Contains(t, plain, "ls")
-	assert.Less(t, lipgloss.Height(view), height/2,
-		"a short proposed call stays content-sized with its inputs and policy explanation")
+	assert.Less(t, lipgloss.Height(view), height,
+		"a short proposed call stays content-sized with its inputs and described choices")
 	row, col := dialog.Position()
 	assert.Equal(t, (height-lipgloss.Height(view))/2, row)
 	assert.Equal(t, (width-lipgloss.Width(view))/2, col)
@@ -265,6 +265,9 @@ func locateInView(d *toolConfirmationDialog, needle string) (y, x int, ok bool) 
 func clickCell(d *toolConfirmationDialog, y, x int) tea.Cmd {
 	probe := NewToolConfirmationDialog(animation.NewRuntime(), d.msg, d.sessionState).(*toolConfirmationDialog)
 	probe.SetSize(d.Width(), d.Height())
+	probe.actionsFocused, probe.focusedAction = d.actionsFocused, d.focusedAction
+	probe.prepareLayout()
+	probe.bodyScroll.SetScrollOffset(d.BodyScrollOffset())
 	_, cmd := probe.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	return cmd
 }
@@ -293,35 +296,42 @@ func TestToolConfirmationDialog_ClickOnYFiresAtEveryWidth(t *testing.T) {
 	}
 }
 
-// Every painted cell of every decision pill must dispatch only that decision.
+// Every painted cell, including descriptions, dispatches only its own decision.
 func TestToolConfirmationDialog_ActionCellsAndGaps(t *testing.T) {
 	for _, width := range []int{20, 30, 45, 80, 120} {
 		d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
 		d.SetSize(width, 30)
-		view := d.View()
-		row, col := d.Position()
-		dl := NewDialogLayout(view, row, col)
 		seen := map[string]bool{}
-		for y := row; y < row+lipgloss.Height(view); y++ {
-			for x := col; x < col+lipgloss.Width(view); x++ {
-				action, hit := d.ActionKeyAt(x, y, dl)
-				if !hit {
-					continue
+		for selected := range 6 {
+			d.FocusDefaultAction()
+			d.focusedAction = selected
+			d.revealChoice()
+			view := d.View()
+			row, col := d.Position()
+			dl := NewDialogLayout(view, row, col)
+			selected, ok := d.SelectedActionKey()
+			require.True(t, ok)
+			for y := row; y < row+lipgloss.Height(view); y++ {
+				for x := col; x < col+lipgloss.Width(view); x++ {
+					action, hit := d.ActionKeyAt(x, y, dl)
+					if !hit || action.Code != selected.Code {
+						continue
+					}
+					seen[action.Text] = true
+					msgs := collectMsgs(clickCell(d, y, x))
+					if action.Text == "R" {
+						require.True(t, hasMsg[OpenDialogMsg](msgs))
+						continue
+					}
+					response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
+					require.True(t, ok, "width %d cell %d,%d action %s", width, x, y, action.Text)
+					want := map[string]runtime.ResumeRequest{"N": runtime.ResumeReject(""), "Y": runtime.ResumeApprove(), "T": runtime.ResumeApproveTool("shell"), "B": runtime.ResumeApproveBalanced(), "A": runtime.ResumeApproveAutonomous()}
+					assert.Equal(t, want[action.Text], response.Response.Resume)
 				}
-				seen[action.Text] = true
-				msgs := collectMsgs(clickCell(d, y, x))
-				if action.Text == "R" {
-					require.True(t, hasMsg[OpenDialogMsg](msgs))
-					continue
-				}
-				response, ok := findMsg[tuimessages.InteractionResponseMsg](msgs)
-				require.True(t, ok, "width %d cell %d,%d action %s", width, x, y, action.Text)
-				want := map[string]runtime.ResumeRequest{"N": runtime.ResumeReject(""), "Y": runtime.ResumeApprove(), "T": runtime.ResumeApproveTool("shell"), "B": runtime.ResumeApproveBalanced(), "A": runtime.ResumeApproveAutonomous()}
-				assert.Equal(t, want[action.Text], response.Response.Resume)
 			}
+			assert.Nil(t, clickCell(d, row+lipgloss.Height(view), col), "outside clicks never authorize")
 		}
 		assert.Len(t, seen, 6, "width %d: all decisions stay reachable", width)
-		assert.Nil(t, clickCell(d, row+lipgloss.Height(view), col), "outside clicks never authorize")
 	}
 }
 
@@ -331,6 +341,10 @@ func TestToolConfirmationDialog_LongPatternPreservesAuthorization(t *testing.T) 
 	event.ToolCall.Function.Arguments = `{"cmd":"` + longWord + ` --flag"}`
 	d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
 	d.SetSize(40, 12)
+	for range 2 {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		assert.Nil(t, cmd)
+	}
 	view := d.View()
 	row, col := d.Position()
 	dl := NewDialogLayout(view, row, col)
@@ -376,7 +390,7 @@ func TestToolConfirmationDialog_TinyHeightScrollsEveryAction(t *testing.T) {
 	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
 	d.SetSize(20, 6)
 	seen := map[string]bool{}
-	for range 12 {
+	for range d.choicesStart + len(d.actionRows) {
 		view := d.View()
 		row, col := d.Position()
 		dl := NewDialogLayout(view, row, col)
@@ -672,5 +686,97 @@ func TestToolConfirmationDialogVerticalNavigationThenDismissDeniesOnce(t *testin
 		assert.Nil(t, d.CancelDialogCmd())
 		_, duplicate := d.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 		assert.Nil(t, duplicate)
+	}
+}
+
+func TestToolConfirmationDialogDescriptionsAndHelpPlacement(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(165, 47)
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	for i, action := range d.actions {
+		y, x, found := locateInView(d, action.Label)
+		require.True(t, found)
+		key, hit := d.ActionKeyAt(x, y+1, dl)
+		require.True(t, hit, "description below %s is clickable", action.Label)
+		assert.Equal(t, action.Key, key)
+		if i > 0 {
+			_, hit := d.ActionKeyAt(x, y-1, dl)
+			assert.False(t, hit, "spacing between blocks cannot authorize")
+		}
+	}
+	helpY, helpX, found := locateInView(d, "↑/↓ choose")
+	require.True(t, found)
+	bodyX, _, _, _ := d.BodyScrollBounds()
+	assert.Equal(t, bodyX, helpX, "help is aligned to the left content edge")
+	lastY, _, found := locateInView(d, "Reject with reason")
+	require.True(t, found)
+	assert.Greater(t, helpY, lastY+1, "help is below the choices and descriptions")
+	_, hit := d.ActionKeyAt(helpX, helpY, dl)
+	assert.False(t, hit, "help is never an action target")
+}
+
+func TestToolConfirmationDialogOverflowKeepsPreviewAndFixedHelp(t *testing.T) {
+	event := newConfirmationEvent(nil)
+	event.ToolCall.Function.Arguments = `{"cmd":"` + strings.Repeat("long proposed command ", 100) + `"}`
+	for _, size := range [][2]int{{165, 30}, {80, 16}, {30, 8}, {20, 6}} {
+		d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+		d.SetSize(size[0], size[1])
+		initial := ansi.Strip(d.View())
+		assert.Contains(t, initial, "Proposed:", "initial view prioritizes proposed inputs")
+		assert.Zero(t, d.BodyScrollOffset())
+		action, ok := d.SelectedActionKey()
+		require.True(t, ok)
+		assert.Equal(t, 'N', action.Code)
+		help := "↑/↓ choose"
+		if size[0] <= 30 {
+			help = "↑↓"
+		}
+		helpY, helpX, found := locateInView(d, help)
+		require.True(t, found)
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		assert.Nil(t, cmd)
+		assert.Positive(t, d.BodyScrollOffset(), "Tab reveals the safe default without answering")
+		for range 6 {
+			view := d.View()
+			row, col := d.Position()
+			dl := NewDialogLayout(view, row, col)
+			y, x, found := locateInView(d, "›")
+			require.True(t, found, "selected label is visible even when its description is taller than the viewport")
+			key, hit := d.ActionKeyAt(x, y, dl)
+			require.True(t, hit)
+			selected, ok := d.SelectedActionKey()
+			require.True(t, ok)
+			assert.Equal(t, selected, key)
+			actualY, actualX, found := locateInView(d, help)
+			require.True(t, found)
+			assert.Equal(t, helpY, actualY, "help stays fixed at the bottom while choices scroll")
+			assert.Equal(t, helpX, actualX)
+			assert.LessOrEqual(t, lipgloss.Height(view), size[1])
+			assert.LessOrEqual(t, lipgloss.Width(view), size[0])
+			_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+			assert.Nil(t, cmd)
+		}
+		assert.False(t, d.responseSent)
+	}
+}
+
+func TestToolConfirmationDialogResizeRevealsSelectedBlock(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(165, 47)
+	for range 4 {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		assert.Nil(t, cmd)
+	}
+	for _, size := range [][2]int{{50, 12}, {20, 6}, {165, 47}} {
+		d.SetSize(size[0], size[1])
+		y, x, found := locateInView(d, "›")
+		require.True(t, found)
+		view := d.View()
+		row, col := d.Position()
+		key, hit := d.ActionKeyAt(x, y, NewDialogLayout(view, row, col))
+		require.True(t, hit)
+		assert.Equal(t, 'A', key.Code)
 	}
 }

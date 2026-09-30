@@ -4,10 +4,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -544,6 +544,7 @@ func (dc *Content) Build() string {
 // Action connects a visible action pill to its existing keyboard path.
 type Action struct {
 	Label        string
+	Description  string
 	Key          tea.KeyPressMsg
 	Disabled     bool
 	Default      bool

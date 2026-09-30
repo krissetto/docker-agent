@@ -23,6 +23,10 @@ func (b *BaseDialog) RenderChoices(contentWidth int, choices ...Action) string {
 	selected := b.selectedAction(choices)
 	var rendered []string
 	for index, choice := range choices {
+		if index > 0 && (choice.Description != "" || choices[index-1].Description != "") {
+			b.actionRows = append(b.actionRows, dialogActionRow{})
+			rendered = append(rendered, "")
+		}
 		style := styles.NoStyle.Foreground(styles.TextPrimary)
 		prefix := strings.Repeat(" ", indent)
 		label := choice.Label
@@ -53,6 +57,22 @@ func (b *BaseDialog) RenderChoices(contentWidth int, choices ...Action) string {
 			}
 			b.actionRows = append(b.actionRows, row)
 			rendered = append(rendered, style.Render(text))
+		}
+		if choice.Description != "" {
+			descriptionStyle := styles.NoStyle.Foreground(styles.TextMuted)
+			if index == selected {
+				descriptionStyle = descriptionStyle.Foreground(styles.SelectedFg).Background(styles.Selected)
+			}
+			for _, line := range strings.Split(ansi.Hardwrap(choice.Description, max(1, width-indent), true), "\n") {
+				text := strings.Repeat(" ", indent) + line
+				text += strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
+				row := dialogActionRow{text: ansi.Strip(text)}
+				if !choice.Disabled {
+					row.hits = []dialogActionHit{{width: width, key: choice.Key}}
+				}
+				b.actionRows = append(b.actionRows, row)
+				rendered = append(rendered, descriptionStyle.Render(text))
+			}
 		}
 	}
 	return strings.Join(rendered, "\n")

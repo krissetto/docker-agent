@@ -100,3 +100,35 @@ func TestChoiceListUsesBoundedViewportAndRevealsKeyboardSelection(t *testing.T) 
 		assert.Zero(t, key.Code, "navigation never dispatches a choice")
 	}
 }
+
+func TestChoiceListDescribedBlocks(t *testing.T) {
+	for _, width := range []int{8, 24, 80} {
+		var b BaseDialog
+		choices := []Action{
+			{Label: "No", Description: "Reject without running.", Key: tea.KeyPressMsg{Code: 'N'}, Default: true},
+			{Label: "Yes", Description: "Allow this call only.", Key: tea.KeyPressMsg{Code: 'Y'}},
+			{Label: "Disabled", Description: "Unavailable choice.", Disabled: true},
+		}
+		view := b.RenderChoices(width, choices...)
+		assert.LessOrEqual(t, lipgloss.Width(view), width)
+		for i, choice := range choices {
+			end := len(b.actionRows)
+			if i+1 < len(choices) {
+				end = b.actionLines[i+1] - 1
+				assert.Empty(t, b.actionRows[end].text, "blocks have a blank separator")
+				assert.Empty(t, b.actionRows[end].hits, "separators never activate choices")
+			}
+			var text strings.Builder
+			for _, row := range b.actionRows[b.actionLines[i]:end] {
+				text.WriteString(strings.TrimSpace(row.text))
+				if choice.Disabled {
+					assert.Empty(t, row.hits)
+				} else {
+					require.Len(t, row.hits, 1)
+					assert.Equal(t, choice.Key, row.hits[0].key, "description rows belong to their choice")
+				}
+			}
+			assert.Contains(t, strings.ReplaceAll(text.String(), " ", ""), strings.ReplaceAll(choice.Description, " ", ""))
+		}
+	}
+}

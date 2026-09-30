@@ -274,12 +274,8 @@ func TestToolConfirmationManagerCompactBoundsAcrossOpenFrames(t *testing.T) {
 	targetWidth := lipgloss.Width(dialog.View())
 	targetHeight := lipgloss.Height(dialog.View())
 	choices := dialog.(*toolConfirmationDialog)
-	require.Len(t, choices.actionRows, 6, "each authorization policy has its own readable row")
-	// The former 15-row fixture packed all decisions into one button row.
-	// Preserve the content-sized contract rather than that obsolete packing:
-	// six vertical choices and their help must still occupy less than half
-	// the screen, with every animation frame centered at its final width.
-	require.Less(t, targetHeight, viewportHeight/2, "a short call remains compact with readable policy choices")
+	require.Len(t, choices.actions, 6, "each authorization policy has its own described block")
+	require.Less(t, targetHeight, viewportHeight, "a short call remains content-sized with described choices")
 	require.LessOrEqual(t, targetWidth, viewportWidth)
 	require.LessOrEqual(t, targetHeight, viewportHeight)
 	assertManagerFrameBounds(t, mgr, targetWidth, 1)

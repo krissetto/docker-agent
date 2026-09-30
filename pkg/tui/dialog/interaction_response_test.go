@@ -146,6 +146,11 @@ func TestConfirmationFormFamiliesSmallHeightActionCells(t *testing.T) {
 			for _, size := range [][2]int{{100, 30}, {45, 12}, {30, 8}, {20, 6}, {10, 4}} {
 				d := factory()
 				d.SetSize(size[0], size[1])
+				if confirmation, ok := d.(*toolConfirmationDialog); ok {
+					// Proposed inputs start visible; Tab brings the safe choice into view.
+					_, cmd := confirmation.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+					assert.Nil(t, cmd)
+				}
 				view := d.View()
 				row, col := d.Position()
 				assert.LessOrEqual(t, lipgloss.Width(view), size[0])
