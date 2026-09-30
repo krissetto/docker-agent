@@ -80,7 +80,7 @@ func TestSettingsFocusAndCategoriesKeepStableBounds(t *testing.T) {
 			mgr.handleOpen(OpenDialogMsg{Model: NewSettingsDialog(messages.Preferences{}, true)})
 			mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 			entry := &mgr.stack[0]
-			width, height := entry.targetWidth, entry.targetHeight
+			width := entry.targetWidth
 			for _, key := range []tea.KeyPressMsg{
 				{Code: tea.KeyTab}, {Code: tea.KeyTab}, {Code: tea.KeyRight},
 				{Code: tea.KeyRight}, {Code: tea.KeyLeft}, {Code: tea.KeyDown},
@@ -90,9 +90,12 @@ func TestSettingsFocusAndCategoriesKeepStableBounds(t *testing.T) {
 				mgr.forwardToTop(key)
 				assert.Equal(t, beforeCount+1, entry.boundsMeasurementCount)
 				assert.Equal(t, width, entry.targetWidth)
-				assert.Equal(t, height, entry.targetHeight)
-				assert.False(t, entry.anim.Running(), "focus/category changes never recenter the card")
-				assert.Equal(t, int32(0), r.ActiveCount(), "static settings own no animation lease")
+				assert.LessOrEqual(t, entry.targetHeight, size[1])
+				for entry.anim.Running() {
+					acceptedDialogTick(r, r.Continue())
+					entry.tick("settle", size[0], size[1])
+				}
+				assert.Equal(t, int32(0), r.ActiveCount())
 			}
 		})
 	}

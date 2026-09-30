@@ -181,7 +181,7 @@ func TestDialogContextHelpSettingsAndContextSelection(t *testing.T) {
 	d.setFocus(settingsActions)
 	d.prepareBody()
 	_, sections = ContextHelp(d)
-	assert.Equal(t, "Cancel", strings.TrimSpace(helpEntry(t, sections, "dialog.settings.selected-enter").Description))
+	assert.Equal(t, "Apply", strings.TrimSpace(helpEntry(t, sections, "dialog.settings.selected-enter").Description))
 
 	c := &contextDialog{selected: -1, breakdown: &runtime.ContextBreakdown{}}
 	_, sections = ContextHelp(c)

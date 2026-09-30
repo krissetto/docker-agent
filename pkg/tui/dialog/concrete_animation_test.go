@@ -82,7 +82,6 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 						}
 					}
 				case *settingsDialog:
-					before := mgr.stack[0].targetHeight
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyRight})
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -90,8 +89,10 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 					d.confirmYOLO = false
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeySpace})
 					require.True(t, d.confirmYOLO)
-					require.Equal(t, before, mgr.stack[0].targetHeight)
-					require.False(t, mgr.stack[0].anim.Running(), "warning updates do not resize the card")
+					if tick == nil {
+						tick = runtime.Continue()
+					}
+					finishConcreteDialog(t, runtime, &tick, mgr)
 					assertConcreteRootFrame(t, mgr)
 				}
 

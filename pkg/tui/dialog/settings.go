@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	settingsWidthPercent = 60
+	settingsWidthPercent = 90
 	settingsMinWidth     = 52
-	settingsMaxWidth     = 72
+	settingsMaxWidth     = 76
 	previewMaxWidth      = 44
 	previewMinWidth      = 24
 )
@@ -35,6 +35,13 @@ var settingsTabLabels = [tabCount]string{"Appearance", "Behavior", "Notification
 
 const (
 	rowTheme = iota
+	rowTransparentBackground
+	rowDimInactivePanes
+	rowSplitDiff
+	rowExpandThinking
+	rowHideToolResults
+	rowRenderImages
+	rowShowBanner
 	rowPosition
 	rowSpacing
 	rowInfoMode
@@ -44,13 +51,6 @@ const (
 	rowActiveAgents
 	rowTools
 	rowTodos
-	rowTransparentBackground
-	rowDimInactivePanes
-	rowSplitDiff
-	rowExpandThinking
-	rowHideToolResults
-	rowRenderImages
-	rowShowBanner
 	appearanceRowCount
 )
 
@@ -150,9 +150,6 @@ func (b *settingsBody) add(text string) {
 }
 
 func (b *settingsBody) section(title string) {
-	if len(b.lines) > 0 {
-		b.add("")
-	}
 	b.add(styles.MutedStyle.Render(title))
 }
 
@@ -197,7 +194,7 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 			order = append(order, element)
 		}
 	}
-	return &settingsDialog{BaseDialog: BaseDialog{bodyFillHeight: true, bodyMaxHeight: 38}, original: preferences, current: current, showVisuals: showVisuals, panelOrder: order}
+	return &settingsDialog{BaseDialog: BaseDialog{bodyMaxHeight: 34, bodyCompactTitle: true}, original: preferences, current: current, showVisuals: showVisuals, panelOrder: order}
 }
 
 func (d *settingsDialog) Init() tea.Cmd { return nil }
@@ -227,13 +224,16 @@ func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, d.cancel()
 		}
 		if action, hit := d.ActionKeyAt(msg.X, msg.Y, dl); hit {
+			if action.Code == tea.KeyEnter {
+				return d, d.apply()
+			}
 			return d, d.handleKey(action)
 		}
 		x, y, width, height := d.BodyScrollBounds()
-		if tabY, visible := d.headerRow(1); visible && msg.Y == tabY {
+		if tabY, visible := d.headerRow(2); visible {
 			for _, hit := range d.tabHits {
-				if hit.contains(msg.X-x, 0) {
-					d.setFocus(settingsCategories)
+				if hit.contains(msg.X-x, msg.Y-tabY) {
+					d.setFocus(settingsControls)
 					d.selectTab(hit.row)
 					return d, nil
 				}
@@ -275,7 +275,7 @@ func (d *settingsDialog) setFocus(focus settingsFocus) {
 	d.confirmYOLO = false
 	d.BlurActions()
 	if focus == settingsActions {
-		d.FocusActions(false)
+		d.FocusActions(true)
 	}
 	if focus == settingsControls {
 		d.revealSelected = true
@@ -325,6 +325,42 @@ func (d *settingsDialog) moveSelection(delta int) {
 	}
 }
 
+func (d *settingsDialog) moveTarget(delta int, wrap bool) {
+	targets := []int{-1}
+	for row := range d.rowCount() {
+		if d.selectable(d.tab, row) {
+			targets = append(targets, row)
+		}
+	}
+	targets = append(targets, d.rowCount())
+	at := 0
+	if d.focus == settingsActions {
+		at = len(targets) - 1
+	} else if d.focus == settingsControls {
+		for i, row := range targets {
+			if row == d.selected[d.tab] {
+				at = i
+				break
+			}
+		}
+	}
+	next := at + delta
+	if wrap {
+		next = (next + len(targets)) % len(targets)
+	} else {
+		next = max(0, min(len(targets)-1, next))
+	}
+	switch next {
+	case 0:
+		d.setFocus(settingsCategories)
+	case len(targets) - 1:
+		d.setFocus(settingsActions)
+	default:
+		d.setFocus(settingsControls)
+		d.selected[d.tab] = targets[next]
+	}
+}
+
 func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc", "q", "ctrl+c":
@@ -336,12 +372,23 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if msg.Mod&tea.ModShift != 0 {
 			delta = -1
 		}
-		d.setFocus(settingsFocus((int(d.focus) + delta + 3) % 3))
+		d.moveTarget(delta, true)
+		return nil
+	}
+	if msg.Code == tea.KeyHome || msg.Code == tea.KeyEnd {
+		d.setFocus(settingsControls)
+	}
+	if msg.String() == "up" || msg.String() == "k" || msg.String() == "down" || msg.String() == "j" {
+		delta := 1
+		if msg.String() == "up" || msg.String() == "k" {
+			delta = -1
+		}
+		d.moveTarget(delta, false)
 		return nil
 	}
 	if d.focus == settingsActions {
-		if action, handled := d.HandleActionKey(msg); handled && action.Code != 0 {
-			return d.handleKey(action)
+		if msg.Code == tea.KeyEnter || msg.Code == tea.KeySpace {
+			return d.apply()
 		}
 		return nil
 	}
@@ -351,7 +398,7 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			d.selectTab(d.tab - 1)
 		case "right", "l":
 			d.selectTab(d.tab + 1)
-		case "enter", "space", "down", "j":
+		case "enter", "space":
 			d.setFocus(settingsControls)
 		}
 		return nil
@@ -372,6 +419,7 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		d.moveSelection(1)
 		d.revealSelected = true
 	case "home", "g":
+		d.setFocus(settingsControls)
 		d.confirmYOLO = false
 		d.selected[d.tab] = 0
 		if !d.selectable(d.tab, 0) {
@@ -379,6 +427,7 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		d.revealSelected = true
 	case "end", "G":
+		d.setFocus(settingsControls)
 		d.confirmYOLO = false
 		d.selected[d.tab] = d.rowCount() - 1
 		if !d.selectable(d.tab, d.selected[d.tab]) {
@@ -547,7 +596,7 @@ func (d *settingsDialog) Position() (row, col int) { return d.CenterDialog(d.Vie
 
 func (d *settingsDialog) View() string {
 	width, header, body, footer, _ := d.bodyParts()
-	return d.RenderScrollableBody(styles.DialogStyle, width, header, body, footer)
+	return d.RenderScrollableBody(d.frameStyle(), width, header, body, footer)
 }
 
 func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) {
@@ -565,27 +614,17 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 		d.renderAppearanceTab(body)
 	}
 	d.rowHits = body.hits
-	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + d.renderTabBar(inner)
-	actions := d.actions()
-	selected := d.selectedAction(actions)
-	for i := range actions {
-		if i != selected {
-			actions[i].Label += "  " // Reserve the selected Enter marker without reflowing the footer.
-		}
-	}
-	footer := d.RenderActions(inner, actions...)
-	enter := "edit"
+	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + RenderSeparator(inner) + "\n" + d.renderTabBar(inner)
+	footer := d.RenderPickerFooter(inner, d.actions()...)
+	helpText := "Tab / ↑↓ move · Enter edit · Ctrl+S apply"
 	if d.focus == settingsCategories {
-		enter = "open"
-	} else if d.focus == settingsActions {
-		enter = "act"
+		helpText = "←/→ category · Enter open · Tab next"
 	}
-	helpText := "Tab focus · ↑↓ move · Enter " + enter + " · Ctrl+S apply"
-	if inner < lipgloss.Width(helpText) {
-		helpText = "Tab focus · Enter " + enter + " · Ctrl+S apply"
+	if d.focus == settingsActions {
+		helpText = "Enter apply · Shift+Tab previous"
 	}
-	if inner < lipgloss.Width(helpText) {
-		helpText = "Tab focus · ↵ " + enter
+	if inner < 40 {
+		helpText = "Tab ↑↓ · ↵ edit"
 	}
 	help := styles.MutedStyle.Render(ansi.Truncate(helpText, inner, ""))
 	d.actionRows = append([]dialogActionRow{{text: ansi.Strip(help)}}, d.actionRows...)
@@ -595,10 +634,17 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	return width, header, strings.Join(body.lines, "\n"), help + "\n" + footer, body.rows
 }
 
+func (d *settingsDialog) frameStyle() lipgloss.Style {
+	if d.height < 16 {
+		return styles.DialogStyle.PaddingTop(0).PaddingBottom(0)
+	}
+	return styles.DialogStyle
+}
+
 func (d *settingsDialog) prepareBody() {
 	width, header, body, footer, rows := d.bodyParts()
 	d.rowLines = rows
-	d.PrepareScrollableBody(styles.DialogStyle, width, header, body, footer)
+	d.PrepareScrollableBody(d.frameStyle(), width, header, body, footer)
 }
 
 func (d *settingsDialog) revealRow() {
@@ -616,24 +662,20 @@ func (d *settingsDialog) SetSize(width, height int) tea.Cmd {
 
 func (d *settingsDialog) renderTabBar(width int) string {
 	d.tabHits = nil
-	start := 0
-	for start < d.tab {
-		required := 0
-		for i := start; i <= d.tab; i++ {
-			required += len(settingsTabLabels[i]) + 3
+	var rows []string
+	line := ""
+	x, y := 0, 0
+	for i, label := range settingsTabLabels {
+		if x > 0 && x+3+len(label) > width {
+			rows = append(rows, line)
+			line = ""
+			x = 0
+			y++
 		}
-		if required-3 <= width {
-			break
+		if x > 0 {
+			line += "   "
+			x += 3
 		}
-		start++
-	}
-	var tabs []string
-	x := 0
-	for i := start; i < tabCount && x < width; i++ {
-		if i != d.tab && len(settingsTabLabels[i]) > width-x {
-			break
-		}
-		label := ansi.Truncate(settingsTabLabels[i], width-x, "")
 		style := styles.MutedStyle
 		if i == d.tab {
 			style = styles.BaseStyle.Bold(true)
@@ -641,11 +683,20 @@ func (d *settingsDialog) renderTabBar(width int) string {
 				style = style.Foreground(styles.SelectedFg).Background(styles.Selected)
 			}
 		}
-		tabs = append(tabs, style.Render(label))
-		d.tabHits = append(d.tabHits, settingsHit{x: x, width: lipgloss.Width(label), height: 1, row: i})
-		x += lipgloss.Width(label) + 3
+		for j, part := range strings.Split(ansi.Hardwrap(label, max(1, width), true), "\n") {
+			if j > 0 {
+				rows = append(rows, line)
+				line = ""
+				x = 0
+				y++
+			}
+			line += style.Render(part)
+			d.tabHits = append(d.tabHits, settingsHit{x: x, y: y, width: ansi.StringWidth(part), height: 1, row: i})
+			x += ansi.StringWidth(part)
+		}
 	}
-	return strings.Join(tabs, "   ")
+	rows = append(rows, line)
+	return strings.Join(rows, "\n")
 }
 
 func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
@@ -655,6 +706,14 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 	}
 	d.addControl(body, rowTheme, "Theme", theme+" · Choose…", false, false)
 	body.add(styles.MutedStyle.Render("Theme picker saves separately from Settings."))
+	body.section("Display")
+	d.addToggle(body, rowTransparentBackground, "Transparent background", d.current.TransparentBackground)
+	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
+	d.addToggle(body, rowSplitDiff, "Split diff view", d.current.SplitDiffView)
+	d.addToggle(body, rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)
+	d.addToggle(body, rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
+	d.addToggle(body, rowRenderImages, "Render images", d.current.RenderImages)
+	d.addToggle(body, rowShowBanner, "Show startup banner", d.current.ShowBanner)
 	if d.showVisuals {
 		body.section("Sidebar layout")
 		d.addControl(body, rowPosition, "Sidebar position", positionLabels[d.current.Layout.SidebarPosition], false, false)
@@ -670,20 +729,9 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 		}
 		d.addToggle(body, rowTools, "Tools", !d.current.Layout.HideTools)
 		d.addToggle(body, rowTodos, "Todos", !d.current.Layout.HideTodos)
-		if d.height >= 30 && body.width >= previewMinWidth {
-			body.add(renderLayoutPreview(d.current.Layout, body.width))
-		} else {
-			body.add(styles.MutedStyle.Render(ansi.Truncate("Preview: sidebar "+positionLabels[d.current.Layout.SidebarPosition]+" · chat + input", body.width, "")))
-		}
+		body.add(styles.MutedStyle.Render(ansi.Truncate("Layout: sidebar "+positionLabels[d.current.Layout.SidebarPosition]+" · "+spacingLabels[d.current.Layout.SectionSpacing]+" · "+infoModeLabels[d.current.Layout.SidebarInfoMode], body.width, "")))
 	}
-	body.section("Display")
-	d.addToggle(body, rowTransparentBackground, "Transparent background", d.current.TransparentBackground)
-	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
-	d.addToggle(body, rowSplitDiff, "Split diff view", d.current.SplitDiffView)
-	d.addToggle(body, rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)
-	d.addToggle(body, rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
-	d.addToggle(body, rowRenderImages, "Render images", d.current.RenderImages)
-	d.addToggle(body, rowShowBanner, "Show startup banner", d.current.ShowBanner)
+
 }
 
 var panelElementLabels = map[messages.PanelElement]string{
@@ -695,21 +743,24 @@ var panelElementLabels = map[messages.PanelElement]string{
 func (d *settingsDialog) renderPanelTab(body *settingsBody) {
 	body.add(styles.MutedStyle.Render("Bottom panel · disable all to hide"))
 	for row, element := range d.panelOrder {
+		fullWidth := body.width
+		body.width = max(1, fullWidth-6)
 		d.addToggle(body, row, panelElementLabels[element], slices.Contains(d.current.Panel.Elements, element))
-		for _, move := range []struct {
-			label string
-			delta int
-		}{{"Move up", -1}, {"Move down", 1}} {
-			text := "  " + move.label
-			start := len(body.lines)
-			style := styles.SecondaryStyle
-			enabled := row+move.delta >= 0 && row+move.delta < len(d.panelOrder)
-			if !enabled {
-				style = styles.MutedStyle
+		body.width = fullWidth
+		line := len(body.lines) - 1
+		for i, delta := range []int{-1, 1} {
+			x := body.width - 5 + i*3
+			if x < 0 {
+				continue
 			}
-			body.add(style.Render(text))
-			if enabled {
-				body.hits = append(body.hits, settingsHit{y: start, width: min(body.width, lipgloss.Width(text)), height: len(body.lines) - start, row: row, kind: settingsMovePanel, delta: move.delta})
+			glyph := "↑"
+			if delta > 0 {
+				glyph = "↓"
+			}
+			text := ansi.Truncate(body.lines[line], x, "")
+			body.lines[line] = text + strings.Repeat(" ", max(0, x-ansi.StringWidth(text))) + styles.MutedStyle.Render(glyph)
+			if row+delta >= 0 && row+delta < len(d.panelOrder) {
+				body.hits = append([]settingsHit{{x: x, y: line, width: 1, height: 1, row: row, kind: settingsMovePanel, delta: delta}}, body.hits...)
 			}
 		}
 	}
@@ -797,7 +848,7 @@ func (d *settingsDialog) addToggle(body *settingsBody, row int, label string, en
 	if enabled {
 		check = "[x]"
 	}
-	d.addControl(body, row, check+" "+label, "", true, !d.selectable(d.tab, row))
+	d.addControl(body, row, label, check, true, !d.selectable(d.tab, row))
 }
 
 func (d *settingsDialog) addControl(body *settingsBody, row int, label, value string, toggle, disabled bool) {
@@ -821,10 +872,10 @@ func (d *settingsDialog) addControl(body *settingsBody, row int, label, value st
 	if value != "" && valueX+lipgloss.Width(value) <= body.width {
 		body.add(style.Render(left + strings.Repeat(" ", valueX-lipgloss.Width(left)) + value))
 	} else {
-		body.add(style.Render(left))
+		body.add(style.Width(body.width).Render(left))
 		if value != "" {
 			valueX = 0
-			body.add(style.Render(value))
+			body.add(style.Width(body.width).Render(value))
 		}
 	}
 	if disabled {
@@ -884,5 +935,5 @@ func renderLayoutPreview(s messages.LayoutSettings, maxWidth int) string {
 }
 
 func (d *settingsDialog) actions() []Action {
-	return actionsForKeys("esc", "Cancel", "ctrl+s", "Apply")
+	return []Action{{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}}, {Label: "Apply", Primary: true, Key: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}}}
 }

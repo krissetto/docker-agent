@@ -550,6 +550,7 @@ func (dc *Content) Build() string {
 type Action struct {
 	Label        string
 	Description  string
+	Primary      bool
 	Key          tea.KeyPressMsg
 	Disabled     bool
 	Default      bool

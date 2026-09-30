@@ -43,59 +43,39 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 }
 
 func TestSettingsDialogNavigation(t *testing.T) {
-	t.Parallel()
-
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	down := tea.KeyPressMsg{Code: tea.KeyDown}
-	up := tea.KeyPressMsg{Code: tea.KeyUp}
-
-	require.Equal(t, rowTheme, d.selected[tabAppearance])
-
-	d.Update(down)
-	require.Equal(t, rowPosition, d.selected[tabAppearance])
-
-	d.Update(down)
-	require.Equal(t, rowSpacing, d.selected[tabAppearance])
-
-	d.Update(down)
-	require.Equal(t, rowInfoMode, d.selected[tabAppearance])
-
-	d.Update(down)
-	require.Equal(t, rowSessionPath, d.selected[tabAppearance])
-
-	for range 20 {
-		d.Update(down)
+	for row := 1; row < appearanceRowCount; row++ {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		require.Equal(t, row, d.selected[d.tab])
 	}
-	require.Equal(t, rowShowBanner, d.selected[tabAppearance], "down must stop at the last row")
-
-	d.Update(up)
-	require.Equal(t, rowRenderImages, d.selected[tabAppearance])
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Equal(t, settingsActions, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Equal(t, settingsActions, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	assert.Equal(t, settingsControls, d.focus)
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	require.Equal(t, settingsControls, d.focus)
-	for _, focus := range []settingsFocus{settingsActions, settingsCategories, settingsControls} {
-		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-		assert.Nil(t, cmd)
-		assert.Equal(t, focus, d.focus)
-		assert.Equal(t, tabAppearance, d.tab, "Tab changes focus zones, not categories")
-		assert.Equal(t, focus == settingsActions, d.ActionsFocused())
-	}
-	for _, focus := range []settingsFocus{settingsCategories, settingsActions, settingsControls} {
-		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-		assert.Nil(t, cmd)
-		assert.Equal(t, focus, d.focus)
-	}
-	d.selected[tabAppearance] = rowPosition
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	for _, tab := range []int{tabBehavior, tabNotifications, tabPanel, tabAppearance} {
-		d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-		assert.Equal(t, tab, d.tab)
-	}
+	require.Equal(t, settingsCategories, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	require.Equal(t, tabBehavior, d.tab)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	assert.Equal(t, settingsControls, d.focus)
-	assert.Equal(t, rowPosition, d.selected[d.tab], "each category remembers its row")
+	require.Equal(t, settingsControls, d.focus)
+	for row := 1; row < behaviorRowCount; row++ {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		require.Equal(t, row, d.selected[d.tab])
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, settingsActions, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, settingsCategories, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	require.Equal(t, tabAppearance, d.tab)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.Equal(t, rowTheme, d.selected[d.tab])
 }
 
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
@@ -599,9 +579,9 @@ func TestSettingsSmallViewportSelectionAndApplyMouseAction(t *testing.T) {
 		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		d.View()
 	}
-	require.Equal(t, rowShowBanner, d.selected[d.tab])
+	require.Equal(t, rowTodos, d.selected[d.tab])
 	height := d.bodyHeight
-	line := d.rowLines[rowShowBanner] - d.BodyScrollOffset()
+	line := d.rowLines[rowTodos] - d.BodyScrollOffset()
 	require.GreaterOrEqual(t, line, 0)
 	require.Less(t, line, height, "last selected setting is visible, not clipped")
 	footerKey := tea.KeyPressMsg{}
@@ -700,7 +680,7 @@ func TestSettingsSharedHeaderTabsUseVisibleRowsOnly(t *testing.T) {
 		d.tab = tabAppearance
 		d.SetSize(size[0], size[1])
 		view := d.View()
-		tabY, visible := d.headerRow(1)
+		tabY, visible := d.headerRow(2)
 		x, y, _, _ := d.BodyScrollBounds()
 		if !visible {
 			_, _ = d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y - 1})
@@ -740,10 +720,10 @@ func TestSettingsStructuralLeadingGapOwnedOnlyBySharedHeader(t *testing.T) {
 			view := d.View()
 			row, _ := d.Position()
 			lines := strings.Split(ansi.Strip(view), "\n")
-			if tabY, visible := d.headerRow(1); visible {
+			if tabY, visible := d.headerRow(2); visible {
 				require.Equal(t, 1, d.bodyHeaderGap)
-				require.Equal(t, tabY+2, d.bodyY, "exactly one shared gap between tabs and body")
-				require.Empty(t, strings.Trim(strings.TrimSpace(lines[tabY-row+1]), "│ "))
+				require.Greater(t, d.bodyY, tabY, "wrapped category strip precedes body")
+
 			}
 			if size[1] == 30 {
 				require.Contains(t, lines[d.bodyY-row], strings.TrimSpace(bodyLines[0]), "first body row is painted at the shared hit origin")
@@ -790,12 +770,12 @@ func TestSettingsFocusOwnsSelectionAndActions(t *testing.T) {
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.False(t, d.current.ShowBanner)
 	_, _, body, footer, _ := d.bodyParts()
-	assert.Contains(t, ansi.Strip(body), "› [ ] Show startup banner")
+	assert.Contains(t, ansi.Strip(body), "› Show startup banner")
 	assert.NotContains(t, ansi.Strip(footer), "↵", "no false Enter footer default in controls")
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.setFocus(settingsActions)
 	_, _, body, footer, _ = d.bodyParts()
 	assert.NotContains(t, ansi.Strip(body), "› [", "controls relinquish selection styling")
-	assert.Contains(t, ansi.Strip(footer), "Cancel ↵")
+	assert.Contains(t, ansi.Strip(footer), "Apply ↵")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(cmd))
@@ -824,7 +804,7 @@ func TestSettingsStableGeometryAndWarningSlot(t *testing.T) {
 				d.prepareBody()
 				view = d.View()
 				assert.Equal(t, width, lipgloss.Width(view))
-				assert.Equal(t, height, lipgloss.Height(view), "focus/category changes keep card geometry")
+				assert.LessOrEqual(t, lipgloss.Height(view), min(34, size[1]), "content-sized categories stay bounded")
 				assert.LessOrEqual(t, height, size[1])
 			}
 		}
@@ -839,7 +819,7 @@ func TestSettingsStableGeometryAndWarningSlot(t *testing.T) {
 			_, _, body, footer, _ = d.bodyParts()
 			assert.Equal(t, bodyHeight, lipgloss.Height(body), "YOLO confirmation has a stable reserved slot")
 			assert.Equal(t, footerHeight, lipgloss.Height(footer))
-			assert.Equal(t, height, lipgloss.Height(d.View()))
+			assert.LessOrEqual(t, lipgloss.Height(d.View()), min(34, size[1]))
 		}
 	}
 }
@@ -1002,16 +982,10 @@ func TestSettingsAllPreferencesSurviveApply(t *testing.T) {
 func TestSettingsAdaptiveHelpNeverCutsInstructionsAtNormalWidth(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	d.SetSize(80, 24)
-	for _, tc := range []struct {
-		focus settingsFocus
-		verb  string
-	}{{settingsControls, "edit"}, {settingsCategories, "open"}, {settingsActions, "act"}} {
-		d.setFocus(tc.focus)
-		d.prepareBody()
-		view := ansi.Strip(d.View())
-		assert.Contains(t, view, "Tab focus · Enter "+tc.verb+" · Ctrl+S apply")
-		assert.NotContains(t, view, "Pane ", "inactive tabs are omitted rather than partially labelled")
-	}
+	assert.Contains(t, ansi.Strip(d.View()), "Tab / ↑↓ move · Enter edit · Ctrl+S apply")
+	d.setFocus(settingsCategories)
+	d.prepareBody()
+	assert.Contains(t, ansi.Strip(d.View()), "←/→ category · Enter open · Tab next")
 }
 
 func TestSettingsTransparentBackgroundDraftApplyCancel(t *testing.T) {
@@ -1028,4 +1002,29 @@ func TestSettingsTransparentBackgroundDraftApplyCancel(t *testing.T) {
 	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(d.apply()))
 	require.True(t, ok)
 	assert.False(t, applied.Preferences.TransparentBackground)
+}
+
+func TestSettingsWrappedCategoriesAndCompactContent(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.SetSize(30, 12)
+	for _, label := range settingsTabLabels {
+		assert.Contains(t, ansi.Strip(d.View()), label)
+	}
+	for _, hit := range d.tabHits {
+		if hit.row != tabPanel {
+			continue
+		}
+		x, _, _, _ := d.BodyScrollBounds()
+		y, ok := d.headerRow(2)
+		require.True(t, ok)
+		d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x + hit.x, Y: y + hit.y})
+		assert.Equal(t, tabPanel, d.tab)
+		assert.Equal(t, settingsControls, d.focus)
+		break
+	}
+	d.SetSize(165, 47)
+	assert.Less(t, lipgloss.Height(d.View()), 20, "three panel controls do not fill a giant fixed-height card")
+	_, _, body, _, _ := d.bodyParts()
+	assert.Equal(t, 3, strings.Count(ansi.Strip(body), "[x]"))
+	assert.NotContains(t, ansi.Strip(body), "Move up")
 }

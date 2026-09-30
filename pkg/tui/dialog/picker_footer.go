@@ -23,7 +23,7 @@ func (b *BaseDialog) RenderPickerFooter(width int, actions ...Action) string {
 	selected := b.selectedAction(actions)
 	primary := -1
 	for i, a := range actions {
-		if a.Key.Code == tea.KeyEnter && a.Key.Mod == 0 {
+		if a.Primary || (a.Key.Code == tea.KeyEnter && a.Key.Mod == 0) {
 			primary = i
 			break
 		}

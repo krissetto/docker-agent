@@ -278,15 +278,15 @@ func dialogReferenceSections() []help.Section {
 		{ID: "dialog.settings", Title: "Settings", Entries: []help.Entry{
 			{ID: "dialog.settings.previous-next-bounded-row", Keys: []string{"up", "k", "down", "j", "ctrl+k", "ctrl+j"}, Description: "Previous/next enabled row", Condition: "Controls; bounded navigation."},
 			{ID: "dialog.settings.first-last-row", Keys: []string{"home", "g", "end", "G"}, Description: "First/last enabled row", Condition: "Controls."},
-			{ID: "dialog.settings.cancel-close", Keys: []string{"esc", "q"}, Description: "Cancel and restore previews", Condition: "Any focus zone."},
+			{ID: "dialog.settings.cancel-close", Keys: []string{"esc", "q"}, Description: "Cancel and restore previews", Condition: "Any selected target."},
 			{ID: "dialog.settings.select-row", Keys: []string{"mouse row click"}, Description: "Focus a row; toggles/theme activate, enum arrows adjust", Condition: "Visible enabled controls only."},
-			{ID: "dialog.settings.focus-zone", Keys: []string{"tab", "shift+tab"}, Description: "Next/previous focus zone", Condition: "Categories → Controls → Actions; starts in Controls."},
+			{ID: "dialog.settings.focus-zone", Keys: []string{"tab", "shift+tab"}, Description: "Next/previous setting target", Condition: "Category strip → enabled settings → Apply; starts at the first setting."},
 			{ID: "dialog.settings.categories", Keys: []string{"left", "up", "h", "k", "right", "l"}, Description: "Previous/next category", Condition: "Categories; each remembers its selected row."},
 			{ID: "dialog.settings.enter-controls", Keys: []string{"enter", "space", "down", "j"}, Description: "Enter category controls", Condition: "Categories."},
 			{ID: "dialog.settings.adjust-setting", Keys: []string{"left", "h", "right", "l"}, Description: "Adjust selected enum or number", Condition: "Controls; numeric bounds apply."},
 			{ID: "dialog.settings.activate-setting", Keys: []string{"enter", "space"}, Description: "Toggle, advance, or choose theme; never apply", Condition: "Controls; auto-approve requires confirmation. Theme picker saves separately."},
 			{ID: "dialog.settings.reorder-panel", Keys: []string{"ctrl+up", "ctrl+down"}, Description: "Reorder selected panel element", Condition: "Controls in Panel."},
-			{ID: "dialog.settings.apply-settings-and-close", Keys: []string{"ctrl+s"}, Description: "Apply settings and close", Condition: "Any focus zone."},
+			{ID: "dialog.settings.apply-settings-and-close", Keys: []string{"ctrl+s"}, Description: "Apply settings and close", Condition: "Any selected target."},
 			{ID: "dialog.settings.scroll-body", Keys: []string{"pgup", "pgdown", "mouse wheel", "scrollbar click/drag"}, Description: "Scroll without moving selection", Condition: "Visible body."},
 		}},
 		{ID: "dialog.working-dir-picker", Title: "Working directory", Entries: []help.Entry{
