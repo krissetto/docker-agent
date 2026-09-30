@@ -103,13 +103,7 @@ func (m *model) treeSummary(width int) string {
 		return ""
 	}
 	parts := []string{styles.TabPrimaryStyle.Render(fmt.Sprintf("%d subagents", total))}
-	if m.treeCollapsed && active > 0 {
-		frame := m.subagentSpinner.RawFrame()
-		if !m.subagentSpinnerOn {
-			frame = m.spinner.RawFrame()
-		}
-		parts[0] = styles.MutedStyle.Render(frame) + " " + parts[0]
-	}
+
 	for i, value := range []int{active, attention} {
 		counter := m.treeCounters[i]
 		alpha := counter.alpha
@@ -138,8 +132,21 @@ func (m *model) treeSummary(width int) string {
 	if width == 1 {
 		return styles.MutedStyle.Render(glyph)
 	}
-	text := ansi.Truncate(strings.Join(parts, " "), width-2, "…")
-	return text + strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1)) + styles.MutedStyle.Render(glyph)
+	tail := styles.MutedStyle.Render(glyph)
+	if m.treeCollapsed && width >= 4 {
+		frame := " "
+		if active > 0 {
+			frame = m.subagentSpinner.RawFrame()
+			if !m.subagentSpinnerOn {
+				frame = m.spinner.RawFrame()
+			}
+		}
+		frame = ansi.Truncate(frame, 1, "")
+		frame += strings.Repeat(" ", max(0, 1-ansi.StringWidth(frame)))
+		tail = styles.MutedStyle.Render(frame) + " " + tail
+	}
+	text := ansi.Truncate(strings.Join(parts, " "), max(0, width-ansi.StringWidth(tail)-1), "…")
+	return text + strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-ansi.StringWidth(tail))) + tail
 }
 
 func (m *model) treeControlAt(x, y int) (treeControl, bool) {

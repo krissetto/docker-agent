@@ -231,7 +231,9 @@ func TestExpandingChildrenNeverCoverPersistentRecap(t *testing.T) {
 		cells := sidebarCells(strings.Split(m.View(), "\n")[y])
 		require.Len(t, cells, len(before))
 		for x := range cells {
-			assert.Equal(t, before[x].fg, cells[x].fg, "recap foreground stable column%d", x)
+			if x != m.layoutCfg.PaddingLeft+m.contentWidth(m.cachedNeedsScrollbar)-3 {
+				assert.Equal(t, before[x].fg, cells[x].fg, "recap foreground stable column%d", x)
+			}
 			assert.Equal(t, before[x].bg, cells[x].bg, "recap background stable column%d", x)
 			if before[x].glyph != "›" {
 				assert.Equal(t, before[x].glyph, cells[x].glyph, "only direction glyph changes")

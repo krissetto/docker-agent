@@ -237,7 +237,7 @@ func TestCollapsedSummaryWarningCounter(t *testing.T) {
 	m.treeCollapsed = true
 
 	header := m.treeSummary(60)
-	assert.Contains(t, ansi.Strip(header), m.subagentSpinner.RawFrame()+" 3 subagents 1 active 1 ⚠")
+	assert.Contains(t, ansi.Strip(header), "3 subagents 1 active 1 ⚠")
 	assert.Contains(t, header, styles.WarningStyle.Render("1 ⚠"))
 	assert.NotContains(t, ansi.Strip(header), "attention")
 	assert.Equal(t, 1, ansi.StringWidth("⚠"), "warning uses the existing single-cell text glyph")
@@ -255,7 +255,7 @@ func TestCollapsedSummaryWarningCounter(t *testing.T) {
 			assert.Contains(t, header, styles.FadeLine(styles.MutedStyle.Render("1 active"), alpha))
 			assert.Contains(t, header, styles.FadeLine(styles.WarningStyle.Render("1 ⚠"), alpha))
 		}
-		assert.True(t, strings.HasPrefix(ansi.Strip(header), m.subagentSpinner.RawFrame()+" "))
+		assert.True(t, strings.HasSuffix(ansi.Strip(header), m.subagentSpinner.RawFrame()+" ›"))
 	}
 
 	snap := collapseFixture()
@@ -308,7 +308,7 @@ func TestPersistentTreeSummaryPositionCountsAndBranchRestore(t *testing.T) {
 	clickTreeControl(t, m, "", true)
 	assert.Equal(t, row, m.treeSectionStart, "summary remains at the same content row")
 	collapsedText := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(ansi.Strip(m.cachedLines[row])), "›"))
-	collapsedText = strings.TrimSpace(strings.TrimPrefix(collapsedText, m.subagentSpinner.RawFrame()))
+	collapsedText = strings.TrimSpace(strings.TrimSuffix(collapsedText, m.subagentSpinner.RawFrame()))
 	expandedText := strings.ReplaceAll(strings.TrimSpace(strings.TrimSuffix(text, "⌄")), "attention", "⚠")
 	assert.Equal(t, expandedText, collapsedText, "summary data persists while collapsed activity, warning label, and direction reflect state")
 	assert.NotContains(t, ansi.Strip(m.View()), "planner")
@@ -722,4 +722,29 @@ func TestCapturedChevronNeverFallsThroughWhenTemporarilyOccluded(t *testing.T) {
 	assert.Empty(t, payload)
 	_, valid := m.capturedBranchAt(capture.x, capture.y)
 	assert.False(t, valid, "occluded capture does not toggle a different row")
+}
+
+func TestCollapsedSpinnerReservesTrailingCellWithoutMovingLabelOrChevron(t *testing.T) {
+	m := newCollapseSidebar(t)
+	m.treeCollapsed = true
+	for _, width := range []int{1, 2, 3, 4, 8, 12, 24, 60} {
+		m.treeCountsValid = true
+		m.treeCountCache = [3]int{3, 0, 0}
+		m.treeCounters = [2]counterPresentation{}
+		idle := ansi.Strip(m.treeSummary(width))
+		m.treeCountCache = [3]int{3, 1, 0}
+		active := ansi.Strip(m.treeSummary(width))
+		assert.Equal(t, width, ansi.StringWidth(idle))
+		assert.Equal(t, width, ansi.StringWidth(active))
+		assert.Equal(t, "›", ansi.Cut(idle, width-1, width))
+		assert.Equal(t, "›", ansi.Cut(active, width-1, width))
+		if width >= 4 {
+			assert.Equal(t, " ", ansi.Cut(idle, width-3, width-2))
+			assert.Equal(t, m.subagentSpinner.RawFrame(), ansi.Cut(active, width-3, width-2))
+			prefixWidth := min(10, width-5)
+			if prefixWidth > 0 {
+				assert.Equal(t, ansi.Cut(idle, 0, prefixWidth), ansi.Cut(active, 0, prefixWidth), "summary label never shifts when activity changes")
+			}
+		}
+	}
 }

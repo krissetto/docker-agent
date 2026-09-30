@@ -72,7 +72,7 @@ func TestCollapsedSubagentSummaryActivity(t *testing.T) {
 				header := m.treeSummary(60)
 				frame := m.subagentSpinner.RawFrame()
 				if collapsed && state == subagent.NodeRunning {
-					assert.True(t, strings.HasPrefix(ansi.Strip(header), frame+" 3 subagents"))
+					assert.True(t, strings.HasPrefix(ansi.Strip(header), "3 subagents") && strings.HasSuffix(ansi.Strip(header), frame+" ›"))
 					assert.Contains(t, header, styles.MutedStyle.Render(frame), "header spinner is subdued")
 				} else {
 					assert.NotContains(t, ansi.Strip(header), frame)
@@ -99,7 +99,7 @@ func TestCollapsedSubagentSummaryUsesExistingParticipantSpinner(t *testing.T) {
 	m.Update(&runtime.StreamStartedEvent{SessionID: "legacy-child", AgentContext: runtime.AgentContext{AgentName: "worker"}})
 	assert.False(t, m.subagentSpinnerOn, "no extra spinner lease for synchronous work")
 	require.EqualValues(t, 1, ar.ActiveCount())
-	assert.True(t, strings.HasPrefix(ansi.Strip(m.treeSummary(60)), m.spinner.RawFrame()+" 1 subagents"))
+	assert.True(t, strings.HasPrefix(ansi.Strip(m.treeSummary(60)), "1 subagents") && strings.HasSuffix(ansi.Strip(m.treeSummary(60)), m.spinner.RawFrame()+" ›"))
 	before := m.treeSummary(60)
 	cmd := ar.Continue()
 	for range 20 {
