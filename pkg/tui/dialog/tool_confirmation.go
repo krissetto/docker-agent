@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/toolconfirm"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -39,11 +40,14 @@ var (
 type toolConfirmationDialog struct {
 	BaseDialog
 
-	msg               *runtime.ToolCallConfirmationEvent
-	keyMap            toolconfirm.KeyMap
-	sessionState      ConfirmationSessionState
-	permissionPattern string // cached permission pattern for this tool call
-	choicesStart      int
+	msg                             *runtime.ToolCallConfirmationEvent
+	keyMap                          toolconfirm.KeyMap
+	sessionState                    ConfirmationSessionState
+	permissionPattern               string // cached permission pattern for this tool call
+	choicesStart                    int
+	choiceScroll                    *scrollview.Model
+	choiceHeight, descriptionHeight int
+	decisionQuestion                bool
 }
 
 func (d *toolConfirmationDialog) dialogDimensions() (dialogWidth, contentWidth int) {
@@ -61,23 +65,35 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	return nil
 }
 
+func (d *toolConfirmationDialog) options() []Action {
+	return []Action{
+		{Label: "No", Description: "Reject this tool call without running it.", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
+		{Label: "Yes, once", Description: "Allow only this tool call. Future calls still require permission.", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
+		{Label: "Always allow tool", Description: "Allow this call and future calls matching " + d.permissionPattern + ".", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
+		{Label: "Balanced mode", Description: "Allow this call and switch this session to Balanced mode: classifier-safe calls run automatically; other calls still require permission.", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
+		{Label: "Allow all tools", Description: "Allow this call and all future tool calls in this session without confirmation.", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
+		{Label: "Reject with reason", Description: "Choose or write a rejection reason before rejecting this call. Cancel returns here without answering.", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
+	}
+}
+
 func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
-	return d.RenderChoices(contentWidth,
-		Action{Label: "No", Description: "Reject this tool call without running it.", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
-		Action{Label: "Yes, once", Description: "Allow only this tool call. Future calls still require permission.", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
-		Action{Label: "Always allow tool", Description: "Allow this call and future calls matching " + d.permissionPattern + ".", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
-		Action{Label: "Balanced mode", Description: "Allow this call and switch this session to Balanced mode: classifier-safe calls run automatically; other calls still require permission.", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
-		Action{Label: "Allow all tools", Description: "Allow this call and all future tool calls in this session without confirmation.", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
-		Action{Label: "Reject with reason", Description: "Choose or write a rejection reason before rejecting this call. Cancel returns here without answering.", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
-	)
+	if d.choiceScroll != nil {
+		contentWidth = d.choiceScroll.ContentWidth()
+	}
+	choices := d.options()
+	for i := range choices {
+		choices[i].Description = ""
+		choices[i].Label = ansi.Truncate(choices[i].Label, max(1, contentWidth-8), "…")
+	}
+	return d.RenderChoices(contentWidth, choices...)
 }
 
 func (d *toolConfirmationDialog) renderNavigation(contentWidth int) string {
-	help := "↑/↓ choose · Enter confirm · shortcut/click applies · wheel scroll"
+	help := "↑/↓ choose · Enter confirm · shortcut/click applies · PgUp/PgDn inputs"
 	if contentWidth < 80 {
-		help = "↑/↓ choose · Enter confirm"
+		help = "↑/↓ choose · Enter confirm · PgUp/PgDn inputs"
 	}
-	if contentWidth < 40 || d.height < 10 {
+	if contentWidth < 50 || d.height < 10 {
 		help = ansi.Truncate("↑↓ · ↵", contentWidth, "")
 	}
 	return styles.MutedStyle.Width(contentWidth).Align(lipgloss.Left).Render(help)
@@ -303,6 +319,14 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 		}()
 	}
+	if d.choiceScroll != nil && d.inChoiceRegion(msg) {
+		if handled, cmd := d.choiceScroll.Update(msg); handled {
+			return d, cmd
+		}
+	}
+	if d.outsideScrollRegions(msg) {
+		return d, nil
+	}
 	if handled, cmd := d.UpdateBodyScroll(msg); handled {
 		return d, cmd
 	}
@@ -351,6 +375,38 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
+func (d *toolConfirmationDialog) outsideScrollRegions(msg tea.Msg) bool {
+	var x, y int
+	switch m := msg.(type) {
+	case tea.MouseWheelMsg:
+		x, y = m.X, m.Y
+	case tuimessages.WheelCoalescedMsg:
+		x, y = m.X, m.Y
+	default:
+		return false
+	}
+	return x < d.bodyX || x >= d.bodyX+d.bodyWidth || y < d.bodyY || y >= d.bodyY+d.bodyHeight
+}
+
+func (d *toolConfirmationDialog) inChoiceRegion(msg tea.Msg) bool {
+	var x, y int
+	switch m := msg.(type) {
+	case tea.MouseWheelMsg:
+		x, y = m.X, m.Y
+	case tuimessages.WheelCoalescedMsg:
+		x, y = m.X, m.Y
+	case tea.MouseClickMsg:
+		x, y = m.X, m.Y
+	case tea.MouseMotionMsg:
+		x, y = m.X, m.Y
+	case tea.MouseReleaseMsg:
+		x, y = m.X, m.Y
+	default:
+		return false
+	}
+	return x >= d.bodyX && x < d.bodyX+d.bodyWidth && y >= d.choicesStart && y < d.choicesStart+d.choiceHeight
+}
+
 func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
 	view := d.View()
 	row, col := d.CenterDialog(view)
@@ -370,7 +426,7 @@ func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, hea
 	dialogWidth, contentWidth := d.dialogDimensions()
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 	header = RenderDialogHeader(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
-	footer = d.renderNavigation(contentWidth)
+	footer = d.renderDecisions(contentWidth)
 	var parts []string
 	if arguments := toolconfirm.Preview(d.msg.ToolCall, d.msg.ToolDefinition, bodyWidth); arguments != "" {
 		parts = append(parts, arguments)
@@ -387,12 +443,7 @@ func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, hea
 		}
 		parts = append(parts, metadata)
 	}
-	if len(parts) > 0 {
-		parts = append(parts, "")
-	}
-	parts = append(parts, styles.DialogQuestionStyle.Width(bodyWidth).Align(lipgloss.Left).Render(toolconfirm.Question), "")
-	d.choicesStart = lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, parts...))
-	parts = append(parts, d.renderOptions(bodyWidth))
+
 	return styles.DialogStyle, dialogWidth, header, lipgloss.JoinVertical(lipgloss.Left, parts...), footer
 }
 
@@ -402,20 +453,70 @@ func (d *toolConfirmationDialog) View() string {
 }
 
 func (d *toolConfirmationDialog) prepareLayout() {
-	style, width, header, body, footer := d.content()
+	width, inner := d.dialogDimensions()
+	style, _, _, available := d.bodyFrame(styles.DialogStyle, width)
+	if d.choiceScroll == nil {
+		d.choiceScroll = d.newScrollview(scrollview.WithKeyMap(nil), scrollview.WithFadeEffectDisabled(), scrollview.WithReserveScrollbarSpace(true))
+	}
+	d.choiceScroll.SetSize(inner, max(1, d.choiceHeight))
+	options := d.renderOptions(inner)
+	maxDescription := 1
+	for _, option := range d.options() {
+		maxDescription = max(maxDescription, lipgloss.Height(ansi.Hardwrap(option.Description, inner, true)))
+	}
+	d.descriptionHeight = min(3, maxDescription, max(0, available-12))
+	d.decisionQuestion = available >= 12
+	questionRows := 0
+	if d.decisionQuestion {
+		questionRows = 1
+	}
+	d.choiceHeight = min(lipgloss.Height(options), max(1, available-2-questionRows-d.descriptionHeight))
+	d.choiceScroll.SetSize(inner, d.choiceHeight)
+	d.choiceScroll.SetContent(strings.Split(options, "\n"), lipgloss.Height(options))
+	_, _, header, body, footer := d.content()
 	d.PrepareScrollableBody(style, width, header, body, footer)
+	d.choicesStart = d.bodyY + d.bodyHeight + d.bodyFooterGap + questionRows
+	d.choiceScroll.SetPosition(d.bodyX, d.choicesStart)
+	d.revealChoice()
 }
 
-// Choices live in the body viewport; the fixed footer contains only navigation help.
+func (d *toolConfirmationDialog) renderDecisions(width int) string {
+	options := d.renderOptions(width)
+	if d.choiceScroll != nil {
+		lines := strings.Split(options, "\n")
+		options = d.choiceScroll.ViewWithRestyledLines(lines[min(len(lines), d.choiceScroll.ScrollOffset()):])
+	}
+	var parts []string
+	if d.decisionQuestion {
+		parts = append(parts, styles.DialogQuestionStyle.Render(toolconfirm.Question))
+	}
+	parts = append(parts, options)
+	if d.descriptionHeight > 0 {
+		selected := max(0, d.selectedAction(d.actions))
+		lines := strings.Split(ansi.Hardwrap(d.options()[selected].Description, width, true), "\n")
+		for i := range d.descriptionHeight {
+			line := " "
+			if i < len(lines) {
+				line = lines[i]
+				if i == d.descriptionHeight-1 && len(lines) > d.descriptionHeight {
+					line = ansi.Truncate(line, max(1, width-1), "") + "…"
+				}
+			}
+			parts = append(parts, styles.MutedStyle.Width(width).Render(line))
+		}
+	}
+	parts = append(parts, d.renderNavigation(width))
+	return strings.Join(parts, "\n")
+}
+
 func (d *toolConfirmationDialog) ActionKeyAt(x, y int, dl DialogLayout) (tea.KeyPressMsg, bool) {
-	bodyX, bodyY, width, height := d.BodyScrollBounds()
-	if x < bodyX || x >= bodyX+width || y < bodyY || y >= bodyY+height || y < dl.Row || y >= dl.Row+dl.Height {
+	if d.choiceScroll == nil || x < d.bodyX || x >= d.bodyX+d.choiceScroll.ContentWidth() || y < d.choicesStart || y >= d.choicesStart+d.choiceHeight || y < dl.Row || y >= dl.Row+dl.Height {
 		return tea.KeyPressMsg{}, false
 	}
-	row := y - bodyY + d.BodyScrollOffset() - d.choicesStart
+	row := y - d.choicesStart + d.choiceScroll.ScrollOffset()
 	if row >= 0 && row < len(d.actionRows) {
 		for _, hit := range d.actionRows[row].hits {
-			if x-bodyX >= hit.x && x-bodyX < hit.x+hit.width {
+			if x-d.bodyX >= hit.x && x-d.bodyX < hit.x+hit.width {
 				return hit.key, true
 			}
 		}
@@ -425,15 +526,9 @@ func (d *toolConfirmationDialog) ActionKeyAt(x, y int, dl DialogLayout) (tea.Key
 
 func (d *toolConfirmationDialog) revealChoice() {
 	selected := d.selectedAction(d.actions)
-	if selected < 0 || selected >= len(d.actionLines) {
-		return
+	if d.choiceScroll != nil && selected >= 0 && selected < len(d.actionLines) {
+		d.choiceScroll.EnsureLineVisible(d.actionLines[selected])
 	}
-	end := len(d.actionRows) - 1
-	if selected+1 < len(d.actionLines) {
-		end = d.actionLines[selected+1] - 2
-	}
-	// Reveal the description when it fits, but always keep the choice label visible.
-	d.bodyScroll.EnsureRangeVisible(d.choicesStart+d.actionLines[selected], d.choicesStart+end)
 }
 
 func (d *toolConfirmationDialog) Position() (row, col int) {

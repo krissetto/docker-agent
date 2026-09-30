@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -402,7 +403,7 @@ func TestToolConfirmationDialog_TinyHeightScrollsEveryAction(t *testing.T) {
 				}
 			}
 		}
-		_, cmd := d.Update(tea.MouseWheelMsg{X: col + 3, Y: row + lipgloss.Height(view) - 2, Button: tea.MouseWheelDown})
+		_, cmd := d.Update(tea.MouseWheelMsg{X: d.bodyX, Y: d.choicesStart, Button: tea.MouseWheelDown})
 		assert.Nil(t, cmd, "wheel movement never authorizes a tool")
 	}
 	assert.Len(t, seen, 6, "all six actions remain mouse reachable at six rows")
@@ -695,17 +696,16 @@ func TestToolConfirmationDialogDescriptionsAndHelpPlacement(t *testing.T) {
 	view := d.View()
 	row, col := d.Position()
 	dl := NewDialogLayout(view, row, col)
-	for i, action := range d.actions {
+	for _, action := range d.actions {
 		y, x, found := locateInView(d, action.Label)
 		require.True(t, found)
-		key, hit := d.ActionKeyAt(x, y+1, dl)
-		require.True(t, hit, "description below %s is clickable", action.Label)
+		key, hit := d.ActionKeyAt(x, y, dl)
+		require.True(t, hit)
 		assert.Equal(t, action.Key, key)
-		if i > 0 {
-			_, hit := d.ActionKeyAt(x, y-1, dl)
-			assert.False(t, hit, "spacing between blocks cannot authorize")
-		}
 	}
+	assert.Contains(t, ansi.Strip(view), "Reject this tool call without running it.")
+	assert.NotContains(t, ansi.Strip(view), "classifier-safe calls run automatically")
+
 	helpY, helpX, found := locateInView(d, "↑/↓ choose")
 	require.True(t, found)
 	bodyX, _, _, _ := d.BodyScrollBounds()
@@ -737,7 +737,7 @@ func TestToolConfirmationDialogOverflowKeepsPreviewAndFixedHelp(t *testing.T) {
 		require.True(t, found)
 		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		assert.Nil(t, cmd)
-		assert.Positive(t, d.BodyScrollOffset(), "Tab reveals the safe default without answering")
+		assert.Zero(t, d.BodyScrollOffset(), "choosing never scrolls proposed arguments")
 		for range 6 {
 			view := d.View()
 			row, col := d.Position()
@@ -779,4 +779,86 @@ func TestToolConfirmationDialogResizeRevealsSelectedBlock(t *testing.T) {
 		require.True(t, hit)
 		assert.Equal(t, 'A', key.Code)
 	}
+}
+
+func TestToolConfirmationIndependentDecisionRegion(t *testing.T) {
+	event := newConfirmationEvent(nil)
+	event.ToolCall.Function.Arguments = `{"cmd":"` + strings.Repeat("界 é long argument ", 120) + `"}`
+	for _, size := range [][2]int{{120, 35}, {80, 24}, {40, 10}, {20, 6}} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
+			d.SetSize(size[0], size[1])
+			view := d.View()
+			t.Logf("%dx%d\n%s", size[0], size[1], ansi.Strip(view))
+			require.LessOrEqual(t, lipgloss.Height(view), size[1])
+			require.LessOrEqual(t, lipgloss.Width(view), size[0])
+			require.Contains(t, ansi.Strip(view), "No ↵")
+			require.NotContains(t, ansi.Strip(view), "Esc")
+			if size[1] >= 24 {
+				for _, choice := range d.options() {
+					require.Contains(t, ansi.Strip(view), choice.Label)
+				}
+				require.GreaterOrEqual(t, d.bodyHeight, 3, "arguments retain their own usable viewport")
+			}
+			choiceOffset := d.choiceScroll.ScrollOffset()
+			d.Update(tea.MouseWheelMsg{X: d.bodyX, Y: d.bodyY, Button: tea.MouseWheelDown})
+			require.Positive(t, d.BodyScrollOffset())
+			require.Equal(t, choiceOffset, d.choiceScroll.ScrollOffset())
+			bodyOffset := d.BodyScrollOffset()
+			d.Update(tea.MouseWheelMsg{X: d.bodyX, Y: d.choicesStart, Button: tea.MouseWheelDown})
+			require.Equal(t, bodyOffset, d.BodyScrollOffset(), "choice wheel cannot move arguments")
+			d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+			require.GreaterOrEqual(t, d.BodyScrollOffset(), bodyOffset)
+			for range 6 {
+				oldHeight := lipgloss.Height(d.View())
+				d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+				require.Equal(t, oldHeight, lipgloss.Height(d.View()), "selection descriptions reserve stable height")
+				require.Contains(t, ansi.Strip(d.View()), "›")
+			}
+			require.False(t, d.responseSent)
+		})
+	}
+}
+
+func TestToolConfirmationSelectedDescriptionIsStableAndNotAnAction(t *testing.T) {
+	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	d.SetSize(80, 24)
+	initialHeight := lipgloss.Height(d.View())
+	for selected := range 6 {
+		view := d.View()
+		row, col := d.Position()
+		dl := NewDialogLayout(view, row, col)
+		require.Equal(t, initialHeight, lipgloss.Height(view))
+		for y := d.choicesStart + d.choiceHeight; y < row+dl.Height; y++ {
+			_, hit := d.ActionKeyAt(d.bodyX, y, dl)
+			require.False(t, hit, "description and navigation cannot authorize")
+		}
+		lines := strings.Split(ansi.Strip(view), "\n")
+		description := strings.Join(lines[d.choicesStart+d.choiceHeight-row:d.choicesStart+d.choiceHeight-row+d.descriptionHeight], " ")
+		want := strings.Split(d.options()[selected].Description, " ")[:3]
+		require.Contains(t, strings.Join(strings.Fields(description), " "), strings.Join(want, " "))
+		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+}
+
+func TestToolConfirmationResizeKeepsDecisionPendingAndPrepared(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := &manager{runtime: r, width: 80, height: 24}
+	d := NewToolConfirmationDialog(r, newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	advanceResize(mgr, dialogOpenDuration)
+	mgr.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	preparations := d.bodyPreparationCount
+	for mgr.stack[0].anim.Running() {
+		mgr.Update(tea.MouseClickMsg{X: d.bodyX, Y: d.choicesStart, Button: tea.MouseLeft})
+		require.False(t, d.responseSent, "transient hitboxes cannot answer")
+		mgr.handleTick(acceptedDialogTick(r, r.Continue()))
+		mgr.GetLayerInfos()
+		require.Equal(t, preparations, d.bodyPreparationCount, "animation ticks do not reprepare arguments or choices")
+	}
+	selected, ok := d.SelectedActionKey()
+	require.True(t, ok)
+	require.Equal(t, 'N', selected.Code)
+	mgr.Cleanup()
+	require.Zero(t, r.ActiveCount())
 }
