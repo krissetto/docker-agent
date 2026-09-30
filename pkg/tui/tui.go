@@ -1239,7 +1239,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case messages.TabsUpdatedMsg:
-		if (m.paneGesture != nil && !slices.Equal(m.paneGesture.order, tabOrderIDs(msg.Tabs))) || (m.paneHydration != nil && !slices.Equal(m.paneHydration.order, tabOrderIDs(msg.Tabs))) {
+		if (m.paneGesture != nil && !m.paneGestureOrderValid(tabOrderIDs(msg.Tabs))) || (m.paneHydration != nil && !slices.Equal(m.paneHydration.order, tabOrderIDs(msg.Tabs))) {
 			m.cancelPaneGesture()
 		}
 		prevHeight := m.tabBar.Height()
@@ -2821,7 +2821,9 @@ func (m *appModel) tabHasRunningSubagents(sessionID string) bool {
 }
 
 func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
-	m.cancelPaneGesture()
+	if g := m.paneGesture; g == nil || !g.focusedSource || g.reorder || g.layout.Contains(sessionID) {
+		m.cancelPaneGesture()
+	}
 	wasTiled := m.panesEnabled()
 	hintCmd := m.cancelInteractionHint()
 	m.closePaneWorkspaceRoute(sessionID)

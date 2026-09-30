@@ -207,9 +207,12 @@ func samePaneGeometry(a, b splitGeometry) bool {
 // the next hidden tab in the vacated leaf; already-visible leaves are never
 // duplicated or displaced. No page initialization or store access occurs here.
 func (m *appModel) paneSplitCandidate(current splitLayout, source, target string, edge splitEdge) (splitLayout, string, bool) {
+	return m.paneSplitCandidateInOrder(current, source, target, edge, m.paneOrder())
+}
+
+func (m *appModel) paneSplitCandidateInOrder(current splitLayout, source, target string, edge splitEdge, order []string) (splitLayout, string, bool) {
 	load := source
 	if source == target {
-		order := m.paneOrder()
 		start := -1
 		for i, id := range order {
 			if id == source {
@@ -221,11 +224,25 @@ func (m *appModel) paneSplitCandidate(current splitLayout, source, target string
 			return current, "", false
 		}
 		replacement := ""
-		for offset := 1; offset < len(order); offset++ {
-			id := order[(start+offset)%len(order)]
-			if !current.Contains(id) {
-				replacement = id
+		eligible := func(id string) bool {
+			if current.Contains(id) || m.supervisor.GetRunner(id) == nil {
+				return false
+			}
+			owner := m.paneWorkspaces.byRoute[id]
+			return owner == nil || owner == m.paneWorkspaces.active || len(owner.layout.Sessions()) == 1
+		}
+		for i := start + 1; i < len(order); i++ {
+			if eligible(order[i]) {
+				replacement = order[i]
 				break
+			}
+		}
+		if replacement == "" {
+			for i := start - 1; i >= 0; i-- {
+				if eligible(order[i]) {
+					replacement = order[i]
+					break
+				}
 			}
 		}
 		if replacement == "" {
@@ -244,7 +261,11 @@ func (m *appModel) paneSplitCandidate(current splitLayout, source, target string
 }
 
 func (m *appModel) splitPane(source, target string, edge splitEdge) tea.Cmd {
-	layout, load, ok := m.paneSplitCandidate(m.paneLayout(), source, target, edge)
+	return m.splitPaneInOrder(source, target, edge, m.paneOrder())
+}
+
+func (m *appModel) splitPaneInOrder(source, target string, edge splitEdge, order []string) tea.Cmd {
+	layout, load, ok := m.paneSplitCandidateInOrder(m.paneLayout(), source, target, edge, order)
 	if !ok {
 		return notification.ErrorCmd("Choose a different session and a pane edge")
 	}

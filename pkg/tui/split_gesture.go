@@ -22,6 +22,7 @@ type panePointerTransaction struct {
 	bounds                                  splitRect
 	geometry                                splitGeometry
 	active, reorder                         bool
+	focusedSource                           bool
 	target                                  string
 	edge                                    splitEdge
 	preview                                 splitRect
@@ -77,12 +78,36 @@ func (m *appModel) cancelPaneGesture() {
 	m.viewCacheValid = false
 }
 
+// A focused drag may outlive a hidden neighbor closing, but never a reorder,
+// new tab, source removal, or removal of another visible leaf.
+func (m *appModel) paneGestureOrderValid(order []string) bool {
+	g := m.paneGesture
+	if g == nil {
+		return false
+	}
+	if slices.Equal(g.order, order) {
+		return true
+	}
+	if !g.focusedSource || g.reorder || !slices.Contains(order, g.source) {
+		return false
+	}
+	remaining := make([]string, 0, len(g.order))
+	for _, id := range g.order {
+		if slices.Contains(order, id) {
+			remaining = append(remaining, id)
+		} else if g.layout.Contains(id) {
+			return false
+		}
+	}
+	return slices.Equal(remaining, order)
+}
+
 func (m *appModel) validPaneGesture() bool {
 	g := m.paneGesture
 	if g == nil {
 		return false
 	}
-	if m.dialogMgr.Open() || m.leanMode || !slices.Equal(g.order, m.paneOrder()) {
+	if m.dialogMgr.Open() || m.leanMode || !m.paneGestureOrderValid(m.paneOrder()) {
 		return false
 	}
 	if g.source != "" {
@@ -113,7 +138,7 @@ func (m *appModel) beginPaneGesture(msg tea.MouseClickMsg) bool {
 		m.panes = m.paneLayout()
 		generation, _ := m.supervisor.RouteGeneration(source)
 		base := m.composePanes()
-		m.paneGesture = &panePointerTransaction{source: source, sourceGeneration: generation, startX: msg.X, startY: msg.Y, ghostGrabOffset: m.tabBar.DragGrabOffset(source, msg.X-tabFrameOrigin()), layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
+		m.paneGesture = &panePointerTransaction{source: source, focusedSource: source == m.paneFocus(), sourceGeneration: generation, startX: msg.X, startY: msg.Y, ghostGrabOffset: m.tabBar.DragGrabOffset(source, msg.X-tabFrameOrigin()), layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
 		m.cachePaneGestureBase(base)
 		return true
 	}
@@ -172,7 +197,7 @@ func (m *appModel) paneDrop(x, y int) (string, splitEdge, splitRect, bool) {
 		if !ok {
 			continue
 		}
-		next, load, ok := m.paneSplitCandidate(g.layout, g.source, id, edge)
+		next, load, ok := m.paneSplitCandidateInOrder(g.layout, g.source, id, edge, g.order)
 		if !ok || !m.supportsPaneCandidate(next, load) {
 			return "", 0, splitRect{}, false
 		}
@@ -293,7 +318,7 @@ func (m *appModel) releasePaneGesture(msg tea.MouseReleaseMsg) tea.Cmd {
 	target, edge, _, ok := m.paneDrop(msg.X, msg.Y)
 	m.cancelPaneGesture()
 	if ok {
-		return m.splitPane(g.source, target, edge)
+		return m.splitPaneInOrder(g.source, target, edge, g.order)
 	}
 	return nil
 }
