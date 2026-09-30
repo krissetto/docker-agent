@@ -560,11 +560,15 @@ type dialogActionHit struct {
 }
 
 func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
+	return b.renderActions(contentWidth, lipgloss.Right, 1, 1, actions...)
+}
+
+func (b *BaseDialog) renderActions(contentWidth int, alignment lipgloss.Position, gap, padding int, actions ...Action) string {
 	b.actionRows = nil
 	b.actions = append(b.actions[:0], actions...)
 	b.actionLines = make([]int, len(actions))
 	width := max(1, contentWidth)
-	button := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
+	button := styles.NoStyle.Padding(0, padding).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
 	var rendered []string
 	var row string
 	var hits []dialogActionHit
@@ -572,7 +576,7 @@ func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
 		if row == "" {
 			return
 		}
-		offset := max(0, width-lipgloss.Width(row))
+		offset := int(float64(max(0, width-lipgloss.Width(row))) * float64(alignment))
 		for i := range hits {
 			hits[i].x += offset
 		}
@@ -602,16 +606,16 @@ func (b *BaseDialog) RenderActions(contentWidth int, actions ...Action) string {
 				shortcut = "↵"
 			}
 		}
-		labelWidth := max(1, width-2)
+		labelWidth := max(1, width-2*padding)
 		if shortcut != "" && lipgloss.Width(shortcut)+2 < labelWidth {
 			label = ansi.Truncate(label, labelWidth-lipgloss.Width(shortcut)-1, "") + " " + shortcut
 		}
 		pill := pillStyle.Render(ansi.Truncate(label, labelWidth, ""))
-		if row != "" && lipgloss.Width(row)+1+lipgloss.Width(pill) > width {
+		if row != "" && lipgloss.Width(row)+gap+lipgloss.Width(pill) > width {
 			flush()
 		}
 		if row != "" {
-			row += " "
+			row += strings.Repeat(" ", gap)
 		}
 		b.actionLines[index] = len(b.actionRows)
 		if !action.Disabled {

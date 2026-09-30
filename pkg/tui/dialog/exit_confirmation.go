@@ -1,9 +1,9 @@
 package dialog
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -137,10 +137,41 @@ func (d *exitConfirmationDialog) content() (style lipgloss.Style, width int, hea
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	header = RenderTitle("Exit", contentWidth, styles.DialogTitleStyle)
-	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("Do you want to exit?")
-	footer = d.RenderConfirmButtons(contentWidth)
+	header = RenderTitle("Exit", contentWidth, styles.DialogTitleStyle) + "\n" + RenderSeparator(contentWidth)
+	question := "Do you want to exit?"
+	questionWidth := bodyWidth
+	if lipgloss.Width(question)+2 <= bodyWidth {
+		// Center short questions on the card, not the scrollbar-reserved body lane.
+		questionWidth = contentWidth
+	}
+	body = styles.DialogQuestionStyle.Width(questionWidth).Render(question)
+	footer = d.renderButtons(contentWidth)
 	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer
+}
+
+func (d *exitConfirmationDialog) renderButtons(contentWidth int) string {
+	actions := []Action{
+		{Label: "No", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: true, HideShortcut: true},
+		{Label: "Yes", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}, HideShortcut: true},
+	}
+	selected := d.selectedAction(actions)
+	for i := range actions {
+		if i != selected {
+			actions[i].Label += "  " // Keep button widths stable when the Enter marker moves.
+		}
+	}
+	padding := min(2, max(0, (contentWidth-3)/2))
+	out := d.renderActions(contentWidth, lipgloss.Center, 2, padding, actions...)
+	for _, row := range d.actionRows {
+		for _, hit := range row.hits {
+			if hit.key.Code == 'n' {
+				d.confirmBtnNoX, d.confirmBtnNoW = hit.x, hit.width
+			} else {
+				d.confirmBtnYesX, d.confirmBtnYesW = hit.x, hit.width
+			}
+		}
+	}
+	return out
 }
 
 func (d *exitConfirmationDialog) View() string {

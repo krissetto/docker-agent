@@ -642,3 +642,100 @@ func TestSharedTitleRemainsOneBoundedHeaderRow(t *testing.T) {
 		require.Equal(t, 1, lipgloss.Height(title))
 	}
 }
+
+func TestExitConfirmationCenteredReferenceLayout(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {165, 47}, {30, 12}, {16, 8}, {20, 6}} {
+		d := NewExitConfirmationDialog().(*exitConfirmationDialog)
+		d.SetSize(size[0], size[1])
+		view := d.View()
+		dl := d.layout()
+		assert.LessOrEqual(t, dl.Width, size[0])
+		assert.LessOrEqual(t, dl.Height, size[1])
+		for _, row := range d.actionRows {
+			require.NotEmpty(t, row.hits)
+			first, last := row.hits[0], row.hits[len(row.hits)-1]
+			left, right := first.x, d.actionContentWidth-last.x-last.width
+			assert.InDelta(t, left, right, 1, "each button row is centered, even when wrapped")
+			if len(row.hits) == 2 {
+				assert.Equal(t, 2, last.x-first.x-first.width, "buttons have an intentional gap")
+			}
+		}
+		if size[1] >= 12 && size[0] >= 80 {
+			lines := strings.Split(ansi.Strip(view), "\n")
+			title, divider, question, buttons := -1, -1, -1, -1
+			for i, line := range lines {
+				switch {
+				case strings.Contains(line, "Exit"):
+					title = i
+				case strings.Contains(line, "────") && !strings.ContainsAny(line, "╭╰"):
+					divider = i
+				case strings.Contains(line, "Do you want to exit?"):
+					question = i
+				case strings.Contains(line, "No ↵"):
+					buttons = i
+				}
+			}
+			require.Greater(t, divider, title)
+			require.Greater(t, question, divider)
+			require.Greater(t, buttons, question+1)
+			for _, text := range []string{"Exit", "Do you want to exit?"} {
+				for _, line := range lines {
+					if before, after, found := strings.Cut(line, text); found {
+						assert.InDelta(t, lipgloss.Width(before), lipgloss.Width(after), 1, "title/question centered on card")
+					}
+				}
+			}
+			assert.NotContains(t, ansi.Strip(view), "Yes y", "reference uses plain button labels")
+		}
+		t.Logf("Exit %dx%d:\n%s", size[0], size[1], ansi.Strip(view))
+	}
+}
+
+func TestExitConfirmationCenteredButtonCellsAndGaps(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {30, 12}, {16, 8}, {20, 6}} {
+		for _, selectedYes := range []bool{false, true} {
+			d := NewExitConfirmationDialog().(*exitConfirmationDialog)
+			d.SetSize(size[0], size[1])
+			if selectedYes {
+				d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+			}
+			dl := d.layout()
+			seen := map[rune]bool{}
+			for y := dl.Row; y < dl.Row+dl.Height; y++ {
+				for x := dl.Col; x < dl.Col+dl.Width; x++ {
+					key, hit := d.ActionKeyAt(x, y, dl)
+					if !hit {
+						if y-dl.Row >= d.actionFooterStart && y-dl.Row < d.actionFooterStart+d.actionFooterHeight {
+							_, cmd := d.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y})
+							assert.Nil(t, cmd, "button gaps and borders do not activate")
+						}
+						continue
+					}
+					seen[key.Code] = true
+					probe := NewExitConfirmationDialog().(*exitConfirmationDialog)
+					probe.SetSize(size[0], size[1])
+					if selectedYes {
+						probe.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+					}
+					_, cmd := probe.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y})
+					msgs := collectMsgs(cmd)
+					assert.True(t, hasMsg[CloseDialogMsg](msgs))
+					assert.Equal(t, key.Code == 'y', hasMsg[ExitConfirmedMsg](msgs))
+				}
+			}
+			assert.Len(t, seen, 2, "both centered choices retain exact mouse targets")
+		}
+	}
+}
+
+func TestExitConfirmationSelectionDoesNotShiftButtons(t *testing.T) {
+	d := NewExitConfirmationDialog().(*exitConfirmationDialog)
+	d.SetSize(80, 24)
+	d.View()
+	before := []int{d.confirmBtnNoX, d.confirmBtnNoW, d.confirmBtnYesX, d.confirmBtnYesW}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	d.View()
+	assert.Equal(t, before, []int{d.confirmBtnNoX, d.confirmBtnNoW, d.confirmBtnYesX, d.confirmBtnYesW})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.True(t, hasMsg[ExitConfirmedMsg](collectMsgs(cmd)))
+}
