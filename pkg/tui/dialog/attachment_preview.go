@@ -119,7 +119,7 @@ func (d *imageAttachmentPreviewDialog) View() string {
 	return d.RenderCard(styles.DialogStyle, d.dialogWidth, d.content)
 }
 func (d *imageAttachmentPreviewDialog) Position() (int, int) { return d.CenterDialog(d.View()) }
-func (d *imageAttachmentPreviewDialog) Cleanup()             {}
+func (d *imageAttachmentPreviewDialog) Cleanup()             { d.preview.Close(); d.content = "" }
 
 func (d *attachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	_, cmd := d.readOnlyScrollDialog.Update(msg)

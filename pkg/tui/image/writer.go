@@ -14,14 +14,18 @@ import (
 )
 
 type overlay struct {
-	explicit         bool
-	cellHeight       int
-	id               uint32
-	png              []byte
-	x, y             int
-	cols, rows       int
-	pixelW, pixelH   int
-	sourceY, sourceH int
+	explicit                     bool
+	cellHeight                   int
+	placementCols, placementRows int
+	displayHeight                int
+	firstRow, totalRows          int
+	id                           uint32
+	png                          []byte
+	managed                      bool
+	x, y                         int
+	cols, rows                   int
+	pixelW, pixelH               int
+	sourceY, sourceH             int
 }
 
 // Writer adds kitty graphics after Bubble Tea has rendered its text cell buffer.
@@ -33,6 +37,7 @@ type Writer struct {
 	mu        sync.Mutex
 	overlays  []overlay
 	uploaded  map[uint32]bool
+	managed   map[uint32]bool
 	active    bool
 	dirty     bool
 	enabled   bool
@@ -40,7 +45,7 @@ type Writer struct {
 }
 
 func NewWriter(out io.Writer) *Writer {
-	return &Writer{out: out, uploaded: make(map[uint32]bool), enabled: true, supported: true}
+	return &Writer{out: out, uploaded: make(map[uint32]bool), managed: make(map[uint32]bool), enabled: true, supported: true}
 }
 
 // Fd, Read, and Close preserve the terminal file interface when Writer wraps
@@ -97,12 +102,11 @@ func (w *Writer) SetEnabled(enabled bool) {
 	}
 }
 
-// Invalidate forces image data and placements to be rebuilt after the terminal
-// clears graphics state, such as during a resize or terminal restore.
+// Invalidate rebuilds placements after a resize. Uploaded source data remains
+// reusable; actual screen-clear escape sequences invalidate it in Write.
 func (w *Writer) Invalidate() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	clear(w.uploaded)
 	w.dirty = true
 }
 
@@ -136,31 +140,59 @@ func (w *Writer) Write(p []byte) (int, error) {
 		w.dirty = true
 		w.active = false
 	}
-	if len(w.overlays) == 0 && !w.active {
+	visible := make(map[uint32]bool, len(w.overlays))
+	for _, image := range w.overlays {
+		visible[image.id] = true
+	}
+	var retired []uint32
+	for id := range w.managed {
+		if !visible[id] && !previewImageRetained(id) {
+			retired = append(retired, id)
+		}
+	}
+	if len(w.overlays) == 0 && !w.active && len(retired) == 0 {
 		return n, nil
 	}
 
 	wasDirty := w.dirty
 	newUploads := make([]uint32, 0, len(w.overlays))
 	var b strings.Builder
+	capacity := 64 + len(w.overlays)*128 + len(retired)*64
+	for _, image := range w.overlays {
+		if !w.uploaded[image.id] {
+			encoded := base64.StdEncoding.EncodedLen(len(image.png))
+			capacity += encoded + (encoded/kittyMaxChunkSize+1)*80
+		}
+	}
+	b.Grow(capacity)
 	b.WriteString("\x1b7")
 	if wasDirty {
 		b.WriteString("\x1b_Ga=d,d=a,q=2\x1b\\")
 	}
 	for index, image := range w.overlays {
+		if image.managed {
+			w.managed[image.id] = true
+		}
 		if !w.uploaded[image.id] {
-			writeTransmission(&b, image.id, image.png)
+			writeImageTransmission(&b, image)
 			newUploads = append(newUploads, image.id)
 		}
 		fmt.Fprintf(&b, "\x1b[%d;%dH", image.y+1, image.x+1)
 		fmt.Fprintf(&b, "\x1b_Ga=p,i=%d,p=%d,q=2,C=1", image.id, index+1)
-		if image.cellHeight == 0 {
+		if image.placementCols > 0 {
+			fmt.Fprintf(&b, ",c=%d", image.placementCols)
+		} else if image.placementRows > 0 {
+			fmt.Fprintf(&b, ",r=%d", image.placementRows)
+		} else if image.cellHeight == 0 {
 			fmt.Fprintf(&b, ",c=%d,r=%d", image.cols, image.rows)
 		}
 		if image.sourceY > 0 || image.sourceH < image.pixelH {
 			fmt.Fprintf(&b, ",x=0,y=%d,w=%d,h=%d", image.sourceY, image.pixelW, image.sourceH)
 		}
 		b.WriteString("\x1b\\")
+	}
+	for _, id := range retired {
+		fmt.Fprintf(&b, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", id)
 	}
 	b.WriteString("\x1b8")
 	overlay := b.String()
@@ -172,6 +204,10 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return n, writeErr
 	}
 
+	for _, id := range retired {
+		delete(w.managed, id)
+		delete(w.uploaded, id)
+	}
 	w.dirty = false
 	w.active = len(w.overlays) > 0
 	for _, id := range newUploads {
@@ -180,19 +216,24 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func writeTransmission(b *strings.Builder, id uint32, png []byte) {
-	encoded := base64.StdEncoding.EncodeToString(png)
-	for offset := 0; offset < len(encoded); offset += kittyMaxChunkSize {
-		end := min(offset+kittyMaxChunkSize, len(encoded))
+func writeImageTransmission(b *strings.Builder, image overlay) {
+	var encoded [kittyMaxChunkSize]byte
+	const rawChunk = kittyMaxChunkSize / 4 * 3
+	for offset := 0; offset < len(image.png); offset += rawChunk {
+		end := min(offset+rawChunk, len(image.png))
+		n := base64.StdEncoding.EncodedLen(end - offset)
+		base64.StdEncoding.Encode(encoded[:n], image.png[offset:end])
 		more := 0
-		if end < len(encoded) {
+		if end < len(image.png) {
 			more = 1
 		}
 		if offset == 0 {
-			fmt.Fprintf(b, "\x1b_Ga=t,t=d,f=100,i=%d,q=2,m=%d;%s\x1b\\", id, more, encoded[offset:end])
+			fmt.Fprintf(b, "\x1b_Ga=t,t=d,f=100,i=%d,q=2,m=%d;", image.id, more)
 		} else {
-			fmt.Fprintf(b, "\x1b_Gm=%d;%s\x1b\\", more, encoded[offset:end])
+			fmt.Fprintf(b, "\x1b_Gm=%d;", more)
 		}
+		b.Write(encoded[:n])
+		b.WriteString("\x1b\\")
 	}
 }
 
@@ -201,7 +242,7 @@ func sameOverlays(a, b []overlay) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].cellHeight != b[i].cellHeight || a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
+		if a[i].placementCols != b[i].placementCols || a[i].placementRows != b[i].placementRows || a[i].displayHeight != b[i].displayHeight || a[i].cellHeight != b[i].cellHeight || a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
 			a[i].cols != b[i].cols || a[i].rows != b[i].rows ||
 			a[i].pixelW != b[i].pixelW || a[i].pixelH != b[i].pixelH ||
 			a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
@@ -275,10 +316,10 @@ func extractMarkerOverlays(lines []string) []overlay {
 			}
 			stop := start + len(markerPrefix) + stopRel
 			fields := strings.Split(line[start+len(markerPrefix):stop], ";")
-			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") || (len(fields) == 7 && fields[4] == "native") {
+			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") || (len(fields) == 7 && fields[4] == "native") || (len(fields) == 11 && fields[4] == "scaled") {
 				explicit := len(fields) > 4
 				cellHeight := 0
-				if len(fields) == 7 {
+				if len(fields) >= 7 {
 					cellHeight, _ = strconv.Atoi(fields[6])
 					if cellHeight <= 0 || cellHeight > 512 {
 						line = line[:start] + line[stop+2:]
@@ -292,6 +333,21 @@ func extractMarkerOverlays(lines []string) []overlay {
 				img, ok := registeredImage(uint32(id64))
 				if idErr == nil && colsErr == nil && rowsErr == nil && rowErr == nil && ok && totalRows > 0 && cols > 0 && row >= 0 && row < totalRows {
 					x := ansi.StringWidth(line[:start])
+					placementCols, placementRows, displayHeight := 0, 0, 0
+					if len(fields) == 11 {
+						placementCols, _ = strconv.Atoi(fields[7])
+						placementRows, _ = strconv.Atoi(fields[8])
+						displayHeight, _ = strconv.Atoi(fields[10])
+						if placementCols < 0 || placementRows < 0 || (placementCols == 0) == (placementRows == 0) || displayHeight <= 0 {
+							line = line[:start] + line[stop+2:]
+							continue
+						}
+					}
+					next := markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit, cellHeight)
+					next.placementCols, next.placementRows, next.displayHeight = placementCols, placementRows, displayHeight
+					if displayHeight > 0 {
+						next.sourceY, next.sourceH = 0, img.Height
+					}
 					if len(overlays) > 0 {
 						last := &overlays[len(overlays)-1]
 						lastEndRow := last.sourceY + last.sourceH
@@ -299,17 +355,20 @@ func extractMarkerOverlays(lines []string) []overlay {
 						if cellHeight > 0 {
 							expectedSourceY = min(img.Height, row*cellHeight)
 						}
-						if last.cellHeight == cellHeight && last.explicit == explicit && uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && lastEndRow == expectedSourceY {
+						if last.placementCols == placementCols && last.placementRows == placementRows && last.displayHeight == displayHeight && last.cellHeight == cellHeight && last.explicit == explicit && uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && last.firstRow+last.rows == row && (displayHeight > 0 || lastEndRow == expectedSourceY) {
 							last.rows++
 							last.sourceH = img.Height*(row+1)/totalRows - last.sourceY
-							if cellHeight > 0 {
+							if displayHeight > 0 {
+								last.sourceH = img.Height
+							}
+							if cellHeight > 0 && displayHeight == 0 {
 								last.sourceH = min(img.Height, (row+1)*cellHeight) - last.sourceY
 							}
 						} else {
-							overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit, cellHeight))
+							overlays = append(overlays, next)
 						}
 					} else {
-						overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit, cellHeight))
+						overlays = append(overlays, next)
 					}
 				}
 			}
@@ -317,7 +376,11 @@ func extractMarkerOverlays(lines []string) []overlay {
 		}
 		lines[y] = line
 	}
-	return overlays
+	// Scaled source crops can round to a different destination size. Suppress a
+	// partially occluded scaled placement rather than paint over another layer.
+	return slices.DeleteFunc(overlays, func(image overlay) bool {
+		return image.displayHeight > 0 && (image.firstRow != 0 || image.rows != image.totalRows)
+	})
 }
 
 func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explicit bool, cellHeight int) overlay {
@@ -327,8 +390,8 @@ func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explic
 		sourceY, sourceEnd = min(img.Height, row*cellHeight), min(img.Height, (row+1)*cellHeight)
 	}
 	return overlay{
-		explicit: explicit, cellHeight: cellHeight,
-		id: id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
+		explicit: explicit, cellHeight: cellHeight, firstRow: row, totalRows: totalRows,
+		id: id, png: img.PNGData, managed: img.registryID != 0, x: x, y: y, cols: cols, rows: 1,
 		pixelW: img.Width, pixelH: img.Height,
 		sourceY: sourceY, sourceH: sourceEnd - sourceY,
 	}

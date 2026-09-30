@@ -16,6 +16,7 @@ func TestNativePreviewFitPreservesNativeSizeAndFitsBothAxes(t *testing.T) {
 		require.NoError(t, png.Encode(&data, stdimage.NewRGBA(stdimage.Rect(0, 0, size[0], size[1]))))
 		preview, err := DecodePreview("image", data.Bytes())
 		require.NoError(t, err)
+		t.Cleanup(preview.Close)
 		for _, cell := range []CellSize{{8, 16}, {9, 23}} {
 			for _, box := range [][2]int{{100, 40}, {10, 5}, {200, 100}} {
 				fitted, err := preview.Fit(box[0], box[1], cell)
@@ -25,7 +26,7 @@ func TestNativePreviewFitPreservesNativeSizeAndFitsBothAxes(t *testing.T) {
 				assert.InDelta(t, float64(size[0])/float64(size[1]), float64(fitted.Width)/float64(fitted.Height), float64(size[0])/float64(size[1])/float64(fitted.Height)+1/float64(fitted.Height))
 				again, err := preview.Fit(box[0], box[1], cell)
 				require.NoError(t, err)
-				assert.Same(t, &fitted.PNGData[0], &again.PNGData[0], "identical fit reuses prepared PNG")
+				assert.Same(t, &fitted.PNGData[0], &again.PNGData[0], "fit reuses source PNG")
 			}
 		}
 	}

@@ -44,8 +44,11 @@ const (
 )
 
 type registryEntry struct {
-	id    uint32
-	image Inline
+	id        uint32
+	image     Inline
+	owners    int
+	cached    bool
+	signature uint32
 }
 
 var (
@@ -56,6 +59,7 @@ var (
 		order   list.List
 	}{entries: make(map[uint32]*list.Element)}
 	renderingDisabled atomic.Bool
+	nextPreviewID     atomic.Uint32
 )
 
 // SetRenderingEnabled controls whether the full-screen TUI reserves image rows.
@@ -65,11 +69,13 @@ func SetRenderingEnabled(enabled bool) {
 
 // Inline is a PNG image prepared for inline kitty-protocol rendering.
 type Inline struct {
-	Name    string
-	MIME    string
-	PNGData []byte
-	Width   int
-	Height  int
+	Name                         string
+	MIME                         string
+	PNGData                      []byte
+	Width                        int
+	Height                       int
+	registryID                   uint32
+	placementCols, placementRows int
 }
 
 // FromToolResult extracts displayable images from a tool result.
@@ -381,7 +387,7 @@ func cellSize(img Inline, width int) (cols, rows int) {
 func imageID(data []byte) uint32 {
 	h := fnv.New32a()
 	_, _ = h.Write(data)
-	if id := h.Sum32(); id != 0 {
+	if id := h.Sum32() & 0x7fffffff; id != 0 {
 		return id
 	}
 	return 1
@@ -390,10 +396,21 @@ func imageID(data []byte) uint32 {
 func registerImage(id uint32, img Inline) uint32 {
 	inlineRegistry.Lock()
 	defer inlineRegistry.Unlock()
+	signature := imageSignature(img)
+	for elem := inlineRegistry.order.Front(); elem != nil; elem = elem.Next() {
+		entry := elem.Value.(*registryEntry)
+		if entry.signature == signature && sameImage(entry.image, img) {
+			entry.cached = true
+			inlineRegistry.order.MoveToFront(elem)
+			trimRegistryCacheLocked()
+			return entry.id
+		}
+	}
 	for {
 		if elem, ok := inlineRegistry.entries[id]; ok {
 			entry := elem.Value.(*registryEntry)
-			if bytes.Equal(entry.image.PNGData, img.PNGData) {
+			if sameImage(entry.image, img) {
+				entry.cached = true
 				entry.image = img
 				inlineRegistry.order.MoveToFront(elem)
 				return id
@@ -405,13 +422,9 @@ func registerImage(id uint32, img Inline) uint32 {
 			continue
 		}
 
-		elem := inlineRegistry.order.PushFront(&registryEntry{id: id, image: img})
+		elem := inlineRegistry.order.PushFront(&registryEntry{id: id, image: img, cached: true, signature: imageSignature(img)})
 		inlineRegistry.entries[id] = elem
-		if inlineRegistry.order.Len() > maxInlineRegistryEntries {
-			oldest := inlineRegistry.order.Back()
-			inlineRegistry.order.Remove(oldest)
-			delete(inlineRegistry.entries, oldest.Value.(*registryEntry).id)
-		}
+		trimRegistryCacheLocked()
 		return id
 	}
 }
@@ -444,4 +457,79 @@ func KittySequence(pngData []byte, cols, rows int) string {
 		}
 	}
 	return b.String()
+}
+
+func imageSignature(img Inline) uint32 { return imageID(img.PNGData) }
+
+func sameImage(a, b Inline) bool {
+	return a.Width == b.Width && a.Height == b.Height && bytes.Equal(a.PNGData, b.PNGData)
+}
+
+func acquirePreviewImage(img Inline) uint32 {
+	signature := imageSignature(img)
+	inlineRegistry.Lock()
+	defer inlineRegistry.Unlock()
+	for elem := inlineRegistry.order.Front(); elem != nil; elem = elem.Next() {
+		entry := elem.Value.(*registryEntry)
+		if entry.signature == signature && sameImage(entry.image, img) {
+			entry.owners++
+			entry.image.registryID = entry.id
+			return entry.id
+		}
+	}
+	// Managed IDs are never reused, including after their registry entry retires.
+	id := nextPreviewID.Add(1) | 0x80000000
+	for inlineRegistry.entries[id] != nil {
+		id = nextPreviewID.Add(1) | 0x80000000
+	}
+	img.registryID = id
+	inlineRegistry.entries[id] = inlineRegistry.order.PushFront(&registryEntry{id: id, image: img, owners: 1, signature: signature})
+	return id
+}
+
+func releasePreviewImage(id uint32) {
+	if id == 0 {
+		return
+	}
+	inlineRegistry.Lock()
+	defer inlineRegistry.Unlock()
+	if elem := inlineRegistry.entries[id]; elem != nil {
+		entry := elem.Value.(*registryEntry)
+		if entry.owners > 0 {
+			entry.owners--
+		}
+		if entry.owners == 0 && !entry.cached {
+			inlineRegistry.order.Remove(elem)
+			delete(inlineRegistry.entries, id)
+		}
+	}
+}
+
+func trimRegistryCacheLocked() {
+	cached := 0
+	for elem := inlineRegistry.order.Front(); elem != nil; elem = elem.Next() {
+		if elem.Value.(*registryEntry).cached {
+			cached++
+		}
+	}
+	for elem := inlineRegistry.order.Back(); elem != nil && cached > maxInlineRegistryEntries; {
+		previous := elem.Prev()
+		entry := elem.Value.(*registryEntry)
+		if entry.cached {
+			entry.cached = false
+			cached--
+			if entry.owners == 0 {
+				inlineRegistry.order.Remove(elem)
+				delete(inlineRegistry.entries, entry.id)
+			}
+		}
+		elem = previous
+	}
+}
+
+func previewImageRetained(id uint32) bool {
+	inlineRegistry.Lock()
+	defer inlineRegistry.Unlock()
+	_, ok := inlineRegistry.entries[id]
+	return ok
 }
