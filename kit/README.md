@@ -189,23 +189,29 @@ Explicit registries such as `ghcr.io` and `localhost:5000` are preserved;
 Builds, push prompts and generated digest pins all use the expanded reference.
 Choose a v3 repository ending in `kagent`, not `docker-agent`, to avoid the
 built-in registration collision.
-The build context is always the repository root. The single target platform
-defaults to `linux/amd64`; `KIT_PLATFORM` overrides `DOCKER_DEFAULT_PLATFORM`:
+The build context is always the repository root. The target platform defaults to
+`linux/amd64`; for v3, a comma-separated list builds a multi-platform OCI index. `KIT_PLATFORM` overrides
+`DOCKER_DEFAULT_PLATFORM`:
 
 ```sh
 KIT_PLATFORM=linux/arm64 task kit -- namespace/kagent:arm64
+KIT_PLATFORM=linux/amd64,linux/arm64 task kit:build-v3 -- namespace/kagent:latest
 ```
 
 Each successful build retains a unique directory under ignored `dist/kit/` and
 prints its path, tagged reference and immutable digest. The **authoritative OCI
 layout** preserves provenance. For v3, the exact descriptor, schema-version and
 capabilities annotations are promoted locally from the selected platform
-manifest to the top-level index before its final digest is computed. Missing
-annotations fail the build; no registry inspection or repair is needed.
+manifest to the top-level index before its final digest is computed. Every
+requested platform must be present and carry identical Kit annotations; missing
+or inconsistent annotations fail the build. Per-platform provenance remains
+intact. No registry inspection or repair is needed.
 
-A second cached Buildx invocation loads the same runtime into local Docker with
-provenance disabled for Docker image-store portability. **That local Docker image
-loses kit metadata and is not an SBX kit reference.** Do not publish it with
+For a single platform, a second cached Buildx invocation loads the same runtime
+into local Docker with provenance disabled for Docker image-store portability.
+Multi-platform v3 exports skip this load: use the authoritative OCI index for
+publication and verify each child platform separately. Kit v2 remains a
+single-platform build. **A Docker-loaded image loses kit metadata and is not an SBX kit reference.** Do not publish it with
 `docker push`; publication copies only the authoritative OCI layout using ORAS.
 The OCI layout itself is not automatically imported into SBX either.
 

@@ -367,14 +367,23 @@ def blob(layout,obj):
  return dict(mediaType=obj.get('mediaType','application/vnd.oci.image.config.v1+json'),digest='sha256:'+digest,size=len(b))
 def fixture(layout):
  layout.mkdir(parents=True,exist_ok=True); (layout/'oci-layout').write_text('{"imageLayoutVersion":"1.0.0"}')
- config=blob(layout,dict(architecture='amd64',os='linux',rootfs=dict(type='layers',diff_ids=[])))
  annotations={'vnd.docker.sandbox.kit.descriptor':'schemaVersion: "3"\nkind: workload\n','vnd.docker.sandbox.kit.schema-version':'3','vnd.docker.sandbox.kit.capabilities':'["com.docker.sandbox/sbx@1"]','test.child':'keep-child'}
  if os.environ.get('KIT_TEST_MISSING_ANNOTATIONS'):annotations.pop('vnd.docker.sandbox.kit.capabilities')
- manifest=dict(schemaVersion=2,mediaType='application/vnd.oci.image.manifest.v1+json',config=config,layers=[],annotations=annotations)
- child=blob(layout,manifest);child['platform']=dict(os='linux',architecture=opt('--platform').split('/')[1])
- child['annotations']=annotations
- provenance=blob(layout,dict(manifest,annotations={'test.provenance':'keep'}));provenance['platform']=dict(os='unknown',architecture='unknown');provenance['annotations']={'vnd.docker.reference.type':'attestation-manifest','vnd.docker.reference.digest':child['digest']}
- root=dict(schemaVersion=2,mediaType='application/vnd.oci.image.index.v1+json',manifests=[child,provenance],annotations={'test.root':'keep-root'})
+ manifests=[]
+ platforms=opt('--platform').split(',')
+ if os.environ.get('KIT_TEST_MISSING_PLATFORM'): platforms=platforms[:1]
+ for i,platform in enumerate(platforms):
+  parts=platform.split('/');arch=parts[1]
+  config=blob(layout,dict(architecture=arch,os='linux',rootfs=dict(type='layers',diff_ids=[])))
+  current=dict(annotations)
+  if i and os.environ.get('KIT_TEST_MISMATCH_ANNOTATIONS'):current['vnd.docker.sandbox.kit.schema-version']='different'
+  manifest=dict(schemaVersion=2,mediaType='application/vnd.oci.image.manifest.v1+json',config=config,layers=[],annotations=current)
+  child=blob(layout,manifest);child['platform']=dict(os='linux',architecture=arch)
+  if len(parts)>2:child['platform']['variant']=parts[2]
+  child['annotations']=current
+  provenance=blob(layout,dict(manifest,annotations={'test.provenance':'keep'}));provenance['platform']=dict(os='unknown',architecture='unknown');provenance['annotations']={'vnd.docker.reference.type':'attestation-manifest','vnd.docker.reference.digest':child['digest']}
+  manifests.extend([child,provenance])
+ root=dict(schemaVersion=2,mediaType='application/vnd.oci.image.index.v1+json',manifests=manifests,annotations={'test.root':'keep-root'})
  desc=blob(layout,root);desc['annotations']={'org.opencontainers.image.ref.name':'latest'}
  (layout/'index.json').write_text(json.dumps(dict(schemaVersion=2,manifests=[desc])))
  (home/'original.json').write_text(json.dumps(root));(home/'runtime-digest').write_text(desc['digest'])
@@ -411,3 +420,55 @@ if args[0]=='cp':
  sys.exit(0)
 sys.exit('unexpected oras invocation')
 `
+
+func TestKitBuildMultiPlatformPreservesAllManifestsWithoutDockerLoad(t *testing.T) {
+	f := newKitBuildFixture(t)
+	t.Setenv("KIT_PLATFORM", "linux/amd64,linux/arm64")
+	calls, out, err := f.run(t, "kit:build-v3", "example.invalid/team/kagent:test", "yes\n", true)
+	require.NoError(t, err, out)
+	builds := kitCalls(calls, "docker", "buildx")
+	require.Len(t, builds, 1)
+	assert.Equal(t, "linux/amd64,linux/arm64", kitArg(builds[0].Args, "--platform"))
+	assert.NotContains(t, builds[0].Args, "--load")
+	assert.Contains(t, out, "not loaded into Docker")
+	var snap struct {
+		Root, Original map[string]any
+		Valid          bool
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "snapshot-1.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &snap))
+	assert.True(t, snap.Valid)
+	assert.Equal(t, snap.Original["manifests"], snap.Root["manifests"])
+	require.Len(t, snap.Root["manifests"], 4, "both target manifests and both attestations survive")
+}
+
+func TestKitMultiPlatformRejectsMissingOrInconsistentPlatform(t *testing.T) {
+	for _, variable := range []string{"KIT_TEST_MISSING_PLATFORM", "KIT_TEST_MISMATCH_ANNOTATIONS"} {
+		t.Run(variable, func(t *testing.T) {
+			f := newKitBuildFixture(t)
+			t.Setenv("KIT_PLATFORM", "linux/amd64,linux/arm64")
+			t.Setenv(variable, "1")
+			calls, out, err := f.run(t, "kit:build-v3", "example.invalid/team/kagent:test", "yes\n", true)
+			require.Error(t, err, out)
+			assert.Empty(t, kitCalls(calls, "oras", "cp"))
+		})
+	}
+}
+
+func TestKitPlatformListValidation(t *testing.T) {
+	for _, platform := range []string{"linux/amd64,", "linux/amd64,,linux/arm64", ",linux/arm64", "linux/amd64,linux/amd64", "linux/amd64, linux/arm64", "darwin/arm64"} {
+		t.Run(platform, func(t *testing.T) {
+			f := newKitBuildFixture(t)
+			t.Setenv("KIT_PLATFORM", platform)
+			calls, out, err := f.run(t, "kit:build-v3", "", "", false)
+			require.Error(t, err, out)
+			assert.Empty(t, calls)
+		})
+	}
+	f := newKitBuildFixture(t)
+	t.Setenv("KIT_PLATFORM", "linux/amd64,linux/arm64")
+	calls, out, err := f.run(t, "kit:build-v2", "", "", false)
+	require.Error(t, err, out)
+	assert.Empty(t, calls)
+}

@@ -13,34 +13,45 @@ layout_digest() {
 
 prepare_layout() {
     local layout=$1 selector=$2 version=$3 platform=$4
-    local digest blob child annotations updated size architecture variant
+    local digest blob child annotations updated size architecture variant selected current
+    local -a platforms
     digest=$(jq -er 'if (.manifests | length) == 1 then .manifests[0].digest else error("expected one exported OCI root") end' "$layout/index.json") || fail 'invalid exported OCI layout'
     [[ $digest =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'expected an OCI sha256 digest'
     blob=$layout/blobs/sha256/${digest#sha256:}
     [[ -f $blob ]] || fail 'exported OCI root blob is missing'
     if [[ $version == v3 ]]; then
-        child=$digest
-        if jq -e '.manifests != null' "$blob" >/dev/null; then
-            architecture=${platform#linux/}
-            variant=
-            if [[ $architecture == */* ]]; then
-                variant=${architecture#*/}
-                architecture=${architecture%%/*}
+        IFS=',' read -r -a platforms <<< "$platform"
+        annotations=
+        for selected in "${platforms[@]}"; do
+            child=$digest
+            if jq -e '.manifests != null' "$blob" >/dev/null; then
+                architecture=${selected#linux/}
+                variant=
+                if [[ $architecture == */* ]]; then
+                    variant=${architecture#*/}
+                    architecture=${architecture%%/*}
+                fi
+                child=$(jq -er --arg arch "$architecture" --arg variant "$variant" '
+                    [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)
+                     | select($variant == "" or .platform.variant == $variant)]
+                    | if length == 1 then .[0].digest else error("expected one selected platform manifest") end
+                ' "$blob") || fail "cannot uniquely select kit platform $selected"
+            elif [[ ${#platforms[@]} -ne 1 ]]; then
+                fail 'multi-platform export must have an OCI index'
             fi
-            child=$(jq -er --arg arch "$architecture" --arg variant "$variant" '
-                [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)
-                 | select($variant == "" or .platform.variant == $variant)]
-                | if length == 1 then .[0].digest else error("expected one selected platform manifest") end
-            ' "$blob") || fail 'cannot uniquely select the kit platform manifest'
-        fi
-        [[ $child =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'invalid platform manifest digest'
-        annotations=$(jq -ce '
-            .annotations | with_entries(select(.key == "vnd.docker.sandbox.kit.descriptor"
-                or .key == "vnd.docker.sandbox.kit.schema-version"
-                or .key == "vnd.docker.sandbox.kit.capabilities"))
-            | if length == 3 and all(.[]; type == "string" and length > 0)
-              then . else error("missing required kit annotations") end
-        ' "$layout/blobs/sha256/${child#sha256:}") || fail 'platform manifest lacks required kit annotations'
+            [[ $child =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'invalid platform manifest digest'
+            current=$(jq -Sce '
+                .annotations | with_entries(select(.key == "vnd.docker.sandbox.kit.descriptor"
+                    or .key == "vnd.docker.sandbox.kit.schema-version"
+                    or .key == "vnd.docker.sandbox.kit.capabilities"))
+                | if length == 3 and all(.[]; type == "string" and length > 0)
+                  then . else error("missing required kit annotations") end
+            ' "$layout/blobs/sha256/${child#sha256:}") || fail "platform $selected lacks required kit annotations"
+            if [[ -n $annotations && $annotations != "$current" ]]; then
+                fail 'kit annotations differ across selected platforms'
+            fi
+            annotations=$current
+        done
         # Avoid rewriting an already annotated root; child blobs/provenance never change.
         if ! jq -e --argjson annotations "$annotations" '.annotations as $current | $annotations | to_entries | all(.[]; $current[.key] == .value)' "$blob" >/dev/null; then
             updated=$layout/promoted-index.json

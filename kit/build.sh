@@ -41,7 +41,15 @@ if [[ $version == v2 ]]; then
     [[ ${#tag} -le 120 ]] || fail 'v2 tag plus -runtime must not exceed 128 characters'
 fi
 platform=${KIT_PLATFORM:-${DOCKER_DEFAULT_PLATFORM:-linux/amd64}}
-[[ $platform =~ ^linux/[a-z0-9_]+(/[a-zA-Z0-9_.-]+)?$ ]] || fail 'select exactly one Linux platform (for example linux/amd64)'
+[[ $platform != ,* && $platform != *, && $platform != *,,* ]] || fail 'platform list contains an empty entry'
+IFS=',' read -r -a platforms <<< "$platform"
+seen_platforms=,
+for selected_platform in "${platforms[@]}"; do
+    [[ $selected_platform =~ ^linux/[a-z0-9_]+(/[a-zA-Z0-9_.-]+)?$ ]] || fail 'expected Linux platforms separated by commas (for example linux/amd64,linux/arm64)'
+    [[ $seen_platforms != *",$selected_platform,"* ]] || fail 'duplicate platform'
+    seen_platforms+="$selected_platform,"
+done
+[[ $version != v2 || ${#platforms[@]} -eq 1 ]] || fail 'Kit v2 builds require one platform'
 
 # Do not run tools or create outputs until all input validation has succeeded.
 for tool in docker oras jq shasum; do
@@ -70,8 +78,12 @@ build+=(-t "$image")
 prepare_layout "$layout" "$selector" "$version" "$platform"
 image_digest=$(layout_digest "$layout" "$selector")
 # The OCI export, not this metadata-losing Docker import, is authoritative.
-"${build[@]}" --load --provenance=false "$root"
-printf 'Local Docker image: %s (not an SBX kit reference)\n' "$image"
+if [[ ${#platforms[@]} -eq 1 ]]; then
+    "${build[@]}" --load --provenance=false "$root"
+    printf 'Local Docker image: %s (not an SBX kit reference)\n' "$image"
+else
+    printf 'Multi-platform export: %s (not loaded into Docker)\n' "$platform"
+fi
 printf 'Authoritative OCI layout: %s:%s\n' "$layout" "$selector"
 
 if [[ $version == v2 ]]; then
