@@ -45,11 +45,21 @@ func TestQueuedPreviewTwoLinesCanonicalIdentityAndRemoveCell(t *testing.T) {
 	_, cmd = m.Update(tea.MouseMotionMsg{X: right, Y: bodyY})
 	settleSidebarHover(t, m, cmd)
 	after := strings.Split(m.View(), "\n")[bodyY]
-	assert.Contains(t, after, styles.ErrorStyle.Render("×"))
+	assert.Contains(t, ansi.Strip(after), "✎ ×")
+	assert.NotEqual(t, strings.Split(before, "\n")[bodyY], after)
+	assert.False(t, m.ConfirmQueuedRemoval("canonical-turn"))
+	assert.Equal(t, "canonical-turn", m.queueRemoveArmed)
+	assert.True(t, m.ConfirmQueuedRemoval("canonical-turn"))
+	assert.Empty(t, m.queueRemoveArmed)
 	result, payload = m.HandleClickType(right, bodyY)
 	assert.Equal(t, ClickRemoveQueuedMessage, result)
 	assert.Equal(t, "canonical-turn", payload)
 	assert.Equal(t, ansi.StringWidth(strings.Split(before, "\n")[bodyY]), ansi.StringWidth(after))
+	result, payload = m.HandleClickType(right-2, bodyY)
+	assert.Equal(t, ClickEditQueuedMessage, result)
+	assert.Equal(t, "canonical-turn", payload)
+	result, _ = m.HandleClickType(right, bodyY+1)
+	assert.Equal(t, ClickQueuedMessage, result, "continuation has no action cluster")
 	headerY := m.queueStart - m.scrollview.ScrollOffset()
 	result, _ = m.HandleClickType(m.layoutCfg.PaddingLeft, headerY)
 	assert.Equal(t, ClickNone, result, "Queue heading has no edit/remove action")
@@ -163,4 +173,74 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 	for _, x := range []int{width - 5, width - 2} {
 		assert.Equal(t, color.NRGBAModel.Convert(styles.Background), color.NRGBAModel.Convert(cells[x].fg), "all icons fade out with the row")
 	}
+}
+
+func TestQueueActionsNarrowGeometryAndConfirmationLifetime(t *testing.T) {
+	for _, width := range []int{1, 2, 3, 5, 7, 8, 10, 20, 80} {
+		m := newHoverSidebar(t)
+		m.SetSize(width, 50)
+		settleTreePresentation(t, m, m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "界é 👩‍💻 first\ncontinuation"}}))
+		w := m.contentWidth(m.cachedNeedsScrollbar)
+		indent, actions := rowActions(w, false)
+		for _, row := range m.placement.rows {
+			if row.payload != "queued" || row.action == ClickNone {
+				continue
+			}
+			require.LessOrEqual(t, ansi.StringWidth(row.text), w)
+			for col := 0; col < w; col++ {
+				if m.layoutCfg.PaddingLeft+col >= m.width-m.layoutCfg.PaddingRight {
+					continue
+				}
+				result, _ := m.HandleClickType(m.layoutCfg.PaddingLeft+col, int(row.y)-m.scrollview.ScrollOffset())
+				switch actions.PartAt(col-indent, row.queueControls) {
+				case "edit":
+					require.Equal(t, ClickEditQueuedMessage, result)
+					require.Equal(t, "✎", ansi.Strip(ansi.Cut(row.text, col, col+1)))
+				case "remove":
+					require.Equal(t, ClickRemoveQueuedMessage, result)
+					require.Equal(t, "×", ansi.Strip(ansi.Cut(row.text, col, col+1)))
+				default:
+					require.Equal(t, ClickQueuedMessage, result)
+				}
+			}
+		}
+		require.False(t, m.ConfirmQueuedRemoval("missing"))
+		require.Empty(t, m.queueRemoveArmed)
+		require.False(t, m.ConfirmQueuedRemoval("queued"))
+		settleSidebarHover(t, m, m.ClearSubagentHover())
+		require.Empty(t, m.queueRemoveArmed)
+		require.False(t, m.ConfirmQueuedRemoval("queued"))
+		m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "replacement"}})
+		require.Empty(t, m.queueRemoveArmed)
+		require.False(t, m.ConfirmQueuedRemoval("queued"))
+		m.SetPresentationActive(false)
+		require.Empty(t, m.queueRemoveArmed)
+		require.Zero(t, m.ar.ActiveCount())
+	}
+}
+
+func TestQueueActionHoverUsesSharedAnimationAndStableRows(t *testing.T) {
+	m := newHoverSidebar(t)
+	settleTreePresentation(t, m, m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "Unicode 界é 👩‍💻\ncontinuation"}}))
+	row := requirePlaced(t, m, "queue:queued:0")
+	width := m.contentWidth(m.cachedNeedsScrollbar)
+	y := int(row.y) - m.scrollview.ScrollOffset()
+	for _, part := range []struct {
+		col  int
+		name string
+	}{{2, "text"}, {width - 3, "edit"}, {width - 1, "remove"}} {
+		_, renders := m.CacheStats()
+		cmd := m.updateRegionHover(m.layoutCfg.PaddingLeft+part.col, y)
+		require.Equal(t, "queue:queued:"+part.name, m.hoverTarget)
+		settleSidebarHover(t, m, cmd)
+		require.Equal(t, 1.0, m.hoverValues[m.hoverTarget].value)
+		require.Equal(t, row.text, requirePlaced(t, m, row.id).text, "hover never rewraps semantic queue rows")
+		_, after := m.CacheStats()
+		require.Equal(t, renders, after)
+		require.Zero(t, m.ar.ActiveCount())
+	}
+	m.updateRegionHover(m.layoutCfg.PaddingLeft+2, y)
+	m.SetPresentationActive(false)
+	require.Empty(t, m.hoverValues)
+	require.Zero(t, m.ar.ActiveCount(), "hidden page releases cosmetic leases")
 }

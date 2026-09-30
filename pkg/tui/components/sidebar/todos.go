@@ -15,7 +15,8 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 	if m.todosCollapsed || m.sectionVisibility.HideTodos || m.todoScope.SessionID == "" || y < 0 || y >= m.viewportHeight() {
 		return nil, false
 	}
-	localX := x - m.layoutCfg.PaddingLeft - min(2, max(0, m.contentWidth(m.cachedNeedsScrollbar)-1))
+	indent, actions := rowActions(m.contentWidth(m.cachedNeedsScrollbar), true)
+	localX := x - m.layoutCfg.PaddingLeft - indent
 	if localX < 0 || x >= m.layoutCfg.PaddingLeft+m.contentWidth(m.cachedNeedsScrollbar) {
 		return nil, false
 	}
@@ -37,19 +38,27 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 	if !ok {
 		return nil, false
 	}
-	if localX == 2 && controls {
+	if m.queueRemoveArmed != "" {
+		m.queueRemoveArmed = ""
+		m.invalidateHover()
+	}
+	part := actions.PartAt(localX, controls)
+	if part == "remove" {
 		if m.todoRemoveArmed != item.ID {
 			m.todoRemoveArmed = item.ID
-			m.invalidateCache()
+			m.invalidateHover()
 			return nil, true
 		}
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Remove: true}), true
 	}
-	m.todoRemoveArmed = ""
-	if localX == 0 && controls {
+	if m.todoRemoveArmed != "" {
+		m.todoRemoveArmed = ""
+		m.invalidateHover()
+	}
+	if part == "status" {
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Status: todotool.NextStatus(item.Status)}), true
 	}
-	if localX == 4 && controls {
+	if part == "edit" {
 		return core.CmdHandler(messages.OpenTodoEditMsg{ID: item.ID, Scope: m.todoScope}), true
 	}
 	return core.CmdHandler(messages.OpenTodosMsg{ID: item.ID, Scope: m.todoScope}), true

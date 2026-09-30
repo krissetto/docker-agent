@@ -80,3 +80,64 @@ func RowLines(description, status string, width int, selected bool) []string {
 	}
 	return rows
 }
+
+// RowActions is the cell contract shared by compact sidebar paint and pointer hits.
+// Negative action columns mean the complete cluster cannot fit beside the text.
+type RowActions struct {
+	Width, TextWidth     int
+	Status, Edit, Remove int
+}
+
+func RightActions(width int, withStatus bool) RowActions {
+	width = max(1, width)
+	a := RowActions{Width: width, TextWidth: width, Status: -1, Edit: -1, Remove: -1}
+	reserve := 4
+	if withStatus {
+		reserve = 6
+	}
+	if width < reserve+2 {
+		return a
+	}
+	a.TextWidth = width - reserve
+	a.Edit, a.Remove = width-3, width-1
+	if withStatus {
+		a.Status = width - 5
+	}
+	return a
+}
+
+func (a RowActions) PartAt(col int, first bool) string {
+	if first && col >= 0 {
+		switch col {
+		case a.Status:
+			return "status"
+		case a.Edit:
+			return "edit"
+		case a.Remove:
+			return "remove"
+		}
+	}
+	return "text"
+}
+
+func (a RowActions) Render(text, status string, first bool) string {
+	text = ansi.Truncate(text, a.TextWidth, "")
+	text += strings.Repeat(" ", max(0, a.TextWidth-ansi.StringWidth(text)))
+	if !first || a.Remove < 0 {
+		return text
+	}
+	if a.Status >= 0 {
+		text += " " + StatusIcon(status)
+	}
+	return text + " " + styles.MutedStyle.Render("✎ ×")
+}
+
+func sidebarRowLines(description, status string, width int) []string {
+	a := RightActions(width, true)
+	wrapped := strings.Split(ansi.Hardwrap(ansi.Wordwrap(ansi.Strip(strings.ReplaceAll(description, "\r", "")), a.TextWidth, ""), a.TextWidth, true), "\n")
+	rows := make([]string, len(wrapped))
+	for i, line := range wrapped {
+		rows[i] = a.Render(Description(ansi.Truncate(line, a.TextWidth, ""), status, false), status, i == 0)
+	}
+	return rows
+}

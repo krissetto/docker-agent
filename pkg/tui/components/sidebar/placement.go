@@ -22,7 +22,7 @@ type placedRow struct {
 	contextWidth                                     int
 	controls                                         []treeControl
 	target                                           bool
-	queueRemove                                      bool
+	queueControls                                    bool
 	todoControls                                     bool
 }
 type paddedPlacementRow struct {
@@ -79,7 +79,7 @@ func (m *model) targetRows() []placedRow {
 			if meta.turnID != "" {
 				row.action = ClickQueuedMessage
 				row.payload = meta.turnID
-				row.queueRemove = meta.first
+				row.queueControls = meta.first
 			}
 		case y == m.agentIdentityRow:
 			row.id = "active-agent"
@@ -457,8 +457,14 @@ func (m *model) placementClick(x, y int) (ClickResult, string) {
 	if row.action == ClickModel {
 		return m.modelClick(col, modelPlacementRow(row.id), m.contentWidth(m.cachedNeedsScrollbar)), ""
 	}
-	if row.queueRemove && col == m.contentWidth(m.cachedNeedsScrollbar)-1 {
-		return ClickRemoveQueuedMessage, row.payload
+	if row.action == ClickQueuedMessage {
+		indent, actions := rowActions(m.contentWidth(m.cachedNeedsScrollbar), false)
+		switch actions.PartAt(col-indent, row.queueControls) {
+		case "edit":
+			return ClickEditQueuedMessage, row.payload
+		case "remove":
+			return ClickRemoveQueuedMessage, row.payload
+		}
 	}
 	for _, control := range row.controls {
 		if control.whole || col == control.x {
@@ -529,17 +535,6 @@ func (m *model) refreshPlacementHover() {
 		m.refreshPlacementPresentation()
 		return
 	}
-	var queue []string
-	for key := range m.hoverValues {
-		if strings.HasPrefix(key, "queue:") || strings.HasPrefix(key, "queue-remove:") {
-			queue = strings.Split(m.queueSection(width), "\n")
-			break
-		}
-	}
-	// The last exit tick removes its hover entry, but must still clear the glyph.
-	if _, cached := m.sectionCache["queue"]; !cached && len(m.queuedMessages) > 0 && queue == nil {
-		queue = strings.Split(m.queueSection(width), "\n")
-	}
 	for i := range m.placement.rows {
 		row := &m.placement.rows[i]
 		if !row.target {
@@ -571,8 +566,6 @@ func (m *model) refreshPlacementHover() {
 					row.text = m.hoverText(ansi.Cut(usage[0], 0, cut), "context") + m.hoverText(ansi.Cut(usage[0], cut, width), "cost")
 				}
 			}
-		case queue != nil && y >= m.queueStart && y < m.queueEnd:
-			row.text = queue[y-m.queueStart]
 		}
 		if y >= 0 && y < len(m.cachedLines) {
 			m.cachedLines[y] = row.text

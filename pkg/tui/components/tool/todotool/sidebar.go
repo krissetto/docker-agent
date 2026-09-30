@@ -90,7 +90,7 @@ func (c *SidebarComponent) RenderBody() string {
 	for i, item := range c.todos {
 		cached, ok := previous[item.ID]
 		if !ok || cached.item != item {
-			cached = cachedTodo{item: item, rows: RowLines(item.Description, item.Status, c.width, false)}
+			cached = cachedTodo{item: item, rows: sidebarRowLines(item.Description, item.Status, c.width)}
 			c.wraps++
 		}
 		c.rows[i] = cached
@@ -125,7 +125,7 @@ func (c *SidebarComponent) TodoByID(id string) (todo.Todo, bool) {
 
 func (c *SidebarComponent) ControlsAtLine(line int) bool {
 	c.RenderBody()
-	return c.width >= 8 && line >= 0 && line < len(c.lineOffsets) && c.lineOffsets[line] == 0
+	return RightActions(c.width, true).Remove >= 0 && line >= 0 && line < len(c.lineOffsets) && c.lineOffsets[line] == 0
 }
 
 func (c *SidebarComponent) OffsetAtLine(line int) int {

@@ -31,7 +31,7 @@ func (m *model) CapturePresentation() PresentationSnapshot {
 		row.y -= float64(offset)
 		row.targetY = row.y
 		row.action, row.payload, row.controls = ClickNone, "", nil
-		row.target, row.queueRemove = false, false
+		row.target, row.queueControls = false, false
 		snapshot.rows = append(snapshot.rows, row)
 	}
 	return snapshot
@@ -88,6 +88,8 @@ func (m *model) placementText(row placedRow, width int) string {
 	switch {
 	case strings.HasPrefix(row.id, "todo:") && row.payload != "":
 		text = m.todoHoverText(row)
+	case row.action == ClickQueuedMessage:
+		text = m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false, m.queueRemoveArmed == row.payload)
 	case row.id == "active-agent":
 		text = m.agentIdentityView(width)
 	case row.action == ClickModel:

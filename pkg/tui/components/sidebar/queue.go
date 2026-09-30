@@ -19,33 +19,44 @@ func (m *model) queueSection(width int) string {
 	if len(m.queuedMessages) == 0 {
 		return ""
 	}
-	lines := []string{styles.MutedStyle.Render("Queue:")}
+	lines := []string{ansi.Truncate(styles.MutedStyle.Render("Queue:"), width, "")}
+	indent, actions := rowActions(width, false)
 	m.queueRows = append(m.queueRows, queueRow{id: "queue-header"})
 	for _, msg := range m.queuedMessages {
-		room := max(1, width-4)
-		wrapped := strings.Split(ansi.Hardwrap(msg.Text, room, false), "\n")
+		room := actions.TextWidth
+		wrapped := strings.Split(ansi.Hardwrap(ansi.Strip(strings.ReplaceAll(msg.Text, "\r", "")), room, false), "\n")
 		if len(wrapped) > 2 {
 			wrapped = wrapped[:2]
 			wrapped[1] = ansi.Truncate(wrapped[1], max(0, room-1), "") + "…"
 		}
 		for i, line := range wrapped {
-			prefix := "  "
-			if i == 0 {
-				prefix = "- "
+			prefix := strings.Repeat(" ", indent)
+			if i == 0 && indent > 0 {
+				prefix = "-" + strings.Repeat(" ", indent-1)
 			}
-			body := m.hoverText(styles.TabPrimaryStyle.Render(prefix+line), "queue:"+msg.ID)
-			body = padRight(ansi.Truncate(body, max(0, width-2), ""), max(0, width-2))
-			remove := " "
-			if i == 0 && (m.hoverTarget == "queue:"+msg.ID || m.hoverTarget == "queue-remove:"+msg.ID) {
-				style := styles.MutedStyle
-				if m.hoverTarget == "queue-remove:"+msg.ID {
-					style = styles.ErrorStyle
-				}
-				remove = style.Render("×")
-			}
-			lines = append(lines, ansi.Truncate(body+" "+remove, width, ""))
+			body := actions.Render(styles.TabPrimaryStyle.Render(line), "", i == 0)
+			lines = append(lines, prefix+body)
 			m.queueRows = append(m.queueRows, queueRow{id: fmt.Sprintf("queue:%s:%d", msg.ID, i), turnID: msg.ID, first: i == 0})
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ConfirmQueuedRemoval arms the visible control before allowing a destructive action.
+func (m *model) ConfirmQueuedRemoval(id string) bool {
+	found := false
+	for _, msg := range m.queuedMessages {
+		if msg.ID == id {
+			found = true
+			break
+		}
+	}
+	confirmed := found && m.queueRemoveArmed == id
+	m.queueRemoveArmed = ""
+	if found && !confirmed {
+		m.queueRemoveArmed = id
+	}
+	m.todoRemoveArmed = ""
+	m.invalidateHover()
+	return confirmed
 }

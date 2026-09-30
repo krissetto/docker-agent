@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -24,44 +25,39 @@ func (m *model) todoSummary(width int) string {
 	return m.hoverText(text+strings.Repeat(" ", max(1, width-ansi.StringWidth(text)-1))+styles.MutedStyle.Render(glyph), "todo-summary")
 }
 
+func rowActions(width int, todo bool) (int, todotool.RowActions) {
+	indent := min(2, max(0, width-1))
+	return indent, todotool.RightActions(width-indent, todo)
+}
+
 func (m *model) todoHoverKey(row placedRow, col int) string {
-	key := "todo:" + row.payload + ":text"
-	indent := min(2, max(0, m.contentWidth(m.cachedNeedsScrollbar)-1))
-	if row.todoControls {
-		switch col - indent {
-		case 0:
-			key = "todo:" + row.payload + ":status"
-		case 2:
-			key = "todo:" + row.payload + ":remove"
-		case 4:
-			key = "todo:" + row.payload + ":edit"
-		}
-	}
-	return key
+	indent, actions := rowActions(m.contentWidth(m.cachedNeedsScrollbar), true)
+	return "todo:" + row.payload + ":" + actions.PartAt(col-indent, row.todoControls)
 }
 
 func (m *model) todoHoverText(row placedRow) string {
-	text := row.text
-	if row.todoControls && m.todoRemoveArmed == row.payload {
-		indent := min(2, max(0, m.contentWidth(m.cachedNeedsScrollbar)-1))
-		col := indent + 2
-		text = ansi.Cut(text, 0, col) + styles.ErrorStyle.Render("×") + ansi.Cut(text, col+1, m.contentWidth(m.cachedNeedsScrollbar))
+	return m.actionRowText(row.text, "todo:"+row.payload+":", row.todoControls, true, m.todoRemoveArmed == row.payload)
+}
+
+func (m *model) actionRowText(text, base string, first, todo, armed bool) string {
+	width := m.contentWidth(m.cachedNeedsScrollbar)
+	indent, actions := rowActions(width, todo)
+	if first && armed && actions.Remove >= 0 {
+		col := indent + actions.Remove
+		text = ansi.Cut(text, 0, col) + styles.ErrorStyle.Render("×") + ansi.Cut(text, col+1, width)
 	}
-	base := "todo:" + row.payload + ":"
-	indent := min(2, max(0, m.contentWidth(m.cachedNeedsScrollbar)-1))
 	for _, part := range []struct {
 		name       string
 		start, end int
-	}{{"status", indent, indent + 1}, {"remove", indent + 2, indent + 3}, {"edit", indent + 4, indent + 5}, {"text", indent + 6, m.contentWidth(m.cachedNeedsScrollbar)}} {
-		value := m.hoverValues[base+part.name].value
-		if value == 0 || (part.name != "text" && !row.todoControls) {
+	}{{"text", 0, indent + actions.TextWidth}, {"status", actions.Status + indent, actions.Status + indent + 1}, {"edit", actions.Edit + indent, actions.Edit + indent + 1}, {"remove", actions.Remove + indent, actions.Remove + indent + 1}} {
+		if part.name != "text" && (!first || part.start < indent) {
 			continue
 		}
-		start, end := part.start, part.end
-		if part.name == "text" && !row.todoControls {
-			start = 0
+		value := m.hoverValues[base+part.name].value
+		if value == 0 {
+			continue
 		}
-		text = ansi.Cut(text, 0, start) + styles.HoverText(ansi.Cut(text, start, end), value, styles.TextPrimary) + ansi.Cut(text, end, m.contentWidth(m.cachedNeedsScrollbar))
+		text = ansi.Cut(text, 0, part.start) + styles.HoverText(ansi.Cut(text, part.start, part.end), value, styles.TextPrimary) + ansi.Cut(text, part.end, width)
 	}
 	return text
 }

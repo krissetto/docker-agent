@@ -99,7 +99,8 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	c.SetSize(40)
 	require.NoError(t, c.SetTodos(todoResult("alpha task")))
 	body := c.RenderBody()
-	assert.Equal(t, "○ × ✎ alpha task", strings.TrimSpace(ansi.Strip(body)))
+	assert.Equal(t, "alpha task", strings.TrimSpace(ansi.Strip(ansi.Cut(body, 0, 34))))
+	assert.Equal(t, "○ ✎ ×", ansi.Strip(ansi.Cut(body, 35, 40)))
 	assert.NotContains(t, body, "TO-DO")
 	assert.Contains(t, c.Render(), "TO-DO")
 	assert.Equal(t, body, c.RenderBody())
@@ -174,6 +175,35 @@ func TestCompactTodoRowsShareDescriptionStyleAndGeometry(t *testing.T) {
 	for width := 1; width < 12; width++ {
 		for _, row := range RowLines("界é 👩‍💻 long words", "completed", width, false) {
 			require.LessOrEqual(t, ansi.StringWidth(row), width, "width=%d row=%q plain=%q", width, row, ansi.Strip(row))
+		}
+	}
+}
+
+func TestSidebarRightActionsPaintAndHitContract(t *testing.T) {
+	for width := 1; width <= 80; width++ {
+		for _, withStatus := range []bool{false, true} {
+			a := RightActions(width, withStatus)
+			for _, first := range []bool{false, true} {
+				line := a.Render(Description("界é 👩‍💻 long words", "completed", false), "completed", first)
+				require.LessOrEqual(t, ansi.StringWidth(line), width)
+				for col := 0; col < width; col++ {
+					part := a.PartAt(col, first)
+					if part == "text" {
+						continue
+					}
+					glyph := map[string]string{"status": "●", "edit": "✎", "remove": "×"}[part]
+					require.Equal(t, glyph, ansi.Strip(ansi.Cut(line, col, col+1)), "width=%d col=%d", width, col)
+				}
+			}
+		}
+		rows := sidebarRowLines("first 世界é 👩‍💻\ncontinuation words", "completed", width)
+		require.Greater(t, len(rows), 1)
+		for i, row := range rows {
+			require.LessOrEqual(t, ansi.StringWidth(row), width)
+			if i > 0 {
+				require.NotContains(t, ansi.Strip(row), "✎")
+				require.NotContains(t, ansi.Strip(row), "×")
+			}
 		}
 	}
 }

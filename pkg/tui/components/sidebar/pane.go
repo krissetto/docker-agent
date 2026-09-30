@@ -47,9 +47,11 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 	case ClickThinkingLevel:
 		key = "thinking-level"
 	case ClickQueuedMessage:
-		key = "queue:" + payload
+		key = "queue:" + payload + ":text"
+	case ClickEditQueuedMessage:
+		key = "queue:" + payload + ":edit"
 	case ClickRemoveQueuedMessage:
-		key = "queue-remove:" + payload
+		key = "queue:" + payload + ":remove"
 	case ClickAgent:
 		key = "agent:" + payload
 		if m.delegationRoot != nil && payload == m.delegationRoot.Agent {

@@ -107,6 +107,7 @@ type Model interface {
 	SetSkillsInfo(availableSkills int)
 	SetSessionStarred(starred bool)
 	SetQueuedMessages(messages []QueuedMessage) tea.Cmd
+	ConfirmQueuedRemoval(id string) bool
 	ReconcileLayout() tea.Cmd
 	SetPresentationActive(active bool) tea.Cmd
 	// SetSectionVisibility controls which optional sidebar sections are rendered.
@@ -490,6 +491,7 @@ type model struct {
 	modelEnd             int
 	queueStart, queueEnd int
 	queueRows            []queueRow
+	queueRemoveArmed     string
 	placement            *placementState
 	presentationSub      animation.Subscription
 	reconcileDirty       bool
@@ -902,6 +904,7 @@ func (m *model) SetQueuedMessages(queuedMessages []QueuedMessage) tea.Cmd {
 	if slices.Equal(m.queuedMessages, queuedMessages) {
 		return nil
 	}
+	m.queueRemoveArmed = ""
 	m.queuedMessages = slices.Clone(queuedMessages)
 	m.invalidateCache()
 	return m.ReconcileLayout()
@@ -1126,6 +1129,7 @@ const (
 	ClickUsageContext        // Click on the token/context part of the usage reading (glyph, tokens, context %/compacting, ⚠ capped)
 	ClickUsage               // Click on the cost part of the usage reading, or a budget line
 	ClickSubagent            // Click on a subagent row in the swarm section (payload: node id)
+	ClickEditQueuedMessage   // Click on the queue edit cell; payload canonical turn ID
 	ClickQueuedMessage       // Click on queued body; payload canonical turn ID
 	ClickRemoveQueuedMessage // Click on remove cell; payload canonical turn ID
 	ClickThinkingLevel       // Click on supported active reasoning level
@@ -1575,6 +1579,10 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if msg.Button == tea.MouseLeft {
 			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
 				return m, cmd
+			}
+			if m.queueRemoveArmed != "" {
+				m.queueRemoveArmed = ""
+				m.invalidateHover()
 			}
 			if m.todoRemoveArmed != "" {
 				m.todoRemoveArmed = ""
@@ -2253,7 +2261,7 @@ func (m *model) renderSections(contentWidth int) []string {
 	if len(m.queuedMessages) > 0 {
 		markBlock()
 	}
-	m.queueStart = appendSection(cached("queue", m.hoverTarget != "", m.queueSection))
+	m.queueStart = appendSection(cached("queue", false, m.queueSection))
 	m.queueEnd = len(lines)
 	if len(m.queuedMessages) > 0 {
 		markBlock()
@@ -2981,6 +2989,10 @@ func (m *model) updateSubagentHover(y int) {
 // ClearSubagentHover resets subagent hover state, e.g. when the mouse leaves
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
+	if m.queueRemoveArmed != "" {
+		m.queueRemoveArmed = ""
+		m.invalidateHover()
+	}
 	if m.todoRemoveArmed != "" {
 		m.todoRemoveArmed = ""
 		m.invalidateCache()
