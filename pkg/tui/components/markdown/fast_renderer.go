@@ -342,6 +342,31 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 	return finalizeOutput(result, r.width), blocks, nil
 }
 
+// renderCheckpointParts freezes only blocks followed by a complete lookahead line.
+// The parser, rather than a separate Markdown heuristic, decides block boundaries.
+func (r *FastRenderer) renderCheckpointParts(input string) (string, string, []CodeBlock, int, int) {
+	p := parserPool.Get().(*parser)
+	p.reset(input, r.width, getGlobalStyles())
+	checkpoint := renderCheckpoint{}
+	p.checkpoint = &checkpoint
+	result := p.parse()
+	stable, tail := "", result
+	if checkpoint.output <= len(result) && checkpoint.input > 0 {
+		stable = strings.TrimRight(result[:checkpoint.output], "\n")
+		tail = result[checkpoint.output:]
+	} else {
+		checkpoint = renderCheckpoint{}
+	}
+	blocks := cloneCodeBlocks(p.codeBlocks)
+	p.checkpoint = nil
+	parserPool.Put(p)
+	return finalizeOutput(stable, r.width), finalizeOutput(tail, r.width), blocks, checkpoint.input, checkpoint.blocks
+}
+
+type renderCheckpoint struct {
+	input, output, blocks int
+}
+
 // parser holds the state for parsing markdown.
 type parser struct {
 	input        string
@@ -352,6 +377,7 @@ type parser struct {
 	lineIdx      int
 	codeBlocks   []CodeBlock
 	hideCopyIcon bool
+	checkpoint   *renderCheckpoint
 }
 
 func (p *parser) reset(input string, width int, palette *cachedStyles) {
@@ -366,13 +392,22 @@ func (p *parser) reset(input string, width int, palette *cachedStyles) {
 	p.lineIdx = 0
 	p.codeBlocks = p.codeBlocks[:0]
 	p.hideCopyIcon = false
+	p.checkpoint = nil
 	p.out.Reset()
 	p.out.Grow(len(input) * 2) // Pre-allocate for styled output
 }
 
 func (p *parser) parse() string {
+	inputOffset := 0
 	for p.lineIdx < len(p.lines) {
 		line := p.lines[p.lineIdx]
+		startLine := p.lineIdx
+		if p.checkpoint != nil && p.lineIdx < len(p.lines)-1 && strings.TrimSpace(line) != "" {
+			raw := p.out.String()
+			if strings.HasSuffix(raw, "\n\n") && !strings.HasSuffix(raw, "\n\n\n") {
+				*p.checkpoint = renderCheckpoint{input: inputOffset, output: len(raw), blocks: len(p.codeBlocks)}
+			}
+		}
 
 		switch {
 		case p.tryCodeBlock(line):
@@ -394,6 +429,11 @@ func (p *parser) parse() string {
 		default:
 			// Regular paragraph
 			p.renderParagraph()
+		}
+		if p.checkpoint != nil {
+			for _, line := range p.lines[startLine:p.lineIdx] {
+				inputOffset += len(line) + 1
+			}
 		}
 	}
 

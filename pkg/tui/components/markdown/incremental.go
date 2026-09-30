@@ -6,24 +6,9 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// IncrementalRenderer is a markdown renderer specialized for streaming use:
-// it remembers the most recently rendered "stable prefix" of the input and,
-// when the next call extends that prefix, re-renders only the new trailing
-// region instead of the whole document.
-//
-// A "stable prefix" here is the portion of the input ending at the last block
-// boundary that the underlying FastRenderer is guaranteed to render the same
-// way regardless of what comes after it: a blank line that lies outside any
-// fenced code block and is not flanked by list or blockquote lines (those
-// constructs absorb blank lines into a single block, so the surrounding
-// content is not yet "frozen").
-//
-// The optimization is correct because the FastRenderer (and CommonMark in
-// general) treats such blank lines as hard breaks between top-level blocks:
-// rendering the document up to a stable boundary and rendering the rest
-// independently produces the same output as rendering the full document,
-// modulo the blank-line separator that joinPrefixAndTail re-inserts.
-//
+// IncrementalRenderer retains completed parser blocks and re-renders only the
+// final, still-mutable block. A complete lookahead line must confirm a boundary
+// before it is retained, so partial list/fence/table syntax can still change it.
 // IncrementalRenderer is not safe for concurrent use.
 type IncrementalRenderer struct {
 	width           int
@@ -34,6 +19,9 @@ type IncrementalRenderer struct {
 	// Both are empty until the first successful incremental render.
 	inputPrefix  string
 	outputPrefix string
+	output       strings.Builder
+	lastInput    string
+	lastParts    RenderedParts
 
 	// codeBlocksPrefix is the list of code blocks emitted while rendering the
 	// cached prefix, with Line indices relative to outputPrefix.
@@ -95,62 +83,29 @@ func (r *IncrementalRenderer) renderParts(input string) (string, string, []CodeB
 		r.themeGeneration = generation
 		r.Reset()
 	}
-	if input == "" {
-		r.inputPrefix = ""
-		r.outputPrefix = ""
-		r.codeBlocksPrefix = nil
-		return "", "", nil, nil
+	input = sanitizeForTerminal(input)
+	if input == r.lastInput {
+		p := r.lastParts
+		return p.StablePrefix, p.MutableTail, p.CodeBlocks, nil
 	}
-
-	// If the new input no longer starts with our cached prefix, the user (or a
-	// retry) replaced earlier content; fall back to a full render.
-	if r.inputPrefix == "" || !strings.HasPrefix(input, r.inputPrefix) {
-		stable, tail, blocks, err := r.fullRenderParts(input)
-		return stable, tail, blocks, err
+	if !strings.HasPrefix(input, r.inputPrefix) {
+		r.Reset()
 	}
-
-	// Locate a fresh stable boundary anywhere up to the end of the current
-	// input. We always re-render from the previous boundary onward to keep the
-	// implementation simple and correctness-preserving: the previously emitted
-	// tail may have been an unfinished paragraph that should now be part of a
-	// completed block.
 	tail := input[len(r.inputPrefix):]
-	boundary := stableBoundary(tail)
-	if boundary <= 0 {
-		// No new block boundary in the tail yet — render only the tail and
-		// concatenate. Cached prefix is unchanged.
-		renderedTail, tailBlocks, err := r.fallback.RenderWithCodeBlocks(tail)
-		if err != nil {
-			stable, tail, blocks, fallbackErr := r.fullRenderParts(input)
-			return stable, tail, blocks, fallbackErr
+	stable, mutable, blocks, boundary, stableBlockCount := r.fallback.renderCheckpointParts(tail)
+	merged := r.mergeCodeBlocks(r.outputPrefix, r.codeBlocksPrefix, blocks)
+	if boundary > 0 {
+		if r.output.Len() > 0 && stable != "" {
+			r.output.WriteString("\n" + strings.Repeat(" ", max(r.width, 0)) + "\n")
 		}
-		return r.outputPrefix, renderedTail, r.mergeCodeBlocks(r.outputPrefix, r.codeBlocksPrefix, tailBlocks), nil
+		r.output.WriteString(stable)
+		r.outputPrefix = r.output.String()
+		r.inputPrefix = input[:len(r.inputPrefix)+boundary]
+		r.codeBlocksPrefix = cloneCodeBlocks(merged[:len(r.codeBlocksPrefix)+stableBlockCount])
 	}
-
-	// We have a new boundary inside the tail. Render the new stable region
-	// (inputPrefix + tail[:boundary]) once, append it to the cache, then render
-	// the new tail.
-	newStableTail := tail[:boundary]
-	renderedStableTail, stableBlocks, err := r.fallback.RenderWithCodeBlocks(newStableTail)
-	if err != nil {
-		stable, tail, blocks, fallbackErr := r.fullRenderParts(input)
-		return stable, tail, blocks, fallbackErr
-	}
-	newBlocks := r.mergeCodeBlocks(r.outputPrefix, r.codeBlocksPrefix, stableBlocks)
-	r.inputPrefix += newStableTail
-	r.outputPrefix = r.joinPrefixAndTail(r.outputPrefix, renderedStableTail)
-	r.codeBlocksPrefix = newBlocks
-
-	rest := tail[boundary:]
-	if rest == "" {
-		return r.outputPrefix, "", cloneCodeBlocks(r.codeBlocksPrefix), nil
-	}
-	renderedRest, restBlocks, err := r.fallback.RenderWithCodeBlocks(rest)
-	if err != nil {
-		stable, tail, blocks, fallbackErr := r.fullRenderParts(input)
-		return stable, tail, blocks, fallbackErr
-	}
-	return r.outputPrefix, renderedRest, r.mergeCodeBlocks(r.outputPrefix, r.codeBlocksPrefix, restBlocks), nil
+	r.lastInput = input
+	r.lastParts = RenderedParts{StablePrefix: r.outputPrefix, MutableTail: mutable, CodeBlocks: merged}
+	return r.outputPrefix, mutable, merged, nil
 }
 
 // SetWidth updates the renderer width. Width changes invalidate the cache
@@ -161,52 +116,17 @@ func (r *IncrementalRenderer) SetWidth(width int) {
 	}
 	r.width = width
 	r.fallback = NewFastRenderer(width)
-	r.inputPrefix = ""
-	r.outputPrefix = ""
-	r.codeBlocksPrefix = nil
+	r.Reset()
 }
 
-// Reset drops the cached prefix without changing the width. Use when the
-// underlying message is replaced by an unrelated new one.
+// Reset releases retained block output and input after an edit or theme change.
 func (r *IncrementalRenderer) Reset() {
 	r.inputPrefix = ""
 	r.outputPrefix = ""
+	r.output.Reset()
 	r.codeBlocksPrefix = nil
-}
-
-func (r *IncrementalRenderer) fullRenderParts(input string) (string, string, []CodeBlock, error) {
-	boundary := stableBoundary(input)
-	if boundary <= 0 {
-		out, blocks, err := r.fallback.RenderWithCodeBlocks(input)
-		if err != nil {
-			return "", "", nil, err
-		}
-		r.inputPrefix = ""
-		r.outputPrefix = ""
-		r.codeBlocksPrefix = nil
-		return "", out, blocks, nil
-	}
-
-	prefix := input[:boundary]
-	rest := input[boundary:]
-	renderedPrefix, prefixBlocks, err := r.fallback.RenderWithCodeBlocks(prefix)
-	if err != nil {
-		return "", "", nil, err
-	}
-	if rest == "" {
-		r.inputPrefix = prefix
-		r.outputPrefix = renderedPrefix
-		r.codeBlocksPrefix = prefixBlocks
-		return renderedPrefix, "", cloneCodeBlocks(prefixBlocks), nil
-	}
-	renderedRest, restBlocks, err := r.fallback.RenderWithCodeBlocks(rest)
-	if err != nil {
-		return "", "", nil, err
-	}
-	r.inputPrefix = prefix
-	r.outputPrefix = renderedPrefix
-	r.codeBlocksPrefix = prefixBlocks
-	return renderedPrefix, renderedRest, r.mergeCodeBlocks(renderedPrefix, prefixBlocks, restBlocks), nil
+	r.lastInput = ""
+	r.lastParts = RenderedParts{}
 }
 
 // joinPrefixAndTail concatenates a previously rendered prefix and a freshly
@@ -281,137 +201,4 @@ func cloneCodeBlocks(in []CodeBlock) []CodeBlock {
 	out := make([]CodeBlock, len(in))
 	copy(out, in)
 	return out
-}
-
-// stableBoundary returns the byte index just after the last "safe" block
-// boundary in input, or 0 if no safe boundary exists. A safe boundary is a
-// blank line that the FastRenderer treats as a hard break between top-level
-// blocks: it must lie outside any fenced code block AND the lines immediately
-// surrounding it must not be "blank-line tolerant" constructs (lists,
-// blockquotes) where the parser keeps absorbing lines across the blank.
-//
-// The returned index satisfies input[:boundary] ends with a newline and a
-// blank line, and input[boundary:] starts a fresh top-level block.
-func stableBoundary(input string) int {
-	if input == "" {
-		return 0
-	}
-
-	// classifyFenceLines and classifyListLikeLines emit one entry per logical
-	// line, including a final trailing line if input does not end with '\n'.
-	// They therefore have either len(lineEnds) or len(lineEnds)+1 entries; the
-	// loop below only indexes positions in [0, len(lineEnds)+1), which is
-	// always within bounds, but we still guard each access defensively to keep
-	// the function robust against future refactors of the helpers.
-	inFence := classifyFenceLines(input)
-	isListLike := classifyListLikeLines(input, inFence)
-
-	lineEnds := make([]int, 0, 64)
-	for i := range len(input) {
-		if input[i] == '\n' {
-			lineEnds = append(lineEnds, i)
-		}
-	}
-
-	// Walk newlines from the end backwards looking for a blank line (two
-	// consecutive '\n' bytes) that isn't inside a fence and whose neighbours
-	// are not list/blockquote lines (which would absorb the blank).
-	for k := len(lineEnds) - 1; k > 0; k-- {
-		i := lineEnds[k]
-		if input[i-1] != '\n' {
-			continue
-		}
-		if inFenceAt(inFence, k) {
-			continue
-		}
-		boundary := i + 1
-		if boundary >= len(input) {
-			continue
-		}
-		if inFenceAt(inFence, k+1) {
-			continue
-		}
-		if listLikeAt(isListLike, k-1) || listLikeAt(isListLike, k+1) {
-			continue
-		}
-		return boundary
-	}
-	return 0
-}
-
-func inFenceAt(inFence []bool, k int) bool {
-	return k >= 0 && k < len(inFence) && inFence[k]
-}
-
-func listLikeAt(isListLike []bool, k int) bool {
-	return k >= 0 && k < len(isListLike) && isListLike[k]
-}
-
-// classifyListLikeLines marks every line that looks like the start of a list
-// item, an ordered-list continuation, an indented continuation of a list
-// item, or a blockquote. The FastRenderer absorbs blank lines between such
-// lines into a single block, so they are not safe split points.
-func classifyListLikeLines(input string, inFence []bool) []bool {
-	var lines []bool
-	lineStart := 0
-	idx := 0
-	for i := 0; i <= len(input); i++ {
-		if i < len(input) && input[i] != '\n' {
-			continue
-		}
-		line := input[lineStart:i]
-		listLike := false
-		if idx < len(inFence) && !inFence[idx] {
-			trimmed := strings.TrimLeft(line, " \t")
-			switch {
-			case strings.HasPrefix(trimmed, ">"):
-				listLike = true
-			case isListStart(trimmed):
-				listLike = true
-			case line != "" && (line[0] == ' ' || line[0] == '\t'):
-				// Indented non-empty line: could be a list-item continuation. We
-				// can't be sure without the surrounding context, so treat it as
-				// list-like to stay on the safe side.
-				listLike = trimmed != ""
-			}
-		}
-		lines = append(lines, listLike)
-		lineStart = i + 1
-		idx++
-	}
-	return lines
-}
-
-// classifyFenceLines returns a slice indexed by line number where each entry
-// is true when that line lies inside a fenced code block. The opening and
-// closing fence lines themselves are marked true so a boundary cannot land
-// directly on them.
-func classifyFenceLines(input string) []bool {
-	var lines []bool
-	openFence := ""
-	lineStart := 0
-	for i := 0; i <= len(input); i++ {
-		if i < len(input) && input[i] != '\n' {
-			continue
-		}
-		line := input[lineStart:i]
-		trimmed := strings.TrimLeft(line, " \t")
-		switch {
-		case openFence != "":
-			lines = append(lines, true)
-			if strings.HasPrefix(strings.TrimSpace(trimmed), openFence) {
-				openFence = ""
-			}
-		case strings.HasPrefix(trimmed, "```"):
-			lines = append(lines, true)
-			openFence = "```"
-		case strings.HasPrefix(trimmed, "~~~"):
-			lines = append(lines, true)
-			openFence = "~~~"
-		default:
-			lines = append(lines, false)
-		}
-		lineStart = i + 1
-	}
-	return lines
 }
