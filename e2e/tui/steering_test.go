@@ -139,15 +139,17 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 		WaitFor(tuitest.Contains("Settings updated"))
 
 	// Flip the send mode on the Behavior tab of /settings: open the dialog,
-	// switch tab, cycle Steer → Queue, apply.
+	// focus Categories, enter Behavior controls, cycle Steer → Queue, apply.
 	d.Send(tea.PasteMsg{Content: "/settings"}).
 		Enter().
 		WaitFor(tuitest.Contains("Sidebar position")).
-		Press(tea.KeyTab).
-		WaitFor(tuitest.Contains("While agent is working")).
+		Send(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).
 		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("● Queue")).
+		WaitFor(tuitest.Contains("While agent is working")).
 		Enter().
+		Press(tea.KeyRight).
+		WaitFor(tuitest.Contains("‹ Queue ›")).
+		Send(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}).
 		WaitFor(tuitest.Contains("Settings updated"))
 
 	// The toast acknowledges persistence, not the end of the modal close fade.
