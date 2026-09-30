@@ -10,7 +10,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -31,8 +30,7 @@ type panePointerTransaction struct {
 	keyboard                                bool
 	ghostX, ghostY                          int
 	ghostLabel                              string
-	ghostTheme                              uint64
-	ghostIdentity                           string
+	ghostGrabOffset                         int
 	base                                    string
 	baseTheme, baseSidebar, baseAgentColors uint64
 	baseFocus                               string
@@ -115,7 +113,7 @@ func (m *appModel) beginPaneGesture(msg tea.MouseClickMsg) bool {
 		m.panes = m.paneLayout()
 		generation, _ := m.supervisor.RouteGeneration(source)
 		base := m.composePanes()
-		m.paneGesture = &panePointerTransaction{source: source, sourceGeneration: generation, startX: msg.X, startY: msg.Y, layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
+		m.paneGesture = &panePointerTransaction{source: source, sourceGeneration: generation, startX: msg.X, startY: msg.Y, ghostGrabOffset: m.tabBar.DragGrabOffset(source, msg.X-tabFrameOrigin()), layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.panes.Compute(bounds, m.paneFocus(), paneMinWidth, paneMinHeight)}
 		m.cachePaneGestureBase(base)
 		return true
 	}
@@ -220,12 +218,13 @@ func (m *appModel) movePaneGesture(msg tea.MouseMotionMsg) tea.Cmd {
 	}
 	m.updatePaneGhost(msg.X, msg.Y)
 	if m.hitTestRegion(msg.Y) == regionTabBar && msg.Y == g.startY {
+		var begin tea.Cmd
 		if !g.reorder {
-			m.tabBar.BeginPointerPreview(g.startX - tabFrameOrigin())
+			begin = m.tabBar.ResumePointerPreview(g.source, g.ghostGrabOffset, msg.X-tabFrameOrigin())
 			g.reorder = true
 		}
 		g.target, g.preview = "", splitRect{}
-		return m.tabBar.PreviewPointer(msg.X - tabFrameOrigin())
+		return tea.Batch(begin, m.tabBar.PreviewPointer(msg.X-tabFrameOrigin()))
 	}
 	if g.reorder {
 		m.tabBar.CancelPointer()
@@ -362,24 +361,10 @@ func (m *appModel) updatePaneGhost(x, y int) {
 	if g == nil || !g.active || g.source == "" {
 		return
 	}
-	name, node := m.tabAgentIdentity(messages.TabInfo{SessionID: g.source})
-	title := ""
-	if state := m.sessionStates[g.source]; state != nil {
-		title = state.SessionTitle()
-	}
-	identity := name + "\x00" + node + "\x00" + title
-	theme := styles.ThemeGeneration()
-	if g.ghostLabel == "" || g.ghostTheme != theme || g.ghostIdentity != identity {
-		g.ghostIdentity, g.ghostTheme = identity, theme
-		label := m.paneChoiceLabel(g.source)
-		g.ghostLabel = styles.BaseStyle.Background(styles.EditorBg).Render(" " + ansi.Truncate(label, max(0, min(38, m.width)-2), "…") + " ")
-	}
-	width := min(m.width, ansi.StringWidth(g.ghostLabel))
-	g.ghostX = max(0, min(x+2, m.width-width))
-	g.ghostY = max(0, min(y+1, m.height-1))
-	if g.ghostY == y && y > 0 {
-		g.ghostY = y - 1
-	}
+	g.ghostLabel = m.tabBar.DragTabView(g.source)
+	width := min(tabFrameWidth(m.width), ansi.StringWidth(g.ghostLabel))
+	g.ghostX = tabFrameOrigin() + max(0, min(x-tabFrameOrigin()-g.ghostGrabOffset, tabFrameWidth(m.width)-width))
+	g.ghostY = max(0, min(y, m.height-1))
 }
 
 func (m *appModel) paneGhostLayer() *lipgloss.Layer {
@@ -387,12 +372,7 @@ func (m *appModel) paneGhostLayer() *lipgloss.Layer {
 	if g == nil || !g.active || g.reorder || g.divider != nil || g.ghostLabel == "" || m.dialogMgr.Open() || m.width <= 0 || m.height <= 0 {
 		return nil
 	}
-	if g.ghostTheme != styles.ThemeGeneration() {
-		g.ghostTheme = styles.ThemeGeneration()
-		g.ghostIdentity = m.paneChoiceLabel(g.source)
-		g.ghostLabel = styles.BaseStyle.Background(styles.EditorBg).Render(" " + ansi.Truncate(g.ghostIdentity, max(0, min(38, m.width)-2), "…") + " ")
-	}
-	return lipgloss.NewLayer(ansi.Truncate(g.ghostLabel, m.width, "")).X(g.ghostX).Y(g.ghostY)
+	return lipgloss.NewLayer(ansi.Truncate(m.tabBar.DragTabView(g.source), tabFrameWidth(m.width), "")).X(g.ghostX).Y(g.ghostY)
 }
 
 func (m *appModel) paneGestureBaseValid() bool {

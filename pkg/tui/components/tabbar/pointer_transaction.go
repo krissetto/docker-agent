@@ -66,3 +66,43 @@ func (t *TabBar) CancelPointer() {
 	t.visualGeneration++
 	t.recordVisualState()
 }
+
+// DragTabView uses the same source rendering as the in-bar floating layer.
+// Root-owned pane drags must not substitute a different label or width budget.
+func (t *TabBar) DragTabView(sessionID string) string {
+	for _, info := range t.tabs {
+		if info.SessionID == sessionID {
+			return renderTab(info, t.maxTitleLen, dragRoleSource, t.ar.Now()).View()
+		}
+	}
+	return ""
+}
+
+// DragGrabOffset measures the pointer against the same clipped bounds used to
+// activate an in-bar drag, including a partially visible source tab.
+func (t *TabBar) DragGrabOffset(sessionID string, x int) int {
+	t.installGeometry()
+	for _, bound := range t.dragBounds {
+		if bound.sessionID == sessionID {
+			return max(0, x-bound.start)
+		}
+	}
+	return 0
+}
+
+// ResumePointerPreview retains source identity and its original grab point when
+// a root-owned drag reenters after the tab strip has scrolled or reflowed.
+func (t *TabBar) ResumePointerPreview(sessionID string, grabOffset, cursorX int) tea.Cmd {
+	for index, tab := range t.tabs {
+		if tab.SessionID != sessionID {
+			continue
+		}
+		t.dragSeq++
+		t.drag = dragState{active: true, dragIdx: index, dropIdx: noTab, cursorX: cursorX, startX: cursorX, grabOffset: max(0, grabOffset), seq: t.dragSeq}
+		t.viewDirty, t.visualDirty = true, true
+		t.visualGeneration++
+		t.recordVisualState()
+		return tea.Batch(t.updateDragReflow(), t.syncIndicatorSub())
+	}
+	return nil
+}

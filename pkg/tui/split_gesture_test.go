@@ -240,3 +240,47 @@ func TestPaneGhostReorderCrossingAndCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestTabDragCrossingKeepsExactCanonicalViewAndGrabOffset(t *testing.T) {
+	for _, width := range []int{40, 80, 120} {
+		for _, source := range []string{"profile", "second"} {
+			root := splitTestRoot(t)
+			root.handleWindowResize(width, 40)
+			// Ensure the chosen source is visible without changing its canonical tab styling.
+			root.handleSwitchTab(source)
+			root.View()
+			x, y := paneTabPoint(t, root, source)
+			x++
+			root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+			require.NotNil(t, root.paneGesture)
+			grab := root.paneGesture.ghostGrabOffset
+			cursorX := min(width-3, x+5)
+			root.Update(tea.MouseMotionMsg{X: cursorX, Y: y, Button: tea.MouseLeft})
+			require.True(t, root.paneGesture.reorder)
+			inside := root.tabBar.GetDragLayerInfo(tabFrameWidth(width), y)
+			require.NotNil(t, inside)
+			want := inside.Content
+			wantX := inside.X + tabFrameOrigin()
+			for _, point := range [][2]int{{cursorX, y - 1}, {cursorX, y + 1}, {cursorX, y}, {2, y - 2}, {width - 2, y + 2}, {cursorX, y}} {
+				root.Update(tea.MouseMotionMsg{X: point[0], Y: point[1], Button: tea.MouseLeft})
+				require.NotNil(t, root.paneGesture)
+				require.Equal(t, grab, root.paneGesture.ghostGrabOffset)
+				if point[1] == y {
+					layer := root.tabBar.GetDragLayerInfo(tabFrameWidth(width), y)
+					require.NotNil(t, layer)
+					require.Equal(t, want, layer.Content, "reentry keeps label/icon/close/colors/padding")
+					require.Equal(t, wantX, layer.X+tabFrameOrigin())
+				} else {
+					layer := root.paneGhostLayer()
+					require.NotNil(t, layer)
+					require.Equal(t, want, layer.GetContent(), "crossing above/below never switches renderer")
+					if point[0] == cursorX {
+						require.Equal(t, wantX, layer.GetX())
+					}
+					require.Equal(t, point[1], layer.GetY(), "original grabbed row remains under the pointer")
+				}
+			}
+			root.cancelPaneGesture()
+		}
+	}
+}
