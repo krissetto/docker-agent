@@ -2,11 +2,14 @@ package root
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel"
 
@@ -163,6 +166,9 @@ func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.Sessio
 	imageWriter.SetSupported(tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout))
 	imageWriter.SetEnabled(userconfig.Get().GetRenderImages())
 	tuiimage.SetRenderingEnabled(imageWriter.RenderingEnabled())
+	if err := resetInheritedTerminalStyle(imageWriter, isatty.IsTerminal(os.Stdout.Fd())); err != nil {
+		return err
+	}
 	tuiOpts = append(tuiOpts, tui.WithImageWriter(imageWriter))
 	model := tui.New(ctx, spawner, a, wd, cleanup, tuiOpts...)
 	if wrap != nil {
@@ -179,6 +185,22 @@ func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.Sessio
 	_, err := p.Run()
 	resetLightDarkReports()
 	return err
+}
+
+// Reset synchronously before Bubble Tea's first erase; its renderer starts
+// with a default pen and cannot detect styles inherited from the shell.
+func resetInheritedTerminalStyle(out io.Writer, terminal bool) error {
+	if !terminal {
+		return nil
+	}
+	n, err := io.WriteString(out, ansi.ResetStyle)
+	if err != nil {
+		return fmt.Errorf("resetting terminal styling: %w", err)
+	}
+	if n != len(ansi.ResetStyle) {
+		return fmt.Errorf("resetting terminal styling: %w", io.ErrShortWrite)
+	}
+	return nil
 }
 
 // resetLightDarkReports clears DEC mode 2031 after the TUI program exits
