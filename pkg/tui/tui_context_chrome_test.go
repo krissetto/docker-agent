@@ -113,7 +113,7 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 					if label != "" {
 						require.Contains(t, ansi.Strip(rows[y]), label)
 						for x := styles.EditorHMargin + barWidth; x < width-styles.EditorHMargin; x++ {
-							require.Equal(t, styles.Background, strip[x].bg, "label cutout x=%d", x)
+							require.Nil(t, strip[x].bg, "label cutout x=%d", x)
 						}
 					}
 					require.Equal(t, len(rows)-2, y, "context strip is directly above the stable message row")

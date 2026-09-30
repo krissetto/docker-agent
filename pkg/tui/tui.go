@@ -4342,10 +4342,10 @@ func externalEditorCallback(ed editor.Editor, tmpPath string) func(error) tea.Ms
 }
 
 func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.View {
-	view := tea.NewView(paintRootBackground(content))
+	view := tea.NewView(content)
 	view.AltScreen = !leanMode
 	view.MouseMode = tea.MouseModeAllMotion
-	// Also set the terminal default for cells outside the composed canvas.
+	// Preserve terminal-default cells; OSC 11 still follows the selected theme.
 	view.BackgroundColor = styles.Background
 	view.WindowTitle = windowTitle
 	if working {

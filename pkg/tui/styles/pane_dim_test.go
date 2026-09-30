@@ -1,6 +1,7 @@
 package styles
 
 import (
+	uv "github.com/charmbracelet/ultraviolet"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
@@ -30,5 +31,21 @@ func TestPaneDimMalformedColorsDoNotBecomeResets(t *testing.T) {
 		output := FadeLineCtx(input, 0.62, &fc)
 		require.Equal(t, "text", ansi.Strip(output))
 		require.NotContains(t, output, "\x1b[0m", "channel zero is not an SGR reset")
+	}
+}
+
+func TestFadeAndPaneDimPreserveDefaultBackgroundCells(t *testing.T) {
+	fc := NewFadeContextRGB(28, 28, 34, 224, 224, 227)
+	input := "default \x1b[48;2;90;100;110mselected\x1b[49m tail"
+	for _, opacity := range []float64{0.1, 0.5, 0.62, 1} {
+		output := FadeLineCtx(input, opacity, &fc)
+		cells := uv.NewStyledString(output).Lines(ansi.GraphemeWidth)[0]
+		for i, cell := range cells {
+			if i >= len("default ") && i < len("default selected") {
+				require.NotNil(t, cell.Style.Bg, "explicit selection background survives fade/dimming")
+			} else {
+				require.Nil(t, cell.Style.Bg, "default background never becomes opaque")
+			}
+		}
 	}
 }

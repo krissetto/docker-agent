@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
+	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -42,7 +43,7 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 				require.NoError(t, err)
 				styles.ApplyTheme(theme)
 				require.Equal(t, styles.Background, root.View().BackgroundColor, "theme generation invalidates cached terminal default")
-				require.Equal(t, styles.Background, chromeCells(root.View().Content)[0].bg)
+				require.Nil(t, chromeCells(root.View().Content)[0].bg)
 				_, _ = root.Update(messages.ThemeChangedMsg{})
 				for _, popup := range []bool{false, true} {
 					if popup {
@@ -64,25 +65,24 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 					for y := range rows {
 						cells := frame[y*120 : (y+1)*120]
 						require.Len(t, cells, 120)
-						for x, cell := range cells {
-							require.NotNil(t, cell.bg, "unpainted cell (%d,%d), popup=%v", x, y, popup)
-						}
-						require.Equal(t, styles.Background, cells[0].bg, "left margin row %d", y)
-						require.Equal(t, styles.Background, cells[119].bg, "right margin row %d", y)
+						require.Nil(t, cells[0].bg, "left margin row %d", y)
+						require.Nil(t, cells[119].bg, "right margin row %d", y)
 					}
-					require.Equal(t, styles.Background, frame[60].bg, "page canvas")
+					require.Nil(t, frame[60].bg, "page canvas")
 					if mode.sidebar && !popup {
 						geometry := root.chatPage.(chat.SplitPresentation).MeasureSplitShell(root.width, root.contentHeight).Sidebar
 						require.Positive(t, geometry.Width)
 						require.Positive(t, geometry.Height)
 						for y := geometry.Y; y < geometry.Y+geometry.Height; y++ {
 							for _, x := range []int{geometry.X, geometry.X + geometry.Width - 1} {
-								require.Equal(t, styles.Background, frame[y*120+x].bg, "sidebar canvas (%d,%d)", x, y)
+								require.Nil(t, frame[y*120+x].bg, "sidebar canvas (%d,%d)", x, y)
 							}
 						}
 					}
-					for _, cell := range frame[39*120:] {
-						require.Equal(t, styles.Background, cell.bg, "blank message/footer row")
+					footer := layoutTerminalCells(root.renderMessageBar())[0]
+					composedFooter := layoutTerminalCells(view.Content)[39]
+					for x, cell := range footer {
+						require.Equal(t, cell, composedFooter[x], "footer retains only its intentional local surfaces")
 					}
 					if !lean {
 						_, editorHeight := root.editor.GetSize()
@@ -92,7 +92,7 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 						before, _, found := strings.Cut(ansi.Strip(rows[contextY]), label)
 						require.True(t, found)
 						for x := ansi.StringWidth(before); x < 120; x++ {
-							require.Equal(t, styles.Background, cells[x].bg, "context label/cutout")
+							require.Nil(t, cells[x].bg, "context label/cutout")
 						}
 						require.Equal(t, styles.Background, cells[styles.EditorHMargin].fg, "empty lower half agrees with canvas")
 						require.Equal(t, styles.EditorBg, cells[styles.EditorHMargin].bg, "upper half retains editor surface")
@@ -101,7 +101,7 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 							require.NotEqual(t, styles.Background, styles.EditorBg)
 						}
 					}
-					require.Equal(t, view.Content, root.View().Content, "painted canvas participates in root view cache")
+					require.Equal(t, view.Content, root.View().Content, "default-background canvas participates in root view cache")
 				}
 				root.messageBar.SetMessage(messagebar.Message{Text: "Notice", Actions: []messagebar.Action{{Label: "Act"}}})
 				root.messageBar.SetFocused(true)
@@ -109,13 +109,10 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 				local := layoutTerminalCells(root.renderMessageBar())[0]
 				painted := layoutTerminalCells(root.View().Content)[39]
 				for x, cell := range local {
-					if cell.Style.Bg == nil {
-						cell.Style.Bg = styles.Background
-					}
 					require.Equal(t, cell, painted[x], "action background and attributes cell %d", x)
 				}
-				require.Equal(t, styles.Background, painted[styles.AppPadding].Style.Bg, "notice text inherits canvas")
-				require.Equal(t, styles.Background, painted[118].Style.Bg, "notice trailing space inherits canvas")
+				require.Equal(t, styles.Background, painted[styles.AppPadding].Style.Bg, "notice retains intentional messagebar surface")
+				require.Equal(t, styles.Background, painted[118].Style.Bg, "notice trailing space retains messagebar surface")
 				root.messageBar.SetMessage(messagebar.Message{})
 			})
 		}
@@ -141,9 +138,6 @@ func TestRootBackgroundPreservesNestedStylesAndEscapeBytes(t *testing.T) {
 		for y, line := range before {
 			require.Len(t, after[y], len(line))
 			for x, cell := range line {
-				if cell.Style.Bg == nil {
-					cell.Style.Bg = styles.Background
-				}
 				require.Equal(t, cell, after[y][x], "sequence %q cell %d", sequence, x)
 			}
 		}
@@ -176,8 +170,37 @@ func TestRootBackgroundLoadingAndError(t *testing.T) {
 			cells := chromeCells(content)
 			require.Len(t, cells, 400)
 			for _, cell := range cells {
-				require.Equal(t, styles.Background, cell.bg)
+				require.Nil(t, cell.bg)
 			}
 		}
+	}
+}
+
+func TestRootDialogDefaultBackgroundSurvivesThemeSwitch(t *testing.T) {
+	setupAutoThemeTest(t)
+	for _, ref := range []string{"gruvbox-dark", "nord", "default"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		d := dialog.NewExitConfirmationDialog()
+		d.SetSize(80, 24)
+		row, col := d.Position()
+		content := composeRootLayers([]*lipgloss.Layer{lipgloss.NewLayer(d.View()).X(col).Y(row)}, 80, 24)
+		content = paneClipped(content, 80, 24)
+		view := toFullscreenView(content, "test", false, false)
+		cells := layoutTerminalCells(view.Content)
+		for y, line := range strings.Split(ansi.Strip(view.Content), "\n") {
+			if strings.Contains(line, "Exit") || strings.Contains(line, "Do you want to exit?") {
+				for x, cell := range cells[y] {
+					require.Nil(t, cell.Style.Bg, "dialog title/question/padding remains default at %d,%d", x, y)
+				}
+			}
+			if before, _, found := strings.Cut(line, "No ↵"); found {
+				require.Equal(t, styles.Selected, cells[y][ansi.StringWidth(before)].Style.Bg, "selected button remains explicit")
+			}
+		}
+		require.Nil(t, cells[0][0].Style.Bg, "outer canvas remains terminal default")
+		require.Equal(t, content, view.Content, "fullscreen adapter preserves exact ANSI/APC/grapheme bytes")
+		require.Equal(t, styles.Background, view.BackgroundColor, "existing OSC 11 behavior retained")
 	}
 }

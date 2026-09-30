@@ -61,9 +61,6 @@ func TestTabFrameAlignsWithEditorBorderCells(t *testing.T) {
 			left, right := styles.EditorStyle.GetMarginLeft(), width-styles.EditorStyle.GetMarginRight()
 			require.Len(t, local, right-left)
 			for x := left; x < right; x++ {
-				if local[x-left].Style.Bg == nil {
-					local[x-left].Style.Bg = styles.Background
-				}
 				require.True(t, local[x-left].Equal(&cells[tabY][x]), "tab cell %d", x)
 			}
 			for _, x := range []int{left, right - 1} {

@@ -1,6 +1,8 @@
 package dialog
 
 import (
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -580,4 +582,21 @@ func TestResizeCompositionStaysBoundedAndSuppressesTransientActionHits(t *testin
 	require.InDelta(t, alpha, entry.opacity(), 0, "theme refresh does not restart opening fade")
 	mgr.Cleanup()
 	require.Zero(t, r.ActiveCount())
+}
+
+func TestAnimatedDialogFadePreservesDefaultAndExplicitBackgrounds(t *testing.T) {
+	view := "default \x1b[48;2;90;100;110mselected\x1b[49m tail"
+	for _, closing := range []bool{false, true} {
+		for _, alpha := range []float64{0.1, 0.5, 1} {
+			a := &animatedDialog{dialog: &lifecycleDialog{view: view}, renderAlpha: alpha, renderWidth: lipgloss.Width(view), renderHeight: 1, closing: closing}
+			cells := uv.NewStyledString(a.view()).Lines(ansi.GraphemeWidth)[0]
+			for i, cell := range cells {
+				if i >= len("default ") && i < len("default selected") {
+					require.NotNil(t, cell.Style.Bg)
+				} else {
+					require.Nil(t, cell.Style.Bg, "open/close fades preserve terminal-default backgrounds")
+				}
+			}
+		}
+	}
 }
