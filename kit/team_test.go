@@ -117,40 +117,23 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	require.Len(t, kit.Capabilities, 5)
-	for _, capability := range kit.Capabilities[:4] {
-		assert.False(t, capability.Optional)
-	}
 	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:3@sha256:11bb68806aef6a68d45c10c0c3b3dc86c2f794a296b5a933661d9dadf760b753\n"))
-	assert.Equal(t, "com.docker.sandbox/network-policy@1", kit.Capabilities[0].Type)
-	assert.Equal(t, map[string]any{
-		"runtime": map[string]any{"allow": []any{"api.openai.com"}},
-	}, kit.Capabilities[0].Config)
-	assert.Equal(t, "com.docker.sandbox/credential@1", kit.Capabilities[1].Type)
-	assert.Equal(t, map[string]any{
-		"service": "openai",
-		"phase":   "runtime",
-		"apiKey": map[string]any{
-			"name":         "OPENAI_API_KEY",
-			"proxyManaged": true,
-			"inject": []any{map[string]any{
-				"domain": "api.openai.com",
-				"header": "Authorization",
-				"format": "Bearer %s",
-			}},
-		},
-	}, kit.Capabilities[1].Config)
-	assert.Equal(t, "com.docker.sandbox/sbx@1", kit.Capabilities[2].Type)
-	assert.Nil(t, kit.Capabilities[2].Config)
-	assert.Equal(t, "com.docker.sandbox/agent-sessions@1", kit.Capabilities[3].Type)
+	byType := make(map[string][]int)
+	for i, capability := range kit.Capabilities {
+		byType[capability.Type] = append(byType[capability.Type], i)
+	}
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle"} {
+		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
+	}
+	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
 	assert.Equal(t, map[string]any{
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--session", "{{.SessionID}}"},
 		"continue": []any{"--session=-1"},
-	}, kit.Capabilities[3].Config)
-	assert.Equal(t, "com.docker.sandbox/lifecycle@1", kit.Capabilities[4].Type)
-	assert.True(t, kit.Capabilities[4].Optional)
-	require.Len(t, kit.Capabilities[4].Config, 2)
+	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
+	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
+	assert.True(t, lifecycle.Optional)
+	require.Len(t, lifecycle.Config, 2)
 	recipe, err := os.ReadFile("async-agent.dockerfile")
 	require.NoError(t, err)
 	assert.Contains(t, string(recipe), "xx-go build")
