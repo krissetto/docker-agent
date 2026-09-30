@@ -274,3 +274,37 @@ func TestInvalidateEmptyOverlayFailureRetriesDeletion(t *testing.T) {
 	assert.Contains(t, output.String(), "a=d,d=a")
 	assert.False(t, writer.active)
 }
+
+func TestGraphicsFlushRequestsCoalesceAndRetireWithoutIdleWork(t *testing.T) {
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	assert.False(t, writer.RequestFlush())
+	writer.Invalidate()
+	assert.False(t, writer.RequestFlush(), "empty graphics state never schedules output")
+	writer.SetContent(strings.Join(RenderNativePreviewMarkers(Inline{PNGData: []byte("png"), Width: 8, Height: 16}, CellSize{}), "\n"))
+	assert.True(t, writer.RequestFlush())
+	assert.False(t, writer.RequestFlush(), "only one wakeup per pending output")
+	_, err := writer.Write([]byte("\x1b7\x1b8"))
+	require.NoError(t, err)
+	assert.False(t, writer.RequestFlush(), "committed placement has no recurring graphics work")
+	writer.SetContent("")
+	assert.True(t, writer.RequestFlush())
+	_, err = writer.Write([]byte("\x1b7\x1b8"))
+	require.NoError(t, err)
+	assert.False(t, writer.RequestFlush())
+	assert.Contains(t, output.String(), "a=d,d=a")
+}
+
+func TestGraphicsFlushWriteFailureAllowsRetryWithoutClearingDirtyState(t *testing.T) {
+	output := &failSecondWrite{}
+	writer := NewWriter(output)
+	writer.SetContent(KittySequence([]byte("png"), 2, 1))
+	require.True(t, writer.RequestFlush())
+	_, err := writer.Write([]byte("first"))
+	require.Error(t, err)
+	assert.True(t, writer.dirty)
+	assert.True(t, writer.RequestFlush(), "failed delivery releases only wakeup ownership, not graphics state")
+	_, err = writer.Write([]byte("retry"))
+	require.NoError(t, err)
+	assert.False(t, writer.RequestFlush())
+}

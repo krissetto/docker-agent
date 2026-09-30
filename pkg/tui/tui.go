@@ -968,6 +968,14 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
+	if m.imageWriter != nil {
+		// Publish the frame before asking for a write: marker changes can leave
+		// Bubble Tea's text-only view identical. Its following View is a cache hit.
+		m.View()
+		if m.imageWriter.RequestFlush() {
+			cmd = tea.Batch(cmd, tea.Raw("\x1b7\x1b8"))
+		}
+	}
 	return model, core.MapCommand(cmd, nil)
 }
 

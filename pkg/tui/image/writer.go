@@ -34,14 +34,15 @@ type overlay struct {
 type Writer struct {
 	out io.Writer
 
-	mu        sync.Mutex
-	overlays  []overlay
-	uploaded  map[uint32]bool
-	managed   map[uint32]bool
-	active    bool
-	dirty     bool
-	enabled   bool
-	supported bool
+	mu           sync.Mutex
+	overlays     []overlay
+	uploaded     map[uint32]bool
+	managed      map[uint32]bool
+	active       bool
+	dirty        bool
+	flushPending bool
+	enabled      bool
+	supported    bool
 }
 
 func NewWriter(out io.Writer) *Writer {
@@ -126,15 +127,40 @@ func (w *Writer) SetContent(content string) string {
 	return clean
 }
 
+// RequestFlush coalesces a graphics-only repaint until the output writer runs.
+// Text renderers may suppress identical frames even when image markers changed.
+func (w *Writer) RequestFlush() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.flushPending {
+		return false
+	}
+	needed := w.dirty && (len(w.overlays) > 0 || w.active)
+	if !needed {
+		for id := range w.managed {
+			if !previewImageRetained(id) {
+				needed = true
+				break
+			}
+		}
+	}
+	if !needed {
+		return false
+	}
+	w.flushPending = true
+	return true
+}
+
 func (w *Writer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	defer func() { w.flushPending = false }()
 	cleared := bytes.Contains(p, []byte("\x1b[2J")) || bytes.Contains(p, []byte("\x1b[?1049h"))
 	n, err := w.out.Write(p)
 	if err != nil {
 		return n, err
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if cleared {
 		clear(w.uploaded)
 		w.dirty = true
