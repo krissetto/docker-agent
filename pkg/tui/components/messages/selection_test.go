@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -294,4 +295,56 @@ func TestClickOnCopyLabelFlashesCopied(t *testing.T) {
 	m.handleCopiedFlashExpired(copiedFlashExpiredMsg{Seq: m.copiedFlash.seq})
 	out = ansi.Strip(m.View())
 	assert.Contains(t, out, types.MessageCopyLabel)
+}
+
+func TestSelectionAutoScrollUsesActualViewportOrigin(t *testing.T) {
+	var lines []string
+	for row := range 40 {
+		lines = append(lines, fmt.Sprintf("row-%02d unique", row))
+	}
+	for _, origin := range []int{0, 2, 15, 31} {
+		for _, offset := range []int{0, 7, 30} {
+			for _, localY := range []int{-3, 0, 1, 3, 7, 8, 9, 13} {
+				m := newSelectionModel(lines)
+				m.height = 10
+				m.SetPosition(11, origin)
+				m.scrollOffset = offset
+				m.selection.start(offset+3, 0)
+				m.selection.endLine = offset + max(0, localY)
+				beforeEnd := m.selection.endLine
+				m.selection.mouseY = origin + localY
+				cmd := m.autoScroll()
+				want := offset
+				if localY < 2 && offset > 0 {
+					want--
+				} else if localY >= 8 && offset < 30 {
+					want++
+				}
+				assert.Equal(t, want, m.scrollOffset, "origin=%d offset=%d localY=%d", origin, offset, localY)
+				assert.Equal(t, beforeEnd+want-offset, m.selection.endLine)
+				assert.Equal(t, want != offset, cmd != nil)
+			}
+		}
+	}
+}
+
+func TestSelectionInteriorDragAtLowerPaneCopiesExactRowsWithoutScroll(t *testing.T) {
+	var lines []string
+	for row := range 40 {
+		lines = append(lines, fmt.Sprintf("row-%02d unique", row))
+	}
+	for _, origin := range []int{0, 2, 15, 31} {
+		m := newSelectionModel(lines)
+		m.height = 10
+		m.SetPosition(9, origin)
+		m.scrollOffset = 7
+		m.handleMouseClick(tea.MouseClickMsg{X: 9, Y: origin + 3, Button: tea.MouseLeft})
+		m.handleMouseMotion(tea.MouseMotionMsg{X: 15, Y: origin + 4, Button: tea.MouseLeft})
+		m.autoScroll()
+		require.Equal(t, 7, m.scrollOffset, "interior drag must not invent a bottom-edge scroll")
+		assert.Equal(t, "row-10 unique\nrow-11", m.extractSelectedText())
+		line, col := m.mouseToLineCol(15, origin+4)
+		assert.Equal(t, 11, line)
+		assert.Equal(t, 6, col)
+	}
 }

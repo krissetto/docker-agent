@@ -163,9 +163,8 @@ func (m *model) autoScroll() tea.Cmd {
 	direction := 0
 	var scrollCmd tea.Cmd
 
-	// Use stored screen Y coordinate to check if mouse is in autoscroll region
-	// mouseToLineCol subtracts 2 for header, so viewport-relative Y is mouseY - 2
-	viewportY := max(m.selection.mouseY-2, 0)
+	// Selection and edge scrolling share the actual transcript viewport origin.
+	viewportY := max(m.selection.mouseY-m.yPos, 0)
 
 	if viewportY < scrollThreshold && m.scrollOffset > 0 {
 		// Scroll up - mouse is near top of viewport
