@@ -174,7 +174,7 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	// With queue send mode, session admission immediately projects the pending
 	// FIFO in the sidebar instead of maintaining a local queue/toast mirror.
 	d.Enter().
-		WaitFor(tuitest.Matches(`(?m)- Also, what's 3\+3\?\s*$`)).
+		WaitFor(tuitest.Matches(`(?m)- Also, what's 3\+3\?\s+✎ ×\s*$`)).
 		WaitFor(tuitest.Contains("Also, what's 3+3?"))
 	d.Assert(tuitest.Absent("Message sent to the working agent"))
 	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "exactly one pending FIFO row")
@@ -190,7 +190,7 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
 		WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))
-	d.Assert(tuitest.Not(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s*$`)))
+	d.Assert(tuitest.Not(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s+✎ ×\s*$`)))
 	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "FIFO promotion renders the accepted input once in transcript")
 	select {
 	case advanced := <-promoted:

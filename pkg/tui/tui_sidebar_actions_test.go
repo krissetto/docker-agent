@@ -128,6 +128,13 @@ func TestActualProgramQueueRemoveUsesExactCanonicalIDAndEvent(t *testing.T) {
 			index := strings.LastIndex(row, "×")
 			removeX := ansi.StringWidth(row[:index])
 			program.Send(tea.MouseClickMsg{X: removeX, Y: y, Button: tea.MouseLeft})
+			_ = sidebarProgramSnapshot(t, program) // Drain the first click before checking backend effects.
+			select {
+			case <-handle.removed:
+				t.Fatal("arming removal must not withdraw the pending message")
+			default:
+			}
+			program.Send(tea.MouseClickMsg{X: removeX, Y: y, Button: tea.MouseLeft})
 			select {
 			case removed := <-handle.removed:
 				require.Equal(t, "turn-second-full-ID", removed)
