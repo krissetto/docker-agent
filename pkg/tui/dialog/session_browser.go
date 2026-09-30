@@ -546,7 +546,7 @@ func (d *sessionBrowserDialog) renderBody(prepare bool) string {
 			actions[i].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
 		}
 	}
-	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
+	footer := d.RenderPickerFooter(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

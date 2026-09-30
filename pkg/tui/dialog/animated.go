@@ -276,6 +276,9 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 
 // CleanupDialog releases visual resources without answering or cancelling a prompt.
 func CleanupDialog(dialog Dialog) {
+	if footer, ok := dialog.(interface{ StopFooterHover() }); ok {
+		footer.StopFooterHover()
+	}
 	if cleanup, ok := dialog.(interface{ Cleanup() }); ok {
 		cleanup.Cleanup()
 	}

@@ -66,6 +66,10 @@ func DefaultConfirmKeyMap() ConfirmKeyMap {
 // BaseDialog provides common functionality for dialog implementations.
 // It handles size management, position calculation, and common UI patterns.
 type BaseDialog struct {
+	pickerFooter                          bool
+	footerHover                           animation.Transition
+	footerHoverKey                        string
+	footerHoverAlpha                      float64
 	scrollviews                           []scrollviewRegistration
 	responseSent                          bool
 	width, height                         int

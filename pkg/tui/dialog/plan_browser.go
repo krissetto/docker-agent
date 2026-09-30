@@ -520,7 +520,7 @@ func (d *planBrowserDialog) renderBody(prepare bool) string {
 			actions[i].Disabled = true
 		}
 	}
-	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
+	footer := d.RenderPickerFooter(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

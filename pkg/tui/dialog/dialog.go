@@ -367,9 +367,17 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 			return cmd
 		}
 	}
+	var footerCmd tea.Cmd
+	if footer, ok := d.stack[top].dialog.(interface {
+		UpdateFooterHover(tea.Msg, *animation.Runtime, DialogLayout) tea.Cmd
+	}); ok {
+		row, col := d.stack[top].position(d.width, d.height)
+		footerCmd = footer.UpdateFooterHover(msg, d.runtime, NewDialogLayout(d.stack[top].view(), row, col))
+	}
 	tick, ticking := msg.(animation.TickMsg)
 	wasTickDirty := ticking && tick.Dirty()
 	u, cmd := d.stack[top].dialog.Update(msg)
+	cmd = tea.Batch(cmd, footerCmd)
 	d.stack[top].dialog = u.(Dialog)
 	switch msg.(type) {
 	case animation.TickMsg, tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
@@ -681,6 +689,9 @@ func (d *manager) beginClose(hiding bool) (layout.Model, tea.Cmd) {
 	d.drag.active = false
 	top := len(d.stack) - 1
 	d.stack[top].closeHovered = false
+	if footer, ok := d.stack[top].dialog.(interface{ StopFooterHover() }); ok {
+		footer.StopFooterHover()
+	}
 	if stopper, ok := d.stack[top].dialog.(interface{ StopAnimations() }); ok {
 		stopper.StopAnimations()
 	}

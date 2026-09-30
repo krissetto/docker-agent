@@ -787,7 +787,7 @@ func (d *workingDirPickerDialog) renderBody(prepare bool) string {
 			}
 		}
 	}
-	footer := d.RenderActions(inner+d.bodyScroll.ReservedCols(), actions...)
+	footer := d.RenderPickerFooter(inner+d.bodyScroll.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

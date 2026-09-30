@@ -390,7 +390,7 @@ func (d *modelPickerDialog) renderBody(prepare bool) string {
 	actions := actionsForKeys("enter", "Use model")
 	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
 	actions = append(actions, actionsForKeys(d.refresh.Help().Key, "Refresh")...)
-	footer := d.RenderActions(d.regionWidth(inner), actions...)
+	footer := d.RenderPickerFooter(d.regionWidth(inner), actions...)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }
 

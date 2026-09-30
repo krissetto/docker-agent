@@ -366,7 +366,7 @@ func (d *filePickerDialog) renderBody(prepare bool) string {
 			}
 		}
 	}
-	footer := d.RenderActions(d.regionWidth(inner), actions...)
+	footer := d.RenderPickerFooter(d.regionWidth(inner), actions...)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }
 
