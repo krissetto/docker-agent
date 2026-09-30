@@ -160,7 +160,7 @@ func (d *panesDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle(d.title, inner, styles.DialogTitleStyle) + "\n" + input.View()
+	header := RenderDialogHeader(d.title, inner, styles.DialogTitleStyle) + "\n" + input.View()
 	lines := make([]string, 0, len(d.filtered))
 	for index, item := range d.filtered {
 		prefix := "  "
@@ -177,6 +177,9 @@ func (d *panesDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No matching panes")}
 	}
-	footer := styles.MutedStyle.Render(ansi.Truncate("↑/↓ choose · Enter/double-click apply · Esc cancel", inner, ""))
+	actions := actionsForKeys("enter", "Apply")
+	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
+	footer := d.RenderPickerFooter(inner, actions...)
+	footer = d.PickerFooterHelp(footer, "↑↓ choose · Esc cancel", inner)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }

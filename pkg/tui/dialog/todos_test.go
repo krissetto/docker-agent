@@ -61,7 +61,7 @@ func TestLongUnicodeTodoRemainsScrollable(t *testing.T) {
 	d := NewTodosDialog(messages.TodoScope{}, []session.Todo{{ID: "long", Status: "pending", Description: strings.Repeat("界é long description ", 60) + "END-OF-TODO"}}, "").(*todosDialog)
 	for _, width := range []int{80, 30, 15} {
 		d.SetSize(width, 14)
-		for range 80 {
+		for range len(d.lines.Lines()) {
 			d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 		}
 		require.Positive(t, d.scrollview.ScrollOffset())
@@ -251,6 +251,9 @@ func TestTodosManagerEscapeCancelsRemovalAndOcclusionStopsHover(t *testing.T) {
 	require.Nil(t, cmd)
 	require.Empty(t, d.removeArmed)
 	require.False(t, mgr.Closing())
+	for r.HasActive() {
+		mgr.Update(acceptedDialogTick(r, r.Continue()))
+	}
 	mgr.Update(tea.MouseMotionMsg{X: d.bodyX + 5, Y: d.bodyY})
 	require.True(t, d.hoverAnimation.IsActive())
 	mgr.Update(OpenDialogMsg{Model: NewTodosDialog(messages.TodoScope{}, nil, "")})

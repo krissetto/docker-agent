@@ -126,7 +126,7 @@ func (d *snapshotsDialog) renderBody(prepare bool) string {
 	width := d.ComputeDialogWidth(snapshotsDialogWidthPercent, snapshotsDialogMinWidth, snapshotsDialogMaxWidth)
 	inner := d.BodyContentWidth(width)
 
-	header := RenderTitle("Snapshots", inner, styles.DialogTitleStyle)
+	header := RenderDialogHeader("Snapshots", inner, styles.DialogTitleStyle)
 	footer := d.RenderActionKeys(inner, d.helpKeys()...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, d.bodyContent(inner), footer)

@@ -42,7 +42,7 @@ func TestPanesDialogCompactIdentityAndKeyboardExactOnce(t *testing.T) {
 	assert.Contains(t, view, colored, "root-supplied canonical agent color is preserved")
 	assert.NotContains(t, plain, "opaque-")
 	assert.NotContains(t, plain, "Commands")
-	assert.Empty(t, d.actions, "choices are not an action-button wall")
+	assert.Len(t, d.actions, 1, "only Apply is a primary action")
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	assert.Nil(t, cmd)
 	assert.Zero(t, calls)

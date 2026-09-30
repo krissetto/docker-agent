@@ -75,7 +75,7 @@ func (b *BaseDialog) RenderPickerFooter(width int, actions ...Action) string {
 	}
 	if primary >= 0 {
 		a := actions[primary]
-		label := strings.TrimSpace(a.Label)
+		label := a.Label
 		if primary == selected {
 			label += " ↵"
 		} else {
@@ -102,6 +102,18 @@ func (b *BaseDialog) RenderPickerFooter(width int, actions ...Action) string {
 	}
 	flush()
 	return strings.Join(lines, "\n")
+}
+
+// PickerFooterHelp appends noninteractive navigation without inventing action targets.
+func (b *BaseDialog) PickerFooterHelp(footer, help string, width int) string {
+	text := styles.MutedStyle.Render(ansi.Wrap(help, max(1, width), ""))
+	for _, line := range strings.Split(text, "\n") {
+		b.actionRows = append(b.actionRows, dialogActionRow{text: ansi.Strip(line)})
+	}
+	if footer == "" {
+		return text
+	}
+	return footer + "\n" + text
 }
 
 func (b *BaseDialog) UpdateFooterHover(msg tea.Msg, runtime *animation.Runtime, dl DialogLayout) tea.Cmd {

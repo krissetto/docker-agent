@@ -1,9 +1,9 @@
 package dialog
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -132,7 +132,7 @@ func (d *closeRootWithSubagentsDialog) content() (style lipgloss.Style, width in
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	header = RenderTitle("Close tab", contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader("Close tab", contentWidth, styles.DialogTitleStyle)
 	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("Close this tab? Subagents keep running and their open tabs stay open.")
 	footer = d.RenderConfirmButtons(contentWidth)
 	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer

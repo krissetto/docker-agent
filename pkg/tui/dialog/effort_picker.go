@@ -143,7 +143,7 @@ func (d *effortPickerDialog) renderBody(prepare bool) string {
 		rows = append(rows, toolcommon.TruncateText(d.renderLevel(level, i == d.selected), inner))
 	}
 
-	header := RenderTitle("Select Reasoning Effort", inner, styles.DialogTitleStyle)
+	header := RenderDialogHeader("Select Reasoning Effort", inner, styles.DialogTitleStyle)
 	actions := actionsForKeys("enter", "Use effort")
 	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.levels)
 	footer := d.RenderActions(inner, actions...)

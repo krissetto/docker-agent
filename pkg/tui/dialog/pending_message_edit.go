@@ -201,7 +201,7 @@ func (d *pendingMessageEditDialog) beginSave() tea.Cmd {
 
 func (d *pendingMessageEditDialog) content() (width int, header, body, footer string) {
 	width = d.ComputeDialogWidth(85, 50, 110)
-	header = RenderTitle("Edit queued message", d.ContentWidth(width, 2), styles.DialogTitleStyle)
+	header = RenderDialogHeader("Edit queued message", d.ContentWidth(width, 2), styles.DialogTitleStyle)
 	input := d.input
 	input.SetStyles(styles.InputStyle)
 	body = input.View()

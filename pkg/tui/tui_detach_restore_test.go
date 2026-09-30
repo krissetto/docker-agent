@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,8 +87,10 @@ func TestActualProgramCloseParentDetachesAndRetainsNestedBackgroundViews(t *test
 	root.supervisor.SetProgram(program)
 	program.Send(messages.CloseTabMsg{SessionID: parent.ID})
 	require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).open }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		return strings.Contains(ansi.Strip(sidebarProgramSnapshot(t, program).content), "Subagents keep running")
+	}, time.Second, time.Millisecond, "wait for shared reveal before reading prompt text")
 	prompt := sidebarProgramSnapshot(t, program)
-	require.Contains(t, ansi.Strip(prompt.content), "Subagents keep running")
 	require.Len(t, prompt.tabIDs, 3)
 	program.Send(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	require.Eventually(t, func() bool { return !sidebarProgramSnapshot(t, program).open }, time.Second, time.Millisecond)

@@ -377,7 +377,7 @@ func (d *modelPickerDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle("Select Model", inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + d.renderColumnHeader(inner)
+	header := RenderDialogHeader("Select Model", inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + d.renderColumnHeader(inner)
 	if d.errMsg != "" {
 		header += "\n" + styles.ErrorStyle.Render(d.errMsg)
 	}

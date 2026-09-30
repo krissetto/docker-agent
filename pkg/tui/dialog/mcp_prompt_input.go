@@ -265,7 +265,7 @@ func (d *MCPPromptInputDialog) buildBody(innerWidth int) (body string, fieldStar
 func (d *MCPPromptInputDialog) content() (width int, header, body, footer string) {
 	dialogWidth, contentWidth := d.mcpPromptDialogDimensions()
 	body, _, _ = d.buildBody(d.BodyContentWidth(dialogWidth))
-	header = RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
 	footer = d.RenderActions(contentWidth, Action{Label: "Execute", Default: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}, Disabled: !d.canExecute()})
 	return dialogWidth, header, body, footer
 }

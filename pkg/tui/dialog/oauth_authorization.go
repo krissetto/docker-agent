@@ -126,7 +126,7 @@ func (d *oauthAuthorizationDialog) content() (style lipgloss.Style, width int, h
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 	serverInfo := styles.InfoStyle.Width(bodyWidth).Render(fmt.Sprintf("Server: %s (remote)", d.serverURL))
 	description := styles.DialogContentStyle.Width(bodyWidth).Render("This server requires OAuth authentication to access its tools. Your browser will open automatically to complete the authorization process.")
-	header = RenderTitle("OAuth Authorization Required", contentWidth, styles.DialogTitleInfoStyle)
+	header = RenderDialogHeader("OAuth Authorization Required", contentWidth, styles.DialogTitleInfoStyle)
 	body = NewContent(bodyWidth).AddContent(serverInfo).AddSpace().AddContent(description).
 		AddSpace().AddContent(styles.DialogContentStyle.Width(bodyWidth).Render("After authorizing in your browser, return here and the agent will continue automatically.")).Build()
 	footer = d.RenderActions(contentWidth,

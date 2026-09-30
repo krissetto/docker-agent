@@ -149,7 +149,7 @@ func (d *maxIterationsDialog) content() (style lipgloss.Style, width int, header
 	messageText := "The agent may be stuck in a loop. This can happen with smaller or less capable models."
 	questionText := "Do you want to continue for 10 more iterations?"
 
-	header = RenderTitle("Maximum Iterations Reached", contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader("Maximum Iterations Reached", contentWidth, styles.DialogTitleStyle)
 	body = NewContent(bodyWidth).
 		AddContent(styles.DialogContentStyle.Render(wrapDisplayText(infoText, bodyWidth))).
 		AddSpace().AddContent(styles.DialogContentStyle.Render(wrapDisplayText(messageText, bodyWidth))).

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
@@ -278,7 +278,7 @@ func (d *planDetailDialog) renderBody(prepare bool) string {
 			actions[i].Disabled = d.plan.Version == nil
 		}
 	}
-	footer := d.RenderActions(inner+d.scrollview.ReservedCols(), actions...)
+	footer := d.RenderPickerFooter(inner+d.scrollview.ReservedCols(), actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(d.headerLines(inner), "\n"), strings.Join(d.renderContent(inner), "\n"), footer)
 		return ""

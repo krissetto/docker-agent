@@ -344,7 +344,7 @@ func (d *filePickerDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle("Attach File", inner, styles.DialogTitleStyle) + "\n" + styles.MutedStyle.Render(toolcommon.TruncateText(d.currentDir, inner)) + "\n" + input.View()
+	header := RenderDialogHeader("Attach File", inner, styles.DialogTitleStyle) + "\n" + styles.MutedStyle.Render(toolcommon.TruncateText(d.currentDir, inner)) + "\n" + input.View()
 	var lines []string
 	for i, entry := range d.filtered {
 		lines = append(lines, d.renderEntry(entry, i == d.selected, inner))

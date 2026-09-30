@@ -339,6 +339,7 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if (msg.String() == "r" || msg.String() == "R") && !d.responseSent {
 			d.FocusDefaultAction()
 			d.BlurActions()
+			revealSelection = true
 			return d, core.CmdHandler(OpenDialogMsg{Model: NewToolRejectionReasonDialog(d.msg.SessionID, d.msg.RequestID)})
 		}
 
@@ -368,7 +369,7 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 func (d *toolConfirmationDialog) content() (style lipgloss.Style, width int, header, body, footer string) {
 	dialogWidth, contentWidth := d.dialogDimensions()
 	bodyWidth := d.BodyContentWidth(dialogWidth)
-	header = RenderTitle(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader(toolconfirm.Title, contentWidth, styles.DialogTitleStyle)
 	footer = d.renderNavigation(contentWidth)
 	var parts []string
 	if arguments := toolconfirm.Preview(d.msg.ToolCall, d.msg.ToolDefinition, bodyWidth); arguments != "" {

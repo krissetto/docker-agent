@@ -7,10 +7,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -415,7 +415,7 @@ func (d *contextDialog) renderContextContent(contentWidth, maxHeight int, prepar
 
 	if prepare {
 		width, _, _ := d.dialogSize()
-		footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), d.helpKeys()...)
+		footer := d.RenderPickerFooter(contentWidth+d.scrollview.ReservedCols(), actionsForKeys(d.helpKeys()...)...)
 		d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(lines[:contextHeaderLines], "\n"), strings.Join(lines[contextHeaderLines:], "\n"), footer)
 		return ""
 	}
@@ -734,7 +734,7 @@ func renderContextRow(row *contextRow, scale int64, labelWidth int, markerCol co
 
 func (d *contextDialog) applyScrolling(allLines []string, contentWidth, _ int) string {
 	width, _, _ := d.dialogSize()
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), d.helpKeys()...)
+	footer := d.RenderPickerFooter(contentWidth+d.scrollview.ReservedCols(), actionsForKeys(d.helpKeys()...)...)
 	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:contextHeaderLines], "\n"), strings.Join(allLines[contextHeaderLines:], "\n"), footer)
 }
 

@@ -2,9 +2,9 @@
 package dialog
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -132,7 +132,7 @@ func (d *tourOfferDialog) content() (style lipgloss.Style, width int, header, bo
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 
-	header = RenderTitle("Welcome to docker agent 👋", contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader("Welcome to docker agent 👋", contentWidth, styles.DialogTitleStyle)
 	content := NewContent(bodyWidth).
 		AddContent(styles.BaseStyle.Width(bodyWidth).Render(
 			"First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes."))

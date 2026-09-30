@@ -5,9 +5,9 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -143,7 +143,7 @@ func (d *URLElicitationDialog) content() (style lipgloss.Style, width int, heade
 	bodyWidth := d.BodyContentWidth(dialogWidth)
 
 	content := NewContent(bodyWidth)
-	header = RenderTitle("MCP Server Request", contentWidth, styles.DialogTitleStyle)
+	header = RenderDialogHeader("MCP Server Request", contentWidth, styles.DialogTitleStyle)
 
 	// Message from server
 	if d.message != "" {

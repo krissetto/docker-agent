@@ -488,7 +488,7 @@ func (d *planBrowserDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.filterInput = input
 	}
-	header := RenderTitle(fmt.Sprintf("Plans (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + input.View()
+	header := RenderDialogHeader(fmt.Sprintf("Plans (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + input.View()
 	lines := make([]string, 0, len(d.filtered))
 	for i, p := range d.filtered {
 		lines = append(lines, d.renderPlan(p, i == d.selected, inner))
@@ -738,7 +738,7 @@ func (d *planStatusDialog) renderBody(prepare bool) string {
 		d.input = input
 	}
 
-	header := RenderTitle(fmt.Sprintf("Set status: %s (v%d)", d.name, d.version), contentWidth, styles.DialogTitleStyle)
+	header := RenderDialogHeader(fmt.Sprintf("Set status: %s (v%d)", d.name, d.version), contentWidth, styles.DialogTitleStyle)
 	actions := actionsForKeys("esc", "Cancel", "enter", "Apply")
 	actions[1].Disabled = strings.TrimSpace(d.input.Value()) == ""
 	footer := d.RenderActions(contentWidth, actions...)
@@ -827,7 +827,7 @@ func (d *planDeleteConfirmDialog) renderBody(prepare bool) string {
 	dialogWidth := d.ComputeDialogWidth(60, 40, 70)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
 
-	header := RenderTitle("Delete plan", contentWidth, styles.DialogTitleStyle)
+	header := RenderDialogHeader("Delete plan", contentWidth, styles.DialogTitleStyle)
 	body := fmt.Sprintf("Delete shared plan %q at version %d? This cannot be undone.", d.name, d.version)
 	footer := d.RenderConfirmButtons(contentWidth)
 	if prepare {
@@ -934,7 +934,7 @@ func (d *planNameDialog) renderBody(prepare bool) string {
 		d.input = input
 	}
 
-	header := RenderTitle("New shared plan", contentWidth, styles.DialogTitleStyle)
+	header := RenderDialogHeader("New shared plan", contentWidth, styles.DialogTitleStyle)
 	actions := actionsForKeys("esc", "Cancel", "enter", "Open editor")
 	actions[1].Disabled = strings.TrimSpace(d.input.Value()) == ""
 	footer := d.RenderActions(contentWidth, actions...)

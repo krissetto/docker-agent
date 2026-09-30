@@ -408,6 +408,11 @@ func RenderTitle(title string, contentWidth int, style lipgloss.Style) string {
 	return style.Width(max(1, contentWidth)).Render(ansi.Truncate(title, max(1, contentWidth), "…"))
 }
 
+// RenderDialogHeader keeps the title and separator convention explicit at each dialog boundary.
+func RenderDialogHeader(title string, width int, style lipgloss.Style) string {
+	return RenderTitle(title, width, style) + "\n" + RenderSeparator(width)
+}
+
 // RenderSeparator renders a horizontal separator line.
 func RenderSeparator(contentWidth int) string {
 	separatorWidth := max(1, contentWidth)

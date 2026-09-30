@@ -194,7 +194,7 @@ func (d *subagentsDialog) Position() (int, int) { return d.CenterDialog(d.View()
 func (d *subagentsDialog) View() string         { return d.renderBody(false) }
 func (d *subagentsDialog) renderBody(prepare bool) string {
 	width, _, inner := d.dialogSize()
-	header := RenderTitle("Subagents", inner, styles.DialogTitleStyle)
+	header := RenderDialogHeader("Subagents", inner, styles.DialogTitleStyle)
 	// Use the body's actual cell budget, including compact frame padding.
 	_, _, bodyInner, _ := d.bodyFrame(styles.DialogStyle, width)
 	inner = max(1, bodyInner-d.scrollview.ReservedCols())
@@ -205,7 +205,10 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No subagents in this session.")}
 	}
-	footer := styles.MutedStyle.Render(ansi.Truncate("↑↓ choose · ←→/Space fold · Enter/double-click attach · Esc close", inner, ""))
+	actions := actionsForKeys("enter", "Attach")
+	actions[0].Disabled = d.selectedID() == ""
+	footer := d.RenderPickerFooter(inner, actions...)
+	footer = d.PickerFooterHelp(footer, "↑↓ choose · ←→/Space fold · Esc close", inner)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

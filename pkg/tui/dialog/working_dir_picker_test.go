@@ -66,7 +66,7 @@ func TestWorkingDirectorySharedHeaderSpacingAndTabHitGeometry(t *testing.T) {
 			row, col := d.Position()
 			require.LessOrEqual(t, lipgloss.Width(view), size[0])
 			require.LessOrEqual(t, lipgloss.Height(view), size[1])
-			tabY, visible := d.headerRow(1)
+			tabY, visible := d.headerRow(2)
 			if !visible {
 				for y := row; y < row+lipgloss.Height(view); y++ {
 					require.Equal(t, -1, d.tabClickTarget(d.bodyX, y))
@@ -78,7 +78,7 @@ func TestWorkingDirectorySharedHeaderSpacingAndTabHitGeometry(t *testing.T) {
 			if size[1] >= 12 {
 				titleY, titleVisible := d.headerRow(0)
 				require.True(t, titleVisible)
-				require.Equal(t, titleY+2, tabY, "one shared blank row separates title and tabs")
+				require.Equal(t, titleY+3, tabY, "title gap and divider precede tabs")
 				require.Empty(t, strings.Trim(strings.TrimSpace(lines[titleY-row+1]), "│ "))
 			}
 			for _, region := range d.tabRegions {

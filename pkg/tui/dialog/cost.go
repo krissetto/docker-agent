@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
@@ -566,7 +566,7 @@ func (d *costDialog) renderUsageLine(u totalUsage, totalCost float64, labelWidth
 
 func (d *costDialog) applyScrolling(allLines []string, contentWidth, _ int) string {
 	width, _, _ := d.dialogSize()
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy")
+	footer := d.RenderPickerFooter(contentWidth+d.scrollview.ReservedCols(), actionsForKeys("c", "Copy")...)
 	return d.RenderScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
 }
 
@@ -742,7 +742,7 @@ func (d *costDialog) prepareContent(contentWidth int) {
 	}
 	width, _, _ := d.dialogSize()
 	allLines := d.cachedLines
-	footer := d.RenderActionKeys(contentWidth+d.scrollview.ReservedCols(), "c", "Copy")
+	footer := d.RenderPickerFooter(contentWidth+d.scrollview.ReservedCols(), actionsForKeys("c", "Copy")...)
 	d.PrepareScrollableBody(styles.DialogStyle, width, strings.Join(allLines[:3], "\n"), strings.Join(allLines[3:], "\n"), footer)
 }
 

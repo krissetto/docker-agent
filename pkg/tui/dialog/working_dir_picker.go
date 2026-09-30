@@ -644,7 +644,7 @@ func (d *workingDirPickerDialog) setSection(s dirSection) {
 
 // tabClickTarget returns the section index if the click is on a tab, or -1.
 func (d *workingDirPickerDialog) tabClickTarget(x, y int) int {
-	tabY, visible := d.headerRow(1)
+	tabY, visible := d.headerRow(2)
 	if !visible || y != tabY {
 		return -1
 	}
@@ -753,7 +753,7 @@ func (d *workingDirPickerDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle("Select Working Directory", inner, styles.DialogTitleStyle) + "\n" + d.renderTabs(inner)
+	header := RenderDialogHeader("Select Working Directory", inner, styles.DialogTitleStyle) + "\n" + d.renderTabs(inner)
 	if d.section == sectionBrowse {
 		header += "\n" + input.View()
 	}

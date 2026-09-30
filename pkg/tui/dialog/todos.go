@@ -189,7 +189,7 @@ func (d *todosDialog) Position() (int, int) { return d.CenterDialog(d.View()) }
 func (d *todosDialog) View() string         { return d.renderBody(false) }
 func (d *todosDialog) renderBody(prepare bool) string {
 	width, _, inner := d.dialogSize()
-	header := RenderTitle("Todos", inner, styles.DialogTitleStyle)
+	header := RenderDialogHeader("Todos", inner, styles.DialogTitleStyle)
 	_, _, bodyWidth, _ := d.bodyFrame(styles.DialogStyle, width)
 	inner = max(1, bodyWidth-d.scrollview.ReservedCols())
 	d.prepareRows(inner)
@@ -205,7 +205,13 @@ func (d *todosDialog) renderBody(prepare bool) string {
 	} else if d.errorText != "" {
 		hint = d.errorText
 	}
-	footer := styles.MutedStyle.Render(ansi.Truncate(hint, inner, ""))
+	if d.removeArmed == "" && !d.busy && d.errorText == "" && inner < 60 {
+		hint = "↑↓ choose · Space status · d remove · Esc close"
+	}
+	if inner < 20 && d.removeArmed == "" && !d.busy && d.errorText == "" {
+		hint = "↑↓ · Space · d · Esc"
+	}
+	footer := styles.MutedStyle.Render(ansi.Wrap(hint, inner, ""))
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

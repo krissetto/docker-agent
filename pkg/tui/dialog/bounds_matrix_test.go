@@ -7,15 +7,18 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
@@ -24,6 +27,31 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 		name string
 		new  func() Dialog
 	}{
+		{"exit", NewExitConfirmationDialog},
+		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }},
+		{"max-iterations", func() Dialog { return NewMaxIterationsDialog(10, "s", "r") }},
+		{"tool-confirmation", func() Dialog {
+			return NewToolConfirmationDialog(nil, newConfirmationEvent(nil), &service.SessionState{})
+		}},
+		{"tour", func() Dialog { return NewTourOfferDialog(true) }},
+		{"oauth", func() Dialog { return NewOAuthAuthorizationDialog("https://example.test", ElicitationRef{}) }},
+		{"url", func() Dialog {
+			return NewURLElicitationDialog(t.Context(), "Request", "https://example.test", ElicitationRef{})
+		}},
+		{"elicitation", func() Dialog { return NewElicitationDialog("Request", nil, nil, ElicitationRef{}) }},
+		{"mcp", func() Dialog { return NewMCPPromptInputDialog("prompt", mcptools.PromptInfo{}) }},
+		{"pending", func() Dialog { return NewPendingMessageEditDialog("s", "t", "draft", 1, nil) }},
+		{"multi-choice", func() Dialog {
+			return NewMultiChoiceDialog(MultiChoiceConfig{Title: "Choose", AllowCustom: true, AllowSecondary: true})
+		}},
+		{"tool-reason", func() Dialog { return NewToolRejectionReasonDialog("s", "r") }},
+		{"panes", func() Dialog { return NewPanesDialog("Panes", nil) }},
+		{"subagents", func() Dialog { return NewSubagentsDialog(nil, nil) }},
+		{"todos", func() Dialog { return NewTodosDialog(messages.TodoScope{}, nil, "") }},
+		{"panel-details", func() Dialog { return NewPanelDetailsDialog("Panel details", []string{"line"}) }},
+		{"image", func() Dialog {
+			return NewImageAttachmentPreviewDialog(nil, "image.png", "image/png", previewPNG(t), true)
+		}},
 		{"ctrl-k", func() Dialog { return NewCommandPaletteDialog([]commands.Category{{Name: "General"}}) }},
 		{"settings", func() Dialog { return NewSettingsDialog(messages.Preferences{}, true) }},
 		{"settings-behavior", func() Dialog {
@@ -72,6 +100,15 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 				require.GreaterOrEqual(t, col, 0)
 				require.LessOrEqual(t, col+lipgloss.Width(view), size.w)
 				require.LessOrEqual(t, row+lipgloss.Height(view), size.h)
+				if size.w == 120 && size.h == 40 {
+					divider := false
+					for _, line := range strings.Split(ansi.Strip(view), "\n") {
+						if strings.Contains(line, "────") && !strings.ContainsAny(line, "╭╰┌└") {
+							divider = true
+						}
+					}
+					require.True(t, divider, "every standard-size dialog includes a title separator")
+				}
 			})
 		}
 	}

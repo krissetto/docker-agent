@@ -631,7 +631,7 @@ func (d *multiChoiceDialog) buildBody(contentWidth int) (string, []clickableRang
 func (d *multiChoiceDialog) content() (width int, header, body, footer string) {
 	dialogWidth := d.computeDialogWidth()
 	body, _ = d.buildBody(d.BodyContentWidth(dialogWidth))
-	header = RenderTitle(d.config.Title, d.ContentWidth(dialogWidth, 2), styles.DialogTitleStyle)
+	header = RenderDialogHeader(d.config.Title, d.ContentWidth(dialogWidth, 2), styles.DialogTitleStyle)
 	footer = d.renderHelpAndButtons(d.ContentWidth(dialogWidth, 2))
 	return dialogWidth, header, body, footer
 }
