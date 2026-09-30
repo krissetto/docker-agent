@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -22,6 +23,9 @@ const (
 // contextBar renders the expandable bar above the editor that displays
 // attachment pills.
 type contextBar struct {
+	hoverAnimation  animation.Subscription
+	hoverBound      bool
+	hoverValues     map[string]bannerHoverValue
 	attachments     []bannerItem
 	height          int
 	maxHeight       int
@@ -57,6 +61,7 @@ func (b *contextBar) SetItems(items []bannerItem) {
 	if slices.Equal(b.attachments, items) {
 		return
 	}
+	b.cancelHover()
 	b.attachments = slices.Clone(items)
 	b.regions = nil
 	if len(items) == 0 {
@@ -100,6 +105,7 @@ func (b *contextBar) SetMaxHeight(height int) {
 	if b.maxHeight == height {
 		return
 	}
+	b.cancelHover()
 	b.maxHeight = height
 	b.regions = nil
 	b.reflow()
@@ -116,6 +122,7 @@ func (b *contextBar) SetSize(totalWidth int) {
 	if b.width == width && b.themeGeneration == styles.ThemeGeneration() {
 		return
 	}
+	b.cancelHover()
 	b.width = width
 	b.reflow()
 }
@@ -164,6 +171,8 @@ func (b *contextBar) reflow() {
 		if b.focused {
 			right = styles.AttachmentSizeStyle.Underline(true).Render(ansi.Strip(right))
 		}
+		countWidth := max(0, ansi.StringWidth(right)-2)
+		right = styles.HoverText(ansi.Cut(right, 0, countWidth), b.hoverValues["count"].value, styles.TextPrimary) + ansi.Cut(right, countWidth, ansi.StringWidth(right))
 	}
 
 	var rows []string
@@ -180,7 +189,7 @@ func (b *contextBar) reflow() {
 			if len(rows) >= b.maxHeight {
 				break
 			}
-			pill := ansi.Truncate(renderAttachmentPill(item), innerWidth, "…")
+			pill := ansi.Truncate(b.renderPill(item), innerWidth, "…")
 			b.regions = append(b.regions, bannerRegion{start: 0, end: ansi.StringWidth(pill), y: len(rows), item: item})
 			rows = append(rows, pill+strings.Repeat(" ", max(0, innerWidth-ansi.StringWidth(pill))))
 		}
@@ -210,9 +219,20 @@ func (b *contextBar) prepareSummary(innerWidth int, count string) (string, strin
 	if right == "" {
 		leftBudget = innerWidth
 	}
+	fullWidth := 0
+	for i, item := range b.attachments {
+		fullWidth += ansi.StringWidth(renderAttachmentPill(item))
+		if i > 0 {
+			fullWidth += 2
+		}
+	}
+	overflowCue := len(b.attachments) > 1 && fullWidth > leftBudget && leftBudget >= 3
+	if overflowCue {
+		leftBudget = max(0, leftBudget-2)
+	}
 	var left string
 	for i, item := range b.attachments {
-		pill := renderAttachmentPill(item)
+		pill := b.renderPill(item)
 		start := ansi.StringWidth(left)
 		if i > 0 {
 			start += 2
@@ -230,16 +250,19 @@ func (b *contextBar) prepareSummary(innerWidth int, count string) (string, strin
 		}
 		left += pill
 	}
+	if len(b.hidden) > 0 && overflowCue {
+		left += " …"
+	}
 	return left, right
 }
 
 func (b *contextBar) ToggleAt(x, y int) bool {
-	r := b.toggleRegion
-	x -= bannerContentOffset
-	return b.canExpand && y == r.y && x >= r.start && x < r.end
+	return b.canExpand && x >= 0 && x < b.width && y >= 0 && y < b.height
 }
 
-func renderAttachmentPill(item bannerItem) string {
+func renderAttachmentPill(item bannerItem) string { return renderHoveredAttachmentPill(item, 0) }
+
+func renderHoveredAttachmentPill(item bannerItem, progress float64) string {
 	label := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '
@@ -247,7 +270,7 @@ func renderAttachmentPill(item bannerItem) string {
 		return r
 	}, ansi.Strip(item.label))
 	name, size := parseLabel(label)
-	pill := styles.AttachmentIconStyle.Render("📎 ") + styles.AttachmentBadgeStyle.Render(name)
+	pill := styles.AttachmentIconStyle.Render("📎 ") + styles.HoverText(styles.AttachmentBadgeStyle.Render(name), progress, styles.TextPrimary)
 	if size != "" {
 		pill += " " + styles.AttachmentSizeStyle.Render(size)
 	}

@@ -82,6 +82,9 @@ func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 // updateDialogCmd forwards a message to the dialog manager and returns its cmd.
 func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	if opened, opening := msg.(dialog.OpenDialogMsg); opening {
+		if hover, ok := m.editor.(editor.BannerHover); ok && hover.CancelBannerHover() {
+			m.viewCacheValid = false
+		}
 		m.cancelInteractionHint()
 		if m.panePicker == nil || m.panePicker.dialog != opened.Model {
 			m.panePicker = nil

@@ -819,6 +819,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 // editorOpts returns the editor.Option slice derived from the current appModel.
 func (m *appModel) editorOpts() []editor.Option {
 	opts := []editor.Option{
+		editor.WithAnimationRuntime(m.ar),
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
 			completions.NewFileCompletion(m.ctx()),
@@ -851,7 +852,7 @@ func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *sessi
 	ss := service.NewSessionState(sess)
 	cp := chat.New(m.ar, m.ctx(), a, ss, m.chatPageOpts()...)
 	cp.SetRoutingID(tabID)
-	opts := []editor.Option{editor.WithCompletions(completions.NewCommandCompletion(m.commandCategories()), completions.NewFileCompletion(m.ctx()))}
+	opts := []editor.Option{editor.WithAnimationRuntime(m.ar), editor.WithCompletions(completions.NewCommandCompletion(m.commandCategories()), completions.NewFileCompletion(m.ctx()))}
 	if a.IsReadOnly() {
 		opts = append(opts, editor.WithReadOnly())
 	}
@@ -1019,7 +1020,20 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg, tea.MouseClickMsg, tea.MouseWheelMsg, messages.WheelCoalescedMsg:
 		promptCmd = tea.Batch(m.cancelInteractionHint(), m.clearResponsePrompt())
 	}
+	previousEditor := m.editor
 	model, cmd := m.update(msg)
+	if previousEditor != m.editor || m.dialogMgr.Open() || m.tickPaused {
+		if hover, ok := previousEditor.(editor.BannerHover); ok {
+			if hover.CancelBannerHover() {
+				m.viewCacheValid = false
+			}
+		}
+		if hover, ok := m.editor.(editor.BannerHover); ok {
+			if hover.CancelBannerHover() {
+				m.viewCacheValid = false
+			}
+		}
+	}
 	cmd = tea.Batch(promptCmd, cmd)
 	if !tick && m.responsePrompt.sessionID != "" && (!m.chatPage.IsWorking() || m.dialogMgr.Open() || m.responsePrompt.generation != m.responseRunGeneration) {
 		cmd = tea.Batch(cmd, m.clearResponsePrompt())
@@ -1126,6 +1140,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		msg = accepted
+		if hover, ok := m.editor.(editor.BannerHover); ok && !m.tickPaused {
+			hover.TickBannerHover(msg)
+		}
 		// Consume but do not fan out or continue ticks while blurred. The
 		// Update epilogue re-arms on focus, or keeps a still-outstanding lease.
 		if m.tickPaused {
@@ -3630,6 +3647,17 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 // handleMouseMotion routes mouse motion events with adjusted coordinates.
 func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if hover, ok := m.editor.(editor.BannerHover); ok {
+		if m.dialogMgr.Open() || m.isDragging || m.paneGesture != nil || m.chatPage.IsSelecting() {
+			if hover.CancelBannerHover() {
+				m.viewCacheValid = false
+			}
+		} else if m.hitTestRegion(msg.Y) == regionContextBar {
+			hover.HoverBanner(msg.X, msg.Y-m.composerLayout().bannerTop)
+		} else {
+			hover.HoverBanner(-1, -1)
+		}
+	}
 	if cmd, captured := m.routeMessagesScrollbar(msg, false); captured {
 		return m, cmd
 	}

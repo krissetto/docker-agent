@@ -30,8 +30,10 @@ func TestAttachmentBannerMeaningfulOverflowRouting(t *testing.T) {
 	before := root.editor.BannerHeight()
 	for _, point := range [][2]int{{0, 0}, {20, 0}, {20, 1}, {0, 2}} {
 		root.handleMouseClick(tea.MouseClickMsg{X: point[0], Y: root.composerLayout().bannerTop + point[1], Button: tea.MouseLeft})
-		require.Equal(t, before, root.editor.BannerHeight())
-		require.False(t, root.editor.IsContextBarFocused(), "blank and border clicks do not steal focus")
+		require.Greater(t, root.editor.BannerHeight(), before, "blank and border clicks expand real overflow")
+		require.True(t, root.editor.IsContextBarFocused())
+		root.handleMouseClick(tea.MouseClickMsg{X: point[0], Y: root.composerLayout().bannerTop + point[1], Button: tea.MouseLeft})
+		require.Equal(t, before, root.editor.BannerHeight(), "whole bar collapses")
 	}
 	x := -1
 	for column := range root.width {

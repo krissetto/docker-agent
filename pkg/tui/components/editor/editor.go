@@ -21,6 +21,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
@@ -190,6 +191,14 @@ type editor struct {
 
 // Option configures the Editor.
 type Option func(*editor)
+
+// WithAnimationRuntime joins the shell's shared hover cadence.
+func WithAnimationRuntime(ar *animation.Runtime) Option {
+	return func(e *editor) {
+		e.banner.hoverAnimation.SetRuntime(ar)
+		e.banner.hoverBound = true
+	}
+}
 
 // WithCompletions sets the available completions for the editor.
 func WithCompletions(comps ...completions.Completion) Option {
@@ -1238,8 +1247,35 @@ func wrappedLineCount(runes []rune, width int) int {
 	return preview.VisualLineCount(textcore.Config{Width: max(1, width), Wrap: true})
 }
 
-// BannerLayout prepares width-dependent height and exposes only the explicit
-// overflow control as a toggle target. Coordinates are local to BannerView.
+// BannerHover is optional for shells that route pointer and animation events.
+type BannerHover interface {
+	HoverBanner(x, y int)
+	CancelBannerHover() bool
+	TickBannerHover(animation.TickMsg)
+}
+
+func (e *editor) HoverBanner(x, y int) {
+	if e.banner != nil {
+		e.banner.hover(x, y)
+	}
+}
+func (e *editor) CancelBannerHover() bool {
+	if e.banner != nil && len(e.banner.hoverValues) > 0 {
+		e.banner.cancelHover()
+		e.banner.reflow()
+		return true
+	}
+	return false
+}
+func (e *editor) TickBannerHover(tick animation.TickMsg) {
+	if e.banner != nil {
+		e.banner.tickHover(tick)
+	}
+}
+
+// BannerLayout prepares width-dependent height and exposes the whole bar
+// as a toggle target only when additional attachments can be revealed.
+// Coordinates are local to BannerView.
 type BannerLayout interface {
 	SetBannerWidth(width int)
 	ContextBarToggleAt(x, y int) bool
@@ -1538,6 +1574,7 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 
 // Cleanup removes any temporary paste files that haven't been sent yet.
 func (e *editor) Cleanup() {
+	e.CancelBannerHover()
 	for _, att := range e.attachments {
 		if att.isTemp {
 			_ = os.Remove(att.path)

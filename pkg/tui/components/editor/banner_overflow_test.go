@@ -67,8 +67,7 @@ func TestBannerExpansionOnlyRevealsHiddenIdentities(t *testing.T) {
 	require.Equal(t, min(3+len(hidden), b.maxHeight), b.Height())
 	for y := range b.Height() {
 		for x := range b.width {
-			r := b.toggleRegion
-			require.Equal(t, y == r.y && x >= r.start+styles.AppPadding && x < r.end+styles.AppPadding, b.ToggleAt(x, y))
+			require.True(t, b.ToggleAt(x, y), "whole banner toggles meaningful overflow")
 		}
 	}
 	b.SetSize(160)
@@ -121,7 +120,8 @@ func TestBannerFocusLeavesPaddingAndEmptyRowsTransparent(t *testing.T) {
 			require.Nil(t, cell.Style.Bg, "default terminal background at %d,%d", x, y)
 			if cell != before[y][i] {
 				changed++
-				require.True(t, b.ToggleAt(x, y), "focus cue must stay on overflow label: %d,%d", x, y)
+				r := b.toggleRegion
+				require.True(t, y == r.y && x >= r.start+styles.AppPadding && x < r.end+styles.AppPadding, "focus cue must stay on overflow label: %d,%d", x, y)
 			}
 			x += cell.Width
 		}

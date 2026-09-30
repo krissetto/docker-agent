@@ -10,8 +10,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-const hoverDuration = 150 * time.Millisecond
-
 type hoverValue struct {
 	value, target, from float64
 	elapsed             time.Duration
@@ -76,7 +74,6 @@ func (m *model) tickHover(tick animation.TickMsg) {
 		return
 	}
 	before, after := tick.ElapsedBounds()
-	step := float64(after-before) / float64(hoverDuration)
 	changed, running := false, false
 	for key, state := range m.hoverValues {
 		old := state.value
@@ -85,10 +82,8 @@ func (m *model) tickHover(tick animation.TickMsg) {
 			state.elapsed += after - before
 			p := min(1, float64(state.elapsed)/float64(animation.ShortDuration))
 			state.value = state.from + (state.target-state.from)*animation.EaseOutCubic(p)
-		case state.target > state.value:
-			state.value = min(state.target, state.value+step)
 		default:
-			state.value = max(state.target, state.value-step)
+			state.value = animation.HoverStep(state.value, state.target, after-before)
 		}
 		changed = changed || old != state.value
 		running = running || state.value != state.target
