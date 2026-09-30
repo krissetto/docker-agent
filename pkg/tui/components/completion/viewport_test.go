@@ -31,7 +31,7 @@ func TestCompletionViewportBoundsAndSelectedRowSurviveResize(t *testing.T) {
 			require.Empty(t, m.GetLayers(), "no popup is painted over the only editor cell")
 			continue
 		}
-		require.LessOrEqual(t, lipgloss.Height(view), size[1]-2)
+		require.LessOrEqual(t, lipgloss.Height(view), size[1]-1)
 		for line := range strings.SplitSeq(view, "\n") {
 			require.LessOrEqual(t, ansi.StringWidth(line)+2*m.popupX(), size[0])
 		}
@@ -53,7 +53,7 @@ func TestCompletionLongLabelsAndLoadingStayWithinAllocatedCells(t *testing.T) {
 		m.Update(SetLoadingMsg{Loading: true})
 		view := m.View()
 		require.LessOrEqual(t, lipgloss.Width(view)+2*m.popupX(), 18)
-		require.LessOrEqual(t, lipgloss.Height(view), 5)
+		require.LessOrEqual(t, lipgloss.Height(view), 6)
 	}
 }
 

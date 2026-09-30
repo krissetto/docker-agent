@@ -100,7 +100,7 @@ func TestRootResizePointerSameRowKeepsCacheAndCompletionAnchor(t *testing.T) {
 		popupTop := layers[0].GetY()
 		popupBottom := popupTop + layers[0].Height()
 		geometry := root.composerLayout()
-		require.Equal(t, geometry.bannerTop-1, popupBottom, "completion stays above composer chrome for editor allocation %d", lines)
+		require.Equal(t, geometry.bannerTop, popupBottom, "completion stays above composer chrome for editor allocation %d", lines)
 		require.GreaterOrEqual(t, popupTop, 0)
 		require.Equal(t, regionContent, root.hitTestRegion(popupBottom-1), "last popup row belongs to the transcript")
 		rows := strings.Split(view.Content, "\n")

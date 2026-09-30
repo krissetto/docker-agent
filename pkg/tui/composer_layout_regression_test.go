@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -257,5 +259,53 @@ func TestComposerLayoutClippedBannerLeanAndTinyCompletion(t *testing.T) {
 		require.Contains(t, ansi.Strip(root.composeView().Content), "visible error")
 		require.Equal(t, regionOutside, root.hitTestRegion(root.composerLayout().separatorTop))
 		require.False(t, root.composerResizeHit(4, root.composerLayout().separatorTop))
+	}
+}
+
+func TestCompletionTouchesActualComposerWithRealAttachments(t *testing.T) {
+	for _, lean := range []bool{false, true} {
+		for _, count := range []int{0, 1, 3} {
+			for _, expanded := range []bool{false, true} {
+				root := splitTestRoot(t)
+				root.leanMode = lean
+				for range count {
+					path := filepath.Join(t.TempDir(), "attachment.txt")
+					require.NoError(t, os.WriteFile(path, []byte("text"), 0o600))
+					require.NoError(t, root.editor.AttachFile(path))
+				}
+				if expanded {
+					root.editor.ToggleContextBar()
+				}
+				root.editor.SetValue("@")
+				root.updateCompletionsCmd(completion.OpenMsg{Items: []completion.Item{{Label: "Browse files…", Description: "Open file picker", Pinned: true}}})
+				for _, size := range [][2]int{{120, 40}, {40, 12}, {16, 7}, {120, 40}} {
+					root.handleWindowResize(size[0], size[1])
+					geometry := root.composerLayout()
+					if count == 0 {
+						require.Zero(t, root.editor.BannerHeight(), "zero attachments reserve no context bar")
+						require.Equal(t, geometry.separatorTop, geometry.bannerTop)
+					}
+					layers := root.completions.GetLayers()
+					if geometry.bannerTop == 0 {
+						require.Empty(t, layers, "no popup may cover the only remaining editor row")
+						continue
+					}
+					require.Len(t, layers, 1)
+					layer := layers[0]
+					require.Equal(t, geometry.bannerTop, layer.GetY()+layer.Height(), "no phantom gap for lean=%v count=%d expanded=%v size=%v", lean, count, expanded, size)
+					require.GreaterOrEqual(t, layer.GetY(), 0)
+					frame := strings.Split(root.View().Content, "\n")
+					if root.editor.BannerHeight() > 0 {
+						banner := strings.Split(root.editor.BannerView(root.width), "\n")
+						for y, line := range banner {
+							require.Equal(t, ansi.Strip(line), ansi.Strip(frame[geometry.bannerTop+y]), "actual attachment bar is not covered")
+						}
+					} else if root.separatorHeight > 0 {
+						require.Equal(t, ansi.Strip(root.renderResizeHandle(root.width)), ansi.Strip(frame[geometry.separatorTop]))
+					}
+					require.Equal(t, "@", root.editor.Value())
+				}
+			}
+		}
 	}
 }

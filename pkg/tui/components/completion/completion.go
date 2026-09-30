@@ -5,10 +5,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/junegunn/fzf/src/algo"
 	"github.com/junegunn/fzf/src/util"
 
@@ -385,7 +385,7 @@ func (c *manager) View() string {
 			// Underline, which leaks the raw escape code as literal text).
 			line := itemStyle.Render(paddedLabel)
 			if item.Description != "" {
-				line = lipgloss.JoinHorizontal(lipgloss.Top, line, " ", descStyle.Render(ansi.Truncate(completionSingleLine(item.Description), max(0, innerWidth-ansi.StringWidth(paddedLabel)-1), "…")))
+				line = lipgloss.JoinHorizontal(lipgloss.Top, line, itemStyle.Render(" "), descStyle.Render(ansi.Truncate(completionSingleLine(item.Description), max(0, innerWidth-ansi.StringWidth(paddedLabel)-1), "…")))
 			}
 			line = ansi.Truncate(line, innerWidth, "")
 			if pad := innerWidth - lipgloss.Width(line); pad > 0 {
@@ -423,7 +423,7 @@ func (c *manager) viewport() (lipgloss.Style, int, int) {
 	width := max(0, c.width-2*c.popupX())
 	rows := maxItems + box.GetVerticalFrameSize()
 	if c.sized || c.height > 0 {
-		rows = max(0, c.height-c.editorOffset()-1)
+		rows = max(0, c.height-c.editorOffset())
 	}
 	if width <= box.GetHorizontalFrameSize() {
 		box = box.Padding(0).Border(lipgloss.Border{})
@@ -455,7 +455,7 @@ func (c *manager) GetLayers() []*lipgloss.Layer {
 
 	// Use actual editor height if set, otherwise fall back to reasonable default
 	editorHeight := c.editorOffset()
-	yPos := max(c.height-viewHeight-editorHeight-1, 0)
+	yPos := max(c.height-viewHeight-editorHeight, 0)
 
 	return []*lipgloss.Layer{
 		lipgloss.NewLayer(view).X(c.popupX()).Y(yPos),
