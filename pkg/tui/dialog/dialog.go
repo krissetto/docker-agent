@@ -170,6 +170,9 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		for i := range d.stack {
+			d.stack[i].capture()
+		}
 		d.width = msg.Width
 		d.height = msg.Height
 		cmd := d.broadcastToAll(msg)
@@ -337,6 +340,7 @@ func (d *manager) View() string {
 func (d *manager) broadcastToAll(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 	for i := range d.stack {
+		d.stack[i].capture()
 		u, cmd := d.stack[i].dialog.Update(msg)
 		d.stack[i].dialog = u.(Dialog)
 		d.stack[i].invalidateView()
@@ -376,6 +380,9 @@ func (d *manager) forwardToTopWithRetarget(msg tea.Msg, retarget bool) tea.Cmd {
 	}
 	tick, ticking := msg.(animation.TickMsg)
 	wasTickDirty := ticking && tick.Dirty()
+	if retarget {
+		d.stack[top].capture()
+	}
 	u, cmd := d.stack[top].dialog.Update(msg)
 	cmd = tea.Batch(cmd, footerCmd)
 	d.stack[top].dialog = u.(Dialog)
@@ -899,8 +906,8 @@ func (d *manager) positionedEntry(e *dialogEntry) (string, int, int) {
 	view := e.viewWithChrome(dialogClosable(e.dialog), e.closeHovered)
 	lines := strings.Split(view, "\n")
 	start, end := max(0, -row), min(len(lines), d.height-row)
-	if start >= end || d.width <= 0 {
-		return "", max(0, row), max(0, col)
+	if start >= end || d.width <= 0 || col >= d.width || col+e.renderWidth <= 0 {
+		return "", min(max(0, row), max(0, d.height-1)), min(max(0, col), max(0, d.width))
 	}
 	lines = lines[start:end]
 	for i := range lines {

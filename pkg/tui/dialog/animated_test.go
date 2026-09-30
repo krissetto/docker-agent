@@ -601,7 +601,11 @@ func TestAnimatedDialogFadePreservesDefaultAndExplicitBackgrounds(t *testing.T) 
 
 func assertAnchoredSourceRows(t *testing.T, a *animatedDialog, width, height int) {
 	t.Helper()
-	source := strings.Split(ansi.Strip(a.intrinsicView()), "\n")
+	view := a.intrinsicView()
+	if a.geometry {
+		view = a.resizeView
+	}
+	source := strings.Split(ansi.Strip(view), "\n")
 	fullHeight := a.sourceHeight()
 	finalTop, _ := CenterPosition(width, height, a.renderWidth, fullHeight)
 	top, _ := a.position(width, height)

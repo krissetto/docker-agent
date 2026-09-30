@@ -145,7 +145,11 @@ func assertConcreteRootFrame(t *testing.T, mgr *manager) {
 	assert.Equal(t, layer.GetY(), info.Y, "lipgloss and flat root paths share animated Y")
 	assert.Equal(t, layer.Width(), lipgloss.Width(info.Content))
 	assert.Equal(t, layer.Height(), lipgloss.Height(info.Content))
-	assert.LessOrEqual(t, absInt(layer.GetX()-(mgr.width-layer.GetX()-layer.Width())), 1, "left/right margins are symmetric")
+	if !mgr.stack[0].geometry {
+		assert.LessOrEqual(t, absInt(layer.GetX()-(mgr.width-layer.GetX()-layer.Width())), 1, "settled left/right margins are symmetric")
+	}
+	assert.LessOrEqual(t, layer.Width(), mgr.width)
+	assert.LessOrEqual(t, layer.Height(), mgr.height)
 	expectedY, _ := mgr.stack[0].position(mgr.width, mgr.height)
 	assert.Equal(t, max(0, expectedY), layer.GetY(), "anchored source offset determines the reveal origin")
 
@@ -158,7 +162,10 @@ func assertConcreteRootFrame(t *testing.T, mgr *manager) {
 	).Render()
 	plain := strings.Split(ansi.Strip(root), "\n")
 	for y := max(0, layer.GetY()); y < min(len(plain), layer.GetY()+layer.Height()); y++ {
-		assert.Equal(t, mgr.width, lipgloss.Width(plain[y]), "decoded ANSI root preserves the full manager frame")
+		assert.LessOrEqual(t, lipgloss.Width(plain[y]), mgr.width, "decoded ANSI root remains terminal bounded")
+		if layer.GetX()+layer.Width() < mgr.width {
+			assert.Equal(t, mgr.width, lipgloss.Width(plain[y]), "uncovered backdrop sentinel remains visible")
+		}
 	}
 }
 

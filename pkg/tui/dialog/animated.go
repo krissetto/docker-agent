@@ -30,10 +30,7 @@ type DialogLifecycleException interface {
 	DisableDialogLifecycleAnimation() bool
 }
 
-// animatedDialog owns the visual lifecycle of one stack entry. A single
-// transition drives alpha and rendered height. Width is always the final
-// measured width, preventing narrow first frames while height opens, closes,
-// resizes, and reverses around the dialog's center.
+// dialogBoundsEvent records event-driven target preparation, never frame sampling.
 type dialogBoundsEvent struct {
 	At                   time.Time
 	Cause                string
@@ -44,28 +41,40 @@ type dialogBoundsEvent struct {
 	Retargeted           bool
 }
 
+type dialogFrame struct {
+	row, col, width, height int
+}
+
+// animatedDialog keeps opening width fixed, but interpolates the entire resize rectangle.
 type animatedDialog struct {
 	dialog Dialog
 	anim   animation.Transition
 
-	fromAlpha, targetAlpha    float64
-	fromWidth, targetWidth    int
-	fromHeight, targetHeight  int
-	renderAlpha               float64
-	renderWidth, renderHeight int
-	closing, hiding           bool
-	resizing                  bool
-	disabled                  bool
-	lastBoundsEvent           dialogBoundsEvent
-	boundsMeasurementCount    int
-	cachedView                string
-	viewTheme                 uint64
-	viewValid                 bool
-	fullHeight                int
+	fromAlpha, targetAlpha                 float64
+	fromWidth, targetWidth                 int
+	fromHeight, targetHeight               int
+	renderAlpha                            float64
+	renderWidth, renderHeight              int
+	closing, hiding                        bool
+	resizing                               bool
+	disabled                               bool
+	lastBoundsEvent                        dialogBoundsEvent
+	boundsMeasurementCount                 int
+	cachedView                             string
+	viewTheme                              uint64
+	viewValid                              bool
+	fullHeight                             int
+	viewportWidth, viewportHeight          int
+	captured                               *dialogFrame
+	geometry                               bool
+	fromRow, fromCol, targetRow, targetCol int
+	renderRow, renderCol                   int
+	resizeView                             string
+	resizeWidth, resizeHeight              int
 }
 
 func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxHeight int) (*animatedDialog, tea.Cmd) {
-	a := &animatedDialog{dialog: dialog, anim: runtime.Transition()}
+	a := &animatedDialog{dialog: dialog, anim: runtime.Transition(), viewportWidth: maxWidth, viewportHeight: maxHeight}
 	if exception, ok := dialog.(DialogLifecycleException); ok {
 		a.disabled = exception.DisableDialogLifecycleAnimation()
 	}
@@ -76,6 +85,7 @@ func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxH
 		a.renderAlpha, a.renderWidth, a.renderHeight = 1, w, h
 		return a, nil
 	}
+	a.fromWidth = w
 	a.renderWidth, a.renderHeight = w, min(1, h)
 	return a, a.anim.Start(dialogOpenDuration, animation.EaseOutCubic)
 }
@@ -112,11 +122,35 @@ func (a *animatedDialog) sample() {
 	}
 	a.anim.Tick()
 	a.renderAlpha = a.fromAlpha + (a.targetAlpha-a.fromAlpha)*a.anim.Value()
-	a.renderWidth = a.targetWidth
+	a.renderWidth = a.anim.Lerp(a.fromWidth, a.targetWidth)
 	a.renderHeight = a.anim.Lerp(a.fromHeight, a.targetHeight)
+	if a.geometry {
+		// Interpolate the source anchor, then apply the same signed crop offset in View.
+		a.renderRow = a.anchoredPosition(a.fromRow, a.targetRow, a.fromHeight, a.targetHeight, a.resizeHeight, a.renderHeight)
+		a.renderCol = a.anchoredPosition(a.fromCol, a.targetCol, a.fromWidth, a.targetWidth, a.resizeWidth, a.renderWidth)
+	}
 	if !a.anim.Running() {
 		a.renderAlpha, a.renderWidth, a.renderHeight = a.targetAlpha, a.targetWidth, a.targetHeight
+		a.geometry = false
+		a.resizeView = ""
+		a.resizing = false
 	}
+}
+
+func (a *animatedDialog) anchoredPosition(from, to, fromSize, toSize, sourceSize, renderSize int) int {
+	fromAnchor := from - centeredOffset(sourceSize, fromSize)
+	toAnchor := to - centeredOffset(sourceSize, toSize)
+	return a.anim.Lerp(fromAnchor, toAnchor) + centeredOffset(sourceSize, renderSize)
+}
+
+// capture runs before concrete updates can replace the source or terminal dimensions.
+func (a *animatedDialog) capture() {
+	if a.captured != nil || a.closing {
+		return
+	}
+	a.sample()
+	row, col := a.position(a.viewportWidth, a.viewportHeight)
+	a.captured = &dialogFrame{row: row, col: col, width: a.renderWidth, height: a.renderHeight}
 }
 
 func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd {
@@ -127,31 +161,60 @@ func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd
 		}
 		return nil
 	}
+	a.capture()
+	previous := *a.captured
+	a.captured = nil
+	oldRow, oldCol := CenterPosition(a.viewportWidth, a.viewportHeight, a.targetWidth, a.targetHeight)
+	a.viewportWidth, a.viewportHeight = maxWidth, maxHeight
 	a.invalidateView()
 	w, h := a.measureBounds(cause, maxWidth, maxHeight, false)
+	row, col := CenterPosition(maxWidth, maxHeight, w, h)
 	if a.disabled || w == 0 || h == 0 {
 		a.anim.Cancel()
+		a.geometry, a.resizing, a.resizeView = false, false, ""
 		a.targetAlpha, a.renderAlpha = 1, 1
 		a.targetWidth, a.targetHeight = w, h
 		a.renderWidth, a.renderHeight = w, h
 		return nil
 	}
-	if w == a.targetWidth && h == a.targetHeight {
+	if a.geometry {
+		oldRow, oldCol = a.targetRow, a.targetCol
+	} else if !a.anim.Running() {
+		oldRow, oldCol = previous.row, previous.col
+	}
+	if w == a.targetWidth && h == a.targetHeight && row == oldRow && col == oldCol {
+		if a.geometry {
+			a.resizeView = a.intrinsicView()
+		}
 		return nil
 	}
-	a.sample()
+	a.lastBoundsEvent.Retargeted = true
 	a.resizing = a.renderAlpha >= 1
-	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
-	a.fromWidth = w
+	a.fromAlpha, a.fromHeight, a.fromWidth = a.renderAlpha, previous.height, previous.width
 	a.targetAlpha, a.targetWidth, a.targetHeight = 1, w, h
-	a.renderWidth = w
+	a.geometry = true
+	a.fromRow, a.fromCol = previous.row, previous.col
+	a.renderRow, a.renderCol = previous.row, previous.col
+	a.targetRow, a.targetCol = row, col
+	// Input stays live: clip the newly prepared destination, never stale filtered rows.
+	a.resizeView, a.resizeWidth, a.resizeHeight = a.intrinsicView(), w, h
 	return a.anim.Start(dialogResizeDuration, animation.Linear)
 }
 
 func (a *animatedDialog) reopen(maxWidth, maxHeight int) tea.Cmd {
 	a.sample()
 	a.closing, a.hiding = false, false
+	if a.geometry {
+		a.retarget("reopen", maxWidth, maxHeight)
+		if a.disabled || a.targetWidth == 0 || a.targetHeight == 0 {
+			return nil
+		}
+		a.resizing = false
+		return a.anim.Start(dialogOpenDuration, animation.EaseOutCubic)
+	}
 	a.resizing = false
+	a.geometry, a.resizeView = false, ""
+	a.viewportWidth, a.viewportHeight = maxWidth, maxHeight
 	w, h := a.measureBounds("reopen", maxWidth, maxHeight, true)
 	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
 	a.fromWidth = w
@@ -174,10 +237,17 @@ func (a *animatedDialog) startClose(hiding bool) tea.Cmd {
 	}
 	visible := a.targetWidth > 0 && a.targetHeight > 0
 	a.sample()
+	if a.geometry {
+		frame := a.view()
+		a.fromRow, a.fromCol = a.renderRow, a.renderCol
+		a.targetRow, a.targetCol = a.renderRow+centeredOffset(a.renderHeight, 0), a.renderCol
+		a.resizeView, a.resizeWidth, a.resizeHeight = frame, a.renderWidth, a.renderHeight
+	}
 	a.closing, a.hiding = true, hiding
 	a.resizing = false
 	a.fromAlpha, a.fromHeight = a.renderAlpha, a.renderHeight
 	a.fromWidth = a.renderWidth
+	a.targetWidth = a.renderWidth
 	a.targetAlpha, a.targetHeight = 0, 0
 	if a.disabled || !visible {
 		a.anim.Cancel()
@@ -196,6 +266,9 @@ func (a *animatedDialog) tick(_ string, _, _ int) (finished bool, cmd tea.Cmd) {
 func (a *animatedDialog) opacity() float64 { return a.renderAlpha }
 
 func (a *animatedDialog) position(maxWidth, maxHeight int) (row, col int) {
+	if a.geometry {
+		return a.renderRow, a.renderCol
+	}
 	row, col = CenterPosition(maxWidth, maxHeight, a.renderWidth, a.sourceHeight())
 	return row + a.sourceOffset(), col
 }
@@ -208,6 +281,9 @@ func (a *animatedDialog) cancel() {
 }
 
 func (a *animatedDialog) sourceHeight() int {
+	if a.geometry {
+		return a.resizeHeight
+	}
 	if a.fullHeight > 0 {
 		return a.fullHeight
 	}
@@ -215,7 +291,11 @@ func (a *animatedDialog) sourceHeight() int {
 }
 
 func (a *animatedDialog) sourceOffset() int {
-	difference := a.sourceHeight() - max(0, a.renderHeight)
+	return centeredOffset(a.sourceHeight(), a.renderHeight)
+}
+
+func centeredOffset(source, rendered int) int {
+	difference := source - max(0, rendered)
 	if difference < 0 {
 		return (difference - 1) / 2
 	}
@@ -230,6 +310,9 @@ func (a *animatedDialog) view() string {
 
 func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 	view := a.intrinsicView()
+	if a.geometry {
+		view = a.resizeView
+	}
 	if a.anim.Running() || a.closing {
 		view = image.StripMarkers(view)
 	}
@@ -254,7 +337,15 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 		}
 	}
 	for i := range lines {
-		lines[i] = ansi.Truncate(lines[i], w, "")
+		if a.geometry {
+			offsetX := centeredOffset(a.resizeWidth, w)
+			if offsetX < 0 {
+				lines[i] = strings.Repeat(" ", -offsetX) + lines[i]
+			}
+			lines[i] = ansi.Cut(lines[i], max(0, offsetX), max(0, offsetX)+w)
+		} else {
+			lines[i] = ansi.Truncate(lines[i], w, "")
+		}
 		if pad := w - lipgloss.Width(lines[i]); pad > 0 {
 			lines[i] += strings.Repeat(" ", pad)
 		}
