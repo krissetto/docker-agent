@@ -49,6 +49,7 @@ const (
 )
 
 type attachment struct {
+	aliases     []string
 	path        string // Path to file (temp for pastes, real for file refs)
 	placeholder string // @paste-1 or @filename
 	label       string // Display label like "paste-1 (21.1 KB)"
@@ -1363,15 +1364,37 @@ func (e *editor) InsertText(text string) {
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
 func (e *editor) AttachFile(filePath string) error {
 	placeholder := "@" + filePath
+	before := len(e.attachments)
 	if err := e.addFileAttachment(placeholder); err != nil {
 		return fmt.Errorf("failed to attach %s: %w", filePath, err)
 	}
-	currentValue := e.textarea.Value()
-	e.textarea.SetValue(currentValue + placeholder + " ")
+	for i := range e.attachments {
+		att := &e.attachments[i]
+		if att.placeholder != placeholder && !slices.Contains(att.aliases, placeholder) {
+			continue
+		}
+		if i < before && att.referenced(e.textarea.Value()) {
+			return nil
+		}
+		break
+	}
+	e.textarea.SetValue(e.textarea.Value() + placeholder + " ")
 	e.textarea.MoveToEnd()
 	e.userTyped = true
 	e.updateAttachmentBanner()
 	return nil
+}
+
+func (a attachment) referenced(content string) bool {
+	if strings.Contains(content, a.placeholder) {
+		return true
+	}
+	for _, alias := range a.aliases {
+		if strings.Contains(content, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 // tryAddFileRef checks if word is a valid @filepath and adds it as attachment.
@@ -1402,6 +1425,9 @@ func (e *editor) tryAddFileRef(word string) {
 // (e.g. processFileAttachment) always receive a fully qualified path.
 func (e *editor) addFileAttachment(placeholder string) error {
 	path := strings.TrimPrefix(placeholder, "@")
+	if _, err := validateFilePath(path); err != nil {
+		return fmt.Errorf("invalid file path %s: %w", path, err)
+	}
 
 	// Resolve to absolute path so the attachment carries a fully qualified
 	// path regardless of the working directory at send time.
@@ -1423,13 +1449,22 @@ func (e *editor) addFileAttachment(placeholder string) error {
 		return fmt.Errorf("file too large: %s (%s)", absPath, units.HumanSize(float64(info.Size())))
 	}
 
-	// Avoid duplicates
-	for _, att := range e.attachments {
-		if att.placeholder == placeholder {
+	for i := range e.attachments {
+		att := &e.attachments[i]
+		if att.isTemp {
+			continue
+		}
+		same := att.path == absPath
+		if old, err := os.Stat(att.path); err == nil {
+			same = same || os.SameFile(old, info)
+		}
+		if same {
+			if att.placeholder != placeholder && !slices.Contains(att.aliases, placeholder) {
+				att.aliases = append(att.aliases, placeholder)
+			}
 			return nil
 		}
 	}
-
 	e.attachments = append(e.attachments, attachment{
 		path:        absPath,
 		placeholder: placeholder,
@@ -1452,7 +1487,7 @@ func (e *editor) collectAttachments(content string) []messages.Attachment {
 
 	var result []messages.Attachment
 	for _, att := range e.attachments {
-		if !strings.Contains(content, att.placeholder) {
+		if !att.referenced(content) {
 			if att.isTemp {
 				_ = os.Remove(att.path)
 			}
@@ -1555,23 +1590,28 @@ func (e *editor) handlePaste(content string) (normalized string, handled bool) {
 
 	// First, try to parse as file paths (drag-and-drop)
 	filePaths := ParsePastedFiles(content)
-	if len(filePaths) > 0 {
-		var attached int
+	if len(filePaths) > 0 && IsSupportedFileType(filePaths[0]) {
+		originalValue := e.textarea.Value()
+		originalAttachments := slices.Clone(e.attachments)
+		for i := range originalAttachments {
+			originalAttachments[i].aliases = slices.Clone(originalAttachments[i].aliases)
+		}
+		valid := true
 		for _, path := range filePaths {
 			if !IsSupportedFileType(path) {
+				valid = false
 				break
 			}
 			if err := e.AttachFile(path); err != nil {
-				slog.Debug("paste path not attachable, treating as text", "path", path, "error", err)
+				valid = false
 				break
 			}
-			attached++
 		}
-		if attached == len(filePaths) {
+		if valid {
 			return content, true
 		}
-		// Not all files could be attached; undo partial attachments and fall through to text paste
-		e.removeLastNAttachments(attached)
+		e.attachments = originalAttachments
+		e.textarea.SetValue(originalValue)
 	}
 
 	// Not file paths, handle as text paste
@@ -1631,7 +1671,7 @@ func (e *editor) updateAttachmentBanner() {
 	var items []bannerItem
 
 	for _, att := range e.attachments {
-		if strings.Contains(value, att.placeholder) {
+		if att.referenced(value) {
 			items = append(items, bannerItem{
 				label:       att.label,
 				placeholder: att.placeholder,

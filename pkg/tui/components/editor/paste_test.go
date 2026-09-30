@@ -854,3 +854,63 @@ func TestAttachFile_SetsCorrectLabel(t *testing.T) {
 	expectedLabel := fmt.Sprintf("labeled.png (%s)", units.HumanSize(float64(len(data))))
 	assert.Equal(t, expectedLabel, e.attachments[0].label)
 }
+
+func TestAttachmentCanonicalIdentityAliasesAndReattach(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "same.png")
+	require.NoError(t, os.WriteFile(file, []byte("PNG"), 0o600))
+	hard := filepath.Join(dir, "hard.png")
+	require.NoError(t, os.Link(file, hard))
+	e := newPasteTestEditor()
+	require.NoError(t, e.AttachFile(file))
+	before := e.Value()
+	require.NoError(t, e.AttachFile(file))
+	require.NoError(t, e.AttachFile(hard))
+	assert.Equal(t, before, e.Value(), "duplicate admission never appends a token")
+	require.Len(t, e.attachments, 1)
+	alias := "@" + hard
+	e.SetValue(alias)
+	e.tryAddFileRef(alias)
+	e.updateAttachmentBanner()
+	require.Len(t, e.attachments, 1)
+	assert.True(t, e.attachments[0].referenced(alias))
+	attachments := e.collectAttachments(alias)
+	require.Len(t, attachments, 1)
+	assert.Equal(t, file, attachments[0].FilePath, "canonical first-admission path retained")
+	e.SetValue("")
+	require.NoError(t, e.AttachFile(file))
+	require.Len(t, e.attachments, 1)
+	assert.Equal(t, "@"+file+" ", e.Value())
+}
+
+func TestAttachmentDistinctFilesAndRejectedAliases(t *testing.T) {
+	e := newPasteTestEditor()
+	for range 2 {
+		file := filepath.Join(t.TempDir(), "same.png")
+		require.NoError(t, os.WriteFile(file, []byte("same content"), 0o600))
+		require.NoError(t, e.AttachFile(file))
+	}
+	require.Len(t, e.attachments, 2, "same basename/content is not file identity")
+	file := e.attachments[0].path
+	link := filepath.Join(t.TempDir(), "alias.png")
+	require.NoError(t, os.Symlink(file, link))
+	assert.Error(t, e.AttachFile(link), "existing symlink rejection preserved")
+	assert.Error(t, e.AttachFile(filepath.Dir(file)+"/../"+filepath.Base(filepath.Dir(file))+"/same.png"), "validate original traversal before filepath.Abs")
+	require.Len(t, e.attachments, 2)
+}
+
+func TestDuplicateDropRollbackNeverRemovesPreexistingAttachment(t *testing.T) {
+	e := newPasteTestEditor()
+	file := filepath.Join(t.TempDir(), "existing.png")
+	require.NoError(t, os.WriteFile(file, []byte("PNG"), 0o600))
+	require.NoError(t, e.AttachFile(file))
+	before := e.Value()
+	_, handled := e.handlePaste(file + "\n" + filepath.Join(t.TempDir(), "missing.png"))
+	assert.False(t, handled)
+	require.Len(t, e.attachments, 1)
+	assert.Equal(t, before, e.Value())
+	_, handled = e.handlePaste(file + "\n" + file)
+	assert.True(t, handled)
+	assert.Equal(t, before, e.Value())
+	require.Len(t, e.collectAttachments(before), 1)
+}
