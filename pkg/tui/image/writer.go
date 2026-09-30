@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 )
 
 type overlay struct {
+	explicit         bool
 	id               uint32
 	png              []byte
 	x, y             int
@@ -70,6 +72,13 @@ func (w *Writer) SetSupported(supported bool) {
 	}
 }
 
+// Supported reports terminal capability without applying the automatic-display preference.
+func (w *Writer) Supported() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.supported
+}
+
 // RenderingEnabled reports whether both the user setting and terminal support allow images.
 func (w *Writer) RenderingEnabled() bool {
 	w.mu.Lock()
@@ -101,8 +110,10 @@ func (w *Writer) SetContent(content string) string {
 	clean, overlays := extractOverlays(content)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.enabled || !w.supported {
+	if !w.supported {
 		overlays = nil
+	} else if !w.enabled {
+		overlays = slices.DeleteFunc(overlays, func(image overlay) bool { return !image.explicit })
 	}
 	if !sameOverlays(w.overlays, overlays) {
 		w.overlays = overlays
@@ -187,7 +198,7 @@ func sameOverlays(a, b []overlay) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
+		if a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
 			a[i].cols != b[i].cols || a[i].rows != b[i].rows ||
 			a[i].pixelW != b[i].pixelW || a[i].pixelH != b[i].pixelH ||
 			a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
@@ -261,7 +272,8 @@ func extractMarkerOverlays(lines []string) []overlay {
 			}
 			stop := start + len(markerPrefix) + stopRel
 			fields := strings.Split(line[start+len(markerPrefix):stop], ";")
-			if len(fields) == 4 {
+			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") {
+				explicit := len(fields) == 5
 				id64, idErr := strconv.ParseUint(fields[0], 10, 32)
 				cols, colsErr := strconv.Atoi(fields[1])
 				totalRows, rowsErr := strconv.Atoi(fields[2])
@@ -273,14 +285,14 @@ func extractMarkerOverlays(lines []string) []overlay {
 						last := &overlays[len(overlays)-1]
 						lastEndRow := last.sourceY + last.sourceH
 						expectedSourceY := img.Height * row / totalRows
-						if uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && lastEndRow == expectedSourceY {
+						if last.explicit == explicit && uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && lastEndRow == expectedSourceY {
 							last.rows++
 							last.sourceH = img.Height*(row+1)/totalRows - last.sourceY
 						} else {
-							overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row))
+							overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit))
 						}
 					} else {
-						overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row))
+						overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit))
 					}
 				}
 			}
@@ -291,11 +303,12 @@ func extractMarkerOverlays(lines []string) []overlay {
 	return overlays
 }
 
-func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int) overlay {
+func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explicit bool) overlay {
 	sourceY := img.Height * row / totalRows
 	sourceEnd := img.Height * (row + 1) / totalRows
 	return overlay{
-		id: id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
+		explicit: explicit,
+		id:       id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
 		pixelW: img.Width, pixelH: img.Height,
 		sourceY: sourceY, sourceH: sourceEnd - sourceY,
 	}

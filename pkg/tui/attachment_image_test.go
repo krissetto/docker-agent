@@ -33,6 +33,10 @@ func TestAttachmentImageClickUsesWriterAvailabilityWithoutChangingDraft(t *testi
 				root.imageWriter.SetEnabled(mode != "disabled")
 				root.imageWriter.SetSupported(mode != "unsupported")
 			}
+			if mode == "disabled" {
+				tuiimage.SetRenderingEnabled(false)
+				t.Cleanup(func() { tuiimage.SetRenderingEnabled(true) })
+			}
 			path := filepath.Join(t.TempDir(), "preview.png")
 			require.NoError(t, os.WriteFile(path, data.Bytes(), 0o600))
 			require.NoError(t, root.editor.AttachFile(path))
@@ -40,19 +44,34 @@ func TestAttachmentImageClickUsesWriterAvailabilityWithoutChangingDraft(t *testi
 			root.editor.ToggleContextBar()
 			root.resizeAll()
 			root.View()
+			bannerBefore := root.editor.BannerView(root.width)
+			focusBefore := root.focusedPanel
+			assert.False(t, root.editor.IsContextBarFocused())
 			_, _ = root.Update(tea.MouseClickMsg{X: 2, Y: root.composerLayout().bannerTop + 3, Button: tea.MouseLeft})
 			require.True(t, root.dialogMgr.Open())
 			view := root.dialogMgr.TopDialog().View()
 			assert.Contains(t, ansi.Strip(view), "40 × 40 pixels")
-			if mode == "enabled" {
+			if mode == "enabled" || mode == "disabled" {
 				assert.Contains(t, view, "cagent-image;")
 			} else {
 				assert.NotContains(t, view, "cagent-image;")
-				assert.Contains(t, ansi.Strip(view), "disabled or unsupported")
+				assert.Contains(t, ansi.Strip(view), "does not support image rendering")
 			}
 			assert.Equal(t, draft, root.editor.Value())
+			assert.False(t, root.editor.IsContextBarFocused(), "attachment preview never focuses/highlights the context rectangle")
+			assert.Equal(t, focusBefore, root.focusedPanel)
+			assert.Equal(t, bannerBefore, root.editor.BannerView(root.width))
+			if mode == "enabled" || mode == "disabled" {
+				root.imageWriter.SetContent(view)
+				_, err := root.imageWriter.Write([]byte("preview"))
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), "a=p,i=", "explicit preview renders even when automatic images are disabled")
+			}
 			if root.imageWriter != nil {
 				assert.Equal(t, mode == "enabled", root.imageWriter.RenderingEnabled(), "preview never changes the writer preference")
+			}
+			if mode == "disabled" {
+				assert.Empty(t, tuiimage.RenderMarkers(tuiimage.Inline{PNGData: []byte("automatic"), Width: 10, Height: 10}, 20))
 			}
 		})
 	}

@@ -337,15 +337,28 @@ func Render(img Inline, width int) []string {
 // TUI resolves these after viewport clipping, which lets it crop images that
 // are partially scrolled off-screen without copying PNG data into every row.
 func RenderMarkers(img Inline, width int) []string {
-	if renderingDisabled.Load() || len(img.PNGData) == 0 || img.Width <= 0 || img.Height <= 0 || width <= 0 {
+	return renderMarkers(img, width, false)
+}
+
+// RenderPreviewMarkers represents an explicit user preview, independently of automatic image display.
+func RenderPreviewMarkers(img Inline, width int) []string {
+	return renderMarkers(img, width, true)
+}
+
+func renderMarkers(img Inline, width int, explicit bool) []string {
+	if (!explicit && renderingDisabled.Load()) || len(img.PNGData) == 0 || img.Width <= 0 || img.Height <= 0 || width <= 0 {
 		return nil
 	}
 	cols, rows := cellSize(img, width)
 	id := registerImage(imageID(img.PNGData), img)
 
+	policy := ""
+	if explicit {
+		policy = ";preview"
+	}
 	out := make([]string, 0, rows)
 	for row := range rows {
-		out = append(out, fmt.Sprintf("  %s%d;%d;%d;%d\x1b\\", markerPrefix, id, cols, rows, row))
+		out = append(out, fmt.Sprintf("  %s%d;%d;%d;%d%s\x1b\\", markerPrefix, id, cols, rows, row, policy))
 	}
 	return out
 }

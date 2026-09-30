@@ -13,7 +13,7 @@ func MarkerColumns(sequence string) (columns int, marker bool) {
 		return 0, false
 	}
 	fields := strings.Split(strings.TrimSuffix(strings.TrimPrefix(sequence, markerPrefix), "\x1b\\"), ";")
-	if len(fields) != 4 {
+	if len(fields) != 4 && (len(fields) != 5 || fields[4] != "preview") {
 		return 0, true
 	}
 	columns, err := strconv.Atoi(fields[1])

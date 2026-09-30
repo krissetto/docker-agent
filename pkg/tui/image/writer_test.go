@@ -172,3 +172,50 @@ func TestWriterDeletesMarkerPlacementsOnCloseReplaceAndDisable(t *testing.T) {
 		})
 	}
 }
+
+func TestExplicitPreviewPolicyIsPerPlacementNotSharedImage(t *testing.T) {
+	img := Inline{PNGData: []byte("identical-image-data"), Width: 100, Height: 100}
+	automatic := RenderMarkers(img, 24)
+	explicit := RenderPreviewMarkers(img, 24)
+	require.Greater(t, len(automatic), 2)
+	// Adjacent source rows of the same image must not merge across policies.
+	content := automatic[0] + "\n" + explicit[1] + "\n" + automatic[2]
+	_, overlays := extractOverlays(content)
+	require.Len(t, overlays, 3)
+	assert.Equal(t, overlays[0].id, overlays[1].id)
+	assert.False(t, overlays[0].explicit)
+	assert.True(t, overlays[1].explicit)
+	assert.False(t, overlays[2].explicit)
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	writer.SetEnabled(false)
+	writer.SetContent(content)
+	require.Len(t, writer.overlays, 1)
+	assert.Equal(t, 1, writer.overlays[0].y)
+	assert.True(t, writer.Supported())
+	assert.False(t, writer.RenderingEnabled(), "automatic preference unchanged")
+	_, err := writer.Write([]byte("frame"))
+	require.NoError(t, err)
+	assert.Contains(t, output.String(), "a=p,i=")
+	writer.SetSupported(false)
+	writer.SetContent(content)
+	assert.Empty(t, writer.overlays, "explicit preview never bypasses terminal capability")
+}
+
+func TestExplicitMarkersIgnoreAutomaticGlobalWithoutChangingIt(t *testing.T) {
+	SetRenderingEnabled(false)
+	t.Cleanup(func() { SetRenderingEnabled(true) })
+	img := Inline{PNGData: []byte("preview"), Width: 40, Height: 40}
+	assert.Empty(t, RenderMarkers(img, 20))
+	lines := RenderPreviewMarkers(img, 20)
+	require.NotEmpty(t, lines)
+	assert.Contains(t, lines[0], ";preview\x1b\\")
+	assert.Empty(t, RenderMarkers(img, 20), "manual preview never toggles the global preference")
+	for _, line := range lines {
+		start := strings.Index(line, markerPrefix)
+		cols, marker := MarkerColumns(line[start:])
+		assert.True(t, marker)
+		assert.Positive(t, cols)
+		assert.NotContains(t, StripMarkers(line), markerPrefix)
+	}
+}

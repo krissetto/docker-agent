@@ -38,7 +38,7 @@ func NewAttachmentPreviewDialog(_ *animation.Runtime, title, content string) Dia
 }
 
 // NewImageAttachmentPreviewDialog decodes once, before the shared render lifecycle.
-func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType string, data []byte, enabled bool) Dialog {
+func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType string, data []byte, supported bool) Dialog {
 	title = safeAttachmentText(title)
 	const maxPixels = 16_000_000
 	if len(data) > 20<<20 {
@@ -53,8 +53,8 @@ func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType stri
 	}
 	mimeType = "image/" + format
 	info := fmt.Sprintf("%s · %d × %d pixels", mimeType, config.Width, config.Height)
-	unavailable := "Image preview unavailable: image rendering is disabled or unsupported by this terminal."
-	if !enabled {
+	unavailable := "Image preview unavailable: this terminal does not support image rendering."
+	if !supported {
 		return NewAttachmentPreviewDialog(ar, title, info+"\n\n"+unavailable)
 	}
 	img, ok := image.FromBytes(title, mimeType, data)
@@ -68,7 +68,7 @@ func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType stri
 		lines := []string{RenderTitle(title, width, styles.DialogTitleStyle), RenderSeparator(width), ""}
 		lines = append(lines, strings.Split(ansi.Hardwrap(info, width, true), "\n")...)
 		lines = append(lines, "")
-		markers := image.RenderMarkers(img, width)
+		markers := image.RenderPreviewMarkers(img, width)
 		if len(markers) == 0 || width < 4 {
 			return append(lines, strings.Split(ansi.Hardwrap(unavailable, width, true), "\n")...)
 		}

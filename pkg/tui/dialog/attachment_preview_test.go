@@ -52,7 +52,7 @@ func TestImageAttachmentPreviewAvailabilityBoundsAndScroll(t *testing.T) {
 				if enabled {
 					assert.Contains(t, view, "cagent-image;")
 				} else {
-					assert.Contains(t, ansi.Strip(view), "disabled")
+					assert.Contains(t, ansi.Strip(view), "does not")
 					assert.NotContains(t, view, "cagent-image;")
 				}
 			}
