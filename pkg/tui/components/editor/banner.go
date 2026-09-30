@@ -27,6 +27,9 @@ type contextBar struct {
 	maxHeight       int
 	width           int
 	regions         []bannerRegion
+	hidden          []bannerItem
+	toggleRegion    bannerRegion
+	canExpand       bool
 	expanded        bool
 	focused         bool
 	themeGeneration uint64
@@ -59,7 +62,6 @@ func (b *contextBar) SetItems(items []bannerItem) {
 	if len(items) == 0 {
 		b.focused = false
 	}
-	b.updateHeight()
 	b.reflow()
 }
 
@@ -72,9 +74,11 @@ func (b *contextBar) IsExpanded() bool {
 }
 
 func (b *contextBar) Toggle() {
+	if !b.canExpand {
+		return
+	}
 	b.expanded = !b.expanded
 	b.regions = nil
-	b.updateHeight()
 	b.reflow()
 }
 
@@ -91,20 +95,6 @@ func (b *contextBar) hasContent() bool {
 	return len(b.attachments) > 0
 }
 
-func (b *contextBar) updateHeight() {
-	if !b.hasContent() || b.maxHeight == 0 {
-		b.height = 0
-		b.focused = false
-		return
-	}
-	// top border + summary row
-	b.height = 2 + contextBarMarginTop
-	if b.expanded {
-		b.height += len(b.attachments)
-	}
-	b.height = min(b.height, b.maxHeight)
-}
-
 func (b *contextBar) SetMaxHeight(height int) {
 	height = max(0, height)
 	if b.maxHeight == height {
@@ -112,7 +102,6 @@ func (b *contextBar) SetMaxHeight(height int) {
 	}
 	b.maxHeight = height
 	b.regions = nil
-	b.updateHeight()
 	b.reflow()
 }
 
@@ -138,120 +127,116 @@ func (b *contextBar) View(totalWidth int) string {
 
 func (b *contextBar) reflow() {
 	b.renders++
-	totalWidth := b.width
 	b.themeGeneration = styles.ThemeGeneration()
-	b.regions = nil
-	if !b.hasContent() || b.height == 0 || totalWidth <= 0 {
-		b.view = ""
+	b.regions, b.hidden = nil, nil
+	b.toggleRegion = bannerRegion{}
+	b.canExpand = false
+	b.height = 0
+	b.view = ""
+	if !b.hasContent() || b.maxHeight == 0 {
+		b.expanded, b.focused = false, false
+		return
+	}
+	b.height = min(2+contextBarMarginTop, b.maxHeight)
+	if b.width <= 0 {
+		b.expanded = false
 		return
 	}
 
-	leftPadding := min(styles.AppPadding, totalWidth)
-	rightPadding := min(styles.AppPadding, totalWidth-leftPadding)
-	innerWidth := totalWidth - leftPadding - rightPadding
+	leftPadding := min(styles.AppPadding, b.width)
+	rightPadding := min(styles.AppPadding, b.width-leftPadding)
+	innerWidth := b.width - leftPadding - rightPadding
+	count := fmt.Sprintf("%d attachment", len(b.attachments))
+	if len(b.attachments) != 1 {
+		count += "s"
+	}
+	left, right := b.prepareSummary(innerWidth, count)
+	b.canExpand = len(b.hidden) > 0 && b.maxHeight > b.height && ansi.StringWidth(right) > 0
+	if !b.canExpand {
+		b.expanded = false
+	} else {
+		chevron := contextBarChevronCollapsed
+		if b.expanded {
+			chevron = contextBarChevronExpanded
+		}
+		left, right = b.prepareSummary(innerWidth, count+" "+chevron)
+		b.toggleRegion = bannerRegion{start: innerWidth - ansi.StringWidth(right), end: innerWidth, y: b.summaryY()}
+		if b.focused {
+			right = styles.AttachmentSizeStyle.Underline(true).Render(ansi.Strip(right))
+		}
+	}
+
 	var rows []string
 	if b.height >= 3 {
 		rows = append(rows, strings.Repeat(" ", innerWidth))
 	}
 	if b.height >= 2 {
-		rows = append(rows, b.renderTopBorder(innerWidth))
+		rows = append(rows, styles.ResizeHandleStyle.Render(strings.Repeat("─", innerWidth)))
 	}
-	rows = append(rows, b.renderSummaryRow(innerWidth))
+	gap := max(0, innerWidth-ansi.StringWidth(left)-ansi.StringWidth(right))
+	rows = append(rows, left+strings.Repeat(" ", gap)+right)
 	if b.expanded {
-		for i, item := range b.attachments {
-			if len(rows) >= b.height {
+		for _, item := range b.hidden {
+			if len(rows) >= b.maxHeight {
 				break
 			}
 			pill := ansi.Truncate(renderAttachmentPill(item), innerWidth, "…")
+			b.regions = append(b.regions, bannerRegion{start: 0, end: ansi.StringWidth(pill), y: len(rows), item: item})
 			rows = append(rows, pill+strings.Repeat(" ", max(0, innerWidth-ansi.StringWidth(pill))))
-			b.regions = append(b.regions, bannerRegion{start: 0, end: ansi.StringWidth(pill), y: b.summaryY() + 1 + i, item: item})
 		}
 	}
-
-	padStyle := lipgloss.NewStyle().Padding(0, rightPadding, 0, leftPadding)
-	if b.focused {
-		padStyle = padStyle.Background(styles.Selected)
-	}
-	b.view = padStyle.Render(strings.Join(rows, "\n"))
+	b.height = len(rows)
+	b.view = lipgloss.NewStyle().Padding(0, rightPadding, 0, leftPadding).Render(strings.Join(rows, "\n"))
 }
 
-func (b *contextBar) renderTopBorder(innerWidth int) string {
-	if innerWidth <= 0 {
-		return ""
-	}
-	return styles.ResizeHandleStyle.Render(strings.Repeat("─", innerWidth))
-}
-
-// renderSummaryRow renders the single collapsed row with attachment pills on the left
-// and summary labels (attachment count) on the right.
-func (b *contextBar) renderSummaryRow(innerWidth int) string {
-	var pills []string
-	if !b.expanded {
-		for _, item := range b.attachments {
-			pills = append(pills, renderAttachmentPill(item))
+// prepareSummary retains identities, not a clipped concatenation of pills. The
+// first pill may be truncated; expansion only reveals additional attachments.
+func (b *contextBar) prepareSummary(innerWidth int, count string) (string, string) {
+	b.regions, b.hidden = nil, nil
+	// Keep a first attachment visible even when its name needs truncation.
+	rightBudget := max(0, innerWidth-min(4, innerWidth)-2)
+	right := ansi.Truncate(count, rightBudget, "")
+	for _, chevron := range []string{contextBarChevronCollapsed, contextBarChevronExpanded} {
+		if strings.HasSuffix(count, " "+chevron) && rightBudget > 0 {
+			right = ansi.Truncate(strings.TrimSuffix(count, " "+chevron), max(0, rightBudget-2), "")
+			if right != "" {
+				right += " "
+			}
+			right += chevron
 		}
 	}
-	left := strings.Join(pills, "  ")
-
-	// Build right side: summary labels
-	var rightParts []string
-	if len(b.attachments) > 0 {
-		countLabel := fmt.Sprintf("%d attachment", len(b.attachments))
-		if len(b.attachments) != 1 {
-			countLabel += "s"
-		}
-		rightParts = append(rightParts, styles.AttachmentSizeStyle.Render(countLabel))
-	}
-
-	chevron := contextBarChevronCollapsed
-	if b.expanded {
-		chevron = contextBarChevronExpanded
-	}
-	right := strings.Join(rightParts, "  ") + " " + styles.MutedStyle.Render(chevron)
-
-	right = ansi.Truncate(right, innerWidth, "")
+	right = styles.AttachmentSizeStyle.Render(right)
 	leftBudget := max(0, innerWidth-ansi.StringWidth(right)-2)
-	left = ansi.Truncate(left, leftBudget, "…")
-	if !b.expanded {
-		b.buildRegions(pills, "  ")
-		for i := range b.regions {
-			b.regions[i].end = min(b.regions[i].end, leftBudget)
-		}
+	if right == "" {
+		leftBudget = innerWidth
 	}
-	return b.alignRow(left, right, innerWidth)
-}
-
-// alignRow left-aligns the main content and right-aligns the summary label within the given width.
-func (b *contextBar) alignRow(left, right string, innerWidth int) string {
-	leftWidth := ansi.StringWidth(left)
-	rightWidth := ansi.StringWidth(right)
-	gap := innerWidth - leftWidth - rightWidth
-	gap = max(gap, 0)
-	return left + strings.Repeat(" ", gap) + right
-}
-
-func (b *contextBar) buildRegions(pills []string, separator string) {
-	b.regions = b.regions[:0]
-	if len(pills) == 0 {
-		return
-	}
-
-	pos := 0
-	sepWidth := ansi.StringWidth(separator)
-
-	for i, pill := range pills {
+	var left string
+	for i, item := range b.attachments {
+		pill := renderAttachmentPill(item)
+		start := ansi.StringWidth(left)
 		if i > 0 {
-			pos += sepWidth
+			start += 2
+			if start+ansi.StringWidth(pill) > leftBudget {
+				b.hidden = b.attachments[i:]
+				break
+			}
+			left += "  "
+		} else {
+			pill = ansi.Truncate(pill, leftBudget, "…")
 		}
-		width := ansi.StringWidth(pill)
-		b.regions = append(b.regions, bannerRegion{
-			start: pos,
-			end:   pos + width,
-			item:  b.attachments[i],
-			y:     b.summaryY(),
-		})
-		pos += width
+		end := start + ansi.StringWidth(pill)
+		if end > start {
+			b.regions = append(b.regions, bannerRegion{start: start, end: end, y: b.summaryY(), item: item})
+		}
+		left += pill
 	}
+	return left, right
+}
+
+func (b *contextBar) ToggleAt(x, y int) bool {
+	r := b.toggleRegion
+	x -= bannerContentOffset
+	return b.canExpand && y == r.y && x >= r.start && x < r.end
 }
 
 func renderAttachmentPill(item bannerItem) string {

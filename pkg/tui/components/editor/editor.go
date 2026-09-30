@@ -1238,6 +1238,23 @@ func wrappedLineCount(runes []rune, width int) int {
 	return preview.VisualLineCount(textcore.Config{Width: max(1, width), Wrap: true})
 }
 
+// BannerLayout prepares width-dependent height and exposes only the explicit
+// overflow control as a toggle target. Coordinates are local to BannerView.
+type BannerLayout interface {
+	SetBannerWidth(width int)
+	ContextBarToggleAt(x, y int) bool
+}
+
+func (e *editor) SetBannerWidth(width int) {
+	if e.banner != nil {
+		e.banner.SetSize(width)
+	}
+}
+
+func (e *editor) ContextBarToggleAt(x, y int) bool {
+	return e.banner != nil && e.banner.ToggleAt(x, y)
+}
+
 // BannerHeightLimit is an optional shell capability. Set the available rows
 // before measuring BannerHeight; zero hides the banner without losing items.
 type BannerHeightLimit interface {

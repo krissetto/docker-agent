@@ -43,7 +43,7 @@ func TestAttachmentPreviewTypedImagesAndSafeText(t *testing.T) {
 			e.ToggleContextBar()
 			e.BannerView(80)
 			draft := e.Value()
-			preview, ok := e.AttachmentAtPosition(styles.AppPadding, 3)
+			preview, ok := e.AttachmentAtPosition(styles.AppPadding, 2)
 			require.True(t, ok)
 			assert.Equal(t, tc.image, preview.IsImage)
 			if tc.image {
@@ -71,4 +71,25 @@ func TestAttachmentPreviewReadAndSizeErrorsAreVisible(t *testing.T) {
 	assert.Contains(t, large.Content, "20 MiB")
 	assert.Empty(t, large.ImageData)
 	assert.Equal(t, "bad�name", safePreviewLabel("bad\x1bname"))
+}
+
+func TestOverflowPreviewKeepsDuplicateBasenameIdentity(t *testing.T) {
+	e := New(nil).(*editor)
+	e.SetSize(40, 3)
+	e.SetBannerWidth(40)
+	for _, content := range []string{"first exact bytes", "second exact bytes", "third exact bytes"} {
+		path := filepath.Join(t.TempDir(), "same-界.txt")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		require.NoError(t, e.AttachFile(path))
+	}
+	e.ToggleContextBar()
+	require.True(t, e.banner.IsExpanded())
+	require.Len(t, e.banner.regions, 3)
+	for i, region := range e.banner.regions {
+		preview, ok := e.AttachmentAtPosition(styles.AppPadding+region.start, region.y)
+		require.True(t, ok)
+		expected, err := os.ReadFile(e.attachments[i].path)
+		require.NoError(t, err)
+		require.Equal(t, string(expected), preview.Content)
+	}
 }

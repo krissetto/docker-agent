@@ -233,12 +233,15 @@ func TestEditorExternalBannerGeometryAcrossResize(t *testing.T) {
 }
 
 func TestExternalAttachmentBannerClickUsesExpandedCoordinates(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	root, _, _ := wallClockRoot(t, 40, 40)
 	defer root.ar.Stop()
 	defer root.dialogMgr.Cleanup()
 	file := filepath.Join(t.TempDir(), "preview.txt")
 	require.NoError(t, os.WriteFile(file, []byte("ATTACHMENT-PREVIEW-CONTENT"), 0o600))
 	require.NoError(t, root.editor.AttachFile(file))
+	second := filepath.Join(t.TempDir(), "hidden-preview.txt")
+	require.NoError(t, os.WriteFile(second, []byte("ATTACHMENT-PREVIEW-CONTENT"), 0o600))
+	require.NoError(t, root.editor.AttachFile(second))
 	draft := root.editor.Value()
 	root.resizeAll()
 	_ = root.View()

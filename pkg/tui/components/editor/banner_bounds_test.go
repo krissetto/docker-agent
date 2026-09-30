@@ -22,10 +22,11 @@ func TestBannerBudgetBoundsLabelsRowsAndHitRegions(t *testing.T) {
 						items = append(items, bannerItem{label: fmt.Sprintf("界-file-%d\nsecond\r\trow (2 KB)", i), placeholder: fmt.Sprintf("@file-%d", i)})
 					}
 					b.SetItems(items)
+					b.SetMaxHeight(budget)
+					b.SetSize(width)
 					if expanded {
 						b.Toggle()
 					}
-					b.SetMaxHeight(budget)
 					view := b.View(width)
 					if budget == 0 {
 						require.Empty(t, view)
@@ -64,9 +65,9 @@ func TestBannerBudgetRetainsDraftAndInvalidatesOldRegions(t *testing.T) {
 	draft := "prior message\nreply\nfollow-up  exact text"
 	e.SetValue(draft)
 	e.banner.SetItems([]bannerItem{{label: "paste-1 (2 KB)", placeholder: "@paste-1"}})
-	e.ToggleContextBar()
 	e.BannerView(40)
-	_, ok := e.banner.HitTestPosition(styles.AppPadding, 3)
+	e.ToggleContextBar()
+	_, ok := e.banner.HitTestPosition(styles.AppPadding, 2)
 	require.True(t, ok)
 	e.SetBannerMaxHeight(1)
 	require.Equal(t, 1, e.BannerHeight())
@@ -79,8 +80,8 @@ func TestBannerBudgetRetainsDraftAndInvalidatesOldRegions(t *testing.T) {
 	require.Equal(t, draft, e.Value())
 	require.Len(t, e.banner.attachments, 1)
 	e.SetBannerMaxHeight(4)
-	require.Equal(t, 4, e.BannerHeight())
+	require.Equal(t, 3, e.BannerHeight())
 	e.BannerView(40)
-	_, ok = e.banner.HitTestPosition(styles.AppPadding, 3)
+	_, ok = e.banner.HitTestPosition(styles.AppPadding, 2)
 	require.True(t, ok, "restored geometry recovers the same attachment")
 }

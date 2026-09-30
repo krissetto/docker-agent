@@ -48,7 +48,7 @@ func TestAttachmentImageClickUsesWriterAvailabilityWithoutChangingDraft(t *testi
 			bannerBefore := root.editor.BannerView(root.width)
 			focusBefore := root.focusedPanel
 			assert.False(t, root.editor.IsContextBarFocused())
-			_, _ = root.Update(tea.MouseClickMsg{X: 2, Y: root.composerLayout().bannerTop + 3, Button: tea.MouseLeft})
+			_, _ = root.Update(tea.MouseClickMsg{X: 2, Y: root.composerLayout().bannerTop + 2, Button: tea.MouseLeft})
 			require.True(t, root.dialogMgr.Open())
 			view := root.dialogMgr.TopDialog().View()
 			if mode == "enabled" || mode == "disabled" {

@@ -303,9 +303,9 @@ func TestHelpContextBarCanonicalSpaceEncoding(t *testing.T) {
 			require.Equal(t, "space", key.String())
 			before := root.editor.BannerView(120)
 			_, _ = root.Update(key)
-			require.True(t, root.editor.IsContextBarFocused(), "Space toggles without leaving bar")
+			require.True(t, root.editor.IsContextBarFocused(), "Space stays on the focused bar")
 			require.Equal(t, draft, root.editor.Value())
-			require.NotEqual(t, before, root.editor.BannerView(120), "Space actually expands/collapses bar")
+			require.Equal(t, before, root.editor.BannerView(120), "Space cannot expand an all-fit attachment")
 		})
 	}
 }

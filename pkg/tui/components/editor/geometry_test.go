@@ -29,8 +29,9 @@ func TestExpandedContextGeometryResizeClicksAndDraft(t *testing.T) {
 	e.textarea.SetCursorColumn(4)
 	row, col := e.textarea.Line(), e.textarea.Column()
 	require.Equal(t, 3, e.BannerHeight())
+	e.SetBannerWidth(40)
 	e.ToggleContextBar()
-	require.Equal(t, 5, e.BannerHeight())
+	require.Equal(t, 4, e.BannerHeight())
 	e.SetContextBarFocused(true)
 	require.True(t, e.IsContextBarFocused())
 
@@ -39,12 +40,19 @@ func TestExpandedContextGeometryResizeClicksAndDraft(t *testing.T) {
 		view := e.BannerView(width)
 		assert.Equal(t, e.BannerHeight(), lipgloss.Height(view))
 		assert.LessOrEqual(t, lipgloss.Width(view), width)
-		for i, att := range e.attachments {
-			preview, ok := e.AttachmentAtPosition(styles.AppPadding, 3+i)
-			require.True(t, ok)
-			assert.Equal(t, filepath.Base(att.path)+"\nexact  text", preview.Content)
+		if e.banner.canExpand && !e.banner.expanded {
+			e.ToggleContextBar()
 		}
-		for _, y := range []int{0, 1, 2, 5} {
+		for _, region := range e.banner.regions {
+			preview, ok := e.AttachmentAtPosition(styles.AppPadding+region.start, region.y)
+			require.True(t, ok)
+			for _, att := range e.attachments {
+				if att.placeholder == region.item.placeholder {
+					assert.Equal(t, filepath.Base(att.path)+"\nexact  text", preview.Content)
+				}
+			}
+		}
+		for _, y := range []int{0, 1, e.BannerHeight()} {
 			_, ok := e.AttachmentAtPosition(styles.AppPadding, y)
 			assert.False(t, ok, "non-pill row %d", y)
 		}

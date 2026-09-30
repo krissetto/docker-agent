@@ -3094,6 +3094,9 @@ func (m *appModel) resizeAll() tea.Cmd {
 		cmds = append(cmds, m.editor.SetSize(innerWidth, m.editorHeight))
 	}
 	_, editorHeight := m.editor.GetSize()
+	if banner, ok := m.editor.(editor.BannerLayout); ok {
+		banner.SetBannerWidth(width)
+	}
 	if banner, ok := m.editor.(editor.BannerHeightLimit); ok {
 		banner.SetBannerMaxHeight(max(0, height-chromeHeight-editorHeight-paneMinHeight))
 	}
@@ -3595,6 +3598,10 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 				return m.forwardDialog(dialog.OpenDialogMsg{Model: previewDialog})
 			}
 			return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewAttachmentPreviewDialog(m.ar, preview.Title, preview.Content)})
+		}
+		banner, ok := m.editor.(editor.BannerLayout)
+		if !ok || !banner.ContextBarToggleAt(msg.X, msg.Y-m.composerLayout().bannerTop) {
+			return m, nil
 		}
 		m.editor.SetContextBarFocused(true)
 		m.editor.Blur()

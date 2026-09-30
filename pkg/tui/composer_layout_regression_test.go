@@ -54,7 +54,9 @@ func (e *composerInlineBanner) BannerView(width int) string {
 	}
 	return strings.Join(rows[:e.BannerHeight()], "\n")
 }
-func (e *composerInlineBanner) ToggleContextBar() { e.expanded = !e.expanded }
+func (e *composerInlineBanner) SetBannerWidth(int)               {}
+func (e *composerInlineBanner) ContextBarToggleAt(x, y int) bool { return x == 4 && y == 2 }
+func (e *composerInlineBanner) ToggleContextBar()                { e.expanded = !e.expanded }
 func (e *composerInlineBanner) AttachmentAtPosition(_, y int) (editor.AttachmentPreview, bool) {
 	e.previewY = y
 	return editor.AttachmentPreview{Title: "inline", Content: "SYNTHETIC PREVIEW"}, e.expanded && y == 3
