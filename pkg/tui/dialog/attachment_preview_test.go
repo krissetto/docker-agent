@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,10 +38,10 @@ func previewPNG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func TestImageAttachmentPreviewAvailabilityBoundsAndScroll(t *testing.T) {
+func TestImageAttachmentPreviewAvailabilityAndBounds(t *testing.T) {
 	data := previewPNG(t)
 	for _, enabled := range []bool{false, true} {
-		d := NewImageAttachmentPreviewDialog(newDialogRuntime(), "photo.png", "image/png", data, enabled).(*attachmentPreviewDialog)
+		d := NewImageAttachmentPreviewDialog(newDialogRuntime(), "photo.png", "image/png", data, enabled)
 		for _, size := range [][2]int{{80, 24}, {30, 12}, {8, 4}, {80, 24}} {
 			d.SetSize(size[0], size[1])
 			view := d.View()
@@ -48,7 +49,11 @@ func TestImageAttachmentPreviewAvailabilityBoundsAndScroll(t *testing.T) {
 			assert.LessOrEqual(t, lipgloss.Height(view), size[1])
 			assert.NotContains(t, view, "\x1b_G", "only deferred markers, never raw terminal graphics")
 			if size[0] == 80 {
-				assert.Contains(t, ansi.Strip(view), "40 × 80 pixels")
+				if enabled {
+					assert.NotContains(t, ansi.Strip(view), "pixels")
+				} else {
+					assert.Contains(t, ansi.Strip(view), "40 × 80 pixels")
+				}
 				if enabled {
 					assert.Contains(t, view, "cagent-image;")
 				} else {
@@ -57,12 +62,7 @@ func TestImageAttachmentPreviewAvailabilityBoundsAndScroll(t *testing.T) {
 				}
 			}
 		}
-		if enabled {
-			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-			assert.Nil(t, cmd)
-			assert.Positive(t, d.BodyScrollOffset())
-			assert.Contains(t, d.View(), "cagent-image;")
-		}
+
 	}
 	bad := NewImageAttachmentPreviewDialog(newDialogRuntime(), "bad.png", "image/png", []byte("\x1b_Gjunk"), true)
 	bad.SetSize(100, 30)
@@ -79,11 +79,11 @@ func TestImageAttachmentMarkersOnlyAppearInSettledLifecycle(t *testing.T) {
 	advanceDialog(r, r.Continue(), dialogOpenDuration)
 	a.tick("", 80, 30)
 	require.Contains(t, a.view(), "cagent-image;")
-	d.SetSize(40, 12)
-	a.retarget("resize", 40, 12)
+	d.SetSize(10, 6)
+	a.retarget("resize", 10, 6)
 	assert.NotContains(t, a.view(), "cagent-image;")
 	advanceDialog(r, r.Continue(), dialogOpenDuration+dialogResizeDuration)
-	a.tick("", 40, 12)
+	a.tick("", 10, 6)
 	require.Contains(t, a.view(), "cagent-image;")
 	a.startClose(false)
 	assert.NotContains(t, a.view(), "cagent-image;")
@@ -111,4 +111,32 @@ func TestImageAttachmentPreviewRejectsPixelBombBeforeDecode(t *testing.T) {
 	d.SetSize(100, 30)
 	assert.Contains(t, ansi.Strip(d.View()), "16 megapixel")
 	assert.NotContains(t, d.View(), "cagent-image;")
+}
+
+func TestNativeImageDialogCentersActualPlacementAndUsesAvailableScreen(t *testing.T) {
+	for _, pixels := range [][2]int{{1, 1}, {1600, 100}, {100, 1600}, {1800, 1200}} {
+		var data bytes.Buffer
+		require.NoError(t, png.Encode(&data, stdimage.NewRGBA(stdimage.Rect(0, 0, pixels[0], pixels[1]))))
+		d := NewImageAttachmentPreviewDialog(nil, "picture.png", "image/png", data.Bytes(), true).(*imageAttachmentPreviewDialog)
+		for _, size := range [][2]int{{180, 60}, {40, 12}, {10, 6}, {180, 60}} {
+			d.Update(ImageCellSizeMsg{Width: 9, Height: 23})
+			d.SetSize(size[0], size[1])
+			view := d.View()
+			assert.LessOrEqual(t, lipgloss.Width(view), size[0])
+			assert.LessOrEqual(t, lipgloss.Height(view), size[1])
+			assert.NotContains(t, ansi.Strip(view), "pixels")
+			assert.NotContains(t, ansi.Strip(view), "image/png")
+			for _, line := range strings.Split(view, "\n") {
+				at := strings.Index(line, "\x1b_cagent-image;")
+				if at < 0 {
+					continue
+				}
+				stop := strings.Index(line[at:], "\x1b\\") + at + 2
+				cols, ok := image.MarkerColumns(line[at:stop])
+				require.True(t, ok)
+				x := ansi.StringWidth(line[:at])
+				assert.InDelta(t, x, lipgloss.Width(view)-x-cols, 1, "graphic extent, not zero-width marker text, is centered")
+			}
+		}
+	}
 }

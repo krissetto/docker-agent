@@ -219,3 +219,26 @@ func TestExplicitMarkersIgnoreAutomaticGlobalWithoutChangingIt(t *testing.T) {
 		assert.NotContains(t, StripMarkers(line), markerPrefix)
 	}
 }
+
+func TestNativePreviewPlacementUsesPixelsAndPartialCellCrop(t *testing.T) {
+	img := Inline{PNGData: []byte("native-png"), Width: 17, Height: 35}
+	lines := RenderNativePreviewMarkers(img, CellSize{9, 23})
+	require.Len(t, lines, 2)
+	_, overlays := extractOverlays(strings.Join(lines, "\n"))
+	require.Len(t, overlays, 1)
+	assert.Equal(t, 2, overlays[0].cols)
+	assert.Equal(t, 35, overlays[0].sourceH)
+	_, cropped := extractOverlays(lines[1])
+	require.Len(t, cropped, 1)
+	assert.Equal(t, 23, cropped[0].sourceY)
+	assert.Equal(t, 12, cropped[0].sourceH)
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	writer.SetContent(lines[1])
+	_, err := writer.Write([]byte("frame"))
+	require.NoError(t, err)
+	assert.Contains(t, output.String(), "a=p,i=")
+	assert.NotContains(t, output.String(), ",c=", "native previews never scale to rounded terminal cells")
+	assert.NotContains(t, output.String(), ",r=")
+	assert.Contains(t, output.String(), ",y=23,w=17,h=12")
+}

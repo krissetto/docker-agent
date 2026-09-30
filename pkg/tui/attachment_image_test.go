@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,7 +51,11 @@ func TestAttachmentImageClickUsesWriterAvailabilityWithoutChangingDraft(t *testi
 			_, _ = root.Update(tea.MouseClickMsg{X: 2, Y: root.composerLayout().bannerTop + 3, Button: tea.MouseLeft})
 			require.True(t, root.dialogMgr.Open())
 			view := root.dialogMgr.TopDialog().View()
-			assert.Contains(t, ansi.Strip(view), "40 × 40 pixels")
+			if mode == "enabled" || mode == "disabled" {
+				assert.NotContains(t, ansi.Strip(view), "pixels")
+			} else {
+				assert.Contains(t, ansi.Strip(view), "40 × 40 pixels")
+			}
 			if mode == "enabled" || mode == "disabled" {
 				assert.Contains(t, view, "cagent-image;")
 			} else {
@@ -102,7 +107,7 @@ func TestImageDialogComposedFrameOwnsPlacementsThroughStackAndResize(t *testing.
 	frame(true, 80, 24)
 	assert.Contains(t, output.String(), "a=d,d=a", "occlusion replaces stale placement geometry")
 	output.Reset()
-	frame(false, 30, 12)
+	frame(false, 10, 6)
 	assert.Contains(t, output.String(), "a=d,d=a", "resize replaces stale placement geometry")
 	output.Reset()
 	writer.SetContent("replacement dialog without graphics")
@@ -110,4 +115,24 @@ func TestImageDialogComposedFrameOwnsPlacementsThroughStackAndResize(t *testing.
 	require.NoError(t, err)
 	assert.Contains(t, output.String(), "a=d,d=a")
 	assert.NotContains(t, output.String(), "a=p,i=", "close/replacement leaves no graphics placement")
+}
+
+func TestImageCellMetricsReflowPreviewAndRejectInvalidReports(t *testing.T) {
+	root, _, _ := wallClockRoot(t, 120, 40)
+	defer root.ar.Stop()
+	defer root.dialogMgr.Cleanup()
+	var data bytes.Buffer
+	require.NoError(t, png.Encode(&data, stdimage.NewRGBA(stdimage.Rect(0, 0, 800, 600))))
+	preview := dialog.NewImageAttachmentPreviewDialog(nil, "native.png", "image/png", data.Bytes(), true)
+	root.dialogMgr.Update(dialog.OpenDialogMsg{Model: preview})
+	before := preview.View()
+	root.Update(uv.CellSizeEvent{Width: 9, Height: 23})
+	require.Equal(t, tuiimage.CellSize{Width: 9, Height: 23}, root.imageCellSize)
+	assert.NotEqual(t, before, preview.View(), "valid cell-size report refits active image outside View")
+	warm := preview.View()
+	root.Update(uv.CellSizeEvent{Width: 0, Height: 9999})
+	assert.Equal(t, warm, preview.View())
+	for range 4 {
+		assert.Equal(t, warm, preview.View())
+	}
 }

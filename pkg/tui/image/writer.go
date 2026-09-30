@@ -15,6 +15,7 @@ import (
 
 type overlay struct {
 	explicit         bool
+	cellHeight       int
 	id               uint32
 	png              []byte
 	x, y             int
@@ -153,7 +154,10 @@ func (w *Writer) Write(p []byte) (int, error) {
 			newUploads = append(newUploads, image.id)
 		}
 		fmt.Fprintf(&b, "\x1b[%d;%dH", image.y+1, image.x+1)
-		fmt.Fprintf(&b, "\x1b_Ga=p,i=%d,p=%d,q=2,C=1,c=%d,r=%d", image.id, index+1, image.cols, image.rows)
+		fmt.Fprintf(&b, "\x1b_Ga=p,i=%d,p=%d,q=2,C=1", image.id, index+1)
+		if image.cellHeight == 0 {
+			fmt.Fprintf(&b, ",c=%d,r=%d", image.cols, image.rows)
+		}
 		if image.sourceY > 0 || image.sourceH < image.pixelH {
 			fmt.Fprintf(&b, ",x=0,y=%d,w=%d,h=%d", image.sourceY, image.pixelW, image.sourceH)
 		}
@@ -198,7 +202,7 @@ func sameOverlays(a, b []overlay) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
+		if a[i].cellHeight != b[i].cellHeight || a[i].explicit != b[i].explicit || a[i].id != b[i].id || a[i].x != b[i].x || a[i].y != b[i].y ||
 			a[i].cols != b[i].cols || a[i].rows != b[i].rows ||
 			a[i].pixelW != b[i].pixelW || a[i].pixelH != b[i].pixelH ||
 			a[i].sourceY != b[i].sourceY || a[i].sourceH != b[i].sourceH {
@@ -272,27 +276,41 @@ func extractMarkerOverlays(lines []string) []overlay {
 			}
 			stop := start + len(markerPrefix) + stopRel
 			fields := strings.Split(line[start+len(markerPrefix):stop], ";")
-			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") {
-				explicit := len(fields) == 5
+			if len(fields) == 4 || (len(fields) == 5 && fields[4] == "preview") || (len(fields) == 7 && fields[4] == "native") {
+				explicit := len(fields) > 4
+				cellHeight := 0
+				if len(fields) == 7 {
+					cellHeight, _ = strconv.Atoi(fields[6])
+					if cellHeight <= 0 || cellHeight > 512 {
+						line = line[:start] + line[stop+2:]
+						continue
+					}
+				}
 				id64, idErr := strconv.ParseUint(fields[0], 10, 32)
 				cols, colsErr := strconv.Atoi(fields[1])
 				totalRows, rowsErr := strconv.Atoi(fields[2])
 				row, rowErr := strconv.Atoi(fields[3])
 				img, ok := registeredImage(uint32(id64))
-				if idErr == nil && colsErr == nil && rowsErr == nil && rowErr == nil && ok && totalRows > 0 {
+				if idErr == nil && colsErr == nil && rowsErr == nil && rowErr == nil && ok && totalRows > 0 && cols > 0 && row >= 0 && row < totalRows {
 					x := ansi.StringWidth(line[:start])
 					if len(overlays) > 0 {
 						last := &overlays[len(overlays)-1]
 						lastEndRow := last.sourceY + last.sourceH
 						expectedSourceY := img.Height * row / totalRows
-						if last.explicit == explicit && uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && lastEndRow == expectedSourceY {
+						if cellHeight > 0 {
+							expectedSourceY = min(img.Height, row*cellHeight)
+						}
+						if last.cellHeight == cellHeight && last.explicit == explicit && uint64(last.id) == id64 && last.x == x && last.y+last.rows == y && lastEndRow == expectedSourceY {
 							last.rows++
 							last.sourceH = img.Height*(row+1)/totalRows - last.sourceY
+							if cellHeight > 0 {
+								last.sourceH = min(img.Height, (row+1)*cellHeight) - last.sourceY
+							}
 						} else {
-							overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit))
+							overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit, cellHeight))
 						}
 					} else {
-						overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit))
+						overlays = append(overlays, markerOverlay(uint32(id64), img, x, y, cols, totalRows, row, explicit, cellHeight))
 					}
 				}
 			}
@@ -303,12 +321,15 @@ func extractMarkerOverlays(lines []string) []overlay {
 	return overlays
 }
 
-func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explicit bool) overlay {
+func markerOverlay(id uint32, img Inline, x, y, cols, totalRows, row int, explicit bool, cellHeight int) overlay {
 	sourceY := img.Height * row / totalRows
 	sourceEnd := img.Height * (row + 1) / totalRows
+	if cellHeight > 0 {
+		sourceY, sourceEnd = min(img.Height, row*cellHeight), min(img.Height, (row+1)*cellHeight)
+	}
 	return overlay{
-		explicit: explicit,
-		id:       id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
+		explicit: explicit, cellHeight: cellHeight,
+		id: id, png: img.PNGData, x: x, y: y, cols: cols, rows: 1,
 		pixelW: img.Width, pixelH: img.Height,
 		sourceY: sourceY, sourceH: sourceEnd - sourceY,
 	}

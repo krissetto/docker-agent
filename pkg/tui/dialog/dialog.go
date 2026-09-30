@@ -175,6 +175,9 @@ func (d *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.broadcastToAll(msg)
 		return d, cmd
 
+	case ImageCellSizeMsg:
+		return d, d.broadcastToAll(msg)
+
 	case messages.ThemeChangedMsg:
 		cmd := d.broadcastToAll(msg)
 		return d, cmd

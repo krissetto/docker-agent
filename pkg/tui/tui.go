@@ -409,7 +409,8 @@ type appModel struct {
 	// Normalized to start with "/".
 	disabledCommands map[string]bool
 
-	imageWriter *tuiimage.Writer
+	imageWriter   *tuiimage.Writer
+	imageCellSize tuiimage.CellSize
 }
 
 // themeFileWatcher is the subset of *styles.ThemeWatcher the model drives.
@@ -870,7 +871,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
-	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel())
+	cmd := tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.preparePanel(), tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
 	}
@@ -1303,13 +1304,24 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- Window / Terminal ---
 
+	case uv.CellSizeEvent:
+		cell := tuiimage.CellSize{Width: msg.Width, Height: msg.Height}
+		if !cell.Valid() || cell == m.imageCellSize {
+			return m, nil
+		}
+		m.imageCellSize = cell
+		m.viewCacheValid = false
+		if m.imageWriter != nil {
+			m.imageWriter.Invalidate()
+		}
+		return m, m.updateDialogCmd(dialog.ImageCellSizeMsg(cell))
 	case tea.WindowSizeMsg:
 		if m.imageWriter != nil {
 			m.imageWriter.Invalidate()
 		}
 		m.wWidth, m.wHeight = msg.Width, msg.Height
 		cmd := m.handleWindowResize(msg.Width, msg.Height)
-		return m, cmd
+		return m, tea.Batch(cmd, tea.Raw(ansi.WindowOp(ansi.RequestCellSizeWinOp)))
 
 	case tea.BlurMsg:
 		m.cancelPaneGesture()
@@ -3570,7 +3582,9 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		if preview, ok := m.editor.AttachmentAtPosition(msg.X, msg.Y-m.composerLayout().bannerTop); ok {
 			if preview.IsImage {
 				supported := m.imageWriter != nil && m.imageWriter.Supported()
-				return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewImageAttachmentPreviewDialog(m.ar, preview.Title, preview.MIME, preview.ImageData, supported)})
+				previewDialog := dialog.NewImageAttachmentPreviewDialog(m.ar, preview.Title, preview.MIME, preview.ImageData, supported)
+				previewDialog.Update(dialog.ImageCellSizeMsg(m.imageCellSize))
+				return m.forwardDialog(dialog.OpenDialogMsg{Model: previewDialog})
 			}
 			return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewAttachmentPreviewDialog(m.ar, preview.Title, preview.Content)})
 		}

@@ -57,28 +57,69 @@ func NewImageAttachmentPreviewDialog(ar *animation.Runtime, title, mimeType stri
 	if !supported {
 		return NewAttachmentPreviewDialog(ar, title, info+"\n\n"+unavailable)
 	}
-	img, ok := image.FromBytes(title, mimeType, data)
-	if !ok {
+	preview, err := image.DecodePreview(title, data)
+	if err != nil {
 		return NewAttachmentPreviewDialog(ar, title, info+"\n\nImage preview unavailable: unable to decode image data.")
 	}
-	d := &attachmentPreviewDialog{}
-	d.readOnlyScrollDialog = newReadOnlyScrollDialog(readOnlyScrollDialogSize{
-		widthPercent: 80, minWidth: 40, maxWidth: 140, heightPercent: 80, heightMax: 60,
-	}, func(width, _ int) []string {
-		lines := []string{RenderTitle(title, width, styles.DialogTitleStyle), RenderSeparator(width), ""}
-		lines = append(lines, strings.Split(ansi.Hardwrap(info, width, true), "\n")...)
-		lines = append(lines, "")
-		markers := image.RenderPreviewMarkers(img, width)
-		if len(markers) == 0 || width < 4 {
-			return append(lines, strings.Split(ansi.Hardwrap(unavailable, width, true), "\n")...)
-		}
-		for _, marker := range markers {
-			lines = append(lines, marker+strings.Repeat(" ", max(0, width-ansi.StringWidth(marker))))
-		}
-		return lines
-	})
-	return d
+	return &imageAttachmentPreviewDialog{title: title, preview: preview}
 }
+
+type ImageCellSizeMsg image.CellSize
+
+type imageAttachmentPreviewDialog struct {
+	BaseDialog
+	title       string
+	preview     *image.Preview
+	cell        image.CellSize
+	content     string
+	dialogWidth int
+}
+
+func (d *imageAttachmentPreviewDialog) Init() tea.Cmd { return nil }
+func (d *imageAttachmentPreviewDialog) SetSize(width, height int) tea.Cmd {
+	d.BaseDialog.SetSize(width, height)
+	d.prepare()
+	return nil
+}
+func (d *imageAttachmentPreviewDialog) prepare() {
+	cell := d.cell.Resolved()
+	cols, rows := max(1, d.width-6), max(1, d.height-5)
+	img, err := d.preview.Fit(cols, rows, cell)
+	if err != nil {
+		d.content = "Image preview unavailable: unable to resize image."
+		return
+	}
+	placementCols := (img.Width + cell.Width - 1) / cell.Width
+	d.dialogWidth = min(d.width, max(placementCols, min(ansi.StringWidth(d.title), cols))+6)
+	inner := max(1, d.dialogWidth-6)
+	lines := []string{RenderTitle(d.title, inner, styles.DialogTitleStyle)}
+	if d.width >= 7 && d.height >= 6 {
+		for _, marker := range image.RenderNativePreviewMarkers(img, cell) {
+			left := max(0, (inner-placementCols)/2)
+			lines = append(lines, strings.Repeat(" ", left)+marker+strings.Repeat(" ", inner-left))
+		}
+	}
+	d.content = strings.Join(lines, "\n")
+}
+func (d *imageAttachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		return d, d.SetSize(msg.Width, msg.Height)
+	case ImageCellSizeMsg:
+		d.cell = image.CellSize(msg)
+		d.prepare()
+	case tea.KeyPressMsg:
+		if msg.Code == tea.KeyEscape || msg.Code == tea.KeyEnter || msg.String() == "q" {
+			return d, d.CancelDialogCmd()
+		}
+	}
+	return d, nil
+}
+func (d *imageAttachmentPreviewDialog) View() string {
+	return d.RenderCard(styles.DialogStyle, d.dialogWidth, d.content)
+}
+func (d *imageAttachmentPreviewDialog) Position() (int, int) { return d.CenterDialog(d.View()) }
+func (d *imageAttachmentPreviewDialog) Cleanup()             {}
 
 func (d *attachmentPreviewDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	_, cmd := d.readOnlyScrollDialog.Update(msg)
