@@ -77,7 +77,7 @@ type Settings struct {
 	// ShowBanner displays the ASCII-art startup banner in the TUI.
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
-	// DimInactivePanes slightly reduces contrast of unfocused transcripts.
+	// DimInactivePanes reduces contrast of unfocused split-pane content.
 	// Defaults to true when not set.
 	DimInactivePanes *bool `yaml:"dim_inactive_panes,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
@@ -285,7 +285,7 @@ func (s *Settings) GetShowBanner() bool {
 	return *s.ShowBanner
 }
 
-// GetDimInactivePanes defaults to subtly dimming unfocused pane content.
+// GetDimInactivePanes defaults to dimming unfocused pane content.
 func (s *Settings) GetDimInactivePanes() bool {
 	if s == nil || s.DimInactivePanes == nil {
 		return true

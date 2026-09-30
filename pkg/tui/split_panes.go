@@ -565,10 +565,10 @@ func (m *appModel) paneActivity(id string) string {
 	return styles.MutedStyle.Render("· idle")
 }
 
-// Keep 62% of each semantic color's distance from the active theme background.
+// Keep 35% of each semantic color's distance from the active theme background.
 // This visibly subordinates inactive content without replacing its hues or
 // relying on terminal faint support, on both dark and light themes.
-const inactivePaneContrast = 0.62
+const inactivePaneContrast = 0.35
 
 type paneDimInput struct {
 	content string

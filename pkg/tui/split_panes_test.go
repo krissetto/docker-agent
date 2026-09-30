@@ -659,8 +659,8 @@ func TestInactivePaneRenderedContrastDarkLightAndDisabled(t *testing.T) {
 				br, bg, bb := styles.ColorToRGB(styles.Background)
 				return math.Sqrt((r-br)*(r-br) + (g-bg)*(g-bg) + (b-bb)*(b-bb))
 			}
-			require.Less(t, distance(inactiveCell.fg), distance(focusCell.fg)*0.70, "rendered RGB distance must be materially reduced, not the rejected 0.88 wash")
-			require.Greater(t, distance(inactiveCell.fg), distance(focusCell.fg)*0.55, "body text remains readable rather than disappearing")
+			require.Less(t, distance(inactiveCell.fg), distance(focusCell.fg)*0.40, "rendered RGB distance must be strongly reduced")
+			require.Greater(t, distance(inactiveCell.fg), distance(focusCell.fg)*0.30, "body text retains the intended 35% contrast rather than disappearing")
 			root.dimInactivePanes = false
 			headerFull := root.paneTitle("profile", 60)
 			root.dimInactivePanes = true

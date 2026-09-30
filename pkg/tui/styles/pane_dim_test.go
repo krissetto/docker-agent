@@ -37,7 +37,7 @@ func TestPaneDimMalformedColorsDoNotBecomeResets(t *testing.T) {
 func TestFadeAndPaneDimPreserveDefaultBackgroundCells(t *testing.T) {
 	fc := NewFadeContextRGB(28, 28, 34, 224, 224, 227)
 	input := "default \x1b[48;2;90;100;110mselected\x1b[49m tail"
-	for _, opacity := range []float64{0.1, 0.5, 0.62, 1} {
+	for _, opacity := range []float64{0.1, 0.35, 0.5, 0.62, 1} {
 		output := FadeLineCtx(input, opacity, &fc)
 		cells := uv.NewStyledString(output).Lines(ansi.GraphemeWidth)[0]
 		for i, cell := range cells {

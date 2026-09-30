@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -125,4 +126,57 @@ func TestShellFrameCacheReadsExactContentAndGeometry(t *testing.T) {
 	cache.render("replacement page", 81, 2, render)
 	cache.render("replacement page", 81, 3, render)
 	require.Equal(t, 4, renders)
+}
+
+func TestOptionalInactivePaneDimmingStrongWholeContentAndFocus(t *testing.T) {
+	root, _, _ := paneReplayRoot(t)
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	require.InDelta(t, 0.35, inactivePaneContrast, 0, "enabled dimming is deliberately pronounced")
+	content := "plain 界 é\n\x1b[38;2;230;180;100;48;2;30;90;150m[ control ] ▐\x1b[49m tail\x1b[m\n\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\"
+	for _, ref := range []string{"default", "default-light", "nord"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		for _, focus := range []string{"profile", "second", "third", "profile"} {
+			root.handleSwitchTab(focus)
+			root.dimInactivePanes = false
+			titles := map[string]string{}
+			for _, id := range root.panes.Sessions() {
+				titles[id] = root.paneTitle(id, 60)
+				require.Equal(t, content, root.paneTranscript(id, content), "explicit false bypasses all dimming")
+			}
+			editor := root.editor.View()
+			tabs := root.tabBar.View()
+			root.dimInactivePanes = true
+			for _, id := range root.panes.Sessions() {
+				got := root.paneTranscript(id, content)
+				title := root.paneTitle(id, 60)
+				if id == focus {
+					require.Equal(t, content, got, "active content retains exact bytes")
+					require.Equal(t, titles[id], title)
+				} else {
+					fc := styles.NewFadeContext()
+					lines := strings.Split(content, "\n")
+					for i := range lines {
+						lines[i] = styles.FadeLineCtx(lines[i], 0.35, &fc)
+					}
+					require.Equal(t, strings.Join(lines, "\n"), got, "whole transcript/control/scrollbar painted exactly once")
+					require.Equal(t, styles.FadeLineCtx(titles[id], 0.35, &fc), title, "title/status painted exactly once")
+					require.Equal(t, ansi.Strip(content), ansi.Strip(got))
+					require.Contains(t, got, "\x1b]8;;https://example.test\x1b\\")
+				}
+				root.paneDimCache = nil
+				root.paneTitleCache = nil
+				require.Equal(t, got, root.paneTranscript(id, content), "theme/focus retained and fresh output agree")
+				require.Equal(t, title, root.paneTitle(id, 60))
+			}
+			require.Equal(t, editor, root.editor.View(), "shared editor is never dimmed")
+			require.Equal(t, tabs, root.tabBar.View(), "shared tabs are never dimmed")
+			root.focusedPanel = PanelEditor
+			require.Equal(t, content, root.paneTranscript(focus, content), "keyboard region focus is not pane session focus")
+		}
+	}
+	root.singlePane()
+	require.Equal(t, content, root.paneTranscript("second", content), "unsplit content is not dimmed")
 }
