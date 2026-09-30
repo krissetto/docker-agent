@@ -14,8 +14,12 @@ import (
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 )
 
-func pendingEdit(turnID, content string) SessionEdit {
-	return SessionEdit{Kind: SessionEditPendingMessage, PendingMessage: &PendingMessageEdit{TurnID: turnID, Content: content}}
+func pendingEdit(turnID, content string, expectedContent ...string) SessionEdit {
+	edit := &PendingMessageEdit{TurnID: turnID, Content: content}
+	if len(expectedContent) != 0 {
+		edit.ExpectedContent = &expectedContent[0]
+	}
+	return SessionEdit{Kind: SessionEditPendingMessage, PendingMessage: edit}
 }
 
 func TestPendingEditSameAdmissionAndOrder(t *testing.T) {
@@ -34,7 +38,7 @@ func TestPendingEditSameAdmissionAndOrder(t *testing.T) {
 			last, err := post(t.Context(), TurnInput{Content: "last"})
 			require.NoError(t, err)
 			before := h.driver.sess.MessagesSnapshot()
-			snapshot, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "new"))
+			snapshot, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "new", "old"))
 			require.NoError(t, err)
 			items := snapshot.MessagesSnapshot()
 			require.Len(t, items, 3)
@@ -78,12 +82,12 @@ type pendingEditFailingStore struct {
 	err error
 }
 
-func (s pendingEditFailingStore) EditPendingUserMessage(context.Context, string, string, string) error {
+func (s pendingEditFailingStore) EditPendingUserMessage(context.Context, string, string, string, ...string) error {
 	return s.err
 }
 
 func TestPendingEditFailureNoMutationOrEvent(t *testing.T) {
-	for _, kind := range []string{"persistence", "unsupported", "context", "missing", "active", "nonhuman", "retry", "consumed_prefix", "empty", "layout", "stale_store"} {
+	for _, kind := range []string{"persistence", "unsupported", "context", "missing", "active", "nonhuman", "retry", "consumed_prefix", "empty", "layout", "stale_store", "stale_content", "wrong_session"} {
 		t.Run(kind, func(t *testing.T) {
 			store := session.NewInMemorySessionStore()
 			h := pendingRecallHandle(t, store)
@@ -105,6 +109,11 @@ func TestPendingEditFailureNoMutationOrEvent(t *testing.T) {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
+			case "stale_content":
+				expected := "older"
+				edit.PendingMessage.ExpectedContent = &expected
+			case "wrong_session":
+				h.driver.sess.ID = "other"
 			case "missing":
 				edit.PendingMessage.TurnID = "missing"
 			case "active":
@@ -148,7 +157,7 @@ func TestPendingEditSQLiteRestartTwice(t *testing.T) {
 	h := pendingRecallHandle(t, store)
 	turn, err := h.Submit(t.Context(), TurnInput{Content: "old"})
 	require.NoError(t, err)
-	_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "new"))
+	_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "new", "old"))
 	require.NoError(t, err)
 	require.NoError(t, store.Close())
 	for range 2 {
@@ -175,10 +184,10 @@ type pendingEditBarrierStore struct {
 	once    sync.Once
 }
 
-func (s *pendingEditBarrierStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string) error {
+func (s *pendingEditBarrierStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string, expectedContent ...string) error {
 	s.once.Do(func() { close(s.entered) })
 	<-s.release
-	return s.Store.(session.PendingMessageEditor).EditPendingUserMessage(ctx, sessionID, turnID, content)
+	return s.Store.(session.PendingMessageEditor).EditPendingUserMessage(ctx, sessionID, turnID, content, expectedContent...)
 }
 
 func (s *pendingEditBarrierStore) DeletePendingUserMessage(ctx context.Context, sessionID, turnID string) error {
@@ -200,7 +209,7 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 			barrier := &pendingEditBarrierStore{Store: store, entered: make(chan struct{}), release: make(chan struct{})}
 			h.driver.r.sessionStore = barrier
 			edited := make(chan error, 1)
-			go func() { _, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "new")); edited <- err }()
+			go func() { _, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "new", "old")); edited <- err }()
 			<-barrier.entered
 			done := make(chan error, 1)
 			var drained []QueuedMessage
@@ -229,7 +238,7 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 				h.driver.r.activeRootStreams.Add(-1)
 				h.driver.wg.Done()
 			}
-			_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "late"))
+			_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "late", "new"))
 			var typed *SessionError
 			require.ErrorAs(t, err, &typed)
 			assert.Equal(t, SessionErrorStale, typed.Kind)
@@ -261,4 +270,70 @@ func TestPendingEditConcurrentLastWriterWins(t *testing.T) {
 	require.Len(t, h.driver.events.replay[h.ID()], 3)
 	assert.Equal(t, "first", h.driver.events.replay[h.ID()][1].event.(*PendingUserMessageEditedEvent).Message)
 	assert.Equal(t, "second", h.driver.events.replay[h.ID()][2].event.(*PendingUserMessageEditedEvent).Message)
+}
+
+func TestPendingEditConcurrentStaleDraftRejected(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	h := pendingRecallHandle(t, store)
+	turn, err := h.Steer(t.Context(), TurnInput{Content: "old"})
+	require.NoError(t, err)
+	barrier := &pendingEditBarrierStore{Store: store, entered: make(chan struct{}), release: make(chan struct{})}
+	h.driver.r.sessionStore = barrier
+	first := make(chan error, 1)
+	go func() { _, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "first", "old")); first <- err }()
+	<-barrier.entered
+	second := make(chan error, 1)
+	go func() { _, err := h.Edit(t.Context(), pendingEdit(turn.TurnID, "second", "old")); second <- err }()
+	close(barrier.release)
+	require.NoError(t, <-first)
+	var typed *SessionError
+	require.ErrorAs(t, <-second, &typed)
+	assert.Equal(t, SessionErrorStale, typed.Kind)
+	assert.Equal(t, "first", h.driver.steering[0].Content)
+	assert.Equal(t, "first", h.driver.sess.MessagesSnapshot()[0].Message.Message.Content)
+	stored, err := store.GetSession(t.Context(), h.ID())
+	require.NoError(t, err)
+	assert.Equal(t, "first", stored.MessagesSnapshot()[0].Message.Message.Content)
+	assert.Len(t, h.driver.events.replay[h.ID()], 2, "stale edits publish nothing")
+}
+
+func TestPendingEditRejectsDivergedStore(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			store := session.NewInMemorySessionStore()
+			if kind == "sqlite" {
+				var err error
+				store, err = sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "edit.db"))
+				require.NoError(t, err)
+			}
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			h := pendingRecallHandle(t, store)
+			turn, err := h.Submit(t.Context(), TurnInput{Content: "old"})
+			require.NoError(t, err)
+			require.NoError(t, store.(session.PendingMessageEditor).EditPendingUserMessage(t.Context(), h.ID(), turn.TurnID, "newer", "old"))
+			before := h.driver.sess.MessagesSnapshot()
+			_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "stale draft", "old"))
+			var typed *SessionError
+			require.ErrorAs(t, err, &typed)
+			assert.Equal(t, SessionErrorStale, typed.Kind)
+			assert.Equal(t, before, h.driver.sess.MessagesSnapshot())
+			assert.Equal(t, "old", h.driver.pending[0].Content)
+			assert.Len(t, h.driver.events.replay[h.ID()], 1)
+			stored, err := store.GetSession(t.Context(), h.ID())
+			require.NoError(t, err)
+			assert.Equal(t, "newer", stored.MessagesSnapshot()[0].Message.Message.Content)
+		})
+	}
+}
+
+func TestPendingEditSameContentAndTextCAS(t *testing.T) {
+	h := pendingRecallHandle(t, session.NewInMemorySessionStore())
+	turn, err := h.Steer(t.Context(), TurnInput{Content: "A"})
+	require.NoError(t, err)
+	for _, change := range [][2]string{{"A", "A"}, {"A", "B"}, {"B", "A"}, {"A", "C"}} {
+		_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, change[1], change[0]))
+		require.NoError(t, err)
+	}
+	assert.Equal(t, "C", h.driver.steering[0].Content)
+	assert.Len(t, h.driver.events.replay[h.ID()], 5, "same-content saves retain successful edit event semantics")
 }

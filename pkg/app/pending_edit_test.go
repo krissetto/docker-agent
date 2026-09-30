@@ -25,6 +25,14 @@ func TestPendingEditRoutesExactOwnerWithoutSnapshotInstall(t *testing.T) {
 	require.ErrorAs(t, a.EditPendingMessage(t.Context(), "other", "turn", "bad"), &typed)
 	assert.Equal(t, runtime.SessionErrorWrongSession, typed.Kind)
 	assert.Equal(t, "new", owner.edit.PendingMessage.Content)
+	for _, original := range []string{"old", ""} {
+		require.NoError(t, a.EditPendingMessage(t.Context(), "s", "turn", "guarded", original))
+		require.NotNil(t, owner.edit.PendingMessage.ExpectedContent)
+		assert.Equal(t, original, *owner.edit.PendingMessage.ExpectedContent)
+		require.ErrorAs(t, a.EditPendingMessage(t.Context(), "other", "turn", "bad", original), &typed)
+		assert.Equal(t, runtime.SessionErrorWrongSession, typed.Kind)
+		assert.Equal(t, "guarded", owner.edit.PendingMessage.Content)
+	}
 	require.NoError(t, a.EditSession(t.Context(), runtime.SessionEdit{Kind: runtime.SessionEditPendingMessage, PendingMessage: &runtime.PendingMessageEdit{TurnID: "turn", Content: "again"}}))
 	assert.Same(t, before, a.Session())
 	assert.Empty(t, a.events)

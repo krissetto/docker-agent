@@ -52,7 +52,8 @@ func TestPendingEditHTTPAuthLocalRemoteParity(t *testing.T) {
 	}
 	queued, err := handle.Submit(ctx, runtime.TurnInput{Content: "old", RequestID: "original"})
 	require.NoError(t, err)
-	edit := runtime.SessionEdit{Kind: runtime.SessionEditPendingMessage, PendingMessage: &runtime.PendingMessageEdit{TurnID: queued.TurnID, Content: "remote"}}
+	original := "old"
+	edit := runtime.SessionEdit{Kind: runtime.SessionEditPendingMessage, PendingMessage: &runtime.PendingMessageEdit{TurnID: queued.TurnID, Content: "remote", ExpectedContent: &original}}
 	body, err := json.Marshal(edit)
 	require.NoError(t, err)
 	for _, token := range []string{"", "wrong"} {
@@ -64,6 +65,11 @@ func TestPendingEditHTTPAuthLocalRemoteParity(t *testing.T) {
 	assert.Equal(t, "remote", snapshot.MessagesSnapshot()[snapshot.ItemCount()-1].Message.Message.Content)
 	local, err := owner.Runtime().SessionByID(handle.ID())
 	require.NoError(t, err)
+	_, err = handle.Edit(ctx, edit)
+	var typed *runtime.SessionError
+	require.ErrorAs(t, err, &typed)
+	assert.Equal(t, runtime.SessionErrorStale, typed.Kind)
+	original = "remote"
 	edit.PendingMessage.Content = "local"
 	_, err = local.Edit(ctx, edit)
 	require.NoError(t, err)
@@ -94,9 +100,9 @@ func TestPendingEditHTTPAuthLocalRemoteParity(t *testing.T) {
 		rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/"+handle.ID(), tc.body, "secret")
 		assert.Equal(t, tc.status, rec.Code, rec.Body.String())
 	}
+	original = "local"
 	edit.PendingMessage.Content = " "
 	_, err = handle.Edit(ctx, edit)
-	var typed *runtime.SessionError
 	require.ErrorAs(t, err, &typed)
 	assert.Equal(t, runtime.SessionErrorInvalid, typed.Kind)
 	_, err = handle.Cancel(ctx, queued.TurnID)
@@ -135,13 +141,15 @@ func TestPendingEditHTTPAttachedChildExactRouting(t *testing.T) {
 	srv.sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootOwner, registry: registry})
 	srv.sm.runtimeSessions.Store(child.ID, &activeRuntimes{handle: childOwner, registry: registry})
 	authenticated := NewWithManager(srv.sm, "secret")
-	body := `{"kind":"pending_message","pending_message":{"turn_id":"same-turn-id","content":"child only"}}`
+	body := `{"kind":"pending_message","pending_message":{"turn_id":"same-turn-id","content":"child only","expected_content":""}}`
 	rec := sessionRequest(t, authenticated, http.MethodPatch, "/api/v2/sessions/child", body, "secret")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Empty(t, rootOwner.edits)
 	require.Len(t, childOwner.edits, 1)
 	assert.Equal(t, "same-turn-id", childOwner.edits[0].PendingMessage.TurnID)
 	assert.Equal(t, "child only", childOwner.edits[0].PendingMessage.Content)
+	require.NotNil(t, childOwner.edits[0].PendingMessage.ExpectedContent)
+	assert.Empty(t, *childOwner.edits[0].PendingMessage.ExpectedContent)
 	var returned session.Session
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &returned))
 	assert.Equal(t, child.ID, returned.ID)

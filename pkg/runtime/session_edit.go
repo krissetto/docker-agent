@@ -25,8 +25,9 @@ const (
 )
 
 type PendingMessageEdit struct {
-	TurnID  string `json:"turn_id"`
-	Content string `json:"content"`
+	TurnID          string  `json:"turn_id"`
+	Content         string  `json:"content"`
+	ExpectedContent *string `json:"expected_content,omitempty"`
 }
 
 type SessionEdit struct {

@@ -17,14 +17,19 @@ var (
 )
 
 // PendingMessageEditor updates an accepted admission without changing its identity.
+// When supplied, expectedContent is checked atomically against the stored editable text.
 type PendingMessageEditor interface {
-	EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string) error
+	EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string, expectedContent ...string) error
 }
 
 // PendingUserMessageReplacement prepares a detached payload, preserving the
 // leading text's attachment suffix and every non-text part produced by the App.
-func PendingUserMessageReplacement(message *Message, content string) (*Message, error) {
+func PendingUserMessageReplacement(message *Message, content string, expectedContent ...string) (*Message, error) {
 	if message == nil || !message.Pending || !message.Accepted || message.InputOrigin != InputOriginUser || message.Message.Role != chat.MessageRoleUser {
+		return nil, ErrPendingMessageStale
+	}
+	// Text CAS deliberately permits A-to-B-to-A edits; admissions have no revision.
+	if len(expectedContent) != 0 && message.Message.Content != expectedContent[0] {
 		return nil, ErrPendingMessageStale
 	}
 	parts := message.Message.MultiContent
@@ -79,7 +84,7 @@ func (s *Session) ReplacePendingUserMessagePayload(turnID, content string, parts
 	return true
 }
 
-func (s *InMemorySessionStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string) error {
+func (s *InMemorySessionStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string, expectedContent ...string) error {
 	s.coordinationMu.Lock()
 	defer s.coordinationMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -106,7 +111,7 @@ func (s *InMemorySessionStore) EditPendingUserMessage(ctx context.Context, sessi
 	if index < 0 {
 		return ErrPendingMessageStale
 	}
-	next, err := PendingUserMessageReplacement(sess.Messages[index].Message, content)
+	next, err := PendingUserMessageReplacement(sess.Messages[index].Message, content, expectedContent...)
 	if err != nil {
 		return err
 	}
@@ -117,7 +122,7 @@ func (s *InMemorySessionStore) EditPendingUserMessage(ctx context.Context, sessi
 	return nil
 }
 
-func (s *SQLiteSessionStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string) error {
+func (s *SQLiteSessionStore) EditPendingUserMessage(ctx context.Context, sessionID, turnID, content string, expectedContent ...string) error {
 	if sessionID == "" {
 		return ErrEmptyID
 	}
@@ -143,7 +148,7 @@ func (s *SQLiteSessionStore) EditPendingUserMessage(ctx context.Context, session
 	if err := json.Unmarshal([]byte(payload), &message.Message); err != nil {
 		return err
 	}
-	next, err := PendingUserMessageReplacement(message, content)
+	next, err := PendingUserMessageReplacement(message, content, expectedContent...)
 	if err != nil {
 		return err
 	}

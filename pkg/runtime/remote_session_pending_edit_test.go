@@ -23,7 +23,7 @@ func TestRemotePendingEditExistingPatchAndTypedEvent(t *testing.T) {
 			http.Error(w, "invalid edit request", http.StatusBadRequest)
 			return
 		}
-		assert.Equal(t, pendingEdit("turn", "new"), edit)
+		assert.Equal(t, pendingEdit("turn", "new", "old"), edit)
 		w.Header().Set("Content-Type", "application/json")
 		if !assert.NoError(t, json.NewEncoder(w).Encode(session.New(session.WithID("child")))) {
 			http.Error(w, "encode session response", http.StatusInternalServerError)
@@ -37,7 +37,7 @@ func TestRemotePendingEditExistingPatchAndTypedEvent(t *testing.T) {
 	require.NoError(t, err)
 	handle, err := transport.SessionByID("child")
 	require.NoError(t, err)
-	snapshot, err := handle.Edit(t.Context(), pendingEdit("turn", "new"))
+	snapshot, err := handle.Edit(t.Context(), pendingEdit("turn", "new", "old"))
 	require.NoError(t, err)
 	assert.Equal(t, "child", snapshot.ID)
 	event := PendingUserMessageEdited("child", "turn", "new", nil, 3)
@@ -72,7 +72,7 @@ func TestRemotePendingEditTypedErrors(t *testing.T) {
 			require.NoError(t, err)
 			handle, err := transport.SessionByID("s")
 			require.NoError(t, err)
-			_, err = handle.Edit(t.Context(), pendingEdit("turn", "new"))
+			_, err = handle.Edit(t.Context(), pendingEdit("turn", "new", "old"))
 			var typed *SessionError
 			require.ErrorAs(t, err, &typed)
 			assert.Equal(t, tc.kind, typed.Kind)

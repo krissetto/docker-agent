@@ -39,7 +39,8 @@ func TestPendingEditStoresPreserveAdmission(t *testing.T) {
 			items := before.MessagesSnapshot()
 			editor := store.(PendingMessageEditor)
 			require.ErrorIs(t, editor.EditPendingUserMessage(t.Context(), "wrong", "target", "new"), ErrPendingMessageStale)
-			require.NoError(t, editor.EditPendingUserMessage(t.Context(), sess.ID, "target", "new"))
+			require.NoError(t, editor.EditPendingUserMessage(t.Context(), sess.ID, "target", "new", "old"))
+			require.ErrorIs(t, editor.EditPendingUserMessage(t.Context(), sess.ID, "target", "stale", "old"), ErrPendingMessageStale)
 			want := items
 			want[1].Message.Message.Content = "new"
 			want[1].Message.Message.MultiContent[0].Text = "new\n\nattachment"
@@ -151,7 +152,7 @@ func TestPendingEditStoreRejectsIneligibleAndAmbiguousIdentity(t *testing.T) {
 				require.NoError(t, err)
 				before, err := store.GetSession(t.Context(), sess.ID)
 				require.NoError(t, err)
-				require.Error(t, store.(PendingMessageEditor).EditPendingUserMessage(t.Context(), sess.ID, "turn", "new"))
+				require.Error(t, store.(PendingMessageEditor).EditPendingUserMessage(t.Context(), sess.ID, "turn", "new", "old"))
 				after, err := store.GetSession(t.Context(), sess.ID)
 				require.NoError(t, err)
 				assert.Equal(t, before.MessagesSnapshot(), after.MessagesSnapshot())
@@ -167,8 +168,36 @@ func TestPendingEditSharedMemorySlotIsIdempotent(t *testing.T) {
 	store.sessions.Store(sess.ID, sess)
 	replacement, err := PendingUserMessageReplacement(sess.MessagesSnapshot()[0].Message, "new")
 	require.NoError(t, err)
-	require.NoError(t, store.EditPendingUserMessage(t.Context(), sess.ID, "turn", "new"))
+	require.NoError(t, store.EditPendingUserMessage(t.Context(), sess.ID, "turn", "new", "old"))
 	require.True(t, sess.ReplacePendingUserMessagePayload("turn", replacement.Message.Content, replacement.Message.MultiContent))
 	assert.Equal(t, "new\n\nattachment", sess.MessagesSnapshot()[0].Message.Message.MultiContent[0].Text)
 	assert.Equal(t, 1, sess.ItemCount())
+}
+
+func TestPendingEditExpectedEmptyContent(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			if kind == "sqlite" {
+				var err error
+				store, err = newSQLiteStoreForTest(t, filepath.Join(t.TempDir(), "edit.db"))
+				require.NoError(t, err)
+			}
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			sess := New(WithID("empty"))
+			require.NoError(t, store.AddSession(t.Context(), sess))
+			message, err := PendingUserMessageReplacement(editablePendingMessage("turn"), "")
+			require.NoError(t, err)
+			message.ID, err = store.AddMessage(t.Context(), sess.ID, message)
+			require.NoError(t, err)
+			editor := store.(PendingMessageEditor)
+			require.NoError(t, editor.EditPendingUserMessage(t.Context(), sess.ID, "turn", "new", ""))
+			require.ErrorIs(t, editor.EditPendingUserMessage(t.Context(), sess.ID, "turn", "stale", ""), ErrPendingMessageStale)
+			loaded, err := store.GetSession(t.Context(), sess.ID)
+			require.NoError(t, err)
+			want, err := PendingUserMessageReplacement(message, "new")
+			require.NoError(t, err)
+			assert.Equal(t, want, loaded.MessagesSnapshot()[0].Message)
+		})
+	}
 }

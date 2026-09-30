@@ -48,7 +48,11 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		}
 		current, position = item.Message, i
 	}
-	next, err := session.PendingUserMessageReplacement(current, edit.Content)
+	var expectedContent []string
+	if edit.ExpectedContent != nil {
+		expectedContent = []string{*edit.ExpectedContent}
+	}
+	next, err := session.PendingUserMessageReplacement(current, edit.Content, expectedContent...)
 	classify := func(err error) error {
 		switch {
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -71,7 +75,7 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		if !ok {
 			return nil, failure(SessionErrorUnsupported, "store does not support pending message edits")
 		}
-		if err := store.EditPendingUserMessage(ctx, h.sessionID, edit.TurnID, edit.Content); err != nil {
+		if err := store.EditPendingUserMessage(ctx, h.sessionID, edit.TurnID, edit.Content, expectedContent...); err != nil {
 			return nil, classify(err)
 		}
 	} else if err := ctx.Err(); err != nil {
