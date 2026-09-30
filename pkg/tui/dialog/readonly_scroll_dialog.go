@@ -1,10 +1,11 @@
 package dialog
 
 import (
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -48,7 +49,7 @@ func newReadOnlyScrollDialog(
 	size readOnlyScrollDialogSize,
 	render contentRenderer,
 ) readOnlyScrollDialog {
-	base := BaseDialog{}
+	base := BaseDialog{bodyCompactTitle: true}
 	scrollviewView := base.newScrollview(
 		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 		scrollview.WithReserveScrollbarSpace(true),
@@ -111,8 +112,12 @@ func (d *readOnlyScrollDialog) renderBody(prepare bool) string {
 	dialogWidth, contentWidth := d.dialogWidth()
 	allLines := d.render(max(1, contentWidth), d.maxViewport())
 	headerLines := min(3, len(allLines))
-	footer := d.RenderActions(contentWidth + d.scrollview.ReservedCols())
+	footer := ""
+	if len(allLines) < 3 || strings.TrimSpace(ansi.Strip(allLines[2])) == "" {
+		footer = styles.MutedStyle.Render(ansi.Wrap("↑/↓ scroll · PgUp/PgDn page · Esc close", max(1, contentWidth), ""))
+	}
 	if prepare {
+		d.bodyMaxHeight = max(1, min(d.Height()*d.size.heightPercent/100, d.size.heightMax))
 		d.PrepareScrollableBody(styles.DialogStyle, dialogWidth, strings.Join(allLines[:headerLines], "\n"), strings.Join(allLines[headerLines:], "\n"), footer)
 		return ""
 	}
