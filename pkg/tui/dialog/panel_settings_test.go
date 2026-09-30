@@ -49,7 +49,7 @@ func TestSettingsPanelAllOffAndReenable(t *testing.T) {
 	applied := collectMsgs(d.apply())
 	require.NotNil(t, applied[1].(messages.ApplySettingsMsg).Preferences.Panel.Elements)
 	d.selected[tabPanel] = 0
-	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	assert.Equal(t, []messages.PanelElement{messages.PanelWorkspace}, d.current.Panel.Elements)
 	assert.Contains(t, d.View(), "Workspace")
 }
@@ -83,4 +83,26 @@ func TestSettingsPanelPreviewRestoredAfterRoundTrip(t *testing.T) {
 		require.Len(t, msgs, 2, "clear the root preview baseline even when edits return to the original")
 		require.IsType(t, messages.CancelPanelPreviewMsg{}, msgs[1])
 	}
+}
+
+func TestSettingsPanelMouseReorderAndBounds(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.tab = tabPanel
+	d.SetSize(40, 20)
+	found := false
+	for _, hit := range d.rowHits {
+		if hit.kind != settingsMovePanel {
+			continue
+		}
+		assert.False(t, hit.row == 0 && hit.delta == -1, "first row cannot move up")
+		assert.False(t, hit.row == len(d.panelOrder)-1 && hit.delta == 1, "last row cannot move down")
+		if hit.row == 0 && hit.delta == 1 {
+			msgs := collectMsgs(clickSettingsHit(t, d, hit))
+			assert.True(t, hasMsg[messages.PreviewPanelMsg](msgs))
+			assert.Equal(t, messages.PanelWorkspace, d.panelOrder[1])
+			assert.Equal(t, 1, d.selected[tabPanel])
+			found = true
+		}
+	}
+	require.True(t, found)
 }

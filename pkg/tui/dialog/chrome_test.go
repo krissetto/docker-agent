@@ -321,16 +321,34 @@ func TestPartialActionCannotAuthorizeBorderOrOutsideCells(t *testing.T) {
 	}
 }
 
+type overflowingChromeDialog struct{ BaseDialog }
+
+func (d *overflowingChromeDialog) Init() tea.Cmd { return nil }
+func (d *overflowingChromeDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	_, cmd := d.UpdateBodyScroll(msg)
+	return d, cmd
+}
+func (d *overflowingChromeDialog) content() string {
+	return d.RenderActionKeys(12, "a", "First", "b", "Second", "c", "Third", "d", "Fourth")
+}
+func (d *overflowingChromeDialog) SetSize(width, height int) tea.Cmd {
+	d.BaseDialog.SetSize(width, height)
+	d.PrepareScrollableBody(styles.DialogStyle, 20, "", strings.Repeat("body\n", 20), d.content())
+	return nil
+}
+func (d *overflowingChromeDialog) View() string {
+	return d.RenderScrollableBody(styles.DialogStyle, 20, "", strings.Repeat("body\n", 20), d.content())
+}
+func (d *overflowingChromeDialog) Position() (int, int) { return d.CenterDialog(d.View()) }
+
 func TestDraggedCoalescedWheelRoutesToVisibleFooter(t *testing.T) {
 	r := newDialogRuntime()
 	mgr := New(r).(*manager)
 	mgr.SetSize(30, 10)
-	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	d := &overflowingChromeDialog{}
 	mgr.handleOpen(OpenDialogMsg{Model: d})
 	settleTestDialog(mgr)
 	// Use a tiny card in a taller root so its footer overflows and the entry can move.
-	d.tab = tabBehavior
-	d.selected[d.tab] = rowTabTitleLength
 	d.SetSize(20, 6)
 	mgr.stack[0].invalidateView()
 	view := d.View()

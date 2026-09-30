@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -172,8 +173,15 @@ func TestDialogContextHelpSettingsAndContextSelection(t *testing.T) {
 	d.current.TabTitleMaxLength = 5
 	d.prepareBody()
 	_, sections = ContextHelp(d)
-	assert.Equal(t, "Apply", helpEntry(t, sections, "dialog.settings.selected-enter").Description)
-	assert.True(t, d.actions()[0].Disabled)
+	assert.Equal(t, "Advance selected setting", helpEntry(t, sections, "dialog.settings.selected-enter").Description)
+	assert.Contains(t, helpEntry(t, sections, "dialog.settings.control.adjust").Condition, "numeric bounds")
+	d.setFocus(settingsCategories)
+	_, sections = ContextHelp(d)
+	assert.Equal(t, "Enter category controls", helpEntry(t, sections, "dialog.settings.enter-controls").Description)
+	d.setFocus(settingsActions)
+	d.prepareBody()
+	_, sections = ContextHelp(d)
+	assert.Equal(t, "Cancel", strings.TrimSpace(helpEntry(t, sections, "dialog.settings.selected-enter").Description))
 
 	c := &contextDialog{selected: -1, breakdown: &runtime.ContextBreakdown{}}
 	_, sections = ContextHelp(c)

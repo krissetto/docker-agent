@@ -72,75 +72,28 @@ func TestConcreteDialogOpeningCadence(t *testing.T) {
 	}
 }
 
-func TestSettingsSemanticTabChangeHasOneStableTarget(t *testing.T) {
-	r := newDialogRuntime()
-	mgr := &manager{runtime: r, width: 120, height: 40}
-	d := NewSettingsDialog(messages.Preferences{}, true)
-	mgr.handleOpen(OpenDialogMsg{Model: d})
-	mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
-
-	entry := &mgr.stack[0]
-	baseline := entry.boundsMeasurementCount
-	mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab}) // Appearance -> Behavior
-	require.True(t, entry.anim.Running())
-	assert.Equal(t, baseline+1, entry.boundsMeasurementCount)
-	target := entry.targetHeight
-	for elapsed := dialogOpenDuration + animation.TickRate; entry.anim.Running(); elapsed += animation.TickRate {
-		mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
-		assert.Equal(t, target, entry.targetHeight)
-	}
-	assert.Equal(t, baseline+1, entry.boundsMeasurementCount, "animation ticks do not repeatedly remeasure or retarget")
-}
-
-func TestSettingsBidirectionalRetargetCadence(t *testing.T) {
-	for _, size := range [][2]int{{165, 47}, {120, 40}} {
+func TestSettingsFocusAndCategoriesKeepStableBounds(t *testing.T) {
+	for _, size := range [][2]int{{165, 47}, {120, 40}, {80, 24}, {30, 8}} {
 		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
 			r := newDialogRuntime()
 			mgr := &manager{runtime: r, width: size[0], height: size[1]}
 			mgr.handleOpen(OpenDialogMsg{Model: NewSettingsDialog(messages.Preferences{}, true)})
 			mgr.handleTick(advanceDialog(r, r.Continue(), dialogOpenDuration))
 			entry := &mgr.stack[0]
-
-			elapsed := dialogOpenDuration
-			for round, keyCode := range []rune{'\t', 0, '\t', 0, '\t'} {
-				key := tea.KeyPressMsg{Code: keyCode}
-				if keyCode == 0 {
-					key = tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
-				}
-				beforeHeight, beforeCount := entry.renderHeight, entry.boundsMeasurementCount
+			width, height := entry.targetWidth, entry.targetHeight
+			for _, key := range []tea.KeyPressMsg{
+				{Code: tea.KeyTab}, {Code: tea.KeyTab}, {Code: tea.KeyRight},
+				{Code: tea.KeyRight}, {Code: tea.KeyLeft}, {Code: tea.KeyDown},
+				{Code: tea.KeyTab}, {Code: tea.KeyTab, Mod: tea.ModShift},
+			} {
+				beforeCount := entry.boundsMeasurementCount
 				mgr.forwardToTop(key)
-				assert.Equal(t, beforeCount+1, entry.boundsMeasurementCount, "one semantic action measures once")
-				assert.Equal(t, beforeHeight, entry.fromHeight, "retarget starts at the currently rendered height")
-				target := entry.targetHeight
-
-				previous := beforeHeight
-				direction := target - beforeHeight
-				for entry.anim.Running() {
-					elapsed += animation.TickRate
-					mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
-					assert.Equal(t, target, entry.targetHeight, "target remains stable through the transition")
-					if direction >= 0 {
-						assert.GreaterOrEqual(t, entry.renderHeight, previous)
-					} else {
-						assert.LessOrEqual(t, entry.renderHeight, previous)
-					}
-					row, _ := entry.position(size[0], size[1])
-					assert.InDelta(t, float64(size[1]-entry.renderHeight)/2, row, 1, "center remains invariant")
-					previous = entry.renderHeight
-				}
-				assert.Equal(t, target, entry.renderHeight)
-				t.Logf("round=%d elapsed=%s target=%d measurements=%d", round, elapsed, target, entry.boundsMeasurementCount)
+				assert.Equal(t, beforeCount+1, entry.boundsMeasurementCount)
+				assert.Equal(t, width, entry.targetWidth)
+				assert.Equal(t, height, entry.targetHeight)
+				assert.False(t, entry.anim.Running(), "focus/category changes never recenter the card")
+				assert.Equal(t, int32(0), r.ActiveCount(), "static settings own no animation lease")
 			}
-
-			// Reverse before the current resize settles: the new transition must
-			// continue from the sampled current position without a reset or jump.
-			mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
-			elapsed += 2 * animation.TickRate
-			mgr.handleTick(advanceDialog(r, r.Continue(), elapsed))
-			current := entry.renderHeight
-			mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-			assert.Equal(t, current, entry.fromHeight)
-			assert.Equal(t, int32(1), r.ActiveCount(), "reversal reuses the active transition lease")
 		})
 	}
 }

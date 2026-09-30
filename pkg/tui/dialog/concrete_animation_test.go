@@ -82,29 +82,17 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 						}
 					}
 				case *settingsDialog:
-					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
-					if tick == nil {
-						tick = runtime.Continue()
-					}
-					require.True(t, mgr.stack[0].anim.Running(), "category content change retargets the shared outer transition")
-					assertConcreteRootFrame(t, mgr)
-					stepConcreteDialog(t, runtime, &tick, mgr)
-					assertConcreteRootFrame(t, mgr)
-					finishConcreteDialog(t, runtime, &tick, mgr)
+					before := mgr.stack[0].targetHeight
+					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyRight})
+					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyDown})
 					d.selected[d.tab] = rowYOLO
 					d.confirmYOLO = false
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeySpace})
-					require.True(t, mgr.stack[0].anim.Running(), "toggle-dependent content retargets the shared outer transition")
-					if tick == nil {
-						tick = runtime.Continue()
-					}
+					require.True(t, d.confirmYOLO)
+					require.Equal(t, before, mgr.stack[0].targetHeight)
+					require.False(t, mgr.stack[0].anim.Running(), "warning updates do not resize the card")
 					assertConcreteRootFrame(t, mgr)
-					finishConcreteDialog(t, runtime, &tick, mgr)
-					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab})
-					if tick == nil {
-						tick = runtime.Continue()
-					}
-					finishConcreteDialog(t, runtime, &tick, mgr)
 				}
 
 				mgr.Update(tea.WindowSizeMsg{Width: 40, Height: 12})

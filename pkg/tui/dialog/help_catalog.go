@@ -4,8 +4,6 @@ import (
 	"slices"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/help"
 )
@@ -67,7 +65,7 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 	case *workingDirPickerDialog:
 		context += " / " + map[dirSection]string{sectionBrowse: "Browse", sectionRecent: "Recent", sectionPinned: "Pinned"}[d.section]
 	case *settingsDialog:
-		context += " / " + settingsTabLabels[d.tab]
+		context += " / " + settingsTabLabels[d.tab] + " / " + map[settingsFocus]string{settingsControls: "Controls", settingsCategories: "Categories", settingsActions: "Actions"}[d.focus]
 	case *multiChoiceDialog:
 		if d.config.Title != "" {
 			context = d.config.Title + strings.TrimPrefix(context, "Choices and rejection reason")
@@ -81,8 +79,14 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 	for si := range sections {
 		entries := sections[si].Entries[:0]
 		for _, entry := range sections[si].Entries {
-			if family == "settings" && strings.HasSuffix(entry.ID, ".decrease-previous-or-increase-next-toggle-selected-setting") {
-				continue // Individual current controls below have independent bounds.
+			if d, ok := dialog.(*settingsDialog); ok {
+				if strings.HasSuffix(entry.ID, ".adjust-setting") || strings.HasSuffix(entry.ID, ".activate-setting") {
+					continue // Selected control semantics are described below.
+				}
+				if (strings.HasPrefix(entry.Condition, "Controls") && d.focus != settingsControls) ||
+					(strings.HasPrefix(entry.Condition, "Categories") && d.focus != settingsCategories) {
+					continue
+				}
 			}
 			entry.Keys = slices.Clone(entry.Keys)
 			if d, ok := dialog.(*multiChoiceDialog); ok && slices.Contains(entry.Keys, "1") {
@@ -129,31 +133,19 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 		}
 		sections[si].Entries = entries
 	}
-	if d, ok := dialog.(*settingsDialog); ok {
-		controls := help.Section{ID: "dialog.settings.controls", Title: "Selected setting controls"}
-		actions := d.actions()
-		hasPrevious := slices.ContainsFunc(actions, func(a Action) bool { return a.Key.Code == tea.KeyLeft })
-		for _, action := range actions {
-			keys := []string{action.Key.String()}
-			switch action.Key.Code {
-			case tea.KeyLeft:
-				keys = append(keys, "h")
-			case tea.KeyRight:
-				keys = append(keys, "l", "space")
-				if !hasPrevious && (d.tab != tabAppearance || d.selected[d.tab] != rowTheme) {
-					keys = append(keys, "left", "h") // Toggles ignore direction.
-				}
-			default:
-				continue
-			}
-			if base.actionsFocused {
-				keys = slices.DeleteFunc(keys, func(k string) bool { return k == "left" || k == "right" })
-			}
-			condition := "Selected setting."
-			if action.Disabled {
-				condition = "Unavailable now: selected value is at its bound."
-			}
-			controls.Entries = append(controls.Entries, help.Entry{ID: "dialog.settings.control." + action.Key.String(), Keys: keys, Description: action.Label, Condition: condition})
+	if d, ok := dialog.(*settingsDialog); ok && d.focus == settingsControls {
+		label := "Toggle selected setting"
+		if d.adjustable(d.selected[d.tab]) {
+			label = "Advance selected setting"
+		} else if d.tab == tabAppearance && d.selected[d.tab] == rowTheme {
+			label = "Choose theme"
+		}
+		controls := help.Section{ID: "dialog.settings.controls", Title: "Selected setting controls", Entries: []help.Entry{{
+			ID: "dialog.settings.selected-enter", Keys: []string{"enter", "space"}, Description: label,
+			Condition: "Controls; edits the draft, never applies Settings. Theme picker saves separately.",
+		}}}
+		if d.adjustable(d.selected[d.tab]) {
+			controls.Entries = append(controls.Entries, help.Entry{ID: "dialog.settings.control.adjust", Keys: []string{"left", "h", "right", "l"}, Description: "Previous/decrease or next/increase", Condition: "Enabled selected enum or number; numeric bounds apply."})
 		}
 		sections = append(sections, controls)
 	}

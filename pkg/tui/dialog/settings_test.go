@@ -5,11 +5,14 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func newTestSettingsDialog(t *testing.T, layout messages.LayoutSettings) *settingsDialog {
@@ -70,28 +73,29 @@ func TestSettingsDialogNavigation(t *testing.T) {
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
-	t.Parallel()
-
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	require.Equal(t, tabAppearance, d.tab)
-
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabBehavior, d.tab)
-
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabNotifications, d.tab)
-
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabPanel, d.tab)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	assert.Equal(t, tabPanel, d.tab, "content stays on its last section while actions are focused")
-	require.True(t, d.ActionsFocused())
-
+	require.Equal(t, settingsControls, d.focus)
+	for _, focus := range []settingsFocus{settingsActions, settingsCategories, settingsControls} {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		assert.Nil(t, cmd)
+		assert.Equal(t, focus, d.focus)
+		assert.Equal(t, tabAppearance, d.tab, "Tab changes focus zones, not categories")
+		assert.Equal(t, focus == settingsActions, d.ActionsFocused())
+	}
+	for _, focus := range []settingsFocus{settingsCategories, settingsActions, settingsControls} {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		assert.Nil(t, cmd)
+		assert.Equal(t, focus, d.focus)
+	}
+	d.selected[tabAppearance] = rowPosition
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	assert.Equal(t, tabPanel, d.tab, "shift+tab returns from actions to the previous content section")
-	require.False(t, d.ActionsFocused())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	assert.Equal(t, tabNotifications, d.tab, "content shift+tab cycles backward")
+	for _, tab := range []int{tabBehavior, tabNotifications, tabPanel, tabAppearance} {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		assert.Equal(t, tab, d.tab)
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.Equal(t, settingsControls, d.focus)
+	assert.Equal(t, rowPosition, d.selected[d.tab], "each category remembers its row")
 }
 
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
@@ -197,7 +201,7 @@ func TestSettingsDialogAppliesInfoMode(t *testing.T) {
 	d.selected[tabAppearance] = rowInfoMode
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
 	require.Len(t, msgs, 2, "apply must close the dialog and emit the settings")
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
@@ -300,7 +304,8 @@ func TestSettingsDialogTogglesSendModeWithoutPreview(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	require.Equal(t, tabBehavior, d.tab)
 	require.Equal(t, messages.SendModeSteer, d.current.SendMode)
 
@@ -334,7 +339,7 @@ func TestSettingsDialogTogglesShowBanner(t *testing.T) {
 	require.False(t, d.current.ShowBanner)
 	assert.Contains(t, ansi.Strip(d.View()), "Show startup banner")
 
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
 	require.Len(t, msgs, 2, "apply must close the dialog and emit the settings")
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
@@ -348,10 +353,11 @@ func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	d.selected[tabAppearance] = rowTools
 	d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
 	require.Len(t, msgs, 2, "apply must close the dialog and emit the settings")
 	_, ok := msgs[0].(CloseDialogMsg)
@@ -366,10 +372,11 @@ func TestSettingsDialogApplySendModeChangeOnly(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
 	require.Len(t, msgs, 2)
 	applied, ok := msgs[1].(messages.ApplySettingsMsg)
@@ -383,7 +390,7 @@ func TestSettingsDialogApplyWithoutChangesOnlyCloses(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	d.selected[tabAppearance] = rowPosition
 
-	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	msgs := collectMsgs(cmd)
 	require.Len(t, msgs, 1)
 	_, ok := msgs[0].(CloseDialogMsg)
@@ -412,7 +419,8 @@ func TestSettingsDialogEscapeWithSendModeChangeOnlyCloses(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -449,20 +457,21 @@ func TestSettingsDialogViewShowsBehaviorRows(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	view := ansi.Strip(d.View())
 
 	assert.Contains(t, view, "While agent is working")
-	assert.Contains(t, view, "● Steer", "steer starts selected")
-	assert.Contains(t, view, "○ Queue")
+	assert.Contains(t, view, "‹ Steer ›", "single enum shows the current mode")
+	assert.NotContains(t, view, "○")
 	assert.Contains(t, view, "mid-turn")
-	assert.Contains(t, view, "hold until the current turn ends")
+	assert.NotContains(t, view, "Hold until the current turn ends")
 	assert.NotContains(t, view, "Sidebar position", "behavior tab must not render visuals rows")
 
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	view = ansi.Strip(d.View())
-	assert.Contains(t, view, "● Queue", "the mark moves to the chosen mode")
-	assert.Contains(t, view, "○ Steer")
+	assert.Contains(t, view, "‹ Queue ›")
+	assert.Contains(t, view, "Hold until the current turn ends.")
 }
 
 func TestStepValueClamps(t *testing.T) {
@@ -578,6 +587,8 @@ func TestRenderLayoutPreviewPositions(t *testing.T) {
 	// Narrow widths truncate the band list instead of overflowing.
 	narrow := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{SidebarPosition: messages.SidebarTop}, previewMinWidth))
 	assert.Contains(t, narrow, "session")
+	assert.LessOrEqual(t, lipgloss.Height(narrow), 5)
+	assert.LessOrEqual(t, lipgloss.Width(narrow), previewMinWidth)
 }
 
 func TestSettingsSmallViewportSelectionAndApplyMouseAction(t *testing.T) {
@@ -613,39 +624,24 @@ func TestSettingsSmallViewportSelectionAndApplyMouseAction(t *testing.T) {
 	assert.IsType(t, CloseDialogMsg{}, msgs[0])
 }
 
-func TestSettingsActionsMatchSelectedControl(t *testing.T) {
+func TestSettingsActionsRemainCancelApply(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	labels := func() []string {
-		var labels []string
-		for _, a := range d.actions() {
-			labels = append(labels, a.Label)
-		}
-		return labels
-	}
-	require.Contains(t, labels(), "Choose theme")
-	require.NotContains(t, labels(), "Decrease", "theme has no previous-value operation")
-	d.selected[tabAppearance] = rowRenderImages
-	require.Contains(t, labels(), "Toggle")
-	require.NotContains(t, labels(), "Decrease")
-	d.selected[tabAppearance] = rowPosition
-	require.Contains(t, labels(), "Previous")
-	require.Contains(t, labels(), "Next")
-	d.tab = tabBehavior
-	d.selected[d.tab] = rowTabTitleLength
-	d.current.TabTitleMaxLength = 5
-	for _, a := range d.actions() {
-		if a.Label == "Decrease" {
-			require.True(t, a.Disabled)
-		}
-		if a.Label == "Increase" {
-			require.False(t, a.Disabled)
+	for tab := range tabCount {
+		d.tab = tab
+		for row := range d.rowCount() {
+			d.selected[tab] = row
+			actions := d.actions()
+			require.Len(t, actions, 2)
+			assert.Equal(t, "Cancel", actions[0].Label)
+			assert.Equal(t, "Apply", actions[1].Label)
+			for _, action := range actions {
+				assert.False(t, action.Default, "controls own Enter until actions are focused")
+			}
 		}
 	}
 	d.tab = tabNotifications
 	d.selected[d.tab] = rowSoundThreshold
 	d.current.Sound = false
-	require.NotContains(t, labels(), "Decrease")
-	require.NotContains(t, labels(), "Increase")
 	before := d.current
 	d.changeValue(1)
 	require.Equal(t, before, d.current, "disabled selection cannot mutate settings")
@@ -738,9 +734,6 @@ func TestSettingsStructuralLeadingGapOwnedOnlyBySharedHeader(t *testing.T) {
 			_, _, body, _, _ := d.bodyParts()
 			bodyLines := strings.Split(ansi.Strip(body), "\n")
 			require.NotEmpty(t, strings.TrimSpace(bodyLines[0]), "generated body starts with content, never padded structural space")
-			if tab == tabAppearance || tab == tabBehavior {
-				require.Empty(t, strings.TrimSpace(bodyLines[1]), "meaningful gap after first body content is preserved")
-			}
 			if tab == tabAppearance {
 				require.Zero(t, d.rowLines[rowTheme], "first control hit anchor has no generated leading spacer")
 			}
@@ -765,8 +758,258 @@ func TestSettingsDialogDefaultsToQueue(t *testing.T) {
 	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	d.selectTab(tabBehavior)
+	d.prepareBody()
 	require.Equal(t, messages.SendModeQueue, d.current.SendMode)
-	assert.Contains(t, ansi.Strip(d.View()), "● Queue")
-	assert.Contains(t, ansi.Strip(d.View()), "○ Steer")
+	assert.Contains(t, ansi.Strip(d.View()), "‹ Queue ›")
+	assert.NotContains(t, ansi.Strip(d.View()), "○")
+}
+
+func TestSettingsEnterEditsEveryEnabledControlWithoutApplying(t *testing.T) {
+	for tab := range tabCount {
+		d := newTestSettingsDialog(t, messages.LayoutSettings{})
+		d.tab = tab
+		d.current.Sound = true
+		for row := range d.rowCount() {
+			d.selected[tab] = row
+			before := d.current
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			msgs := collectMsgs(cmd)
+			assert.False(t, hasMsg[CloseDialogMsg](msgs), "tab %d row %d must not close", tab, row)
+			assert.False(t, hasMsg[messages.ApplySettingsMsg](msgs), "tab %d row %d must not apply", tab, row)
+			if !d.selectable(tab, row) {
+				assert.Equal(t, before, d.current)
+			}
+		}
+	}
+}
+
+func TestSettingsFocusOwnsSelectionAndActions(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[d.tab] = rowShowBanner
+	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.False(t, d.current.ShowBanner)
+	_, _, body, footer, _ := d.bodyParts()
+	assert.Contains(t, ansi.Strip(body), "› [ ] Show startup banner")
+	assert.NotContains(t, ansi.Strip(footer), "↵", "no false Enter footer default in controls")
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	_, _, body, footer, _ = d.bodyParts()
+	assert.NotContains(t, ansi.Strip(body), "› [", "controls relinquish selection styling")
+	assert.Contains(t, ansi.Strip(footer), "Cancel ↵")
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	assert.False(t, applied.Preferences.ShowBanner)
+
+	for _, focus := range []settingsFocus{settingsControls, settingsCategories, settingsActions} {
+		d := newTestSettingsDialog(t, messages.LayoutSettings{})
+		d.current.Snapshot = !d.current.Snapshot
+		d.setFocus(focus)
+		_, cmd := d.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+		assert.True(t, hasMsg[messages.ApplySettingsMsg](collectMsgs(cmd)), "Ctrl+S is global")
+	}
+}
+
+func TestSettingsStableGeometryAndWarningSlot(t *testing.T) {
+	for _, size := range [][2]int{{165, 47}, {80, 24}, {40, 12}, {24, 6}} {
+		d := newTestSettingsDialog(t, messages.LayoutSettings{})
+		d.SetSize(size[0], size[1])
+		view := d.View()
+		width, height := lipgloss.Width(view), lipgloss.Height(view)
+		for tab := range tabCount {
+			d.selectTab(tab)
+			for _, focus := range []settingsFocus{settingsCategories, settingsControls, settingsActions} {
+				d.setFocus(focus)
+				d.prepareBody()
+				view = d.View()
+				assert.Equal(t, width, lipgloss.Width(view))
+				assert.Equal(t, height, lipgloss.Height(view), "focus/category changes keep card geometry")
+				assert.LessOrEqual(t, height, size[1])
+			}
+		}
+		d.setFocus(settingsControls)
+		d.tab = tabBehavior
+		d.selected[d.tab] = rowYOLO
+		d.prepareBody()
+		_, _, body, footer, _ := d.bodyParts()
+		bodyHeight, footerHeight := lipgloss.Height(body), lipgloss.Height(footer)
+		for range 3 {
+			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			_, _, body, footer, _ = d.bodyParts()
+			assert.Equal(t, bodyHeight, lipgloss.Height(body), "YOLO confirmation has a stable reserved slot")
+			assert.Equal(t, footerHeight, lipgloss.Height(footer))
+			assert.Equal(t, height, lipgloss.Height(d.View()))
+		}
+	}
+}
+
+func TestSettingsPageAndWheelScrollDoNotSnapToSelection(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.SetSize(80, 24)
+	d.selected[d.tab] = rowTheme
+	for _, msg := range []tea.Msg{
+		tea.KeyPressMsg{Code: tea.KeyPgDown},
+		tea.MouseWheelMsg{Button: tea.MouseWheelDown},
+	} {
+		d.bodyScroll.ScrollToTop()
+		before := d.BodyScrollOffset()
+		_, cmd := d.Update(msg)
+		assert.Nil(t, cmd)
+		assert.Greater(t, d.BodyScrollOffset(), before)
+		assert.Equal(t, rowTheme, d.selected[d.tab])
+		offset := d.BodyScrollOffset()
+		d.View()
+		assert.Equal(t, offset, d.BodyScrollOffset())
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	assert.Zero(t, d.BodyScrollOffset(), "explicit navigation reveals the selected row")
+}
+
+func clickSettingsHit(t *testing.T, d *settingsDialog, hit settingsHit) tea.Cmd {
+	t.Helper()
+	d.EnsureBodyLineVisible(hit.y)
+	d.View()
+	x, y, _, height := d.BodyScrollBounds()
+	line := hit.y - d.BodyScrollOffset()
+	require.GreaterOrEqual(t, line, 0)
+	require.Less(t, line, height)
+	_, cmd := d.Update(tea.MouseClickMsg{X: x + hit.x, Y: y + line, Button: tea.MouseLeft})
+	return cmd
+}
+
+func TestSettingsExplicitMouseTargetsAtWrappedWidths(t *testing.T) {
+	for _, width := range []int{24, 40, 80, 165} {
+		for _, delta := range []int{-1, 1} {
+			d := newTestSettingsDialog(t, messages.LayoutSettings{})
+			d.SetSize(width, 24)
+			found := false
+			for _, hit := range d.rowHits {
+				if hit.row == rowPosition && hit.kind == settingsAdjust && hit.delta == delta {
+					msgs := collectMsgs(clickSettingsHit(t, d, hit))
+					assert.True(t, hasMsg[messages.PreviewLayoutMsg](msgs))
+					assert.Equal(t, cycleValue(sidebarPositions, messages.SidebarRight, delta), d.current.Layout.SidebarPosition)
+					found = true
+					break
+				}
+			}
+			require.True(t, found)
+		}
+		d := newTestSettingsDialog(t, messages.LayoutSettings{})
+		d.SetSize(width, 24)
+		for _, hit := range d.rowHits {
+			if hit.row == rowPosition && hit.kind == settingsFocusRow {
+				assert.Nil(t, clickSettingsHit(t, d, hit))
+				assert.Equal(t, messages.SidebarRight, d.current.Layout.SidebarPosition, "enum label click only focuses")
+			}
+			if hit.row == rowExpandThinking {
+				// The last wrapped line must activate the same row as its label.
+				hit.y += hit.height - 1
+				assert.Nil(t, clickSettingsHit(t, d, hit))
+				assert.True(t, d.current.ExpandThinking)
+			}
+		}
+	}
+}
+
+func TestSettingsDisabledChildrenRetainValuesAndHaveNoHits(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{HideAgents: true, ActiveAgentsOnly: true})
+	for _, hit := range d.rowHits {
+		assert.NotEqual(t, rowActiveAgents, hit.row)
+	}
+	d.selected[d.tab] = rowActiveAgents
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.Nil(t, cmd)
+	assert.True(t, d.current.Layout.ActiveAgentsOnly)
+	d.tab = tabNotifications
+	d.current.SoundThreshold = 42
+	d.selected[d.tab] = rowSoundThreshold
+	d.prepareBody()
+	for _, hit := range d.rowHits {
+		assert.NotEqual(t, rowSoundThreshold, hit.row)
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.Equal(t, 42, d.current.SoundThreshold)
+	_, _, body, _, _ := d.bodyParts()
+	assert.Contains(t, ansi.Strip(body), "42 seconds")
+	assert.Contains(t, ansi.Strip(body), "Enable sound")
+}
+
+func TestSettingsLayoutChecksAtWideNormalNarrowSizes(t *testing.T) {
+	for _, size := range [][2]int{{165, 47}, {80, 24}, {30, 12}} {
+		d := newTestSettingsDialog(t, messages.LayoutSettings{})
+		d.SetSize(size[0], size[1])
+		for tab := range tabCount {
+			d.selectTab(tab)
+			d.prepareBody()
+			d.bodyScroll.ScrollToTop()
+			view := ansi.Strip(d.View())
+			assert.Contains(t, view, settingsTabLabels[tab], "active category stays visible in narrow tab strip")
+			assert.Contains(t, view, "Cancel")
+			assert.Contains(t, view, "Apply")
+			assert.LessOrEqual(t, lipgloss.Width(view), size[0])
+			assert.LessOrEqual(t, lipgloss.Height(view), size[1])
+			t.Logf("Settings %dx%d / %s:\n%s", size[0], size[1], settingsTabLabels[tab], view)
+		}
+	}
+}
+
+func TestSettingsThemeSaveIsIndependentOfDraftCancel(t *testing.T) {
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+	require.NoError(t, styles.SaveThemeToUserConfig("nord"))
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.current.Snapshot = true
+	d.current.Layout.HideUsage = true
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.True(t, hasMsg[messages.OpenThemePickerMsg](collectMsgs(cmd)))
+	require.NoError(t, styles.SaveThemeToUserConfig("dracula"))
+	d.Update(messages.ThemeChangedMsg{})
+	_, _, body, _, _ := d.bodyParts()
+	assert.Contains(t, ansi.Strip(body), "dracula")
+	assert.Contains(t, ansi.Strip(body), "saves separately")
+	cancelled := collectMsgs(d.cancel())
+	assert.True(t, hasMsg[messages.CancelLayoutPreviewMsg](cancelled))
+	assert.False(t, hasMsg[messages.ApplySettingsMsg](cancelled))
+	assert.Equal(t, "dracula", styles.GetPersistedThemeRef(), "Settings cancel never rolls back the theme picker save")
+}
+
+func TestSettingsAllPreferencesSurviveApply(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	for tab := range tabCount {
+		d.tab = tab
+		for row := range d.rowCount() {
+			if tab == tabAppearance && (row == rowTheme || row == rowAgents) {
+				continue
+			}
+			d.selected[tab] = row
+			d.changeValue(1)
+			if tab == tabBehavior && row == rowYOLO {
+				d.changeValue(1)
+			}
+		}
+	}
+	want := d.current
+	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(d.apply()))
+	require.True(t, ok)
+	assert.True(t, want.Equal(applied.Preferences), "every drafted preference survives the unchanged apply payload")
+	assert.True(t, applied.Preferences.YOLO)
+	assert.True(t, applied.Preferences.Layout.ActiveAgentsOnly)
+	assert.NotEqual(t, d.original.TabTitleMaxLength, applied.Preferences.TabTitleMaxLength)
+	assert.NotEqual(t, d.original.SoundThreshold, applied.Preferences.SoundThreshold)
+}
+
+func TestSettingsAdaptiveHelpNeverCutsInstructionsAtNormalWidth(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.SetSize(80, 24)
+	for _, tc := range []struct {
+		focus settingsFocus
+		verb  string
+	}{{settingsControls, "edit"}, {settingsCategories, "open"}, {settingsActions, "act"}} {
+		d.setFocus(tc.focus)
+		d.prepareBody()
+		view := ansi.Strip(d.View())
+		assert.Contains(t, view, "Tab focus · Enter "+tc.verb+" · Ctrl+S apply")
+		assert.NotContains(t, view, "Pane ", "inactive tabs are omitted rather than partially labelled")
+	}
 }
