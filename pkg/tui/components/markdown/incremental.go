@@ -22,6 +22,7 @@ type IncrementalRenderer struct {
 	output       strings.Builder
 	lastInput    string
 	lastParts    RenderedParts
+	stream       streamCache
 
 	// codeBlocksPrefix is the list of code blocks emitted while rendering the
 	// cached prefix, with Line indices relative to outputPrefix.
@@ -92,7 +93,7 @@ func (r *IncrementalRenderer) renderParts(input string) (string, string, []CodeB
 		r.Reset()
 	}
 	tail := input[len(r.inputPrefix):]
-	stable, mutable, blocks, boundary, stableBlockCount := r.fallback.renderCheckpointParts(tail)
+	stable, mutable, blocks, boundary, stableBlockCount := r.fallback.renderCheckpointParts(tail, &r.stream)
 	merged := r.mergeCodeBlocks(r.outputPrefix, r.codeBlocksPrefix, blocks)
 	if boundary > 0 {
 		if r.output.Len() > 0 && stable != "" {
@@ -127,6 +128,7 @@ func (r *IncrementalRenderer) Reset() {
 	r.codeBlocksPrefix = nil
 	r.lastInput = ""
 	r.lastParts = RenderedParts{}
+	r.stream = streamCache{}
 }
 
 // joinPrefixAndTail concatenates a previously rendered prefix and a freshly

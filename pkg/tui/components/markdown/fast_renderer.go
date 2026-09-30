@@ -344,11 +344,13 @@ func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, 
 
 // renderCheckpointParts freezes only blocks followed by a complete lookahead line.
 // The parser, rather than a separate Markdown heuristic, decides block boundaries.
-func (r *FastRenderer) renderCheckpointParts(input string) (string, string, []CodeBlock, int, int) {
+func (r *FastRenderer) renderCheckpointParts(input string, cache *streamCache) (string, string, []CodeBlock, int, int) {
 	p := parserPool.Get().(*parser)
 	p.reset(input, r.width, getGlobalStyles())
 	checkpoint := renderCheckpoint{}
 	p.checkpoint = &checkpoint
+	cache.begin()
+	p.stream = cache
 	result := p.parse()
 	stable, tail := "", result
 	if checkpoint.output <= len(result) && checkpoint.input > 0 {
@@ -359,6 +361,8 @@ func (r *FastRenderer) renderCheckpointParts(input string) (string, string, []Co
 	}
 	blocks := cloneCodeBlocks(p.codeBlocks)
 	p.checkpoint = nil
+	p.stream = nil
+	cache.end()
 	parserPool.Put(p)
 	return finalizeOutput(stable, r.width), finalizeOutput(tail, r.width), blocks, checkpoint.input, checkpoint.blocks
 }
@@ -378,6 +382,7 @@ type parser struct {
 	codeBlocks   []CodeBlock
 	hideCopyIcon bool
 	checkpoint   *renderCheckpoint
+	stream       *streamCache
 }
 
 func (p *parser) reset(input string, width int, palette *cachedStyles) {
@@ -393,6 +398,7 @@ func (p *parser) reset(input string, width int, palette *cachedStyles) {
 	p.codeBlocks = p.codeBlocks[:0]
 	p.hideCopyIcon = false
 	p.checkpoint = nil
+	p.stream = nil
 	p.out.Reset()
 	p.out.Grow(len(input) * 2) // Pre-allocate for styled output
 }
@@ -1171,6 +1177,24 @@ func (p *parser) renderTableRowsWrapped(rows [][]tableCell, colWidths []int, sty
 
 // parseAndRenderTableRow parses a table row and renders cells in one pass
 func (p *parser) parseAndRenderTableRow(line string) []tableCell {
+	if p.stream == nil {
+		return p.renderTableRow(line)
+	}
+	key := streamKey{kind: 1, text: line}
+	value, ok := p.stream.get(key)
+	if !ok {
+		value = p.renderTableRow(line)
+	}
+	cells := value.([]tableCell)
+	size := len(cells) * 48
+	for _, cell := range cells {
+		size += len(cell.rendered)
+	}
+	p.stream.keep(key, cells, size)
+	return cells
+}
+
+func (p *parser) renderTableRow(line string) []tableCell {
 	// Trim leading/trailing whitespace and pipes
 	line = strings.TrimSpace(line)
 	if line != "" && line[0] == '|' {
@@ -1650,7 +1674,7 @@ func findURLEnd(s string) int {
 // renderInline processes inline markdown elements: bold, italic, code, links, etc.
 // It uses the document's base text style for restoring after styled elements.
 func (p *parser) renderInline(text string) string {
-	return p.renderInlineWithStyle(text, p.styles.ansiText)
+	return p.cachedText(streamKey{kind: 2, text: text}, func() string { return p.renderInlineWithStyle(text, p.styles.ansiText) })
 }
 
 // renderInlineWithWidth renders inline markdown and returns both the rendered string and visual width.
@@ -2632,6 +2656,21 @@ const (
 )
 
 func (p *parser) syntaxHighlight(code, lang string) []token {
+	if p.stream != nil {
+		key := streamKey{kind: 4, text: code, language: lang}
+		value, ok := p.stream.get(key)
+		if !ok {
+			value = p.doSyntaxHighlight(code, lang)
+		}
+		tokens := value.([]token)
+		size := len(tokens) * 128
+		for _, token := range tokens {
+			size += len(token.text)
+		}
+		p.stream.keep(key, tokens, size)
+		return tokens
+	}
+
 	cacheKey := syntaxCacheKey{lang: lang, code: code}
 
 	syntaxHighlightCacheMu.Lock()
@@ -2655,6 +2694,9 @@ func (p *parser) doSyntaxHighlight(code, lang string) []token {
 	lexer := p.getLexer(lang)
 	if lexer == nil {
 		return []token{{text: code, style: p.getCodeStyle(chroma.None)}}
+	}
+	if p.stream != nil && lexer.Config().Name == "plaintext" {
+		return []token{{text: string([]rune(code)), style: p.getCodeStyle(chroma.Text)}}
 	}
 
 	iterator, err := lexer.Tokenise(nil, code)
@@ -2736,6 +2778,10 @@ func chromaToLipgloss(tokenType chroma.TokenType, style *chroma.Style) lipgloss.
 // It tracks active CSI styles and re-applies them on continuation lines so a
 // styled segment that crosses a wrap is rendered correctly on both lines.
 func (p *parser) wrapText(text string, width int) string {
+	return p.cachedText(streamKey{kind: 3, text: text, width: width}, func() string { return p.wrapUncached(text, width) })
+}
+
+func (p *parser) wrapUncached(text string, width int) string {
 	if width <= 0 || text == "" {
 		return text
 	}

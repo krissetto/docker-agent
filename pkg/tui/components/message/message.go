@@ -121,6 +121,7 @@ type assistantStreamLines struct {
 	stableLines []string
 	headerKey   string
 	headerLines []string
+	tail        assistantTailLines
 }
 
 type markdownImagesLoadedMsg struct {
@@ -487,6 +488,7 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 	if widthChanged || !strings.HasPrefix(parts.StablePrefix, cache.stable) {
 		cache.width, cache.stable = width, ""
 		cache.stableLines = nil
+		cache.tail = assistantTailLines{}
 	}
 	if cache.stable != parts.StablePrefix {
 		delta := parts.StablePrefix[len(cache.stable):]
@@ -510,7 +512,7 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		}
 		cache.headerLines = append(cache.headerLines, styledAssistantLines(messageStyle, width, header)...)
 	}
-	tailLines := styledAssistantLines(messageStyle, width, parts.MutableTail)
+	tailLines := cache.tail.render(messageStyle, width, parts.MutableTail)
 	if parts.MutableTail != "" && parts.StablePrefix != "" {
 		separator := styledAssistantLines(messageStyle, width, strings.Repeat(" ", max(innerWidth, 0)))
 		tailLines = append(separator, tailLines...)
