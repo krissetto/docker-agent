@@ -44,38 +44,50 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 
 func TestSettingsDialogNavigation(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	require.Equal(t, settingsControls, d.focus)
+	require.Equal(t, rowTheme, d.selected[d.tab])
 	for row := 1; row < appearanceRowCount; row++ {
 		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 		require.Equal(t, row, d.selected[d.tab])
 	}
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	assert.Equal(t, settingsActions, d.focus)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	assert.Equal(t, settingsActions, d.focus)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	assert.Equal(t, settingsControls, d.focus)
+	require.Equal(t, settingsControls, d.focus, "arrows stop at content boundaries, never focus Apply")
+	require.Equal(t, rowTodos, d.selected[d.tab])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowDimInactivePanes
+	for _, focus := range []settingsFocus{settingsActions, settingsCategories, settingsControls} {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		require.Nil(t, cmd)
+		require.Equal(t, focus, d.focus)
+		require.Equal(t, rowDimInactivePanes, d.selected[tabAppearance])
+	}
+	for _, focus := range []settingsFocus{settingsCategories, settingsActions, settingsControls} {
+		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		require.Nil(t, cmd)
+		require.Equal(t, focus, d.focus)
+	}
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
-	require.Equal(t, settingsCategories, d.focus)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, settingsCategories, d.focus, "vertical arrows do not escape the category zone")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	require.Equal(t, tabBehavior, d.tab)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.Equal(t, settingsControls, d.focus)
-	for row := 1; row < behaviorRowCount; row++ {
-		d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-		require.Equal(t, row, d.selected[d.tab])
-	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, rowInterruptConfirmation, d.selected[d.tab])
 	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	require.Equal(t, settingsActions, d.focus)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	require.Equal(t, settingsCategories, d.focus)
+	before := d.focusedAction
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, before, d.focusedAction)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
-	require.Equal(t, tabAppearance, d.tab)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	require.Equal(t, rowTheme, d.selected[d.tab])
+	require.NotEqual(t, before, d.focusedAction)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	require.Equal(t, before, d.focusedAction)
 }
 
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
@@ -414,7 +426,8 @@ func TestSettingsDialogViewShowsVisualsRows(t *testing.T) {
 	t.Parallel()
 
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
-	view := ansi.Strip(d.View())
+	_, _, body, _, _ := d.bodyParts()
+	view := ansi.Strip(d.View()) + ansi.Strip(body)
 
 	assert.Contains(t, view, "Settings")
 	assert.Contains(t, view, "Appearance")
@@ -556,18 +569,18 @@ func TestRenderLayoutPreviewPositions(t *testing.T) {
 	// Band layouts list the sections on a single line; the full label is
 	// wider than the band and gets truncated at its tail.
 	band := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{SidebarPosition: messages.SidebarTop}, previewMaxWidth))
-	assert.Contains(t, band, "session/path · usage · agents · tools")
+	assert.Contains(t, strings.Join(strings.Fields(band), " "), "session/path · usage · agents · tools")
 
 	hidden := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarTop,
 		HideSessionPath: true,
 	}, previewMaxWidth))
-	assert.Contains(t, hidden, "session · usage · agents · tools · todos")
+	assert.Contains(t, strings.Join(strings.Fields(strings.ReplaceAll(hidden, "│", "")), " "), "session · usage · agents · tools · todos")
 
 	// Narrow widths truncate the band list instead of overflowing.
 	narrow := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{SidebarPosition: messages.SidebarTop}, previewMinWidth))
 	assert.Contains(t, narrow, "session")
-	assert.LessOrEqual(t, lipgloss.Height(narrow), 5)
+	assert.LessOrEqual(t, lipgloss.Height(narrow), 10)
 	assert.LessOrEqual(t, lipgloss.Width(narrow), previewMinWidth)
 }
 
@@ -776,6 +789,7 @@ func TestSettingsFocusOwnsSelectionAndActions(t *testing.T) {
 	_, _, body, footer, _ = d.bodyParts()
 	assert.NotContains(t, ansi.Strip(body), "› [", "controls relinquish selection styling")
 	assert.Contains(t, ansi.Strip(footer), "Apply ↵")
+	d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(cmd))
@@ -982,10 +996,10 @@ func TestSettingsAllPreferencesSurviveApply(t *testing.T) {
 func TestSettingsAdaptiveHelpNeverCutsInstructionsAtNormalWidth(t *testing.T) {
 	d := newTestSettingsDialog(t, messages.LayoutSettings{})
 	d.SetSize(80, 24)
-	assert.Contains(t, ansi.Strip(d.View()), "Tab / ↑↓ move · Enter edit · Ctrl+S apply")
+	assert.Contains(t, ansi.Strip(d.View()), "Tab zone · ↑↓ setting · Enter edit · Ctrl+S apply")
 	d.setFocus(settingsCategories)
 	d.prepareBody()
-	assert.Contains(t, ansi.Strip(d.View()), "←/→ category · Enter open · Tab next")
+	assert.Contains(t, ansi.Strip(d.View()), "Tab zone · ←→ category · Enter open")
 }
 
 func TestSettingsTransparentBackgroundDraftApplyCancel(t *testing.T) {
@@ -1027,4 +1041,82 @@ func TestSettingsWrappedCategoriesAndCompactContent(t *testing.T) {
 	_, _, body, _, _ := d.bodyParts()
 	assert.Equal(t, 3, strings.Count(ansi.Strip(body), "[x]"))
 	assert.NotContains(t, ansi.Strip(body), "Move up")
+}
+
+func TestSettingsVisualPreviewReflectsDraftAndRemainsScrollableAt80Columns(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.SetSize(80, 24)
+	_, _, body, _, _ := d.bodyParts()
+	assert.Contains(t, ansi.Strip(body), "Layout preview")
+	assert.Contains(t, ansi.Strip(body), "┌")
+	assert.Contains(t, ansi.Strip(body), "chat")
+	assert.Contains(t, ansi.Strip(body), "input")
+	d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	for range 10 {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	}
+	view := ansi.Strip(d.View())
+	assert.Contains(t, view, "Layout preview", "diagram stays available through body scrolling, never omitted at80columns")
+	assert.Contains(t, view, "Apply", "footer remains fixed while preview scrolls")
+	before := renderLayoutPreview(d.current.Layout, 44)
+	d.selected[tabAppearance] = rowPosition
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.NotEqual(t, before, renderLayoutPreview(d.current.Layout, 44))
+	compact := d.current.Layout
+	compact.SectionSpacing = messages.SpacingCompact
+	relaxed := compact
+	relaxed.SectionSpacing = messages.SpacingRelaxed
+	assert.Greater(t, lipgloss.Height(renderLayoutPreview(relaxed, 44)), lipgloss.Height(renderLayoutPreview(compact, 44)), "spacing changes the diagram geometry")
+	d.current.Layout.HideTools = true
+	assert.NotContains(t, renderLayoutPreview(d.current.Layout, 44), "tools")
+	for _, position := range sidebarPositions {
+		layout := d.current.Layout
+		layout.SidebarPosition = position
+		preview := ansi.Strip(renderLayoutPreview(layout, 44))
+		if position == messages.SidebarTop {
+			assert.Less(t, strings.Index(preview, "session"), strings.Index(preview, "chat"))
+		}
+		if position == messages.SidebarBottom {
+			assert.Greater(t, strings.Index(preview, "session"), strings.Index(preview, "chat"))
+		}
+		assert.LessOrEqual(t, lipgloss.Width(preview), 44)
+	}
+}
+
+func TestSettingsControlColumnAndSectionSpacing(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	_, _, body, _, _ := d.bodyParts()
+	lines := strings.Split(ansi.Strip(body), "\n")
+	column := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "Display" || strings.TrimSpace(line) == "Sidebar layout" || strings.TrimSpace(line) == "Sidebar sections" {
+			require.Greater(t, i, 0)
+			assert.Empty(t, strings.TrimSpace(lines[i-1]))
+		}
+		if at := strings.Index(line, "[x]"); at >= 0 {
+			x := ansi.StringWidth(line[:at])
+			if column < 0 {
+				column = x
+			}
+			assert.Equal(t, column, x)
+			assert.LessOrEqual(t, x, 38, "checkbox column is close to labels, not at remote right border")
+		}
+	}
+}
+
+func TestSettingsFooterArrowsChooseWithoutApplyingAndSpaceCancels(t *testing.T) {
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.current.ShowBanner = false
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Nil(t, cmd)
+	require.Equal(t, settingsActions, d.focus)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	require.Nil(t, cmd)
+	selected, ok := d.SelectedActionKey()
+	require.True(t, ok)
+	require.Equal(t, tea.KeyEscape, selected.Code)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	msgs := collectMsgs(cmd)
+	assert.True(t, hasMsg[CloseDialogMsg](msgs))
+	assert.False(t, hasMsg[messages.ApplySettingsMsg](msgs))
 }

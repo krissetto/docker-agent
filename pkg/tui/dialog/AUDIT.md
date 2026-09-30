@@ -16,7 +16,7 @@ wrapping, keyboard selection, hover leases, and disabled targets.
 | MCP prompt | Argument fields, validation, submit/cancel |
 | Pending message edit | Draft, multiline editing, saving/error, Ctrl+Enter behavior, close guards |
 | Multi-choice | Empty/custom/secondary choices, rejection reason correlation |
-| Settings | Four categories, visual/nonvisual, complete target traversal, disabled children, staged apply/cancel, theme-independent save, panel reorder, wrapped categories |
+| Settings | Four categories, visual/nonvisual, three-zone Tab traversal and zone-local arrows, visual drafted layout preview, disabled children, staged apply/cancel, theme-independent save, panel reorder, wrapped categories |
 | Sessions | Empty/filter/selection, star/filter/copy/delete/workspace modifiers, Load primary |
 | Model | Empty/error/refresh, row details, Use model primary |
 | File | File/directory, hidden/ignored, errors/empty, actual double-click and stable primary label width |

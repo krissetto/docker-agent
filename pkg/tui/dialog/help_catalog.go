@@ -110,6 +110,9 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 			// A focused action owns every modified arrow/Enter/Tab by key Code.
 			// Content Enter belongs to its actual selected/default action below.
 			entry.Keys = slices.DeleteFunc(entry.Keys, func(k string) bool {
+				if family == "settings" && (k == "tab" || k == "shift+tab") {
+					return false
+				}
 				if k == "enter" && (selected >= 0 || base.actionsFocused) {
 					return true
 				}

@@ -150,6 +150,9 @@ func (b *settingsBody) add(text string) {
 }
 
 func (b *settingsBody) section(title string) {
+	if len(b.lines) > 0 {
+		b.add("")
+	}
 	b.add(styles.MutedStyle.Render(title))
 }
 
@@ -325,42 +328,6 @@ func (d *settingsDialog) moveSelection(delta int) {
 	}
 }
 
-func (d *settingsDialog) moveTarget(delta int, wrap bool) {
-	targets := []int{-1}
-	for row := range d.rowCount() {
-		if d.selectable(d.tab, row) {
-			targets = append(targets, row)
-		}
-	}
-	targets = append(targets, d.rowCount())
-	at := 0
-	if d.focus == settingsActions {
-		at = len(targets) - 1
-	} else if d.focus == settingsControls {
-		for i, row := range targets {
-			if row == d.selected[d.tab] {
-				at = i
-				break
-			}
-		}
-	}
-	next := at + delta
-	if wrap {
-		next = (next + len(targets)) % len(targets)
-	} else {
-		next = max(0, min(len(targets)-1, next))
-	}
-	switch next {
-	case 0:
-		d.setFocus(settingsCategories)
-	case len(targets) - 1:
-		d.setFocus(settingsActions)
-	default:
-		d.setFocus(settingsControls)
-		d.selected[d.tab] = targets[next]
-	}
-}
-
 func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc", "q", "ctrl+c":
@@ -372,29 +339,25 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if msg.Mod&tea.ModShift != 0 {
 			delta = -1
 		}
-		d.moveTarget(delta, true)
-		return nil
-	}
-	if msg.Code == tea.KeyHome || msg.Code == tea.KeyEnd {
-		d.setFocus(settingsControls)
-	}
-	if msg.String() == "up" || msg.String() == "k" || msg.String() == "down" || msg.String() == "j" {
-		delta := 1
-		if msg.String() == "up" || msg.String() == "k" {
-			delta = -1
-		}
-		d.moveTarget(delta, false)
+		d.setFocus(settingsFocus((int(d.focus) + delta + 3) % 3))
 		return nil
 	}
 	if d.focus == settingsActions {
-		if msg.Code == tea.KeyEnter || msg.Code == tea.KeySpace {
-			return d.apply()
+		switch msg.Code {
+		case tea.KeyLeft, tea.KeyRight, tea.KeyEnter:
+			if action, handled := d.HandleActionKey(msg); handled && action.Code != 0 {
+				return d.handleKey(action)
+			}
+		case tea.KeySpace:
+			if action, ok := d.SelectedActionKey(); ok {
+				return d.handleKey(action)
+			}
 		}
 		return nil
 	}
 	if d.focus == settingsCategories {
 		switch msg.String() {
-		case "left", "up", "h", "k":
+		case "left", "h":
 			d.selectTab(d.tab - 1)
 		case "right", "l":
 			d.selectTab(d.tab + 1)
@@ -616,15 +579,15 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	d.rowHits = body.hits
 	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + RenderSeparator(inner) + "\n" + d.renderTabBar(inner)
 	footer := d.RenderPickerFooter(inner, d.actions()...)
-	helpText := "Tab / ↑↓ move · Enter edit · Ctrl+S apply"
+	helpText := "Tab zone · ↑↓ setting · Enter edit · Ctrl+S apply"
 	if d.focus == settingsCategories {
-		helpText = "←/→ category · Enter open · Tab next"
+		helpText = "Tab zone · ←→ category · Enter open"
 	}
 	if d.focus == settingsActions {
-		helpText = "Enter apply · Shift+Tab previous"
+		helpText = "Tab zone · ←→ action · Enter select"
 	}
 	if inner < 40 {
-		helpText = "Tab ↑↓ · ↵ edit"
+		helpText = "Tab zone · ↵ edit"
 	}
 	help := styles.MutedStyle.Render(ansi.Truncate(helpText, inner, ""))
 	d.actionRows = append([]dialogActionRow{{text: ansi.Strip(help)}}, d.actionRows...)
@@ -729,7 +692,8 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 		}
 		d.addToggle(body, rowTools, "Tools", !d.current.Layout.HideTools)
 		d.addToggle(body, rowTodos, "Todos", !d.current.Layout.HideTodos)
-		body.add(styles.MutedStyle.Render(ansi.Truncate("Layout: sidebar "+positionLabels[d.current.Layout.SidebarPosition]+" · "+spacingLabels[d.current.Layout.SectionSpacing]+" · "+infoModeLabels[d.current.Layout.SidebarInfoMode], body.width, "")))
+		body.section("Layout preview")
+		body.add(renderLayoutPreview(d.current.Layout, body.width))
 	}
 
 }
@@ -868,9 +832,9 @@ func (d *settingsDialog) addControl(body *settingsBody, row int, label, value st
 	}
 	left := prefix + label
 	start := len(body.lines)
-	valueX := max(lipgloss.Width(left)+1, body.width-lipgloss.Width(value))
+	valueX := max(lipgloss.Width(left)+2, min(36, body.width-lipgloss.Width(value)))
 	if value != "" && valueX+lipgloss.Width(value) <= body.width {
-		body.add(style.Render(left + strings.Repeat(" ", valueX-lipgloss.Width(left)) + value))
+		body.add(style.Width(body.width).Render(left + strings.Repeat(" ", valueX-lipgloss.Width(left)) + value))
 	} else {
 		body.add(style.Width(body.width).Render(left))
 		if value != "" {
@@ -925,13 +889,69 @@ func visibleSectionLabels(s messages.LayoutSettings) []string {
 	return labels
 }
 
-// renderLayoutPreview keeps the schematic subordinate to the actual controls.
+// renderLayoutPreview reflects the drafted sidebar placement and visible sections.
 func renderLayoutPreview(s messages.LayoutSettings, maxWidth int) string {
 	width := max(1, min(previewMaxWidth, maxWidth))
-	position := positionLabels[messages.ParseSidebarPosition(string(s.SidebarPosition))]
-	sections := strings.Join(visibleSectionLabels(s), " · ")
-	heading := ansi.Truncate("Sidebar "+position+" · chat + input", width, "")
-	return styles.MutedStyle.Render(heading + "\n" + ansi.Wrap(sections, width, ""))
+	position := messages.ParseSidebarPosition(string(s.SidebarPosition))
+	sections := visibleSectionLabels(s)
+	gap := map[messages.SectionSpacing]int{messages.SpacingCompact: 0, messages.SpacingNormal: 1, messages.SpacingRelaxed: 2}[messages.ParseSectionSpacing(string(s.SectionSpacing))]
+	var rows []string
+	if width < 18 {
+		rows = []string{"┌─ chat ─┐", "│ input  │", "└────────┘", "sidebar " + positionLabels[position]}
+		rows = append(rows, sections...)
+	} else if position == messages.SidebarLeft || position == messages.SidebarRight {
+		sideWidth := min(14, width/2)
+		chatWidth := width - sideWidth - 3
+		left, right := chatWidth, sideWidth
+		if position == messages.SidebarLeft {
+			left, right = sideWidth, chatWidth
+		}
+		rows = append(rows, "┌"+strings.Repeat("─", left)+"┬"+strings.Repeat("─", right)+"┐")
+		var side []string
+		for i, label := range sections {
+			if i > 0 {
+				side = append(side, make([]string, gap)...)
+			}
+			side = append(side, label)
+		}
+		for i, label := range side {
+			chat := ""
+			if i == 0 {
+				chat = "chat"
+			}
+			if i == len(side)-1 {
+				chat = "input"
+			}
+			cell := func(text string, n int) string {
+				return lipgloss.NewStyle().Width(n).Render(ansi.Truncate(text, n, "…"))
+			}
+			l, r := cell(chat, chatWidth), cell(label, sideWidth)
+			if position == messages.SidebarLeft {
+				l, r = r, l
+			}
+			rows = append(rows, "│"+l+"│"+r+"│")
+		}
+		rows = append(rows, "└"+strings.Repeat("─", left)+"┴"+strings.Repeat("─", right)+"┘")
+	} else {
+		inner := width - 2
+		band := strings.Split(ansi.Wrap(strings.Join(sections, strings.Repeat(" ", gap+1)+"· "), inner, ""), "\n")
+		cell := func(text string) string { return "│" + lipgloss.NewStyle().Width(inner).Render(text) + "│" }
+		rows = append(rows, "┌"+strings.Repeat("─", inner)+"┐")
+		if position == messages.SidebarBottom {
+			rows = append(rows, cell("chat"), cell("input"), "├"+strings.Repeat("─", inner)+"┤")
+		}
+		for _, line := range band {
+			rows = append(rows, cell(line))
+		}
+		if position == messages.SidebarTop {
+			rows = append(rows, "├"+strings.Repeat("─", inner)+"┤", cell("chat"), cell("input"))
+		}
+		rows = append(rows, "└"+strings.Repeat("─", inner)+"┘")
+	}
+	for i := range rows {
+		rows[i] = ansi.Truncate(rows[i], width, "")
+	}
+	return styles.MutedStyle.Render(strings.Join(rows, "\n"))
 }
 
 func (d *settingsDialog) actions() []Action {

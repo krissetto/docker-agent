@@ -84,7 +84,7 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 				case *settingsDialog:
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyRight})
-					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyDown})
+					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeyEnter})
 					d.selected[d.tab] = rowYOLO
 					d.confirmYOLO = false
 					mgr.forwardToTop(tea.KeyPressMsg{Code: tea.KeySpace})
