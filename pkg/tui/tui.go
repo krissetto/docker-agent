@@ -372,6 +372,7 @@ type appModel struct {
 	// layoutSettings is shared by every tab and managed via /settings.
 	layoutSettings            messages.LayoutSettings
 	dimInactivePanes          bool
+	transparentBackground     bool
 	paneDimCache              map[string]paneDimEntry
 	paneRenderCache           paneRenderCache
 	paneTitleCache            map[string]paneTitleEntry
@@ -650,6 +651,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		panelSettings:                 panelSettingsFromConfig(userSettings.GetPanel()),
 		panelWorkingDir:               panelWorkingDir,
 		dimInactivePanes:              userSettings.GetDimInactivePanes(),
+		transparentBackground:         userSettings.GetTransparentBackground(),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		showBanner:                    userSettings.GetShowBanner(),
@@ -3966,11 +3968,11 @@ func (m *appModel) composeView() tea.View {
 	}
 
 	if m.err != nil {
-		return toFullscreenView(paneClipped(styles.ErrorStyle.Render(m.err.Error()), m.wWidth, m.wHeight), windowTitle, false, m.leanMode)
+		return m.canvasView(paneClipped(styles.ErrorStyle.Render(m.err.Error()), m.wWidth, m.wHeight), windowTitle, false, m.leanMode)
 	}
 
 	if !m.ready {
-		return toFullscreenView(
+		return m.canvasView(
 			styles.CenterStyle.
 				Width(m.wWidth).
 				Height(m.wHeight).
@@ -4020,7 +4022,7 @@ func (m *appModel) composeView() tea.View {
 		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
 			layers = append(layers, m.completions.GetLayers()...)
 		}
-		return toFullscreenView(paneClipped(composeRootLayers(layers, m.width, m.height), m.width, m.height), windowTitle, m.chatPage.IsWorking(), true)
+		return m.canvasView(paneClipped(composeRootLayers(layers, m.width, m.height), m.width, m.height), windowTitle, m.chatPage.IsWorking(), true)
 	}
 
 	// Tab bar (above editor)
@@ -4109,7 +4111,7 @@ func (m *appModel) fullscreenView(content, windowTitle string) tea.View {
 	if m.imageWriter != nil {
 		content = m.imageWriter.SetContent(content)
 	}
-	return toFullscreenView(paneClipped(content, m.width, m.height), windowTitle, m.chatPage.IsWorking(), m.leanMode)
+	return m.canvasView(paneClipped(content, m.width, m.height), windowTitle, m.chatPage.IsWorking(), m.leanMode)
 }
 
 // windowTitle returns the terminal window title for the current model state.
@@ -4339,6 +4341,13 @@ func externalEditorCallback(ed editor.Editor, tmpPath string) func(error) tea.Ms
 		// never sent (or queued while the agent is working).
 		return messages.RequestFocusMsg{Target: messages.PanelEditor}
 	}
+}
+
+func (m *appModel) canvasView(content, windowTitle string, working, leanMode bool) tea.View {
+	if !m.transparentBackground {
+		content = paintRootBackground(content)
+	}
+	return toFullscreenView(content, windowTitle, working, leanMode)
 }
 
 func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.View {

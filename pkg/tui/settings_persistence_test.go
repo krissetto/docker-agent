@@ -25,8 +25,9 @@ func saveTestSettings(layout messages.LayoutSettings, mode messages.SendMode) er
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
-		DimInactivePanes: settings.GetDimInactivePanes(),
-		YOLO:             settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		DimInactivePanes:      settings.GetDimInactivePanes(),
+		TransparentBackground: settings.GetTransparentBackground(),
+		YOLO:                  settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		CacheStablePrompts: settings.CacheStablePromptsEnabled(), WarnOnCacheMiss: settings.CacheMissWarningsEnabled(),
 		Lean: settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
 		Sound: settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
@@ -344,4 +345,17 @@ func TestBusySendModeConfigDefaultsAndRoundTrip(t *testing.T) {
 			assert.Equal(t, tc.want, messages.ParseSendMode(cfg.GetSettings().GetBusySendMode()))
 		})
 	}
+}
+
+func TestTransparentBackgroundPreferenceRoundTrip(t *testing.T) {
+	setupSettingsConfigTest(t)
+	require.True(t, userconfig.Get().GetTransparentBackground())
+	preferences := messages.Preferences{TransparentBackground: false}
+	require.NoError(t, savePreferences(preferences))
+	require.False(t, userconfig.Get().GetTransparentBackground())
+	require.NotNil(t, userconfig.Get().TransparentBackground)
+	preferences.TransparentBackground = true
+	require.NoError(t, savePreferences(preferences))
+	require.True(t, userconfig.Get().GetTransparentBackground())
+	require.Nil(t, userconfig.Get().TransparentBackground, "default true is omitted from YAML")
 }

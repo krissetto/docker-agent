@@ -1008,6 +1008,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		RenderImages:          settings.GetRenderImages(),
 		ShowBanner:            settings.GetShowBanner(),
 		DimInactivePanes:      settings.GetDimInactivePanes(),
+		TransparentBackground: settings.GetTransparentBackground(),
 		YOLO:                  settings.YOLO,
 		RestoreTabs:           settings.GetRestoreTabs(),
 		Snapshot:              settings.SnapshotsEnabled(),
@@ -1037,6 +1038,7 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
 	m.dimInactivePanes = preferences.DimInactivePanes
+	m.transparentBackground = preferences.TransparentBackground
 	m.viewCacheValid = false
 	for _, page := range m.chatPages {
 		page.SetSendMode(m.sendMode)
@@ -1133,6 +1135,7 @@ func savePreferences(p messages.Preferences) error {
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
 		s.DimInactivePanes = boolPreference(p.DimInactivePanes, true)
+		s.TransparentBackground = boolPreference(p.TransparentBackground, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
 		s.Sound = p.Sound

@@ -1013,3 +1013,19 @@ func TestSettingsAdaptiveHelpNeverCutsInstructionsAtNormalWidth(t *testing.T) {
 		assert.NotContains(t, view, "Pane ", "inactive tabs are omitted rather than partially labelled")
 	}
 }
+
+func TestSettingsTransparentBackgroundDraftApplyCancel(t *testing.T) {
+	d := NewSettingsDialog(messages.Preferences{TransparentBackground: true}, false).(*settingsDialog)
+	d.SetSize(100, 40)
+	d.selected[tabAppearance] = rowTransparentBackground
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	assert.Nil(t, cmd, "transparency is staged, not a live preview")
+	assert.False(t, d.current.TransparentBackground)
+	assert.True(t, d.original.TransparentBackground)
+	assert.Contains(t, ansi.Strip(d.View()), "Transparent background")
+	cancel := collectMsgs(d.cancel())
+	assert.False(t, hasMsg[messages.ApplySettingsMsg](cancel))
+	applied, ok := findMsg[messages.ApplySettingsMsg](collectMsgs(d.apply()))
+	require.True(t, ok)
+	assert.False(t, applied.Preferences.TransparentBackground)
+}

@@ -222,6 +222,7 @@ type Preferences struct {
 	RenderImages          bool
 	ShowBanner            bool
 	DimInactivePanes      bool
+	TransparentBackground bool
 	YOLO                  bool
 	RestoreTabs           bool
 	Snapshot              bool

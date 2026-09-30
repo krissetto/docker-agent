@@ -1678,3 +1678,15 @@ func TestSettingsDimInactivePanesDefaults(t *testing.T) {
 	value = true
 	assert.True(t, settings.GetDimInactivePanes())
 }
+
+func TestTransparentBackgroundDefaultsAndExplicitOptOut(t *testing.T) {
+	var settings *Settings
+	assert.True(t, settings.GetTransparentBackground())
+	settings = &Settings{}
+	assert.True(t, settings.GetTransparentBackground())
+	disabled := false
+	settings.TransparentBackground = &disabled
+	assert.False(t, settings.GetTransparentBackground())
+	disabled = true
+	assert.True(t, settings.GetTransparentBackground())
+}

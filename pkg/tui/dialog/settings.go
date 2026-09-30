@@ -44,6 +44,7 @@ const (
 	rowActiveAgents
 	rowTools
 	rowTodos
+	rowTransparentBackground
 	rowDimInactivePanes
 	rowSplitDiff
 	rowExpandThinking
@@ -437,6 +438,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Layout.HideTools = !d.current.Layout.HideTools
 		case rowTodos:
 			d.current.Layout.HideTodos = !d.current.Layout.HideTodos
+		case rowTransparentBackground:
+			d.current.TransparentBackground = !d.current.TransparentBackground
 		case rowDimInactivePanes:
 			d.current.DimInactivePanes = !d.current.DimInactivePanes
 		case rowSplitDiff:
@@ -674,6 +677,7 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 		}
 	}
 	body.section("Display")
+	d.addToggle(body, rowTransparentBackground, "Transparent background", d.current.TransparentBackground)
 	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
 	d.addToggle(body, rowSplitDiff, "Split diff view", d.current.SplitDiffView)
 	d.addToggle(body, rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)

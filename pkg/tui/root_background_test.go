@@ -204,3 +204,62 @@ func TestRootDialogDefaultBackgroundSurvivesThemeSwitch(t *testing.T) {
 		require.Equal(t, styles.Background, view.BackgroundColor, "existing OSC 11 behavior retained")
 	}
 }
+
+func TestCanvasTransparencyPreferencePreservesExplicitSurfacesAndEscapes(t *testing.T) {
+	setupAutoThemeTest(t)
+	for _, ref := range []string{"default", "default-light", "nord"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		content := "default e\x1b[7m\x1b[27ḿ 界 👩‍💻 " + styles.DiffAddStyle.Render("added") +
+			"\x1b[49m tail \x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\\x1b_cagent-image;1;2;3;0;preview\x1b\\\x1bPq~?\x1b\\"
+		original := layoutTerminalCells(content)
+		for _, transparent := range []bool{true, false, true} {
+			root := &appModel{transparentBackground: transparent}
+			view := root.canvasView(content, "title", false, false)
+			require.Equal(t, styles.Background, view.BackgroundColor)
+			if transparent {
+				require.Equal(t, content, view.Content, "transparent path is an exact no-allocation bypass")
+			} else {
+				cells := layoutTerminalCells(view.Content)
+				for y, row := range original {
+					for x, cell := range row {
+						if cell.Style.Bg == nil {
+							cell.Style.Bg = styles.Background
+						}
+						require.Equal(t, cell, cells[y][x])
+					}
+				}
+			}
+			for _, raw := range []string{"e\x1b[7m\x1b[27ḿ", "👩‍💻", "\x1b_cagent-image;1;2;3;0;preview\x1b\\", "\x1bPq~?\x1b\\"} {
+				require.Contains(t, view.Content, raw)
+			}
+		}
+	}
+}
+
+func TestCanvasPreferenceLiveFullLeanLoadingAndError(t *testing.T) {
+	setupAutoThemeTest(t)
+	root, _, _ := frozenClockRoot(t, 80, 24)
+	require.True(t, root.transparentBackground, "startup uses default-on config getter")
+	for _, lean := range []bool{false, true} {
+		root.leanMode = lean
+		for _, state := range []string{"ready", "loading", "error"} {
+			root.ready, root.err = state == "ready", nil
+			if state == "error" {
+				root.err = errors.New("error fixture")
+			}
+			for _, transparent := range []bool{true, false, true} {
+				root.handleApplySettings(messages.ApplySettingsMsg{Preferences: messages.Preferences{TransparentBackground: transparent}})
+				view := root.View()
+				cell := chromeCells(view.Content)[0]
+				if transparent {
+					require.Nil(t, cell.bg)
+				} else {
+					require.Equal(t, styles.Background, cell.bg)
+				}
+				require.Equal(t, view.Content, root.View().Content, "live apply invalidates then stabilizes cache")
+			}
+		}
+	}
+}

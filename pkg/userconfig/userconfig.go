@@ -77,6 +77,8 @@ type Settings struct {
 	// ShowBanner displays the ASCII-art startup banner in the TUI.
 	// Defaults to true when not set.
 	ShowBanner *bool `yaml:"show_banner,omitempty"`
+	// TransparentBackground preserves terminal-default canvas cells. Defaults to true.
+	TransparentBackground *bool `yaml:"transparent_background,omitempty"`
 	// DimInactivePanes reduces contrast of unfocused split-pane content.
 	// Defaults to true when not set.
 	DimInactivePanes *bool `yaml:"dim_inactive_panes,omitempty"`
@@ -283,6 +285,11 @@ func (s *Settings) GetShowBanner() bool {
 		return true
 	}
 	return *s.ShowBanner
+}
+
+// GetTransparentBackground preserves terminal transparency unless explicitly disabled.
+func (s *Settings) GetTransparentBackground() bool {
+	return s == nil || s.TransparentBackground == nil || *s.TransparentBackground
 }
 
 // GetDimInactivePanes defaults to dimming unfocused pane content.
