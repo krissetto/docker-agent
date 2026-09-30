@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -75,7 +77,7 @@ func TestActualProgramResponseDoubleEscapeCancelsOnceWithoutDialog(t *testing.T)
 			program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 			require.Eventually(t, func() bool {
 				f := model.snapshot()
-				return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again to cancel the response.")
+				return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "Double Esc within 3s cancels the response.")
 			}, time.Second, time.Millisecond)
 			require.Zero(t, handle.cancels.Load(), "first Escape never calls cancellation")
 			frames := model.snapshot()
@@ -91,11 +93,12 @@ func TestActualProgramResponseDoubleEscapeCancelsOnceWithoutDialog(t *testing.T)
 			}, time.Second, time.Millisecond)
 			program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 			require.Equal(t, int32(1), handle.cancels.Load(), "completed cancellation cannot dispatch twice")
+			program.Send(tea.KeyPressMsg{Code: 'x', Text: "x"})
 			require.Eventually(t, func() bool {
 				f := model.snapshot()
 				last := f[len(f)-1]
 				return last.active == 0 && !strings.Contains(ansi.Strip(last.content), "Response cancelled.")
-			}, 2*time.Second, time.Millisecond)
+			}, time.Second, time.Millisecond)
 			select {
 			case <-time.After(80 * time.Millisecond):
 			case <-t.Context().Done():
@@ -134,30 +137,25 @@ func TestResponsePromptDisarmsOnInputFinishRestartAndModal(t *testing.T) {
 	require.Zero(t, handle.cancels.Load())
 }
 
-func TestActualProgramResponsePromptExpiresWithoutInput(t *testing.T) {
-	root, handle := responseTestRoot(t)
-	model := &sidebarHoverProgram{root: root}
-	program := startTestProgram(t, root, model, tea.WithOutput(&cacheProgramWriter{}))
-	program.Send(runtime.StreamStarted("response-confirm-session", "root"))
-	waitForResponseAnimation(t, model)
-	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Eventually(t, func() bool {
-		f := model.snapshot()
-		return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
-	}, time.Second, time.Millisecond)
-	require.Eventually(t, func() bool {
-		f := model.snapshot()
-		return !strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
-	}, responsePromptLifetime+time.Second, time.Millisecond, "shared deadline expires without an input wakeup")
-	require.Zero(t, handle.cancels.Load())
-	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Eventually(t, func() bool {
-		f := model.snapshot()
-		return strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
-	}, time.Second, time.Millisecond)
-	require.Zero(t, handle.cancels.Load(), "Escape after expiry is first Escape, not cancellation")
-	program.Send(runtime.StreamStopped("response-confirm-session", "root", "completed"))
-	require.Eventually(t, func() bool { f := model.snapshot(); return f[len(f)-1].active == 0 }, time.Second, time.Millisecond)
+func TestResponsePromptDisarmsAtThreeSecondsButNoticeHoldsFive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		root, handle := responseTestRoot(t)
+		root.Update(runtime.StreamStarted("response-confirm-session", "root"))
+		root.handleResponseEscape()
+		token := root.responsePrompt.noticeToken
+		deadline := time.Now().Add(transientNoticeLifetime)
+		time.Sleep(responsePromptLifetime)
+		root.Update(responseArmExpiredMsg{token: token})
+		require.False(t, root.responsePrompt.armed)
+		require.Contains(t, ansi.Strip(root.messageBar.View()), "Double Esc within 3s")
+		require.Zero(t, handle.cancels.Load())
+		time.Sleep(2 * time.Second)
+		root.expireTransientNotice(transientNoticeExpiredMsg{token: token, deadline: deadline})
+		require.Nil(t, root.responsePrompt.application)
+		root.handleResponseEscape()
+		require.True(t, root.responsePrompt.armed, "expired Escape rearms instead of canceling")
+		require.Zero(t, handle.cancels.Load())
+	})
 }
 
 func TestResponsePromptCannotCancelAnotherSession(t *testing.T) {
@@ -192,7 +190,7 @@ func TestActualProgramResponsePromptRunAndModalGuards(t *testing.T) {
 	waitForResponseAnimation(t, model)
 	promptVisible := func() bool {
 		frames := model.snapshot()
-		return len(frames) > 0 && strings.Contains(ansi.Strip(frames[len(frames)-1].content), "Press Esc again")
+		return len(frames) > 0 && strings.Contains(ansi.Strip(frames[len(frames)-1].content), "Double Esc within 3s")
 	}
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Eventually(t, promptVisible, time.Second, time.Millisecond)
@@ -236,19 +234,19 @@ func TestActualProgramResponsePromptSwitchCannotCancelWrongSession(t *testing.T)
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Eventually(t, func() bool {
 		f := model.snapshot()
-		return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
+		return len(f) > 0 && strings.Contains(ansi.Strip(f[len(f)-1].content), "Double Esc within 3s")
 	}, time.Second, time.Millisecond)
 	program.Send(messages.SwitchTabMsg{SessionID: sess.ID})
 	program.Send(messages.RoutedMsg{SessionID: "response-confirm-session", Inner: runtime.StreamStopped("response-confirm-session", "root", "completed")})
 	program.Send(runtime.StreamStarted(sess.ID, "root"))
 	require.Eventually(t, func() bool {
 		f := model.snapshot()
-		return !strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
+		return !strings.Contains(ansi.Strip(f[len(f)-1].content), "Double Esc within 3s")
 	}, time.Second, time.Millisecond)
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Eventually(t, func() bool {
 		f := model.snapshot()
-		return strings.Contains(ansi.Strip(f[len(f)-1].content), "Press Esc again")
+		return strings.Contains(ansi.Strip(f[len(f)-1].content), "Double Esc within 3s")
 	}, time.Second, time.Millisecond)
 	require.Zero(t, first.cancels.Load())
 	require.Zero(t, second.cancels.Load(), "freshly selected run requires its own second Escape")
@@ -263,10 +261,42 @@ func TestResponsePromptRejectsExpiredSecondEscapeBeforeTickDelivery(t *testing.T
 	root, handle := responseTestRoot(t)
 	_, _ = root.Update(runtime.StreamStarted("response-confirm-session", "root"))
 	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.True(t, root.responsePrompt.deadline.Running())
+	require.True(t, root.responsePrompt.armed)
 	root.responsePrompt.expiresAt = time.Now().Add(-time.Nanosecond)
 	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Zero(t, handle.cancels.Load(), "a delayed animation tick cannot extend the confirmation window")
 	require.True(t, root.responsePrompt.armed, "expired second Escape starts a fresh prompt")
 	require.True(t, time.Now().Before(root.responsePrompt.expiresAt))
+}
+
+func TestTransientNoticesFiveSecondsReplacementPriorityAndPersistentIsolation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		root := splitTestRoot(t)
+		root.messageBar = messagebar.New()
+		root.messageBar.SetSize(80, 1)
+		first, _, accepted := root.setTransientNotice(messagebar.Message{Text: "first", Category: messagebar.Hint})
+		require.True(t, accepted)
+		firstDeadline := time.Now().Add(transientNoticeLifetime)
+		time.Sleep(2 * time.Second)
+		second, _, accepted := root.setTransientNotice(messagebar.Message{Text: "second", Severity: messagebar.Warning})
+		require.True(t, accepted)
+		secondDeadline := time.Now().Add(transientNoticeLifetime)
+		require.NotEqual(t, first, second)
+		_, cmd, accepted := root.setTransientNotice(messagebar.Message{Text: "rejected", Category: messagebar.Hint})
+		require.False(t, accepted)
+		require.Nil(t, cmd)
+		time.Sleep(3 * time.Second)
+		root.expireTransientNotice(transientNoticeExpiredMsg{token: first, deadline: firstDeadline})
+		require.Contains(t, root.messageBar.View(), "second", "stale expiry never clears replacement")
+		time.Sleep(2*time.Second - time.Nanosecond)
+		root.expireTransientNotice(transientNoticeExpiredMsg{token: second, deadline: secondDeadline})
+		require.Contains(t, root.messageBar.View(), "second", "holds for the full five seconds")
+		time.Sleep(time.Nanosecond)
+		root.expireTransientNotice(transientNoticeExpiredMsg{token: second, deadline: secondDeadline})
+		require.NotContains(t, root.messageBar.View(), "second")
+		root.messageBar.SetMessage(messagebar.Message{Text: "persistent"})
+		root.expireTransientNotice(transientNoticeExpiredMsg{token: second, deadline: secondDeadline})
+		require.Contains(t, root.messageBar.View(), "persistent")
+		require.Zero(t, root.ar.ActiveCount(), "deadline holds require no animation lease")
+	})
 }

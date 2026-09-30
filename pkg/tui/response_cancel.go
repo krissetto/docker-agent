@@ -7,7 +7,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
@@ -22,7 +21,6 @@ type responseCancelPrompt struct {
 	sessionID, turnID string
 	handle            runtime.SessionHandle
 	generation        uint64
-	deadline          animation.Transition
 	expiresAt         time.Time
 	noticeToken       messagebar.Token
 }
@@ -40,7 +38,6 @@ func (m *appModel) clearResponsePrompt() tea.Cmd {
 	if m.responsePrompt.application == nil {
 		return nil
 	}
-	m.responsePrompt.deadline.Cancel()
 	token := m.responsePrompt.noticeToken
 	m.responsePrompt = responseCancelPrompt{}
 	m.interactionHintVisible = false
@@ -55,12 +52,11 @@ func (m *appModel) tickResponsePrompt() tea.Cmd {
 	if m.responsePrompt.application == nil {
 		return nil
 	}
-	if m.responsePrompt.armed && (m.application != m.responsePrompt.application || m.application.Session() == nil || m.application.Session().ID != m.responsePrompt.sessionID || m.application.SessionHandle() != m.responsePrompt.handle || m.responseRunGeneration != m.responsePrompt.generation || m.responseTurnID() != m.responsePrompt.turnID) {
+	if m.responsePrompt.sessionID != "" && (m.application != m.responsePrompt.application || m.application.Session() == nil || m.application.Session().ID != m.responsePrompt.sessionID || m.application.SessionHandle() != m.responsePrompt.handle || m.responseRunGeneration != m.responsePrompt.generation || m.responseTurnID() != m.responsePrompt.turnID) {
 		return m.clearResponsePrompt()
 	}
-	m.responsePrompt.deadline.Tick()
-	if !m.responsePrompt.deadline.Running() {
-		return m.clearResponsePrompt()
+	if m.responsePrompt.armed && !time.Now().Before(m.responsePrompt.expiresAt) {
+		m.responsePrompt.armed = false
 	}
 	return nil
 }
@@ -69,7 +65,7 @@ func (m *appModel) handleResponseEscape() tea.Cmd {
 	if m.application == nil || m.application.Session() == nil {
 		return nil
 	}
-	valid := m.responsePrompt.armed && time.Now().Before(m.responsePrompt.expiresAt) && m.responsePrompt.deadline.Running() && m.responsePrompt.application == m.application && m.responsePrompt.sessionID == m.application.Session().ID && m.responsePrompt.handle == m.application.SessionHandle() && m.responsePrompt.generation == m.responseRunGeneration && m.responsePrompt.turnID == m.responseTurnID()
+	valid := m.responsePrompt.armed && time.Now().Before(m.responsePrompt.expiresAt) && m.responsePrompt.application == m.application && m.responsePrompt.sessionID == m.application.Session().ID && m.responsePrompt.handle == m.application.SessionHandle() && m.responsePrompt.generation == m.responseRunGeneration && m.responsePrompt.turnID == m.responseTurnID()
 	if valid {
 		clearCmd := m.clearResponsePrompt()
 		cmd, accepted := chat.CancelResponse(m.chatPage)
@@ -77,13 +73,15 @@ func (m *appModel) handleResponseEscape() tea.Cmd {
 			return tea.Batch(clearCmd, cmd)
 		}
 		m.ensureMessageBar()
-		m.responsePrompt = responseCancelPrompt{application: m.application, deadline: m.ar.Transition()}
-		return tea.Batch(clearCmd, cmd, m.responsePrompt.deadline.Start(time.Second, animation.Linear), m.setResponseNotice("Response cancelled.", messagebar.Success, messagebar.Cancellation))
+		m.responsePrompt = responseCancelPrompt{application: m.application}
+		return tea.Batch(clearCmd, cmd, m.setResponseNotice("Response cancelled.", messagebar.Success, messagebar.Cancellation))
 	}
 	clearCmd := m.clearResponsePrompt()
 	m.ensureMessageBar()
-	m.responsePrompt = responseCancelPrompt{armed: true, application: m.application, sessionID: m.application.Session().ID, handle: m.application.SessionHandle(), generation: m.responseRunGeneration, turnID: m.responseTurnID(), deadline: m.ar.Transition(), expiresAt: time.Now().Add(responsePromptLifetime)}
-	return tea.Batch(clearCmd, m.responsePrompt.deadline.Start(responsePromptLifetime, animation.Linear), m.setResponseNotice("Press Esc again to cancel the response.", messagebar.Warning, messagebar.Cancellation))
+	m.responsePrompt = responseCancelPrompt{armed: true, application: m.application, sessionID: m.application.Session().ID, handle: m.application.SessionHandle(), generation: m.responseRunGeneration, turnID: m.responseTurnID(), expiresAt: time.Now().Add(responsePromptLifetime)}
+	noticeCmd := m.setResponseNotice("Double Esc within 3s cancels the response.", messagebar.Warning, messagebar.Cancellation)
+	token := m.responsePrompt.noticeToken
+	return tea.Batch(clearCmd, noticeCmd, tea.Tick(responsePromptLifetime, func(time.Time) tea.Msg { return responseArmExpiredMsg{token: token} }))
 }
 
 type interactionHintReadyMsg struct {
@@ -128,20 +126,54 @@ func (m *appModel) finishInteractionHint(msg interactionHintReadyMsg) tea.Cmd {
 	}
 	m.ensureMessageBar()
 	m.interactionHintVisible = true
-	m.responsePrompt = responseCancelPrompt{application: m.application, deadline: m.ar.Transition()}
+	m.responsePrompt = responseCancelPrompt{application: m.application}
 	noticeCmd := m.setResponseNotice(msg.text, messagebar.Info, messagebar.Hint)
 	if m.responsePrompt.noticeToken.Generation == 0 {
 		m.responsePrompt = responseCancelPrompt{}
 		m.interactionHintVisible = false
 		return nil
 	}
-	return tea.Batch(m.responsePrompt.deadline.Start(responsePromptLifetime, animation.Linear), noticeCmd)
+	return noticeCmd
 }
 
 func (m *appModel) setResponseNotice(text string, severity messagebar.Severity, category messagebar.Category) tea.Cmd {
-	token, cmd, accepted := m.messageBar.SetNotice(messagebar.Message{Text: text, Severity: severity, Category: category, Owner: m.paneFocus()}, time.Time{})
+	token, cmd, accepted := m.setTransientNotice(messagebar.Message{Text: text, Severity: severity, Category: category, Owner: m.paneFocus()})
 	if accepted {
 		m.responsePrompt.noticeToken = token
 	}
 	return cmd
+}
+
+const transientNoticeLifetime = 5 * time.Second
+
+type responseArmExpiredMsg struct{ token messagebar.Token }
+
+type transientNoticeExpiredMsg struct {
+	token    messagebar.Token
+	deadline time.Time
+}
+
+func (m *appModel) setTransientNotice(notice messagebar.Message) (messagebar.Token, tea.Cmd, bool) {
+	m.ensureMessageBar()
+	deadline := time.Now().Add(transientNoticeLifetime)
+	token, cmd, accepted := m.messageBar.SetNotice(notice, deadline)
+	if !accepted {
+		return token, cmd, false
+	}
+	m.viewCacheValid = false
+	return token, tea.Batch(cmd, tea.Tick(transientNoticeLifetime, func(time.Time) tea.Msg {
+		return transientNoticeExpiredMsg{token: token, deadline: deadline}
+	})), true
+}
+
+func (m *appModel) expireTransientNotice(msg transientNoticeExpiredMsg) tea.Cmd {
+	if m.messageBar == nil || time.Now().Before(msg.deadline) {
+		return nil
+	}
+	if m.responsePrompt.noticeToken == msg.token {
+		m.responsePrompt = responseCancelPrompt{}
+		m.interactionHintVisible = false
+	}
+	m.viewCacheValid = false
+	return m.messageBar.Expire(msg.token, time.Now())
 }

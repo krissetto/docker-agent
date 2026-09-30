@@ -381,13 +381,8 @@ type appModel struct {
 	interactionHintGeneration uint64
 	interactionHintVisible    bool
 	previousSessions          []string
-	majorEvents               messagebar.Aggregator
 	majorEventWater           map[string]majorEventFence
 	paneOutcomes              map[string]runtime.TurnOutcome
-	majorNoticeToken          messagebar.Token
-	majorNoticeDeadline       time.Time
-	majorNoticeTimerPending   bool
-	majorScheduledExpiry      majorNoticeExpiredMsg
 
 	// sendMode is what happens to messages sent while the agent is working:
 	// queue until the turn ends (default) or steer into the ongoing stream.
@@ -1008,14 +1003,14 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var promptCmd tea.Cmd
 	switch msg.(type) {
-	case tea.KeyPressMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.BlurMsg:
+	case tea.KeyPressMsg, tea.BlurMsg:
 		promptCmd = m.cancelInteractionHint()
 	case tea.PasteMsg, tea.MouseClickMsg, tea.MouseWheelMsg, messages.WheelCoalescedMsg:
 		promptCmd = tea.Batch(m.cancelInteractionHint(), m.clearResponsePrompt())
 	}
 	model, cmd := m.update(msg)
 	cmd = tea.Batch(promptCmd, cmd)
-	if !tick && m.responsePrompt.armed && (!m.chatPage.IsWorking() || m.dialogMgr.Open() || m.responsePrompt.generation != m.responseRunGeneration) {
+	if !tick && m.responsePrompt.sessionID != "" && (!m.chatPage.IsWorking() || m.dialogMgr.Open() || m.responsePrompt.generation != m.responseRunGeneration) {
 		cmd = tea.Batch(cmd, m.clearResponsePrompt())
 	}
 	if !tick {
@@ -1837,8 +1832,13 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.OpenURLMsg:
 		return m.handleOpenURL(msg.URL)
 
-	case majorNoticeExpiredMsg:
-		cmd := m.expireMajorNotice(msg)
+	case responseArmExpiredMsg:
+		if m.responsePrompt.noticeToken == msg.token && !time.Now().Before(m.responsePrompt.expiresAt) {
+			m.responsePrompt.armed = false
+		}
+		return m, nil
+	case transientNoticeExpiredMsg:
+		cmd := m.expireTransientNotice(msg)
 		return m, cmd
 
 	case messages.SessionRuntimeEventMsg:

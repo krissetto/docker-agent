@@ -122,7 +122,7 @@ func TestActualProgramQueueRemoveUsesExactCanonicalIDAndEvent(t *testing.T) {
 				return (!clearHint || s.active == 0) && strings.Contains(strings.Split(ansi.Strip(s.content), "\n")[y], "×")
 			}, time.Second, time.Millisecond)
 			if !clearHint {
-				require.NotContains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "Double-click to edit queued message", "new pointer action cancels the shared reminder")
+				require.Contains(t, ansi.Strip(sidebarProgramSnapshot(t, program).content), "Double-click to edit queued message", "pointer motion preserves the useful reminder until action or expiry")
 			}
 			row := strings.Split(ansi.Strip(sidebarProgramSnapshot(t, program).content), "\n")[y]
 			index := strings.LastIndex(row, "×")
