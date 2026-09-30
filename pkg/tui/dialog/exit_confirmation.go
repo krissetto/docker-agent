@@ -48,7 +48,8 @@ type exitConfirmationDialog struct {
 // NewExitConfirmationDialog creates a new exit confirmation dialog.
 func NewExitConfirmationDialog() Dialog {
 	return &exitConfirmationDialog{
-		keyMap: defaultExitConfirmationKeyMap(),
+		BaseDialog: BaseDialog{bodyCompactTitle: true},
+		keyMap:     defaultExitConfirmationKeyMap(),
 	}
 }
 
@@ -157,7 +158,7 @@ func (d *exitConfirmationDialog) renderButtons(contentWidth int) string {
 	selected := d.selectedAction(actions)
 	for i := range actions {
 		if i != selected {
-			actions[i].Label += "  " // Keep button widths stable when the Enter marker moves.
+			actions[i].Label = " " + actions[i].Label + " " // Reserve the Enter marker symmetrically.
 		}
 	}
 	padding := min(2, max(0, (contentWidth-3)/2))

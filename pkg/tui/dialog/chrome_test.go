@@ -675,9 +675,10 @@ func TestExitConfirmationCenteredReferenceLayout(t *testing.T) {
 					buttons = i
 				}
 			}
-			require.Greater(t, divider, title)
-			require.Greater(t, question, divider)
-			require.Greater(t, buttons, question+1)
+			require.Equal(t, title+1, divider, "no blank row between Exit and its divider")
+			require.Equal(t, divider+2, question)
+			require.Equal(t, question+2, buttons)
+			require.Equal(t, 10, dl.Height, "reference exit card is ten terminal rows")
 			for _, text := range []string{"Exit", "Do you want to exit?"} {
 				for _, line := range lines {
 					if before, after, found := strings.Cut(line, text); found {
@@ -738,4 +739,21 @@ func TestExitConfirmationSelectionDoesNotShiftButtons(t *testing.T) {
 	assert.Equal(t, before, []int{d.confirmBtnNoX, d.confirmBtnNoW, d.confirmBtnYesX, d.confirmBtnYesW})
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	assert.True(t, hasMsg[ExitConfirmedMsg](collectMsgs(cmd)))
+}
+
+func TestExitConfirmationLabelsCenteredWithinStablePills(t *testing.T) {
+	d := NewExitConfirmationDialog().(*exitConfirmationDialog)
+	d.SetSize(80, 24)
+	for range 2 {
+		d.View()
+		for _, row := range d.actionRows {
+			for _, hit := range row.hits {
+				pill := ansi.Cut(row.text, hit.x, hit.x+hit.width)
+				left := len(pill) - len(strings.TrimLeft(pill, " "))
+				right := len(pill) - len(strings.TrimRight(pill, " "))
+				assert.Equal(t, left, right, "visible No/Yes label and selected marker centered inside each pill")
+			}
+		}
+		d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	}
 }

@@ -87,6 +87,7 @@ type BaseDialog struct {
 	bodyX, bodyY, bodyWidth, bodyHeight   int
 	bodyHeaderGap                         int
 	bodyTitleGap                          int
+	bodyCompactTitle                      bool
 	bodyHeaderRows                        int
 	bodyFooterGap                         int
 	bodyPreparationCount                  uint64
@@ -711,7 +712,7 @@ func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int
 		b.bodyScroll = b.newScrollview(scrollview.WithKeyMap(&scrollview.ScrollKeyMap{PageUp: key.NewBinding(key.WithKeys("pgup")), PageDown: key.NewBinding(key.WithKeys("pgdown"))}), scrollview.WithReserveScrollbarSpace(true))
 	}
 	style, width, inner, available := b.bodyFrame(style, dialogWidth)
-	headers, footers := bodyChrome(header, footer, available)
+	headers, footers := bodyChrome(header, footer, available, b.bodyCompactTitle)
 	b.bodyHeaderRows = len(headers)
 	b.bodyTitleGap = 0
 	if len(headers) > 2 && headers[1] == "" {
@@ -760,7 +761,7 @@ func (b *BaseDialog) PrepareScrollableBody(style lipgloss.Style, dialogWidth int
 // RenderScrollableBody composes current themed content using already-prepared viewport geometry.
 func (b *BaseDialog) RenderScrollableBody(style lipgloss.Style, dialogWidth int, header, body, footer string) string {
 	style, width, inner, available := b.bodyFrame(style, dialogWidth)
-	headers, footers := bodyChrome(header, footer, available)
+	headers, footers := bodyChrome(header, footer, available, b.bodyCompactTitle)
 	if b.bodyScroll == nil {
 		return b.RenderCard(style, width, strings.Join(append(append(headers, body), footers...), "\n"))
 	}
@@ -796,7 +797,7 @@ func (b *BaseDialog) bodyFrame(style lipgloss.Style, dialogWidth int) (lipgloss.
 
 // bodyChrome owns structural spacing; callers supply title/header content and
 // actions without margins. Body rows are deliberately not normalized here.
-func bodyChrome(header, footer string, available int) ([]string, []string) {
+func bodyChrome(header, footer string, available int, compactTitle ...bool) ([]string, []string) {
 	headers := trimChromeLines(header)
 	footers := trimChromeLines(footer)
 	// Older callers may already separate the title from header controls. Remove
@@ -811,7 +812,7 @@ func bodyChrome(header, footer string, available int) ([]string, []string) {
 		headers = nil
 	}
 	// Reclaim decorative spacing before dropping header controls or body rows.
-	if len(headers) > 1 && len(headers)+len(footers)+3 <= available {
+	if len(headers) > 1 && len(headers)+len(footers)+3 <= available && (len(compactTitle) == 0 || !compactTitle[0]) {
 		headers = append(headers[:1], append([]string{""}, headers[1:]...)...)
 	}
 	if len(headers) > 0 && len(headers)+len(footers)+2 <= available {
