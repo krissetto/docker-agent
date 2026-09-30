@@ -606,6 +606,12 @@ func assertAnchoredSourceRows(t *testing.T, a *animatedDialog, width, height int
 		view = a.resizeView
 	}
 	source := strings.Split(ansi.Strip(view), "\n")
+	if a.resizing {
+		lines := strings.Split(ansi.Strip(a.view()), "\n")
+		require.Equal(t, source[0], lines[0], "resize content follows the moving top")
+		require.Equal(t, source[len(source)-1], lines[len(lines)-1], "resize bottom follows the moving bottom")
+		return
+	}
 	fullHeight := a.sourceHeight()
 	finalTop, _ := CenterPosition(width, height, a.renderWidth, fullHeight)
 	top, _ := a.position(width, height)

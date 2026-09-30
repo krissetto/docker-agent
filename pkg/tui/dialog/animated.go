@@ -71,6 +71,7 @@ type animatedDialog struct {
 	renderRow, renderCol                   int
 	resizeView                             string
 	resizeWidth, resizeHeight              int
+	resizeFooterRows                       int
 }
 
 func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxHeight int) (*animatedDialog, tea.Cmd) {
@@ -124,7 +125,10 @@ func (a *animatedDialog) sample() {
 	a.renderAlpha = a.fromAlpha + (a.targetAlpha-a.fromAlpha)*a.anim.Value()
 	a.renderWidth = a.anim.Lerp(a.fromWidth, a.targetWidth)
 	a.renderHeight = a.anim.Lerp(a.fromHeight, a.targetHeight)
-	if a.geometry {
+	if a.resizing {
+		a.renderRow = a.anim.Lerp(a.fromRow, a.targetRow)
+		a.renderCol = a.anim.Lerp(a.fromCol, a.targetCol)
+	} else if a.geometry {
 		// Interpolate the source anchor, then apply the same signed crop offset in View.
 		a.renderRow = a.anchoredPosition(a.fromRow, a.targetRow, a.fromHeight, a.targetHeight, a.resizeHeight, a.renderHeight)
 		a.renderCol = a.anchoredPosition(a.fromCol, a.targetCol, a.fromWidth, a.targetWidth, a.resizeWidth, a.renderWidth)
@@ -198,6 +202,13 @@ func (a *animatedDialog) retarget(cause string, maxWidth, maxHeight int) tea.Cmd
 	a.targetRow, a.targetCol = row, col
 	// Input stays live: clip the newly prepared destination, never stale filtered rows.
 	a.resizeView, a.resizeWidth, a.resizeHeight = a.intrinsicView(), w, h
+	a.resizeFooterRows = 1
+	if body, ok := a.dialog.(interface{ BodyScrollBounds() (int, int, int, int) }); ok {
+		_, bodyY, _, bodyHeight := body.BodyScrollBounds()
+		if bodyHeight > 0 {
+			a.resizeFooterRows = max(1, h-(bodyY-row+bodyHeight))
+		}
+	}
 	return a.anim.Start(dialogResizeDuration, animation.Linear)
 }
 
@@ -326,6 +337,9 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 	if w == 0 || h == 0 {
 		return ""
 	}
+	if a.resizing {
+		return resizeDialogFrame(view, w, h, a.resizeFooterRows)
+	}
 	source := strings.Split(view, "\n")
 	fullH := min(a.sourceHeight(), len(source))
 	offset := a.sourceOffset()
@@ -363,6 +377,65 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 		lines[i] = styles.FadeLineCtx(lines[i], a.renderAlpha, &fc)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// resizeDialogFrame keeps live header/body rows at the moving top and actions at the moving bottom.
+func resizeDialogFrame(view string, width, height, footerRows int) string {
+	source := strings.Split(view, "\n")
+	sourceWidth := lipgloss.Width(view)
+	bordered := strings.HasPrefix(ansi.Strip(source[0]), "╭") && sourceWidth >= 2 && len(source) > 1
+	closeControl := bordered && sourceWidth != width && strings.Contains(source[1], dialogCloseGlyph)
+	if closeControl {
+		source[1] = strings.Replace(source[1], dialogCloseGlyph, " ", 1)
+	}
+	footerRows = min(footerRows, len(source), max(0, height-1))
+	topRows := min(len(source)-footerRows, height-footerRows)
+	lines := make([]string, height)
+	copy(lines, source[:topRows])
+	copy(lines[height-footerRows:], source[len(source)-footerRows:])
+	for i := range lines {
+		if bordered {
+			if lines[i] == "" {
+				lines[i] = ansi.Cut(source[1], 0, 1) + strings.Repeat(" ", max(0, sourceWidth-2)) + ansi.Cut(source[1], sourceWidth-1, sourceWidth)
+			}
+			lines[i] = resizeDialogLine(lines[i], sourceWidth, width, i == 0 || i == height-1)
+		} else {
+			lines[i] = ansi.Truncate(lines[i], width, "")
+			lines[i] += strings.Repeat(" ", max(0, width-lipgloss.Width(lines[i])))
+		}
+	}
+	frame := strings.Join(lines, "\n")
+	if closeControl {
+		frame = renderCloseControl(frame, false)
+	}
+	return frame
+}
+
+func resizeDialogLine(line string, sourceWidth, width int, edge bool) string {
+	if width == sourceWidth {
+		return line
+	}
+	if width < 2 {
+		return ansi.Truncate(line, width, "")
+	}
+	left, right := ansi.Cut(line, 0, 1), ansi.Cut(line, sourceWidth-1, sourceWidth)
+	inner := ansi.Cut(line, 1, sourceWidth-1)
+	if edge {
+		inner = strings.Repeat(ansi.Cut(line, 1, 2), width-2)
+	} else {
+		plain := ansi.Strip(inner)
+		leading := len(plain) - len(strings.TrimLeft(plain, " "))
+		trailing := len(plain) - len(strings.TrimRight(plain, " "))
+		// Centered titles and dividers follow the intermediate width without reflowing body text.
+		if leading >= 3 && trailing >= 3 && leading-trailing >= -4 && leading-trailing <= 4 {
+			content := ansi.Cut(inner, leading, lipgloss.Width(inner)-trailing)
+			padding := max(0, leading+centeredOffset(width, sourceWidth))
+			inner = strings.Repeat(" ", padding) + content
+		}
+		inner = ansi.Truncate(inner, width-2, "")
+		inner += strings.Repeat(" ", max(0, width-2-lipgloss.Width(inner)))
+	}
+	return left + inner + right
 }
 
 // CleanupDialog releases visual resources without answering or cancelling a prompt.

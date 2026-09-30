@@ -177,12 +177,12 @@ func TestResizeParityKeepsSourceAnchorMonotonic(t *testing.T) {
 				mgr.stack[0].viewportHeight = screenHeight
 				mgr.Update(resizeContentMsg{20, heights[1]})
 				e := &mgr.stack[0]
-				from := e.fromRow - centeredOffset(e.resizeHeight, e.fromHeight)
-				to := e.targetRow - centeredOffset(e.resizeHeight, e.targetHeight)
+				from := e.fromRow
+				to := e.targetRow
 				previous := from
 				for e.anim.Running() {
 					top, _ := e.position(mgr.width, mgr.height)
-					anchor := top - e.sourceOffset()
+					anchor := top
 					if to >= from {
 						require.GreaterOrEqual(t, anchor, previous)
 					} else {
