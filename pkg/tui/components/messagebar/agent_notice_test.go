@@ -225,19 +225,19 @@ func noticeCells(t *testing.T, text string) []noticeCell {
 // Built-in expectation colors come from HEAD theme Git objects; custom colors
 // are the explicit test-only palette in applyNoticeTheme. No live assets read.
 const (
-	agentNoticeDefaultANSI = "\x1b[38;2;122;162;247;48;2;28;28;34mparcel-worker\x1b[0m\x1b[38;2;128;128;128;48;2;28;28;34m (a1b2c)\x1b[0m\x1b[38;2;128;128;128;48;2;28;28;34m · 1 turn completed\x1b[0m\x1b[48;2;28;28;34m                        \x1b[0m\n" +
-		"\x1b[38;2;122;162;247;48;2;28;28;34mparcel-worker\x1b[0m\x1b[38;2;128;128;128;48;2;28;28;34m · 1 subagent spawned\x1b[0m\x1b[48;2;28;28;34m                              \x1b[0m\n" +
-		"\x1b[38;2;122;162;247;48;2;28;28;34mparcel-worker\x1b[0m\x1b[38;2;128;128;128;48;2;28;28;34m (a1b2c)\x1b[0m\x1b[38;2;224;175;104;48;2;28;28;34m · Warning\x1b[0m\x1b[48;2;28;28;34m                                 \x1b[0m\n" +
-		"\x1b[38;2;224;175;104;48;2;28;28;34mPress Esc again to cancel the response.\x1b[0m\x1b[48;2;28;28;34m                         \x1b[0m\n" +
-		"\x1b[38;2;122;162;247;48;2;28;28;34mparcel-worker\x1b[0m\x1b[38;2;128;128;128;48;2;28;28;34m (a1…\x1b[0m\n"
-	agentNoticeLightANSI = "\x1b[38;2;46;89;217;48;2;250;250;250mparcel-worker\x1b[0m\x1b[38;2;90;96;125;48;2;250;250;250m (a1b2c)\x1b[0m\x1b[38;2;90;96;125;48;2;250;250;250m · 1 turn completed\x1b[0m\x1b[48;2;250;250;250m                        \x1b[0m\n" +
-		"\x1b[38;2;46;89;217;48;2;250;250;250mparcel-worker\x1b[0m\x1b[38;2;90;96;125;48;2;250;250;250m · 1 subagent spawned\x1b[0m\x1b[48;2;250;250;250m                              \x1b[0m\n" +
-		"\x1b[38;2;46;89;217;48;2;250;250;250mparcel-worker\x1b[0m\x1b[38;2;90;96;125;48;2;250;250;250m (a1b2c)\x1b[0m\x1b[38;2;140;109;31;48;2;250;250;250m · Warning\x1b[0m\x1b[48;2;250;250;250m                                 \x1b[0m\n" +
-		"\x1b[38;2;140;109;31;48;2;250;250;250mPress Esc again to cancel the response.\x1b[0m\x1b[48;2;250;250;250m                         \x1b[0m\n" +
-		"\x1b[38;2;46;89;217;48;2;250;250;250mparcel-worker\x1b[0m\x1b[38;2;90;96;125;48;2;250;250;250m (a1…\x1b[0m\n"
-	agentNoticeCustomANSI = "\x1b[38;2;212;160;232;48;2;16;32;48mparcel-worker\x1b[0m\x1b[38;2;144;160;176;48;2;16;32;48m (a1b2c)\x1b[0m\x1b[38;2;144;160;176;48;2;16;32;48m · 1 turn completed\x1b[0m\x1b[48;2;16;32;48m                        \x1b[0m\n" +
-		"\x1b[38;2;212;160;232;48;2;16;32;48mparcel-worker\x1b[0m\x1b[38;2;144;160;176;48;2;16;32;48m · 1 subagent spawned\x1b[0m\x1b[48;2;16;32;48m                              \x1b[0m\n" +
-		"\x1b[38;2;212;160;232;48;2;16;32;48mparcel-worker\x1b[0m\x1b[38;2;144;160;176;48;2;16;32;48m (a1b2c)\x1b[0m\x1b[38;2;238;187;85;48;2;16;32;48m · Warning\x1b[0m\x1b[48;2;16;32;48m                                 \x1b[0m\n" +
-		"\x1b[38;2;238;187;85;48;2;16;32;48mPress Esc again to cancel the response.\x1b[0m\x1b[48;2;16;32;48m                         \x1b[0m\n" +
-		"\x1b[38;2;212;160;232;48;2;16;32;48mparcel-worker\x1b[0m\x1b[38;2;144;160;176;48;2;16;32;48m (a1…\x1b[0m\n"
+	agentNoticeDefaultANSI = "\x1b[38;2;122;162;247mparcel-worker\x1b[0m\x1b[38;2;128;128;128m (a1b2c)\x1b[0m\x1b[38;2;128;128;128m · 1 turn completed\x1b[0m                        \x1b[0m\n" +
+		"\x1b[38;2;122;162;247mparcel-worker\x1b[0m\x1b[38;2;128;128;128m · 1 subagent spawned\x1b[0m                              \x1b[0m\n" +
+		"\x1b[38;2;122;162;247mparcel-worker\x1b[0m\x1b[38;2;128;128;128m (a1b2c)\x1b[0m\x1b[38;2;224;175;104m · Warning\x1b[0m                                 \x1b[0m\n" +
+		"\x1b[38;2;224;175;104mPress Esc again to cancel the response.\x1b[0m                         \x1b[0m\n" +
+		"\x1b[38;2;122;162;247mparcel-worker\x1b[0m\x1b[38;2;128;128;128m (a1…\x1b[0m\n"
+	agentNoticeLightANSI = "\x1b[38;2;46;89;217mparcel-worker\x1b[0m\x1b[38;2;90;96;125m (a1b2c)\x1b[0m\x1b[38;2;90;96;125m · 1 turn completed\x1b[0m                        \x1b[0m\n" +
+		"\x1b[38;2;46;89;217mparcel-worker\x1b[0m\x1b[38;2;90;96;125m · 1 subagent spawned\x1b[0m                              \x1b[0m\n" +
+		"\x1b[38;2;46;89;217mparcel-worker\x1b[0m\x1b[38;2;90;96;125m (a1b2c)\x1b[0m\x1b[38;2;140;109;31m · Warning\x1b[0m                                 \x1b[0m\n" +
+		"\x1b[38;2;140;109;31mPress Esc again to cancel the response.\x1b[0m                         \x1b[0m\n" +
+		"\x1b[38;2;46;89;217mparcel-worker\x1b[0m\x1b[38;2;90;96;125m (a1…\x1b[0m\n"
+	agentNoticeCustomANSI = "\x1b[38;2;212;160;232mparcel-worker\x1b[0m\x1b[38;2;144;160;176m (a1b2c)\x1b[0m\x1b[38;2;144;160;176m · 1 turn completed\x1b[0m                        \x1b[0m\n" +
+		"\x1b[38;2;212;160;232mparcel-worker\x1b[0m\x1b[38;2;144;160;176m · 1 subagent spawned\x1b[0m                              \x1b[0m\n" +
+		"\x1b[38;2;212;160;232mparcel-worker\x1b[0m\x1b[38;2;144;160;176m (a1b2c)\x1b[0m\x1b[38;2;238;187;85m · Warning\x1b[0m                                 \x1b[0m\n" +
+		"\x1b[38;2;238;187;85mPress Esc again to cancel the response.\x1b[0m                         \x1b[0m\n" +
+		"\x1b[38;2;212;160;232mparcel-worker\x1b[0m\x1b[38;2;144;160;176m (a1…\x1b[0m\n"
 )

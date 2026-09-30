@@ -185,3 +185,39 @@ func TestSeverityUsesSemanticForeground(t *testing.T) {
 		assert.Equal(t, rgba(m.severityColor()), rgba(foregroundAt(t, m.View(), "N")))
 	}
 }
+
+func TestFiveSecondNoticeKeepsDefaultBackgroundThroughExpiry(t *testing.T) {
+	scheduler := &noticeScheduler{now: time.Unix(1, 0)}
+	ar := animation.NewRuntimeWithScheduler(scheduler)
+	m := NewWithRuntime(ar)
+	m.SetSize(80, 1)
+	deadline := scheduler.now.Add(5 * time.Second)
+	token, cmd, ok := m.SetNotice(notice(), deadline)
+	require.True(t, ok)
+	require.Nil(t, cmd)
+	assertDefaultBackground(t, m.View(), 80)
+	for range 2 {
+		tick := acceptNoticeTick(t, ar, scheduler, ar.Continue(), fadeDuration/2)
+		m.Update(tick)
+		assertDefaultBackground(t, m.View(), 80)
+	}
+	require.True(t, m.SettledPresentation())
+	require.Zero(t, ar.ActiveCount())
+	require.Nil(t, ar.Continue(), "five-second hold must not schedule frame ticks")
+	require.Nil(t, m.Expire(token, deadline.Add(-time.Nanosecond)))
+	require.True(t, m.HasActions())
+	require.Nil(t, m.Expire(Token{Owner: token.Owner, Generation: token.Generation + 1}, deadline))
+	require.False(t, m.closing, "stale expiry cannot dismiss the notice")
+	scheduler.now = deadline
+	require.Nil(t, m.Expire(token, deadline))
+	require.False(t, m.HasActions())
+	assertDefaultBackground(t, m.View(), 80)
+	for range 2 {
+		tick := acceptNoticeTick(t, ar, scheduler, ar.Continue(), fadeDuration/2)
+		m.Update(tick)
+		assertDefaultBackground(t, m.View(), 80)
+	}
+	require.Empty(t, m.message.Text)
+	require.Zero(t, ar.ActiveCount())
+	require.Nil(t, ar.Continue())
+}

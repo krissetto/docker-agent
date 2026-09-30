@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -82,7 +83,7 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 					footer := layoutTerminalCells(root.renderMessageBar())[0]
 					composedFooter := layoutTerminalCells(view.Content)[39]
 					for x, cell := range footer {
-						require.Equal(t, cell, composedFooter[x], "footer retains only its intentional local surfaces")
+						require.Equal(t, cell, composedFooter[x], "footer retains terminal-default canvas")
 					}
 					if !lean {
 						_, editorHeight := root.editor.GetSize()
@@ -103,16 +104,16 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 					}
 					require.Equal(t, view.Content, root.View().Content, "default-background canvas participates in root view cache")
 				}
-				root.messageBar.SetMessage(messagebar.Message{Text: "Notice", Actions: []messagebar.Action{{Label: "Act"}}})
+				root.messageBar.SetMessage(messagebar.Message{Text: "Notice", Actions: []messagebar.Action{{Label: "Act", Command: func() tea.Msg { return nil }}}})
 				root.messageBar.SetFocused(true)
 				root.viewCacheValid = false
 				local := layoutTerminalCells(root.renderMessageBar())[0]
 				painted := layoutTerminalCells(root.View().Content)[39]
 				for x, cell := range local {
-					require.Equal(t, cell, painted[x], "action background and attributes cell %d", x)
+					require.Equal(t, cell, painted[x], "action foreground and attributes cell %d", x)
 				}
-				require.Equal(t, styles.Background, painted[styles.AppPadding].Style.Bg, "notice retains intentional messagebar surface")
-				require.Equal(t, styles.Background, painted[118].Style.Bg, "notice trailing space retains messagebar surface")
+				require.Nil(t, painted[styles.AppPadding].Style.Bg, "notice shares terminal-default canvas")
+				require.Nil(t, painted[118].Style.Bg, "right-edge action padding shares terminal-default canvas")
 				root.messageBar.SetMessage(messagebar.Message{})
 			})
 		}
@@ -259,6 +260,50 @@ func TestCanvasPreferenceLiveFullLeanLoadingAndError(t *testing.T) {
 					require.Equal(t, styles.Background, cell.bg)
 				}
 				require.Equal(t, view.Content, root.View().Content, "live apply invalidates then stabilizes cache")
+			}
+		}
+	}
+}
+
+func TestRootMessageBarCanvasPreferenceAndStatus(t *testing.T) {
+	setupAutoThemeTest(t)
+	root, _, _ := frozenClockRoot(t, 120, 40)
+	root.messageBar = messagebar.New()
+	root.application.Session().WorkingDir = "/workspace/界é-project"
+	root.resizeAll()
+	for _, ref := range []string{"gruvbox-dark", "default-light", "nord"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		for _, status := range []bool{false, true} {
+			settings := messages.PanelSettings{Elements: []messages.PanelElement{}}
+			if status {
+				settings = messages.DefaultPanelSettings()
+			}
+			root.applyPanelSettings(settings)
+			for _, notice := range []messagebar.Message{{}, {Text: "Hint 界", Category: messagebar.Hint}, {Text: "Warning", Severity: messagebar.Warning}} {
+				root.messageBar.ClearMessage()
+				root.messageBar.SetMessage(notice)
+				local := layoutTerminalCells(root.renderMessageBar())[0]
+				require.Len(t, local, 120)
+				if status {
+					require.Contains(t, ansi.Strip(root.renderMessageBar()), "界é-project")
+					require.Contains(t, ansi.Strip(root.renderMessageBar()), "todos unavailable")
+				}
+				for _, transparent := range []bool{true, false, true} {
+					root.handleApplySettings(messages.ApplySettingsMsg{Preferences: messages.Preferences{TransparentBackground: transparent, Panel: settings}})
+					view := root.View()
+					painted := layoutTerminalCells(view.Content)[39]
+					for x, cell := range local {
+						require.Nil(t, cell.Style.Bg, "local footer cell %d never paints a surface", x)
+						if !transparent {
+							cell.Style.Bg = styles.Background
+						}
+						require.Equal(t, cell, painted[x], "%s status=%v transparent=%v cell=%d", ref, status, transparent, x)
+					}
+					require.Equal(t, styles.Background, view.BackgroundColor, "terminal theme color policy is unchanged")
+					require.Equal(t, view.Content, root.View().Content)
+				}
 			}
 		}
 	}

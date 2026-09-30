@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -421,6 +422,25 @@ func TestFadeLineCtx_PreservesHyperlinksWideTextAndColonAttributes(t *testing.T)
 	assert.Contains(t, result, "\x1b]8;;https://example.com\x1b\\")
 	assert.Contains(t, result, "\x1b]8;;\x1b\\")
 	assert.True(t, strings.HasSuffix(result, "\x1b[m"), "fade must not leak into scrollbar or outer padding")
+}
+
+func TestFadeLineCtx_DefaultBackgroundWithLinksAndUnicode(t *testing.T) {
+	fc := testFadeContext()
+	link := "\x1b]8;;https://example.test\x1b\\"
+	input := "  " + link + "\x1b[4;38;2;200;100;50m界 é 👩‍💻\x1b]8;;\x1b\\\x1b[m  "
+	for _, alpha := range []float64{0, 0.1, 0.5, 1} {
+		output := FadeLineCtx(input, alpha, fc)
+		require.Equal(t, ansi.Strip(input), ansi.Strip(output))
+		require.Equal(t, ansi.StringWidth(input), ansi.StringWidth(output))
+		require.Contains(t, output, link)
+		for _, cell := range uv.NewStyledString(output).Lines(ansi.GraphemeWidth)[0] {
+			require.Nil(t, cell.Style.Bg, "fading foregrounds must never paint the default canvas")
+			if cell.Content == "界" {
+				require.Equal(t, "https://example.test", cell.Link.URL)
+				require.NotZero(t, cell.Style.Underline)
+			}
+		}
+	}
 }
 
 func BenchmarkFadeLineCtx(b *testing.B) {

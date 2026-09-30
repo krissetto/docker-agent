@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -202,7 +203,7 @@ func TestHoverUsesSharedForegroundAndNoOpMotionStaysClean(t *testing.T) {
 	assert.Nil(t, m.Update(motion))
 	assert.True(t, m.TakeVisualDirty())
 	view := m.View()
-	pill := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt).Render("Open")
+	pill := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Render("Open")
 	assert.Contains(t, view, styles.HoverText(pill, 1, styles.TextPrimary))
 	assert.Equal(t, ansi.Strip(baseline), ansi.Strip(view))
 	assert.Nil(t, m.Update(motion))
@@ -299,4 +300,45 @@ func foregroundAt(t *testing.T, text, glyph string) color.Color {
 	}
 	t.Fatalf("glyph %q not rendered", glyph)
 	return nil
+}
+
+func assertDefaultBackground(t *testing.T, view string, width int) {
+	t.Helper()
+	rows := uv.NewStyledString(view).Lines(ansi.GraphemeWidth)
+	require.Len(t, rows, 1)
+	require.Equal(t, width, ansi.StringWidth(view))
+	for x, cell := range rows[0] {
+		require.Nil(t, cell.Style.Bg, "messagebar cell %d stays terminal default", x)
+	}
+}
+
+func TestDefaultBackgroundAcrossThemesSeveritiesAndActions(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+	m := New()
+	m.SetSize(80, 1)
+	for _, ref := range []string{"default", "default-light", "gruvbox-dark"} {
+		theme, err := styles.LoadTheme(ref)
+		require.NoError(t, err)
+		styles.ApplyTheme(theme)
+		assertDefaultBackground(t, m.View(), 80)
+		for _, severity := range []Severity{Info, Warning, Error, Success} {
+			m.ClearMessage()
+			m.SetMessage(Message{Text: "Notice 界 é 👩‍💻 https://example.test", Severity: severity})
+			assertDefaultBackground(t, m.View(), 80)
+			assert.Equal(t, rgba(m.severityColor()), rgba(foregroundAt(t, m.View(), "N")))
+			assert.Contains(t, ansi.Strip(m.View()), "界 é 👩‍💻 https://example.test")
+		}
+		m.ClearMessage()
+		m.SetMessage(notice())
+		assertDefaultBackground(t, m.View(), 80)
+		m.SetFocused(true)
+		assertDefaultBackground(t, m.View(), 80)
+		cells := uv.NewStyledString(m.View()).Lines(ansi.GraphemeWidth)[0]
+		assert.NotZero(t, cells[m.bounds[0].start+1].Style.Underline, "keyboard selection remains visible")
+		m.Update(tea.MouseMotionMsg{X: m.bounds[0].start, Y: 0})
+		assertDefaultBackground(t, m.View(), 80)
+		m.ClearMessage()
+		assertDefaultBackground(t, m.View(), 80)
+	}
 }

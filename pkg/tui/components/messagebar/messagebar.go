@@ -307,7 +307,7 @@ func (m *Model) render() string {
 	if m.width == 0 || m.height == 0 {
 		return ""
 	}
-	base := styles.NoStyle.Background(styles.Background)
+	base := styles.NoStyle
 	var out strings.Builder
 	// Segment the already-truncated plain text by terminal cells. Caller ANSI
 	// never passes through; identity colors are resolved from the current theme.
@@ -326,7 +326,7 @@ func (m *Model) render() string {
 	cursor := ansi.StringWidth(m.text)
 	for _, bounds := range m.bounds {
 		out.WriteString(base.Render(strings.Repeat(" ", bounds.start-cursor)))
-		pill := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary).Background(styles.BackgroundAlt)
+		pill := styles.NoStyle.Padding(0, 1).Bold(true).Foreground(styles.TextPrimary)
 		if m.focused && bounds.index == m.selected {
 			pill = pill.Underline(true)
 		}
