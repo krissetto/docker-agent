@@ -68,17 +68,17 @@ func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
 		Action{Label: "Always allow tool", Description: "Allow this call and future calls matching " + d.permissionPattern + ".", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
 		Action{Label: "Balanced mode", Description: "Allow this call and switch this session to Balanced mode: classifier-safe calls run automatically; other calls still require permission.", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
 		Action{Label: "Allow all tools", Description: "Allow this call and all future tool calls in this session without confirmation.", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
-		Action{Label: "Reject with reason", Description: "Choose or write a rejection reason before rejecting this call. Escape returns here without answering.", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
+		Action{Label: "Reject with reason", Description: "Choose or write a rejection reason before rejecting this call. Cancel returns here without answering.", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
 	)
 }
 
 func (d *toolConfirmationDialog) renderNavigation(contentWidth int) string {
-	help := "↑/↓ choose · Enter confirm · shortcut/click applies · wheel scroll · Esc denies"
+	help := "↑/↓ choose · Enter confirm · shortcut/click applies · wheel scroll"
 	if contentWidth < 80 {
-		help = "↑/↓ choose · Enter confirm · Esc denies"
+		help = "↑/↓ choose · Enter confirm"
 	}
 	if contentWidth < 40 || d.height < 10 {
-		help = ansi.Truncate("↑↓ · ↵ · Esc", contentWidth, "")
+		help = ansi.Truncate("↑↓ · ↵", contentWidth, "")
 	}
 	return styles.MutedStyle.Width(contentWidth).Align(lipgloss.Left).Render(help)
 }

@@ -197,19 +197,19 @@ func (d *todosDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No todos in this scope.")}
 	}
-	hint := "↑↓ choose · Space cycle · p/i/c status · PgUp/Dn scroll · d/× remove · Esc close"
+	hint := "↑↓ choose · Space cycle · p/i/c status · PgUp/Dn scroll · d/× remove"
 	if d.removeArmed != "" {
-		hint = "Press d / click × again to remove · Esc cancel"
+		hint = "Press d / click × again to remove"
 	} else if d.busy {
 		hint = "Saving…"
 	} else if d.errorText != "" {
 		hint = d.errorText
 	}
 	if d.removeArmed == "" && !d.busy && d.errorText == "" && inner < 60 {
-		hint = "↑↓ choose · Space status · d remove · Esc close"
+		hint = "↑↓ choose · Space status · d remove"
 	}
 	if inner < 20 && d.removeArmed == "" && !d.busy && d.errorText == "" {
-		hint = "↑↓ · Space · d · Esc"
+		hint = "↑↓ · Space · d"
 	}
 	footer := styles.MutedStyle.Render(ansi.Wrap(hint, inner, ""))
 	if prepare {

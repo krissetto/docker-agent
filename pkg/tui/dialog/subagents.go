@@ -208,7 +208,7 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	actions := actionsForKeys("enter", "Attach")
 	actions[0].Disabled = d.selectedID() == ""
 	footer := d.RenderPickerFooter(inner, actions...)
-	footer = d.PickerFooterHelp(footer, "↑↓ choose · ←→/Space fold · Esc close", inner)
+	footer = d.PickerFooterHelp(footer, "↑↓ choose · ←→/Space fold", inner)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

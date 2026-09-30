@@ -44,7 +44,7 @@ func (b *BaseDialog) RenderPickerFooter(width int, actions ...Action) string {
 		if i == primary {
 			continue
 		}
-		text := a.Key.Keystroke() + " " + strings.TrimSpace(a.Label)
+		text := strings.TrimSpace(a.shortcut() + " " + strings.TrimSpace(a.Label))
 		style := styles.MutedStyle
 		if i == selected && !a.Disabled {
 			style = style.Foreground(styles.TextPrimary).Underline(true)

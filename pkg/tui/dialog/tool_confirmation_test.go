@@ -649,7 +649,7 @@ func TestToolConfirmationDialogVerticalDecisionsAndTruthfulHelp(t *testing.T) {
 	assert.Contains(t, view, "↑/↓ choose")
 	assert.Contains(t, view, "Enter confirm")
 	assert.Contains(t, view, "shortcut/click applies")
-	assert.Contains(t, view, "Esc denies")
+	assert.NotContains(t, view, "Esc")
 	assert.NotContains(t, view, "Close")
 }
 

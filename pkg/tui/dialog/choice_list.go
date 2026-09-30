@@ -3,7 +3,6 @@ package dialog
 import (
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -37,8 +36,8 @@ func (b *BaseDialog) RenderChoices(contentWidth int, choices ...Action) string {
 			}
 			label += " ↵"
 		}
-		if !choice.HideShortcut && (choice.Key.Code != 0 && (choice.Key.Code != tea.KeyEnter || choice.Key.Mod != 0)) {
-			label += " " + choice.Key.Keystroke()
+		if shortcut := choice.shortcut(); shortcut != "" {
+			label += " " + shortcut
 		}
 		if choice.Disabled {
 			style = style.Foreground(styles.TextMuted).Bold(false)

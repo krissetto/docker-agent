@@ -561,6 +561,14 @@ type Action struct {
 	Default      bool
 	HideShortcut bool
 }
+
+func (a Action) shortcut() string {
+	if a.HideShortcut || a.Key.Code == 0 || a.Key.Code == tea.KeyEscape || (a.Key.Code == tea.KeyEnter && a.Key.Mod == 0) {
+		return ""
+	}
+	return a.Key.Keystroke()
+}
+
 type dialogActionRow struct {
 	text string
 	hits []dialogActionHit
@@ -606,10 +614,7 @@ func (b *BaseDialog) renderActions(contentWidth int, alignment lipgloss.Position
 			pillStyle = pillStyle.Foreground(styles.SelectedFg).Background(styles.Selected)
 		}
 		label := action.Label
-		shortcut := ""
-		if !action.HideShortcut && (action.Key.Code != tea.KeyEnter || action.Key.Mod != 0) {
-			shortcut = action.Key.Keystroke()
-		}
+		shortcut := action.shortcut()
 		if index == selected {
 			if shortcut != "" {
 				shortcut = "↵ " + shortcut

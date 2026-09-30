@@ -106,7 +106,7 @@ var interruptConfirmationModes = []messages.InterruptMode{
 
 var interruptConfirmationLabels = map[messages.InterruptMode]string{
 	messages.InterruptModeAlways:    "Always (confirm dialog)",
-	messages.InterruptModeDoubleTap: "Double-tap (press Esc twice)",
+	messages.InterruptModeDoubleTap: "Double-tap",
 	messages.InterruptModeNone:      "None (immediate)",
 }
 

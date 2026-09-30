@@ -5,6 +5,10 @@ positions, and standard-size title dividers. `interaction_response_test.go`
 retains correlated answers, safe dismissals, and enabled-only action targets.
 `picker_footer_test.go` checks unboxed auxiliary cells, exact click regions,
 wrapping, keyboard selection, hover leases, and disabled targets.
+`escape_chrome_test.go` verifies that Cancel stays clickable and keyboard-operable
+without an Escape badge in buttons, picker footers, and choice rows. The bounds
+matrix rejects routine Escape hints across dialog families. Explicit keyboard
+reference entries in Help remain documentation, not dismissal chrome.
 
 | Family | State-specific coverage |
 | --- | --- |

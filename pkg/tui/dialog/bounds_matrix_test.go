@@ -93,6 +93,7 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 				d := f.new()
 				d.SetSize(size.w, size.h)
 				view := d.View()
+				require.NotRegexp(t, `(?i)\besc(?:ape)?\b`, ansi.Strip(view), "routine dialog chrome omits Escape hints")
 				require.LessOrEqual(t, lipgloss.Width(view), size.w)
 				require.LessOrEqual(t, lipgloss.Height(view), size.h)
 				row, col := d.Position()

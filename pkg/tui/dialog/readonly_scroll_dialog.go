@@ -114,7 +114,7 @@ func (d *readOnlyScrollDialog) renderBody(prepare bool) string {
 	headerLines := min(3, len(allLines))
 	footer := ""
 	if len(allLines) < 3 || strings.TrimSpace(ansi.Strip(allLines[2])) == "" {
-		footer = styles.MutedStyle.Render(ansi.Wrap("↑/↓ scroll · PgUp/PgDn page · Esc close", max(1, contentWidth), ""))
+		footer = styles.MutedStyle.Render(ansi.Wrap("↑/↓ scroll · PgUp/PgDn page", max(1, contentWidth), ""))
 	}
 	if prepare {
 		d.bodyMaxHeight = max(1, min(d.Height()*d.size.heightPercent/100, d.size.heightMax))

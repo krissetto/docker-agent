@@ -180,6 +180,6 @@ func (d *panesDialog) renderBody(prepare bool) string {
 	actions := actionsForKeys("enter", "Apply")
 	actions[0].Disabled = d.selected < 0 || d.selected >= len(d.filtered)
 	footer := d.RenderPickerFooter(inner, actions...)
-	footer = d.PickerFooterHelp(footer, "↑↓ choose · Esc cancel", inner)
+	footer = d.PickerFooterHelp(footer, "↑↓ choose", inner)
 	return d.renderPicker(prepare, width, header, lines, footer)
 }

@@ -107,9 +107,9 @@ func (d *helpDialog) renderContent(contentWidth, _ int) []string {
 		appendText("Other-context reference — not all controls are active in the captured view.", 0, false)
 	}
 	if d.page == 0 {
-		appendText("Help: ←/→ categories; ↑/↓ or j/k scroll; pgup/pgdown pages; home/end limits; wheel or scrollbar scroll; enter/q/esc or × dismiss. F1 keeps this Help open.", 0, false)
+		appendText("Help: ←/→ categories; ↑/↓ or j/k scroll; pgup/pgdown pages; home/end limits; wheel or scrollbar scroll; enter/q or × dismiss. F1 keeps this Help open.", 0, false)
 	} else {
-		appendText("pgup/pgdown scroll pages · enter/q/esc dismiss Help", 0, false)
+		appendText("pgup/pgdown scroll pages · enter/q dismiss Help", 0, false)
 	}
 	for _, section := range sections {
 		lines = append(lines, "")
