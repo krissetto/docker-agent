@@ -215,35 +215,3 @@ func TestPublishedWorkload(t *testing.T) {
 	_, err = spec.ValidateEffective(effective, ed)
 	require.NoError(t, err)
 }
-
-func TestScopedProviderExtensions(t *testing.T) {
-	for _, tc := range []struct{ file, arg, host string }{
-		{"azure.yaml", "azureHost", "example.openai.azure.com"},
-		{"custom-provider.yaml", "customHost", "api.example.invalid"},
-	} {
-		t.Run(tc.file, func(t *testing.T) {
-			raw, err := os.ReadFile("../examples/" + tc.file)
-			require.NoError(t, err)
-			d := parse(t, string(raw))
-			require.Equal(t, spec.KindMixin, d.Kind)
-			_, err = spec.ResolveArgs(d.Args, nil)
-			require.Error(t, err, "extension needs an explicitly reviewed endpoint")
-			for _, bad := range []string{"", "https://api.example.com", "api.example.com/path", "*.example.com", "api.example.com:443", "a;echo secret"} {
-				_, err = spec.ResolveArgs(d.Args, map[string]string{tc.arg: bad})
-				require.Error(t, err, bad)
-			}
-			values, err := spec.ResolveArgs(d.Args, map[string]string{tc.arg: tc.host})
-			require.NoError(t, err)
-			effective, err := spec.ExpandCreateArgs(raw, d.Args, values)
-			require.NoError(t, err)
-			ed := parse(t, string(effective))
-			_, err = spec.ValidateEffective(effective, ed)
-			require.NoError(t, err)
-			creds, err := spec.CredentialsOfPhase(ed.Capabilities, "runtime")
-			require.NoError(t, err)
-			require.Len(t, creds, 1)
-			require.Contains(t, string(effective), tc.host)
-			require.NotContains(t, string(effective), "${{ kit.args.")
-		})
-	}
-}

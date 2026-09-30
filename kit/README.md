@@ -109,124 +109,41 @@ A `--model` override still takes precedence over models in the configuration.
 
 ## Provider credentials (v3)
 
-The current v3 descriptor declares optional credentials for all fixed-endpoint
-API-key/bearer providers in this engine. **Optional means unbound services can be
-skipped, not that the kit detects the selected model.** Every declared service
-that the host binds can be used in the sandbox. Bind only the providers needed
-for this sandbox, prefer sandbox-scoped bindings over global credentials, and
-scope each provider token on its provider account. Egress hosts are declared
-independently of bindings; declaring a credential does not contact the provider.
+The current source-built v3 kit supports **only OpenAI, Anthropic and Google
+Gemini API credentials**. The engine itself still supports other providers,
+unchanged, but this kit does not grant their credentials or network access.
+Historical immutable references retain the policies with which they were built.
 
-SBX accepts arbitrary lowercase service names through `sbx secret set <service>`;
-use your SBX version's interactive secret input and sandbox-scoping options.
-No host provider-name registry update is required. Host environment variables are
-**not automatically imported** by these declarations. Sandbox-scoped credentials
-precede global host bindings. Existing direct-engine credential source precedence
-is unchanged; the kit does not copy actual keys from the host environment into
-the guest or offer a real-key environment fallback.
-
-| Engine provider name(s) | Host service | Guest sentinel variable | Runtime injection host(s) | Authentication |
+| Provider | Host service | Guest sentinel variable | Only allowed injection host | Header |
 | --- | --- | --- | --- | --- |
-| `openai`, `openai_chatcompletions`, `openai_responses` | `openai` | `OPENAI_API_KEY` | `api.openai.com` | `Authorization: Bearer %s` |
-| `anthropic` | `anthropic` | `ANTHROPIC_API_KEY` | `api.anthropic.com` | `x-api-key: %s` |
-| `google` | `google` | `GOOGLE_API_KEY` | `generativelanguage.googleapis.com` | `x-goog-api-key: %s` |
-| `amazon-bedrock` | `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK` | `bedrock-runtime.*.amazonaws.com`, `bedrock-runtime.*.amazonaws.com.cn` | `Authorization: Bearer %s` |
-| `requesty` | `requesty` | `REQUESTY_API_KEY` | `router.requesty.ai` | `Authorization: Bearer %s` |
-| `xai` | `xai` | `XAI_API_KEY` | `api.x.ai` | `Authorization: Bearer %s` |
-| `nebius` | `nebius` | `NEBIUS_API_KEY` | `api.studio.nebius.com` | `Authorization: Bearer %s` |
-| `nvidia` | `nvidia` | `NVIDIA_API_KEY` | `integrate.api.nvidia.com` | `Authorization: Bearer %s` |
-| `openrouter` | `openrouter` | `OPENROUTER_API_KEY` | `openrouter.ai` | `Authorization: Bearer %s` |
-| `mistral` | `mistral` | `MISTRAL_API_KEY` | `api.mistral.ai` | `Authorization: Bearer %s` |
-| `minimax` | `minimax` | `MINIMAX_API_KEY` | `api.minimax.io` | `Authorization: Bearer %s` |
-| `baseten` | `baseten` | `BASETEN_API_KEY` | `inference.baseten.co` | `Authorization: Bearer %s` |
-| `ovhcloud` | `ovhcloud` | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` | `oai.endpoints.kepler.ai.cloud.ovh.net` | `Authorization: Bearer %s` |
-| `groq` | `groq` | `GROQ_API_KEY` | `api.groq.com` | `Authorization: Bearer %s` |
-| `fireworks` | `fireworks` | `FIREWORKS_API_KEY` | `api.fireworks.ai` | `Authorization: Bearer %s` |
-| `deepseek` | `deepseek` | `DEEPSEEK_API_KEY` | `api.deepseek.com` | `Authorization: Bearer %s` |
-| `cerebras` | `cerebras` | `CEREBRAS_API_KEY` | `api.cerebras.ai` | `Authorization: Bearer %s` |
-| `together` | `together` | `TOGETHER_API_KEY` | `api.together.xyz` | `Authorization: Bearer %s` |
-| `huggingface` | `huggingface` | `HF_TOKEN` | `router.huggingface.co` | `Authorization: Bearer %s` |
-| `moonshot` | `moonshot` | `MOONSHOT_API_KEY` | `api.moonshot.ai` | `Authorization: Bearer %s` |
-| `vercel` | `vercel` | `AI_GATEWAY_API_KEY` | `ai-gateway.vercel.sh` | `Authorization: Bearer %s` |
-| `cloudflare-workers-ai`, `cloudflare-ai-gateway` | `cloudflare` | `CLOUDFLARE_API_TOKEN` | `api.cloudflare.com`, `gateway.ai.cloudflare.com` | `Authorization: Bearer %s` |
-| `github-copilot` | `github-copilot` | `GITHUB_TOKEN` | `api.githubcopilot.com` | `Authorization: Bearer %s` |
-| `chatgpt` | `chatgpt` | `CHATGPT_OAUTH_TOKEN` | `chatgpt.com` | `Authorization: Bearer %s` |
-| `opencode-go`, `opencode-zen` | `opencode` | `OPENCODE_API_KEY` | `opencode.ai` | `Authorization: Bearer %s` |
-| `azure` | `azure` in the opt-in extension below | `AZURE_API_KEY` | Your exact required Azure endpoint hostname | Engine uses `Authorization: Bearer %s` |
-| `dmr` | None | None | Local Docker Model Runner topology; not granted by the base kit | No provider API key |
-| `ollama` | None | None | `localhost:11434` is inside the sandbox, not your host | No default provider API key |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `api.openai.com` | `Authorization: Bearer %s` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `api.anthropic.com` | `x-api-key: %s` |
+| Google Gemini | `google` | `GOOGLE_API_KEY` | `generativelanguage.googleapis.com` | `x-goog-api-key: %s` |
 
-Additional configuration and limitations:
+All three credential capabilities are optional and proxy-managed. An unbound
+service can be skipped; this does **not** detect or automatically select the
+model's provider. Every service you bind is available in the sandbox. Bind only
+the services you need, preferably sandbox-scoped rather than globally, using
+`sbx secret set <service>` and your SBX version's interactive secret input and
+scoping options. The host retains real credentials; guest environment variables
+contain sentinels. Host environment variables are not imported automatically.
 
-- `google` uses canonical `GOOGLE_API_KEY`; the engine's `GEMINI_API_KEY` fallback
-  needs no duplicate capability. A bound `google` sentinel takes the canonical
-  path. Vertex AI is a different mode: ADC/workload identity, project and location
-  (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, or provider options) require a
-  separately supported host/SDK credential setup and reviewed egress. No static
-  API-key capability pretends to implement ADC or token refresh.
-- `amazon-bedrock` covers **Bedrock API bearer tokens only**. Supply the nonsecret
-  region through `provider_opts.region` or the engine's `AWS_REGION` /
-  `AWS_DEFAULT_REGION` configuration. The middle-label wildcard
-  `bedrock-runtime.*.amazonaws.com` and its China-partition counterpart
-  `bedrock-runtime.*.amazonaws.com.cn` are intentionally shared by network and
-  injection rules; neither grants `*.amazonaws.com`. The same regional pattern
-  covers standard GovCloud runtime hostnames. FIPS/dual-stack/custom endpoints,
-  SigV4 credentials, profiles and STS/SSO flows need a separate reviewed
-  SDK/host policy. An access-key ID is not a Bearer token.
-- `cloudflare-workers-ai` needs `CLOUDFLARE_ACCOUNT_ID` and
-  `cloudflare-ai-gateway` additionally needs `CLOUDFLARE_GATEWAY_ID` as nonsecret
-  runtime configuration. The shared `cloudflare` token is injected only at its
-  two declared hosts, not arbitrary third-party gateway destinations. Token
-  account/resource permissions remain the provider's responsibility.
-- `github-copilot` exposes the engine's `GITHUB_TOKEN` path (the `GH_TOKEN`
-  fallback is not declared twice). Existing Copilot integration headers remain
-  unchanged. Bind a token accepted by the backend; this kit does not implement
-  GitHub device login, token exchange, renewal or subscription entitlement.
-- `chatgpt` binds an existing OAuth **access token** to the Codex backend, not an
-  API key. A proxy sentinel is not the original JWT, so account-ID derivation
-  cannot inspect its claims. If required by the backend, provide the nonsecret
-  `provider_opts.http_headers.chatgpt-account-id` header yourself. Login, refresh credentials,
-  `auth.openai.com` access and expired-token renewal are **not** granted by this
-  binding. Host-managed OAuth refresh is not claimed.
-- `azure` has no default endpoint. Use the scoped extension below plus a model
-  configuration with the corresponding Azure base URL. The engine currently
-  uses Bearer authentication for this alias; this descriptor does not substitute
-  an Azure-specific `api-key` header.
-- `dmr` and `ollama` require local-service/network topology supplied by the host.
-  Their aliases do not receive an unrelated API key. An OpenAI-compatible client
-  may otherwise discover OpenAI fallback credentials; use an explicitly reviewed
-  custom no-auth provider for a local endpoint rather than binding an unrelated
-  secret. The kit does not expose host credential files or arbitrary LAN egress.
-- Anthropic managed WIF/Vertex modes likewise require a separate host/SDK setup.
-  The `anthropic` binding here is the direct API `x-api-key` path only.
+The default bundled team still selects OpenAI. To override all six agents, use
+`--model anthropic/ACCESSIBLE_MODEL` or `--model google/ACCESSIBLE_MODEL` and bind
+that service. Google uses canonical `GOOGLE_API_KEY`; no duplicate
+`GEMINI_API_KEY` capability is needed. OpenAI's `openai_chatcompletions` and
+`openai_responses` API variants share the OpenAI binding.
 
-### Exact-host Azure and custom-provider extensions
+These declarations cover direct API credentials only—not ChatGPT/Copilot OAuth,
+Azure/custom endpoints, Bedrock SigV4/bearer tokens, Vertex ADC, Anthropic WIF,
+local DMR/Ollama connectivity, or OAuth refresh. No broad-provider extension
+examples are bundled. Supporting another mode requires a separately reviewed
+kit policy; do not work around proxy isolation by placing real keys in image
+environment variables, build arguments, or workspace files.
 
-[`examples/azure.yaml`](examples/azure.yaml) and
-[`examples/custom-provider.yaml`](examples/custom-provider.yaml) are validated
-m.5 **mixin source examples**, not already published references. They deliberately
-require a hostname only when that extension is explicitly included; the base
-workload does not require Azure or custom-provider arguments. Review and publish
-an extension through your SBX-compatible Kit v3 workflow, then compose it with
-`kagent`, or copy its two capability declarations and required argument into a
-reviewed derived workload before building. Do not pass a local descriptor path
-to `sbx run` (see the source-layout limitation below).
-
-For Azure, set extension argument `azureHost` to an exact resource hostname such
-as `your-resource.openai.azure.com`; the same value drives both network allow
-and credential injection. For the custom example, `customHost` is similarly an
-exact reviewed hostname, service `custom-provider` uses sentinel
-`CUSTOM_PROVIDER_API_KEY`, and your engine custom provider must set
-`api_type: openai_chatcompletions`, the matching HTTPS `base_url`, and
-`token_key: CUSTOM_PROVIDER_API_KEY`. The supplied custom example is Bearer-only;
-review both the engine and host injection rule before adapting another scheme.
-Neither argument accepts a scheme, path, port or wildcard, nor contains a secret.
-
-The default bundled team still selects OpenAI. To change all six agents, use
-`--model anthropic/ACCESSIBLE_MODEL`, `--model google/ACCESSIBLE_MODEL`, or another
-configured engine name and bind its service. This does not automatically narrow
-the host's bindings. Dry-run/schema/mock tests establish declaration consistency,
-not live authentication, model access or host enforcement.
+Schema and offline tests verify this exact three-service policy. They do not
+establish live SBX startup, proxy authentication, provider entitlement, or model
+behavior. No real provider credentials were read or used during validation.
 
 ## Workspace and runtime boundaries
 
