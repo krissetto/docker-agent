@@ -139,3 +139,36 @@ func TestWriterDeletesPlacementWhenImageLeavesView(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, output.String(), "a=d,d=a")
 }
+
+func TestWriterDeletesMarkerPlacementsOnCloseReplaceAndDisable(t *testing.T) {
+	img := Inline{PNGData: []byte("first-png"), Width: 100, Height: 100}
+	other := Inline{PNGData: []byte("second-png"), Width: 100, Height: 100}
+	for _, operation := range []string{"close", "replace", "disable", "unsupported"} {
+		t.Run(operation, func(t *testing.T) {
+			var output bytes.Buffer
+			writer := NewWriter(&output)
+			writer.SetContent(strings.Join(RenderMarkers(img, 24), "\n"))
+			_, err := writer.Write([]byte("open"))
+			require.NoError(t, err)
+			require.True(t, writer.active)
+			output.Reset()
+			content := "closed"
+			switch operation {
+			case "replace":
+				content = strings.Join(RenderMarkers(other, 24), "\n")
+			case "disable":
+				writer.SetEnabled(false)
+				content = strings.Join(RenderMarkers(img, 24), "\n")
+			case "unsupported":
+				writer.SetSupported(false)
+				content = strings.Join(RenderMarkers(img, 24), "\n")
+			}
+			clean := writer.SetContent(content)
+			assert.NotContains(t, clean, markerPrefix)
+			_, err = writer.Write([]byte("next"))
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "a=d,d=a", "stale placements are removed after the final frame loses markers")
+			assert.Equal(t, operation == "replace", writer.active)
+		})
+	}
+}

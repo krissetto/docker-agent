@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -211,6 +212,9 @@ func (a *animatedDialog) view() string {
 
 func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 	view := a.intrinsicView()
+	if a.anim.Running() || a.closing {
+		view = image.StripMarkers(view)
+	}
 	if closable {
 		view = renderCloseControl(view, hovered)
 	}

@@ -56,12 +56,6 @@ type attachment struct {
 	isTemp      bool // True for paste temp files that need cleanup
 }
 
-// AttachmentPreview describes an attachment and its contents for dialog display.
-type AttachmentPreview struct {
-	Title   string
-	Content string
-}
-
 // Editor represents an input editor component
 type Editor interface {
 	layout.Model
@@ -1322,16 +1316,7 @@ func (e *editor) AttachmentAtPosition(x, y int) (AttachmentPreview, bool) {
 			continue
 		}
 
-		data, err := os.ReadFile(att.path)
-		if err != nil {
-			slog.Warn("failed to read attachment preview", "path", att.path, "error", err)
-			return AttachmentPreview{}, false
-		}
-
-		return AttachmentPreview{
-			Title:   item.label,
-			Content: string(data),
-		}, true
+		return loadAttachmentPreview(item.label, att.path), true
 	}
 
 	return AttachmentPreview{}, false

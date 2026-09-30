@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/help"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
@@ -3570,6 +3570,10 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		m.chatPage.BlurMessages()
 		m.focusedPanel = PanelEditor
 		if preview, ok := m.editor.AttachmentAtPosition(msg.X, msg.Y-m.composerLayout().bannerTop); ok {
+			if preview.IsImage {
+				enabled := m.imageWriter != nil && m.imageWriter.RenderingEnabled()
+				return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewImageAttachmentPreviewDialog(m.ar, preview.Title, preview.MIME, preview.ImageData, enabled)})
+			}
 			return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewAttachmentPreviewDialog(m.ar, preview.Title, preview.Content)})
 		}
 		m.editor.ToggleContextBar()

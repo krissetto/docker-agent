@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 )
 
 func TestRootLayerCompositionMatchesExistingCellsAndPaintOrder(t *testing.T) {
@@ -116,4 +117,38 @@ func TestRootCellSliceCombiningMarksFollowTheirOwnedBaseAcrossSGR(t *testing.T) 
 	got := composeRootLayers([]*lipgloss.Layer{lipgloss.NewLayer(line), lipgloss.NewLayer("X").X(1)}, 3, 1)
 	require.Equal(t, "aXZ", ansi.Strip(got), "a covered base's accent cannot migrate onto its replacement")
 	require.NotContains(t, got, "\u0301")
+}
+
+func TestRootCellSliceSuppressesHorizontallyClippedImageMarkers(t *testing.T) {
+	marker := "\x1b_cagent-image;123;6;4;0\x1b\\"
+	line := "ab" + marker + strings.Repeat(" ", 10)
+	for _, bounds := range [][2]int{{0, 2}, {0, 5}, {3, 12}, {8, 12}} {
+		got := rootCellSlice(line, bounds[0], bounds[1])
+		require.NotContains(t, got, "cagent-image", "clipped markers must not migrate onto retained cells")
+	}
+	require.Contains(t, rootCellSlice(line, 0, 8), marker)
+}
+
+func TestRootImageMarkersRespectModalOcclusionAndTerminalEdges(t *testing.T) {
+	img := tuiimage.Inline{PNGData: []byte("registered-test-image"), Width: 100, Height: 100}
+	markers := tuiimage.RenderMarkers(img, 14)
+	for i := range markers {
+		markers[i] += strings.Repeat(" ", 12)
+	}
+	base := lipgloss.NewLayer(strings.Join(markers, "\n"))
+	full := composeRootLayers([]*lipgloss.Layer{base}, 20, 10)
+	require.Contains(t, full, "cagent-image;")
+	for _, overlay := range []*lipgloss.Layer{
+		lipgloss.NewLayer(strings.Repeat("X\n", 10)).X(6).Z(1),
+		lipgloss.NewLayer(strings.Repeat("xxxxxxxxxxxx\n", 10)).X(0).Z(1),
+	} {
+		frame := composeRootLayers([]*lipgloss.Layer{base, overlay}, 20, 10)
+		require.NotContains(t, frame, "cagent-image;", "no horizontally clipped image can bleed over a modal")
+	}
+	frame := composeRootLayers([]*lipgloss.Layer{lipgloss.NewLayer(strings.Join(markers, "\n")).X(-3)}, 20, 10)
+	require.NotContains(t, frame, "cagent-image;")
+	frame = composeRootLayers([]*lipgloss.Layer{base}, 8, 10)
+	require.NotContains(t, frame, "cagent-image;")
+	frame = composeRootLayers([]*lipgloss.Layer{base, lipgloss.NewLayer("outside").X(14).Z(1)}, 24, 10)
+	require.Contains(t, frame, "cagent-image;", "uncovered image retains its complete horizontal extent")
 }

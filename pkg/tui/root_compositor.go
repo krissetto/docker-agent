@@ -9,6 +9,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -114,6 +115,13 @@ func rootCellSlice(line string, start, end int) string {
 		}
 		state, line = next, line[consumed:]
 		if width == 0 {
+			if columns, marker := image.MarkerColumns(sequence); marker {
+				// A vertically cropped image is supported; horizontal fragments are not.
+				if columns > 0 && column >= start && column+columns <= end {
+					out.WriteString(sequence)
+				}
+				continue
+			}
 			// ANSI changes do not break a grapheme: a cursor's inverse/reset
 			// may separate its base from an acute mark. Keep marks only when
 			// their preceding base belongs to this slice, never on edge padding.
