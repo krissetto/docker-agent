@@ -61,6 +61,7 @@ type animatedDialog struct {
 	cachedView                string
 	viewTheme                 uint64
 	viewValid                 bool
+	fullHeight                int
 }
 
 func newAnimatedDialog(runtime *animation.Runtime, dialog Dialog, maxWidth, maxHeight int) (*animatedDialog, tea.Cmd) {
@@ -86,6 +87,7 @@ func (a *animatedDialog) desiredBounds(maxWidth, maxHeight int) (int, int) {
 
 func (a *animatedDialog) measureBounds(cause string, maxWidth, maxHeight int, opening bool) (int, int) {
 	w, h := a.desiredBounds(maxWidth, maxHeight)
+	a.fullHeight = h
 	event := dialogBoundsEvent{
 		At: time.Now(), Cause: cause, MeasuredWidth: w, MeasuredHeight: h,
 		PreviousTargetWidth: a.targetWidth, PreviousTargetHeight: a.targetHeight,
@@ -194,7 +196,8 @@ func (a *animatedDialog) tick(_ string, _, _ int) (finished bool, cmd tea.Cmd) {
 func (a *animatedDialog) opacity() float64 { return a.renderAlpha }
 
 func (a *animatedDialog) position(maxWidth, maxHeight int) (row, col int) {
-	return CenterPosition(maxWidth, maxHeight, a.renderWidth, a.renderHeight)
+	row, col = CenterPosition(maxWidth, maxHeight, a.renderWidth, a.sourceHeight())
+	return row + a.sourceOffset(), col
 }
 
 func (a *animatedDialog) opening() bool { return !a.closing && a.anim.Running() }
@@ -202,6 +205,21 @@ func (a *animatedDialog) cancel() {
 	if !a.disabled {
 		a.anim.Cancel()
 	}
+}
+
+func (a *animatedDialog) sourceHeight() int {
+	if a.fullHeight > 0 {
+		return a.fullHeight
+	}
+	return lipgloss.Height(a.intrinsicView())
+}
+
+func (a *animatedDialog) sourceOffset() int {
+	difference := a.sourceHeight() - max(0, a.renderHeight)
+	if difference < 0 {
+		return (difference - 1) / 2
+	}
+	return difference / 2
 }
 
 // view crops vertically around the center of the desired card. The same
@@ -225,33 +243,15 @@ func (a *animatedDialog) viewWithChrome(closable, hovered bool) string {
 	if w == 0 || h == 0 {
 		return ""
 	}
-	fullH := lipgloss.Height(view)
-	lines := strings.Split(view, "\n")
-	if h < fullH {
-		if a.resizing {
-			// Resize reveals/conceals the interior from the same anchored top and bottom edges.
-			lines = append(lines[:max(0, h-1)], lines[len(lines)-1])
-		} else {
-			y := max(0, (fullH-h)/2)
-			lines = lines[y:min(len(lines), y+h)]
+	source := strings.Split(view, "\n")
+	fullH := min(a.sourceHeight(), len(source))
+	offset := a.sourceOffset()
+	lines := make([]string, h)
+	for row := range lines {
+		at := row + offset
+		if at >= 0 && at < fullH {
+			lines[row] = source[at]
 		}
-	} else if h > fullH {
-		padded := make([]string, 0, h)
-		// Resize padding remains card chrome, not transparent/trimmed full-width blank rows.
-		blank := styles.DialogStyle.Padding(0, 2).BorderTop(false).BorderBottom(false).Width(w).Render("")
-		padding := make([]string, h-fullH)
-		for i := range padding {
-			padding[i] = blank
-		}
-		if len(lines) == 1 {
-			padded = append(padded, lines...)
-			padded = append(padded, padding...)
-		} else {
-			padded = append(padded, lines[:len(lines)-1]...)
-			padded = append(padded, padding...)
-			padded = append(padded, lines[len(lines)-1])
-		}
-		lines = padded
 	}
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], w, "")

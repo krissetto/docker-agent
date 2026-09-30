@@ -5,10 +5,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -878,6 +878,23 @@ func CenterPosition(screenWidth, screenHeight, dialogWidth, dialogHeight int) (r
 	return row, col
 }
 
+// positionedEntry intersects the anchored animation viewport without shifting source rows.
+func (d *manager) positionedEntry(e *dialogEntry) (string, int, int) {
+	row, col := e.position(d.width, d.height)
+	row, col = row+e.offsetY, col+e.offsetX
+	view := e.viewWithChrome(dialogClosable(e.dialog), e.closeHovered)
+	lines := strings.Split(view, "\n")
+	start, end := max(0, -row), min(len(lines), d.height-row)
+	if start >= end || d.width <= 0 {
+		return "", max(0, row), max(0, col)
+	}
+	lines = lines[start:end]
+	for i := range lines {
+		lines[i] = ansi.Cut(lines[i], max(0, -col), max(0, d.width-col))
+	}
+	return strings.Join(lines, "\n"), max(0, row), max(0, col)
+}
+
 // GetLayers returns lipgloss layers for rendering all dialogs in the stack
 // Dialogs are returned in order from bottom to top (index 0 is bottom-most)
 func (d *manager) GetLayers() []*lipgloss.Layer {
@@ -888,9 +905,8 @@ func (d *manager) GetLayers() []*lipgloss.Layer {
 	layers := make([]*lipgloss.Layer, 0, len(d.stack))
 	for i := range d.stack {
 		e := &d.stack[i]
-		view := d.entryView(e)
-		row, col := e.position(d.width, d.height)
-		layers = append(layers, lipgloss.NewLayer(view).X(col+e.offsetX).Y(row+e.offsetY))
+		view, row, col := d.positionedEntry(e)
+		layers = append(layers, lipgloss.NewLayer(view).X(col).Y(row))
 	}
 	return layers
 }
@@ -902,8 +918,8 @@ func (d *manager) GetLayerInfos() []styles.LayerInfo {
 	layers := make([]styles.LayerInfo, 0, len(d.stack))
 	for i := range d.stack {
 		e := &d.stack[i]
-		row, col := e.position(d.width, d.height)
-		layers = append(layers, styles.LayerInfo{Content: d.entryView(e), X: col + e.offsetX, Y: row + e.offsetY})
+		view, row, col := d.positionedEntry(e)
+		layers = append(layers, styles.LayerInfo{Content: view, X: col, Y: row})
 	}
 	return layers
 }

@@ -145,7 +145,8 @@ func assertConcreteRootFrame(t *testing.T, mgr *manager) {
 	assert.Equal(t, layer.Width(), lipgloss.Width(info.Content))
 	assert.Equal(t, layer.Height(), lipgloss.Height(info.Content))
 	assert.LessOrEqual(t, absInt(layer.GetX()-(mgr.width-layer.GetX()-layer.Width())), 1, "left/right margins are symmetric")
-	assert.LessOrEqual(t, absInt(layer.GetY()-(mgr.height-layer.GetY()-layer.Height())), 1, "top/bottom margins are symmetric")
+	expectedY, _ := mgr.stack[0].position(mgr.width, mgr.height)
+	assert.Equal(t, max(0, expectedY), layer.GetY(), "anchored source offset determines the reveal origin")
 
 	// Canvas.Render trims trailing whitespace; visible backdrop sentinels test actual occlusion.
 	backdropRow := strings.Repeat("·", mgr.width)

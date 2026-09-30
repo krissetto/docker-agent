@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"strings"
@@ -236,7 +237,7 @@ func TestAnimatedDialogFramesRemainCenteredAtFinalWidth(t *testing.T) {
 	// height changes around the content center.
 	a.renderHeight = 2
 	row, col = a.position(40, 20)
-	assert.Equal(t, 9, row)
+	assert.Equal(t, 8, row)
 	assert.Equal(t, 15, col)
 
 	a.closing = true
@@ -262,7 +263,7 @@ func TestAnimatedManagerLayerGeometryUsesFinalWidthAndCenteredHeight(t *testing.
 	layer = mgr.GetLayers()[0]
 	assert.Equal(t, 10, layer.Width())
 	assert.Equal(t, 15, layer.GetX())
-	assert.Equal(t, 9, layer.GetY(), "retarget frame remains centered")
+	assert.Equal(t, 8, layer.GetY(), "retarget preserves absolute source rows across parity")
 }
 
 func TestToolConfirmationManagerCompactBoundsAcrossOpenFrames(t *testing.T) {
@@ -298,7 +299,8 @@ func assertManagerFrameBounds(t *testing.T, mgr *manager, wantWidth, wantHeight 
 	assert.Equal(t, wantWidth, layer.Width(), "width is final from the first frame")
 	assert.Equal(t, wantHeight, layer.Height())
 	assert.Equal(t, (mgr.width-wantWidth)/2, layer.GetX())
-	assert.Equal(t, (mgr.height-wantHeight)/2, layer.GetY(), "each height-only frame stays centered")
+	expectedY, _ := mgr.stack[0].position(mgr.width, mgr.height)
+	assert.Equal(t, max(0, expectedY), layer.GetY(), "frame uses the same source offset as its anchored position")
 }
 
 func TestAnimatedDialogCloseReopenReversalKeepsWidth(t *testing.T) {
@@ -444,7 +446,7 @@ func interpolateDialogBound(from, to int, progress float64) int {
 	return -int(-value + 0.5)
 }
 
-func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
+func TestSameDialogResizeUsesAnchoredInteriorComposition(t *testing.T) {
 	r := newDialogRuntime()
 	small := strings.Join([]string{"TOP─────────", "TITLE       ", "row one     ", "BOTTOM──────"}, "\n")
 	large := strings.Join([]string{"TOP─────────", "TITLE       ", "row one     ", "row two     ", "row three   ", "row four    ", "row five    ", "row six     ", "row seven   ", "row eight   ", "row nine    ", "BOTTOM──────"}, "\n")
@@ -474,9 +476,7 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 		advance(2 * animation.TickRate)
 		grown = append(grown, a.renderHeight)
 		require.InDelta(t, 1.0, a.opacity(), 0)
-		view := strings.Split(a.view(), "\n")
-		require.True(t, strings.HasPrefix(view[0], "TOP"))
-		require.True(t, strings.HasPrefix(view[len(view)-1], "BOTTOM"))
+		assertAnchoredSourceRows(t, a, 80, 30)
 	}
 	for a.anim.Running() {
 		advance(animation.TickRate)
@@ -491,9 +491,7 @@ func TestSameDialogResizeUsesSymmetricInteriorComposition(t *testing.T) {
 		advance(2 * animation.TickRate)
 		shrunk = append(shrunk, a.renderHeight)
 		require.InDelta(t, 1.0, a.opacity(), 0)
-		view := strings.Split(a.view(), "\n")
-		require.True(t, strings.HasPrefix(view[0], "TOP"))
-		require.True(t, strings.HasPrefix(view[len(view)-1], "BOTTOM"))
+		assertAnchoredSourceRows(t, a, 80, 30)
 	}
 	for i := range grown {
 		require.InDelta(t, 12-4, grown[i]-4+shrunk[i]-4, 1, "matched elapsed grow/shrink use equal linear progress")
@@ -599,4 +597,97 @@ func TestAnimatedDialogFadePreservesDefaultAndExplicitBackgrounds(t *testing.T) 
 			}
 		}
 	}
+}
+
+func assertAnchoredSourceRows(t *testing.T, a *animatedDialog, width, height int) {
+	t.Helper()
+	source := strings.Split(ansi.Strip(a.intrinsicView()), "\n")
+	fullHeight := a.sourceHeight()
+	finalTop, _ := CenterPosition(width, height, a.renderWidth, fullHeight)
+	top, _ := a.position(width, height)
+	for j, line := range strings.Split(ansi.Strip(a.view()), "\n") {
+		at := j + a.sourceOffset()
+		if at >= 0 && at < fullHeight {
+			require.Equal(t, source[at], line)
+			require.Equal(t, finalTop+at, top+j, "source row never jitters as the reveal height changes")
+		} else {
+			require.Empty(t, strings.TrimSpace(line), "outside source is default-transparent padding")
+		}
+	}
+}
+
+func TestAnchoredDialogEveryParityAndAnimatedHeight(t *testing.T) {
+	for _, screenHeight := range []int{20, 21, 40, 41} {
+		for _, fullHeight := range []int{4, 5, 10, 11} {
+			var rows []string
+			for row := range fullHeight {
+				rows = append(rows, fmt.Sprintf("source-%02d", row))
+			}
+			d := &lifecycleDialog{view: strings.Join(rows, "\n")}
+			a := &animatedDialog{dialog: d, fullHeight: fullHeight, renderWidth: 9, renderAlpha: 1}
+			for _, closing := range []bool{false, true} {
+				a.closing = closing
+				for height := 1; height <= fullHeight+5; height++ {
+					a.renderHeight = height
+					require.Equal(t, height, lipgloss.Height(a.view()), "real geometry still resizes")
+					assertAnchoredSourceRows(t, a, 40, screenHeight)
+				}
+			}
+		}
+	}
+}
+
+func TestAnchoredActualDialogRowsDuringOpenAndClose(t *testing.T) {
+	for _, factory := range []func() Dialog{NewExitConfirmationDialog, func() Dialog { return NewSettingsDialog(messages.Preferences{}, true) }} {
+		for _, size := range [][2]int{{80, 24}, {81, 25}, {120, 41}} {
+			r := newDialogRuntime()
+			d := factory()
+			d.SetSize(size[0], size[1])
+			a, _ := newAnimatedDialog(r, d, size[0], size[1])
+			heights := map[int]bool{}
+			for a.anim.Running() {
+				heights[a.renderHeight] = true
+				assertAnchoredSourceRows(t, a, size[0], size[1])
+				acceptedDialogTick(r, r.Continue())
+				a.tick("open", size[0], size[1])
+			}
+			require.Greater(t, len(heights), 2, "opening must reveal multiple actual heights")
+			assertAnchoredSourceRows(t, a, size[0], size[1])
+			a.startClose(false)
+			for a.anim.Running() {
+				if a.renderHeight > 0 {
+					assertAnchoredSourceRows(t, a, size[0], size[1])
+				}
+				acceptedDialogTick(r, r.Continue())
+				a.tick("close", size[0], size[1])
+			}
+			require.Zero(t, r.ActiveCount())
+		}
+	}
+}
+
+func TestAnchoredManagerClipsDraggedAnimationWithoutMovingContent(t *testing.T) {
+	r := newDialogRuntime()
+	mgr := &manager{runtime: r, width: 30, height: 12}
+	d := &lifecycleDialog{view: "row-00\nrow-01\nrow-02\nrow-03\nrow-04\nrow-05\nrow-06"}
+	mgr.handleOpen(OpenDialogMsg{Model: d})
+	e := &mgr.stack[0]
+	e.renderAlpha = 1
+	for _, drag := range []int{-6, -2, 3, 7} {
+		e.offsetY = drag
+		for height := 1; height < 12; height++ {
+			e.renderHeight = height
+			layer := mgr.GetLayers()[0]
+			require.GreaterOrEqual(t, layer.GetY(), 0)
+			for j, line := range strings.Split(ansi.Strip(layer.GetContent()), "\n") {
+				if strings.HasPrefix(line, "row-") {
+					var sourceRow int
+					_, err := fmt.Sscanf(line, "row-%d", &sourceRow)
+					require.NoError(t, err)
+					require.Equal(t, (mgr.height-e.fullHeight)/2+sourceRow+drag, layer.GetY()+j)
+				}
+			}
+		}
+	}
+	mgr.Cleanup()
 }
