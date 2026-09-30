@@ -83,7 +83,7 @@ func (d *imageAttachmentPreviewDialog) SetSize(width, height int) tea.Cmd {
 }
 func (d *imageAttachmentPreviewDialog) prepare() {
 	cell := d.cell.Resolved()
-	cols, rows := max(1, d.width-6), max(1, d.height-5)
+	cols, rows := max(1, d.width-6), max(1, d.height-6)
 	img, err := d.preview.Fit(cols, rows, cell)
 	if err != nil {
 		d.content = "Image preview unavailable: unable to resize image."
@@ -92,8 +92,8 @@ func (d *imageAttachmentPreviewDialog) prepare() {
 	placementCols := (img.Width + cell.Width - 1) / cell.Width
 	d.dialogWidth = min(d.width, max(placementCols, min(ansi.StringWidth(d.title), cols))+6)
 	inner := max(1, d.dialogWidth-6)
-	lines := []string{RenderTitle(d.title, inner, styles.DialogTitleStyle)}
-	if d.width >= 7 && d.height >= 6 {
+	lines := []string{RenderTitle(d.title, inner, styles.DialogTitleStyle), RenderSeparator(inner)}
+	if d.width >= 7 && d.height >= 7 {
 		for _, marker := range image.RenderNativePreviewMarkers(img, cell) {
 			left := max(0, (inner-placementCols)/2)
 			lines = append(lines, strings.Repeat(" ", left)+marker+strings.Repeat(" ", inner-left))

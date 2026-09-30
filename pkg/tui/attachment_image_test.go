@@ -107,7 +107,7 @@ func TestImageDialogComposedFrameOwnsPlacementsThroughStackAndResize(t *testing.
 	frame(true, 80, 24)
 	assert.Contains(t, output.String(), "a=d,d=a", "occlusion replaces stale placement geometry")
 	output.Reset()
-	frame(false, 10, 6)
+	frame(false, 10, 7)
 	assert.Contains(t, output.String(), "a=d,d=a", "resize replaces stale placement geometry")
 	output.Reset()
 	writer.SetContent("replacement dialog without graphics")

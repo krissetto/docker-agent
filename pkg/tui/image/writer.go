@@ -103,7 +103,6 @@ func (w *Writer) Invalidate() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	clear(w.uploaded)
-	w.active = false
 	w.dirty = true
 }
 

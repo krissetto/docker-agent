@@ -242,3 +242,35 @@ func TestNativePreviewPlacementUsesPixelsAndPartialCellCrop(t *testing.T) {
 	assert.NotContains(t, output.String(), ",r=")
 	assert.Contains(t, output.String(), ",y=23,w=17,h=12")
 }
+
+func TestInvalidateThenEmptyFrameDeletesExistingPlacement(t *testing.T) {
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	writer.SetContent(strings.Join(RenderPreviewMarkers(Inline{PNGData: []byte("png"), Width: 100, Height: 100}, 24), "\n"))
+	_, err := writer.Write([]byte("visible"))
+	require.NoError(t, err)
+	output.Reset()
+	writer.Invalidate()
+	writer.SetContent("animation frame without markers")
+	_, err = writer.Write([]byte("resize"))
+	require.NoError(t, err)
+	assert.Contains(t, output.String(), "a=d,d=a", "invalidation does not prove terminal placements disappeared")
+	assert.NotContains(t, output.String(), "a=p,i=")
+}
+
+func TestInvalidateEmptyOverlayFailureRetriesDeletion(t *testing.T) {
+	output := &failSecondWrite{}
+	writer := NewWriter(output)
+	writer.active = true
+	writer.Invalidate()
+	writer.SetContent("tiny")
+	_, err := writer.Write([]byte("frame"))
+	require.Error(t, err)
+	assert.True(t, writer.active)
+	assert.True(t, writer.dirty)
+	output.Reset()
+	_, err = writer.Write([]byte("retry"))
+	require.NoError(t, err)
+	assert.Contains(t, output.String(), "a=d,d=a")
+	assert.False(t, writer.active)
+}
