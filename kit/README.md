@@ -191,6 +191,12 @@ behavior. No real provider credentials were read or used during validation.
   auto-update off, disables telemetry, and passes the SBX workspace as working
   directory. Data/config/cache use Docker Agent's default locations; keep
   transcripts private.
+- Current source builds keep SQLite WAL enabled in sandboxes, with FULL
+  synchronous durability unchanged. Keep database files on sandbox-local Linux
+  storage, not the host-shared workspace or a network filesystem: WAL requires
+  reliable shared-memory and file-locking behavior. Sandbox identity alone does
+  not identify a database's backing filesystem. This does not relocate existing
+  databases or change their persistence lifetime.
 - Use a **new workspace and sandbox name** when trying a different kit build or
   digest. Do not adopt old custom-branch databases: async migrations 31–33 are
   not a compatibility promise for those databases. Intentional resume within

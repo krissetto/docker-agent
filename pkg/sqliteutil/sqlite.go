@@ -36,7 +36,7 @@ func openDB(ctx context.Context, path string, immediate bool) (*sql.DB, error) {
 
 	// Add query parameters for better concurrency handling and data integrity
 	// _pragma=busy_timeout(5000): Wait up to 5 seconds if database is locked
-	// _pragma=journal_mode(...): WAL outside sandboxes, DELETE inside (see journalMode)
+	// _pragma=journal_mode(WAL): Keep writes in the write-ahead log, including in sandboxes
 	// _pragma=foreign_keys(1): Enable foreign key constraints (critical for ON DELETE CASCADE)
 	busyTimeout := "5000"
 	if immediate {
@@ -44,7 +44,7 @@ func openDB(ctx context.Context, path string, immediate bool) (*sql.DB, error) {
 		// writes retry only BEGIN acquisition in Go, with a context-aware bound.
 		busyTimeout = "50"
 	}
-	dsn := path + "?_pragma=busy_timeout(" + busyTimeout + ")&_pragma=journal_mode(" + journalMode() + ")&_pragma=foreign_keys(1)"
+	dsn := path + "?_pragma=busy_timeout(" + busyTimeout + ")&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	if immediate {
 		dsn += "&_txlock=immediate"
 	}
@@ -97,22 +97,6 @@ func openConfiguredDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	}
 
 	return db, nil
-}
-
-// journalMode picks the SQLite journal mode. WAL is preferred, but it relies
-// on a shared-memory index (the -shm file) mmap'd by every connection. Inside
-// a Docker sandbox the data dir is bind-mounted from the host (virtiofs),
-// where that mapping is not coherent across the VM boundary and WAL corrupts
-// the database. DELETE mode uses only ordinary file locks, which the mount
-// forwards correctly; it also folds any leftover -wal file back into the main
-// database on open.
-func journalMode() string {
-	// Mirrors environment.InSandbox; checked directly to keep sqliteutil
-	// dependency-free.
-	if os.Getenv("SANDBOX_VM_ID") != "" {
-		return "DELETE"
-	}
-	return "WAL"
 }
 
 // closeDrainTimeout bounds how long CloseDB waits for in-use connections.
