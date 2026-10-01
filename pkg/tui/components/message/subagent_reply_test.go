@@ -52,7 +52,11 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				view.SetHovered(true)
 				view.Finalize()
 				out := ansi.Strip(view.View())
-				assert.Contains(t, out, "has replied v")
+				if origin == session.InputOriginRuntime {
+					assert.Contains(t, out, "has finished their work v")
+				} else {
+					assert.Contains(t, out, "has replied v")
+				}
 				for _, line := range strings.Split(strings.TrimSuffix(body, "\n"), "\n") {
 					assert.Contains(t, out, strings.ReplaceAll(line, "\t", "    "))
 				}

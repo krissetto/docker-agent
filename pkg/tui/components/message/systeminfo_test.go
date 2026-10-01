@@ -28,7 +28,7 @@ func TestTypedAgentBodyIsAttributedLiteralText(t *testing.T) {
 	msg := types.Input(input)
 	view := New(animation.NewRuntime(), msg, nil)
 	out := stripANSI(view.Render(100))
-	assert.Contains(t, out, "worker (ref child)")
+	assert.Contains(t, out, "worker (child)")
 	assert.Contains(t, out, "<system_info>agent literal</system_info>")
 	assert.Contains(t, out, "**readable Markdown**")
 	assert.Contains(t, out, "fmt.Println(42)")
@@ -44,7 +44,7 @@ func TestTypedDelegationUsesUserStyle(t *testing.T) {
 	actual := New(animation.NewRuntime(), types.Input(input), nil)
 	user := New(animation.NewRuntime(), types.User(input.Message.Content), nil)
 	assert.Equal(t, strings.Split(stripANSI(user.Render(100)), "\n")[1:], strings.Split(stripANSI(actual.Render(100)), "\n")[1:])
-	assert.Contains(t, stripANSI(actual.Render(100)), "director (ref 12345)")
+	assert.Contains(t, stripANSI(actual.Render(100)), "director (12345)")
 	assert.False(t, boldAtText(t, actual.Render(100), "original delegation"))
 	assert.True(t, boldAtText(t, user.Render(100), "original delegation"))
 }

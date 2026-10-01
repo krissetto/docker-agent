@@ -609,7 +609,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 func ClearSidebarHover(page Page) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
 		p.lastSidebarClick = sidebarClick{}
-		return p.sidebar.ClearSubagentHover()
+		return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearReferenceHover())
 	}
 	return nil
 }
@@ -617,6 +617,7 @@ func ClearSidebarHover(page Page) tea.Cmd {
 // SetSidebarPresentationActive prevents hidden updates from acquiring finite animation leases.
 func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
+		p.messages.SetReferencePresentationActive(active && !p.presentationHidden)
 		active = active && p.sidebarInteractive()
 		if !active {
 			p.lastSidebarClick = sidebarClick{}
@@ -634,6 +635,7 @@ func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 // CancelSidebarPresentation releases finite presentation animations when a page is hidden.
 func CancelSidebarPresentation(page Page) {
 	if p, ok := page.(*chatPage); ok {
+		p.messages.CancelReferenceHover()
 		switch presentation := p.sidebar.(type) {
 		case interface{ CancelPresentation() }:
 			presentation.CancelPresentation()
@@ -1683,6 +1685,7 @@ func (p *chatPage) routeMouseEvent(msg tea.Msg, _ int) tea.Cmd {
 	inSidebar := sl.mode == sidebarVertical && !p.presentationSidebarSettings().Collapsed && sl.isInSidebar(adjustedX)
 	inBand := !p.hideSidebar && !p.leanMode && sl.isInBand(y) && adjustedX >= 0 && adjustedX < sl.innerWidth
 	if inSidebar || inBand {
+		p.messages.ClearReferenceHover()
 		model, cmd := p.sidebar.Update(msg)
 		p.sidebar = model.(sidebar.Model)
 		return cmd

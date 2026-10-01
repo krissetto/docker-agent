@@ -60,9 +60,6 @@ func ResolveInputReference(snapshot *subagent.Snapshot, parentSessionID, senderI
 
 func (r InputReference) Label() string {
 	id := r.DisplayID
-	if r.Kind == InputReferenceUnknown && id != "" {
-		id = "ref " + id
-	}
 	if r.Name == "" {
 		return id
 	}

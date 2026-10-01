@@ -85,7 +85,7 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 						m.handleMouseMotion(tea.MouseMotionMsg{X: 7 + col, Y: 3 + labelLine})
 						afterHover := m.View()
 						assert.Equal(t, ansi.Strip(beforeHover), ansi.Strip(afterHover), "hover never moves hit coordinates")
-						assert.NotEqual(t, beforeHover, afterHover, "identity brightens like sidebar")
+						assert.True(t, m.referenceHoverAnimation.IsActive(), "identity starts the shared finite transition")
 						if origin == session.InputOriginAgent && mode != "steer" {
 							rawHeader, rawBody := m.renderedLine(start), m.renderedLine(start+1)
 							hoveredHeader := m.applyURLUnderline([]string{rawHeader}, start)[0]
@@ -153,7 +153,7 @@ func TestInputIdentityWrappedNoticeCellsAndUnresolvedAreNotFabricated(t *testing
 			assert.False(t, ok, "unresolved sender never fabricates navigation")
 		}
 	}
-	assert.Contains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "ref")
+	assert.NotContains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "ref ")
 }
 
 func TestInputIdentityToolWrappedLabelMatchesCanonicalColorAndHitCells(t *testing.T) {

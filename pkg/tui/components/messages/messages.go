@@ -172,6 +172,9 @@ type Model interface {
 	SubagentNodeAt(x, y int) (subagent.NodeID, bool)
 	InputReferenceAt(x, y int) (lifecycle.InputReference, bool)
 	RefreshInputReferences()
+	ClearReferenceHover() tea.Cmd
+	CancelReferenceHover()
+	SetReferencePresentationActive(bool)
 	RenderedContentHeight() int
 }
 
@@ -188,6 +191,7 @@ type transcriptFrameKey struct {
 	selection                           visualSelectionKey
 	hoveredURL                          hoveredURL
 	hasHoveredURL                       bool
+	referenceHoverGeneration            uint64
 	copiedFlash                         copiedFlash
 	hasCopiedFlash                      bool
 }
@@ -321,7 +325,12 @@ type model struct {
 	copiedFlashSeq int
 
 	// Hovered URL for underline-on-hover effect (nil = no URL hovered)
-	hoveredURL *hoveredURL
+	hoveredURL                  *hoveredURL
+	referenceHoverAnimation     animation.Subscription
+	referenceHoverTarget        referenceHoverKey
+	referenceHoverValues        map[referenceHoverKey]referenceHoverValue
+	referenceHoverGeneration    uint64
+	referencePresentationHidden bool
 }
 
 // New creates a new message list component
@@ -348,20 +357,21 @@ func newModel(ar *animation.Runtime, width, height int, sessionState SessionStat
 		index = indexes[0]
 	}
 	return &model{
-		ar:                   ar,
-		themeGeneration:      styles.ThemeGeneration(),
-		slackAnimationSub:    ar.Subscribe(),
-		width:                width,
-		height:               height,
-		renderedItems:        make(renderedItemIndex),
-		urlSpans:             newURLSpanCache(),
-		sessionState:         sessionState,
-		subagents:            index,
-		scrollview:           sv,
-		selectedMessageIndex: -1,
-		inlineEditMsgIndex:   -1,
-		hoveredMessageIndex:  -1,
-		renderDirty:          true,
+		ar:                      ar,
+		themeGeneration:         styles.ThemeGeneration(),
+		slackAnimationSub:       ar.Subscribe(),
+		referenceHoverAnimation: ar.Subscribe(),
+		width:                   width,
+		height:                  height,
+		renderedItems:           make(renderedItemIndex),
+		urlSpans:                newURLSpanCache(),
+		sessionState:            sessionState,
+		subagents:               index,
+		scrollview:              sv,
+		selectedMessageIndex:    -1,
+		inlineEditMsgIndex:      -1,
+		hoveredMessageIndex:     -1,
+		renderDirty:             true,
 	}
 }
 
@@ -445,6 +455,10 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.invalidateAllItems()
 		return m, nil
 
+	case messages.SessionToggleChangedMsg:
+		m.invalidateAllItems()
+		return m, nil
+
 	case ToggleHideToolResultsMsg:
 		m.sessionState.ToggleHideToolResults()
 		m.invalidateAllItems()
@@ -508,6 +522,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if tick.Dirty() && (animatedBeforeTick || m.hasAnimatedContent()) {
 			m.renderDirty = true
 		}
+		m.tickReferenceHover(tick)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -515,6 +530,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd tea.Cmd) {
 	m.cancelImageClick()
+	m.CancelReferenceHover()
 	var materializeCmd tea.Cmd
 	defer func() { cmd = tea.Batch(materializeCmd, cmd) }()
 	// Scrollbar hit-testing and thumb geometry must use the exact tail height.
@@ -672,12 +688,14 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 		m.cancelImageClick()
 	}
 	if m.scrollview.IsDragging() {
+		m.CancelReferenceHover()
 		materializeCmd := m.materializeDeferredTailForInteraction()
 		model, cmd := m.handleScrollviewUpdate(msg)
 		return model, tea.Batch(materializeCmd, cmd)
 	}
 
 	if m.selection.mouseButtonDown && m.selection.active {
+		m.CancelReferenceHover()
 		line, col := m.mouseToLineCol(msg.X, msg.Y)
 		// Any real movement turns a multi-click into a drag: the copy now
 		// belongs to the release handler, not the debounced word copy.
@@ -707,7 +725,11 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 	}
 
 	// Track hovered URL for underline effect
-	m.updateHoveredURL(line, col)
+	if msg.X < m.xPos || msg.X >= m.xPos+m.contentWidth() || msg.Y < m.yPos || msg.Y >= m.yPos+m.height {
+		m.ClearReferenceHover()
+	} else {
+		m.updateHoveredURL(line, col)
+	}
 
 	return m, nil
 }
@@ -896,6 +918,7 @@ func (m *model) View() string {
 		visibleLines = m.applySelectionHighlight(visibleLines, startLine)
 	}
 
+	m.applyReferenceHover(visibleLines, startLine)
 	visibleLines = m.applyURLUnderline(visibleLines, startLine)
 	visibleLines = m.applyCopiedFlash(visibleLines, startLine)
 
@@ -925,8 +948,9 @@ func (m *model) View() string {
 
 func (m *model) transcriptFrameKey() transcriptFrameKey {
 	frame := transcriptFrameKey{
-		scrollbarDragging: m.scrollview.IsDragging(),
-		contentGeneration: m.contentGeneration, segmentsRevision: m.segmentsRevision,
+		scrollbarDragging:        m.scrollview.IsDragging(),
+		referenceHoverGeneration: m.referenceHoverGeneration,
+		contentGeneration:        m.contentGeneration, segmentsRevision: m.segmentsRevision,
 		width: m.width, height: m.height, offset: m.scrollOffset,
 		total: m.totalHeight, slack: m.bottomSlack,
 		selection: visualSelectionKey{
@@ -968,6 +992,12 @@ func (m *model) renderedLine(global int) string {
 // and from Update() on animation ticks so that the slack subscription is
 // registered before tui.go schedules the next tick.
 func (m *model) updateScrollState() {
+	beforeOffset := m.scrollOffset
+	defer func() {
+		if beforeOffset != m.scrollOffset {
+			m.CancelReferenceHover()
+		}
+	}()
 	prevTotalHeight := m.totalHeight
 	prevScrollableHeight := m.totalHeight + m.bottomSlack
 	m.ensureAllItemsRendered()
@@ -1035,6 +1065,7 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 		return nil // Dimensions unchanged — skip expensive cache invalidation
 	}
 	m.cancelImageClick()
+	m.CancelReferenceHover()
 	widthChanged := m.width != width
 	m.width = width
 	m.height = height
@@ -1066,6 +1097,7 @@ func (m *model) SetPosition(x, y int) tea.Cmd {
 		return nil
 	}
 	m.cancelImageClick()
+	m.CancelReferenceHover()
 	m.xPos = x
 	m.yPos = y
 	m.scrollview.SetPosition(x, y)
@@ -1357,6 +1389,7 @@ func (m *model) setScrollOffset(offset int) {
 	m.scrollOffset = max(0, min(offset, maxOffset))
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	if before != m.scrollOffset {
+		m.CancelReferenceHover()
 		m.cancelImageClick()
 		m.invalidateView()
 	}
@@ -1649,6 +1682,7 @@ func (m *model) ensureAllItemsRendered() {
 	m.transcriptRebuilds++
 	m.invalidateFrameContent()
 	if len(m.views) == 0 {
+		m.CancelReferenceHover()
 		m.renderedLines = nil
 		m.totalHeight = 0
 		m.renderDirty = false
@@ -1691,6 +1725,10 @@ func (m *model) ensureAllItemsRendered() {
 		}
 	}
 
+	if len(m.lineOffsets) > 0 && (m.totalHeight != virtualHeight || !slices.Equal(m.lineOffsets, offsets)) {
+		m.CancelReferenceHover()
+	}
+	m.pruneReferenceHover()
 	m.renderedLines = allLines
 	m.activeSegments = activeSegments
 	m.renderedItems = ranges
@@ -1777,6 +1815,9 @@ func (m *model) refreshRenderedItem(index int) bool {
 		m.renderedLines = replacement
 	}
 	delta := item.height - (end - start)
+	if delta != 0 {
+		m.CancelReferenceHover()
+	}
 	for i := index + 1; i < len(m.lineOffsets); i++ {
 		m.lineOffsets[i] += delta
 	}
@@ -2662,7 +2703,7 @@ func (m *model) createToolCallView(msg *types.Message) layout.Model {
 
 func (m *model) createMessageView(msg *types.Message) layout.Model {
 	if !lifecycle.IsUserInput(msg.InputOrigin) {
-		msg.InputReference = m.subagents.Resolve(m.inputParentSessionID, msg.SenderID, msg.SenderName)
+		msg.InputReference = m.resolveInputReference(msg)
 	}
 	view := message.New(m.ar, msg, m.sessionState.PreviousMessage())
 	view.SetSize(m.contentWidth(), 0)
@@ -2976,6 +3017,7 @@ func (m *model) IsMouseOnScrollbar(x, y int) bool {
 }
 
 func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
+	m.CancelReferenceHover()
 	// Drag calculations depend on total height and may jump directly into the
 	// stale final item, so reconcile before delegating any active drag update.
 	var materializeCmd tea.Cmd
@@ -3174,6 +3216,7 @@ type InlineEditCommittedMsg struct {
 }
 
 func (m *model) StopAnimations() {
+	m.CancelReferenceHover()
 	m.cancelImageClick()
 	m.slackAnimationSub.Stop()
 	for _, v := range m.views {

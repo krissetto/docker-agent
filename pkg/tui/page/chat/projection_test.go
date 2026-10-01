@@ -115,8 +115,8 @@ func TestTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() {
 		out := ansi.Strip(p.messages.View())
-		assert.Equal(t, 1, strings.Count(out, "worker (ref 12345) has finished their work"))
-		assert.Contains(t, out, "worker (ref 12345)")
+		assert.Equal(t, 1, strings.Count(out, "worker (12345) has finished their work"))
+		assert.Contains(t, out, "worker (12345)")
 		assert.Equal(t, 1, strings.Count(out, "original parent delegation"))
 		assert.NotContains(t, out, "private runtime payload")
 		assert.NotContains(t, out, "12345678-long-id")
@@ -138,7 +138,7 @@ func TestDirectTypedInputMode(t *testing.T) {
 			p.messages.SetSize(100, 40)
 			p.handleRuntimeEvent(&runtime.UserMessageEvent{TurnID: "direct", Message: "clean input", InputOrigin: session.InputOriginAgent, InputMode: mode, SenderName: "worker", SenderID: "12345678-long-id"})
 			assert.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeAgentInput))
-			assert.Contains(t, ansi.Strip(p.messages.View()), "worker (ref 12345)")
+			assert.Contains(t, ansi.Strip(p.messages.View()), "worker (12345)")
 			assert.Empty(t, p.messageQueue)
 		})
 	}

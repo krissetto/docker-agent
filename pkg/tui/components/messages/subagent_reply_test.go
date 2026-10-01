@@ -110,7 +110,7 @@ func clickReplyChevron(t *testing.T, m *model, glyph string) {
 	m.View()
 	for y, line := range m.renderedLines {
 		plain := strings.TrimRight(ansi.Strip(line), " ")
-		if strings.HasSuffix(plain, "has replied "+glyph) || plain == glyph || strings.HasSuffix(plain, " "+glyph) {
+		if strings.HasSuffix(plain, "has replied "+glyph) || strings.HasSuffix(plain, "has finished their work "+glyph) || plain == glyph || strings.HasSuffix(plain, " "+glyph) {
 			x := ansi.StringWidth(plain) - 1
 			_, linked := m.InputReferenceAt(m.xPos+x, m.yPos+y)
 			require.False(t, linked, "chevron is not navigation")

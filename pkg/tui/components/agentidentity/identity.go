@@ -48,18 +48,32 @@ func HoverProgress(line string, startCol, endCol int, ref lifecycle.InputReferen
 	if endCol <= startCol {
 		return line
 	}
-	segment := ansi.Cut(line, startCol, endCol)
-	nameStart := strings.Index(segment, nameLink)
-	if nameStart < 0 {
-		return line
+	// Work on byte ranges, not ANSI cuts: Cut replays unrelated OSC/style
+	// sequences and can multiply them when name and suffix share a row.
+	var out strings.Builder
+	cursor := 0
+	for cursor < len(line) {
+		offset := strings.Index(line[cursor:], nameLink)
+		if offset < 0 {
+			break
+		}
+		nameStart := cursor + offset + len(nameLink)
+		nameEnd := len(line)
+		if end := strings.Index(line[nameStart:], ansi.ResetHyperlink()); end >= 0 {
+			nameEnd = nameStart + end
+		}
+		from := ansi.StringWidth(line[:nameStart])
+		to := from + ansi.StringWidth(line[nameStart:nameEnd])
+		out.WriteString(line[cursor:nameStart])
+		if from >= startCol && to <= endCol && to > from {
+			out.WriteString(styles.HoverText(line[nameStart:nameEnd], progress, nil))
+		} else {
+			out.WriteString(line[nameStart:nameEnd])
+		}
+		cursor = nameEnd
 	}
-	nameStart += len(nameLink)
-	nameEnd := len(segment)
-	if end := strings.Index(segment[nameStart:], ansi.ResetHyperlink()); end >= 0 {
-		nameEnd = nameStart + end
-	}
-	segment = segment[:nameStart] + styles.HoverText(segment[nameStart:nameEnd], progress, nil) + segment[nameEnd:]
-	return ansi.Cut(line, 0, startCol) + segment + ansi.Cut(line, endCol, ansi.StringWidth(line))
+	out.WriteString(line[cursor:])
+	return out.String()
 }
 
 // Border embeds the identity in the top border without changing the body rows.
@@ -102,7 +116,11 @@ func Wrap(prefix string, ref lifecycle.InputReference, suffix string, width int)
 	active := ""
 	for i, line := range lines {
 		if active != "" {
-			line = active + line
+			color := styles.MutedStyle.GetForeground()
+			if active == nameLink {
+				color = styles.AgentIdentityStyle(ref.Agent, false).GetForeground()
+			}
+			line = active + ansi.Style{}.ForegroundColor(color).String() + line
 		}
 		lastName, lastOpen, lastClose := strings.LastIndex(line, nameLink), strings.LastIndex(line, open), strings.LastIndex(line, reset)
 		switch {

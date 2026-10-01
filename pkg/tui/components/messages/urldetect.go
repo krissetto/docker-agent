@@ -2,11 +2,9 @@ package messages
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 )
@@ -23,11 +21,12 @@ type hoveredURL struct {
 // urlSpanCache caches parsed URL spans per rendered line index.
 // Cleared when renderedLines changes (renderDirty rebuild).
 type urlSpanCache struct {
-	spans map[int][]urlSpan
+	spans      map[int][]urlSpan
+	references map[int]renderedReference
 }
 
 func newURLSpanCache() *urlSpanCache {
-	return &urlSpanCache{spans: make(map[int][]urlSpan)}
+	return &urlSpanCache{spans: make(map[int][]urlSpan), references: make(map[int]renderedReference)}
 }
 
 // get returns the cached URL spans for the given line, parsing on first access.
@@ -43,6 +42,7 @@ func (c *urlSpanCache) get(line int, renderedLine string) []urlSpan {
 // clear resets the cache (called when rendered lines change).
 func (c *urlSpanCache) clear() {
 	c.spans = make(map[int][]urlSpan)
+	c.references = make(map[int]renderedReference)
 }
 
 // urlAtPosition extracts a URL from the rendered line at the given display column.
@@ -73,138 +73,26 @@ type urlSpan struct {
 // the visible text after stripping ANSI sequences.
 func extractOSC8Links(renderedLine string) []urlSpan {
 	var spans []urlSpan
-
-	displayCol := 0
-	i := 0
-	s := renderedLine
-
-	for i < len(s) {
-		// Check for OSC 8 opening: \x1b]8;; or \x1b]8;params;
-		if i+4 < len(s) && s[i] == '\x1b' && s[i+1] == ']' && s[i+2] == '8' && s[i+3] == ';' {
-			j := i + 4
-			// Skip params until next ';'
-			for j < len(s) && s[j] != ';' && s[j] != '\x07' {
-				j++
+	parser := ansi.GetParser()
+	defer ansi.PutParser(parser)
+	var state byte
+	col, start := 0, 0
+	active := ""
+	for renderedLine != "" {
+		sequence, width, consumed, next := ansi.DecodeSequence(renderedLine, state, parser)
+		if strings.HasPrefix(sequence, "\x1b]8;") {
+			if active != "" && col > start {
+				spans = append(spans, urlSpan{url: active, startCol: start, endCol: col})
 			}
-			if j < len(s) && s[j] == ';' {
-				j++ // skip the ';'
-				// Extract URL until BEL (\x07) or ST (\x1b\\)
-				urlStart := j
-				for j < len(s) {
-					if s[j] == '\x07' {
-						break
-					}
-					if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
-						break
-					}
-					j++
-				}
-				url := s[urlStart:j]
-
-				// Skip the terminator
-				if j < len(s) && s[j] == '\x07' {
-					j++
-				} else if j+1 < len(s) && s[j] == '\x1b' && s[j+1] == '\\' {
-					j += 2
-				}
-				i = j
-
-				// Empty URL means this is a reset/close — ignore
-				if url == "" {
-					continue
-				}
-
-				// Read the visible text until we hit the closing OSC 8 reset
-				textStartCol := displayCol
-				for i < len(s) {
-					// Check for closing OSC 8: \x1b]8;;\x07
-					if i+4 < len(s) && s[i] == '\x1b' && s[i+1] == ']' && s[i+2] == '8' && s[i+3] == ';' {
-						k := i + 4
-						for k < len(s) && s[k] != ';' && s[k] != '\x07' {
-							k++
-						}
-						if k < len(s) && s[k] == ';' {
-							k++
-						}
-						// Skip until terminator
-						for k < len(s) {
-							if s[k] == '\x07' {
-								k++
-								break
-							}
-							if s[k] == '\x1b' && k+1 < len(s) && s[k+1] == '\\' {
-								k += 2
-								break
-							}
-							k++
-						}
-						i = k
-						break
-					}
-					// Skip CSI sequences (\x1b[...)
-					if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
-						i += 2
-						for i < len(s) && (s[i] < '@' || s[i] > '~') {
-							i++
-						}
-						if i < len(s) {
-							i++
-						}
-						continue
-					}
-					// Visible character
-					r, size := utf8.DecodeRuneInString(s[i:])
-					displayCol += runewidth.RuneWidth(r)
-					i += size
-				}
-
-				if url != "" && displayCol > textStartCol {
-					spans = append(spans, urlSpan{
-						url:      url,
-						startCol: textStartCol,
-						endCol:   displayCol,
-					})
-				}
-				continue
-			}
-			// Malformed OSC, skip
-			i = j
-			continue
+			payload := strings.TrimSuffix(strings.TrimSuffix(sequence[4:], "\x07"), "\x1b\\")
+			_, active, _ = strings.Cut(payload, ";")
+			start = col
 		}
-
-		// Skip CSI sequences
-		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
-			i += 2
-			for i < len(s) && (s[i] < '@' || s[i] > '~') {
-				i++
-			}
-			if i < len(s) {
-				i++
-			}
-			continue
-		}
-
-		// Skip other OSC sequences (non-hyperlink)
-		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == ']' {
-			i += 2
-			for i < len(s) {
-				if s[i] == '\x07' {
-					i++
-					break
-				}
-				if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
-					i += 2
-					break
-				}
-				i++
-			}
-			continue
-		}
-
-		// Visible character — advance display column
-		r, size := utf8.DecodeRuneInString(s[i:])
-		displayCol += runewidth.RuneWidth(r)
-		i += size
+		col += width
+		state, renderedLine = next, renderedLine[consumed:]
+	}
+	if active != "" && col > start {
+		spans = append(spans, urlSpan{url: active, startCol: start, endCol: col})
 	}
 
 	return spans
@@ -299,11 +187,7 @@ func findURLSpans(text string) []urlSpan {
 }
 
 func runeSliceWidth(runes []rune) int {
-	w := 0
-	for _, r := range runes {
-		w += runewidth.RuneWidth(r)
-	}
-	return w
+	return ansi.StringWidth(string(runes))
 }
 
 func isURLChar(r rune) bool {
@@ -360,6 +244,18 @@ func (m *model) updateHoveredURL(line, col int) {
 		rendered := m.renderedLine(line)
 		for _, span := range m.urlSpans.get(line, rendered) {
 			if col >= span.startCol && col < span.endCol {
+				if span.url == agentidentity.Link {
+					if ref := m.renderedReference(line); ref.key.message != nil {
+						m.setReferenceHover(ref.key)
+						if m.hoveredURL != nil {
+							m.hoveredURL = nil
+							m.invalidateView()
+						}
+						return
+					}
+					continue
+				}
+				m.setReferenceHover(referenceHoverKey{})
 				newHover := &hoveredURL{line: line, startCol: span.startCol, endCol: span.endCol}
 				if m.hoveredURL == nil || *m.hoveredURL != *newHover {
 					m.hoveredURL = newHover
@@ -370,6 +266,7 @@ func (m *model) updateHoveredURL(line, col int) {
 		}
 	}
 
+	m.setReferenceHover(referenceHoverKey{})
 	if m.hoveredURL != nil {
 		m.hoveredURL = nil
 		m.invalidateView()
@@ -390,15 +287,7 @@ func (m *model) applyURLUnderline(lines []string, viewportStartLine int) []strin
 	result := make([]string, len(lines))
 	copy(result, lines)
 	style := underlineStyle
-	if m.urlAt(m.hoveredURL.line, m.hoveredURL.startCol) == "" {
-		index, local := m.globalLineToMessageLineCached(m.hoveredURL.line)
-		if ref, ok := m.referenceForMessage(index, local); ok {
-			result[viewIdx] = agentidentity.Hover(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, ref)
-			return result
-		} else {
-			return lines
-		}
-	}
+
 	result[viewIdx] = styleLineSegment(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, style)
 	return result
 }

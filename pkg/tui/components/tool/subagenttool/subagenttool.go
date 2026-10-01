@@ -6,6 +6,9 @@
 package subagenttool
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -141,11 +144,11 @@ func NodeIDFor(msg *types.Message) (subagent.NodeID, bool) {
 // source knows it.
 func attribution(msg *types.Message, argID string, lookup NameLookup) (name, id string) {
 	if msg.ToolResult != nil {
-		if n, nid, ok := subagent.MentionedSubagent(msg.ToolResult.Output); ok {
+		if n, nid, ok := stampedAttribution(msg.ToolCall.Function.Name, msg.ToolResult.Output); ok {
 			return n, string(nid)
 		}
 	}
-	if n, nid, ok := subagent.MentionedSubagent(msg.Content); ok {
+	if n, nid, ok := stampedAttribution(msg.ToolCall.Function.Name, msg.Content); ok {
 		return n, string(nid)
 	}
 	if argID != "" && lookup != nil {
@@ -203,4 +206,46 @@ func statusIcon(msg *types.Message, s spinner.Spinner) string {
 	default:
 		return styles.ToolCompletedIcon.Render("✓")
 	}
+}
+
+// Only tool-authored result headers supply display attribution. Preserve the
+// complete canonical ID, including when distinct IDs share a visible prefix.
+func stampedAttribution(tool, content string) (string, subagent.NodeID, bool) {
+	prefix, boundary := "", "."
+	switch tool {
+	case subagent.ToolSpawnSubagent:
+		prefix = "Spawned subagent "
+	case subagent.ToolSendMessage:
+		prefix = "Message delivered to subagent "
+	case subagent.ToolReadSubagent:
+		prefix, boundary = "Subagent ", " — "
+	case subagent.ToolStopSubagent:
+		prefix = "Stopped subagent "
+	default:
+		return "", "", false
+	}
+	rest, ok := strings.CutPrefix(content, prefix)
+	if !ok {
+		return "", "", false
+	}
+	quoted, err := strconv.QuotedPrefix(rest)
+	if err != nil || !strings.HasPrefix(quoted, `"`) {
+		return "", "", false
+	}
+	name, err := strconv.Unquote(quoted)
+	if err != nil {
+		return "", "", false
+	}
+	rest, ok = strings.CutPrefix(rest[len(quoted):], " (")
+	if !ok {
+		return "", "", false
+	}
+	id, tail, ok := strings.Cut(rest, ")")
+	if !ok || id == "" || strings.ContainsAny(id, " \t\r\n()") || !strings.HasPrefix(tail, boundary) {
+		return "", "", false
+	}
+	if boundary == "." && len(tail) > 1 && tail[1] != ' ' {
+		return "", "", false
+	}
+	return name, subagent.NodeID(id), true
 }

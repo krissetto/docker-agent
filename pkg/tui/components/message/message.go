@@ -432,8 +432,12 @@ func (mv *messageModel) replyHeader(width int) string {
 	if mv.expanded {
 		chevron = "v"
 	}
+	action := " has replied "
+	if mv.message.Type == types.MessageTypeRuntimeNotice {
+		action = " has finished their work "
+	}
 	return agentidentity.Wrap(styles.ToolCompletedIcon.Render("✓")+" ", mv.message.InputReference,
-		styles.MutedStyle.Render(" has replied "+chevron), width)
+		styles.MutedStyle.Render(action+chevron), width)
 }
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.

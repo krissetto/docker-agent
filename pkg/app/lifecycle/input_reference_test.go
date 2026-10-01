@@ -36,5 +36,5 @@ func TestInputIdentityResolverUsesCanonicalMappingNotIDShape(t *testing.T) {
 	unknown := ResolveInputReference(tree, "", "fffff", "unknown")
 	assert.Equal(t, InputReferenceUnknown, unknown.Kind, "five hex characters are not proof of a node")
 	assert.Empty(t, unknown.ID)
-	assert.Equal(t, "unknown (ref fffff)", unknown.Label())
+	assert.Equal(t, "unknown (fffff)", unknown.Label())
 }

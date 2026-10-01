@@ -1,6 +1,8 @@
 package subagenttool
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -185,5 +187,41 @@ func TestNodeIDFor(t *testing.T) {
 				assert.Equal(t, subagent.NodeID(tt.wantID), id)
 			}
 		})
+	}
+}
+
+func TestStampedAttributionFullIDsEscapedNamesAndRestore(t *testing.T) {
+	for _, tool := range []string{subagent.ToolSpawnSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent, subagent.ToolStopSubagent} {
+		for _, id := range []string{"abcde-first-canonical", "abcde-second-canonical"} {
+			name := `Café "worker" 界`
+			var header string
+			switch tool {
+			case subagent.ToolSpawnSubagent:
+				header = fmt.Sprintf("Spawned subagent %q (%s).", name, id)
+			case subagent.ToolSendMessage:
+				header = fmt.Sprintf("Message delivered to subagent %q (%s).", name, id)
+			case subagent.ToolReadSubagent:
+				header = fmt.Sprintf("Subagent %q (%s) — completed:\n\nprivate body", name, id)
+			case subagent.ToolStopSubagent:
+				header = fmt.Sprintf("Stopped subagent %q (%s).", name, id)
+			}
+			for _, restored := range []bool{false, true} {
+				msg := testMessage(tool, `{}`, header, types.ToolStatusCompleted)
+				if restored {
+					msg.Content = header
+					msg.ToolResult = nil
+				}
+				got, ok := NodeIDFor(msg)
+				assert.True(t, ok)
+				assert.Equal(t, subagent.NodeID(id), got)
+				gotName, gotID := attribution(msg, "", nil)
+				assert.Equal(t, name, gotName)
+				assert.Equal(t, id, gotID)
+			}
+			for _, invalid := range []string{"prose " + header, strings.Replace(header, ")", ")invalid", 1), strings.Replace(header, "abcde-", "abcde ) ", 1)} {
+				_, _, ok := stampedAttribution(tool, invalid)
+				assert.False(t, ok)
+			}
+		}
 	}
 }

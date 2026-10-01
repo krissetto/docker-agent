@@ -2013,7 +2013,7 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	}
 
 	visible := m.paneVisible(msg.SessionID)
-	presentationCmd := tea.Batch(setPaneVisible(chatPage, visible), chat.SetSidebarPresentationActive(chatPage, false))
+	presentationCmd := tea.Batch(setPaneVisible(chatPage, visible), chat.SetSidebarPresentationActive(chatPage, visible))
 	inner := msg.Inner
 	var runtimeEvent runtime.Event
 	if bridged, ok := inner.(messages.SessionRuntimeEventMsg); ok {

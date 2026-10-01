@@ -299,6 +299,7 @@ func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod t
 // handleMouseMotion handles mouse motion events.
 func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
 	if p.isDraggingSidebar {
+		p.messages.CancelReferenceHover()
 		delta := p.sidebarDragStartX - msg.X
 		if max(delta, -delta) >= dragThreshold {
 			p.sidebarDragMoved = true
@@ -314,6 +315,7 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 	// so the drag continues even when the cursor drifts outside the component.
 	// The scrollbar ignores motion if it isn't the one being dragged.
 	if p.isScrollbarDragging() {
+		p.messages.CancelReferenceHover()
 		var cmds []tea.Cmd
 		messagesModel, messagesCmd := p.messages.Update(msg)
 		p.messages = messagesModel.(messages.Model)

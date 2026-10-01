@@ -1,6 +1,9 @@
 package messages
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
@@ -13,10 +16,11 @@ func (m *model) RefreshInputReferences() {
 		if lifecycle.IsUserInput(msg.InputOrigin) {
 			continue
 		}
-		ref := m.subagents.Resolve(m.inputParentSessionID, msg.SenderID, msg.SenderName)
+		ref := m.resolveInputReference(msg)
 		if ref == msg.InputReference {
 			continue
 		}
+		m.CancelReferenceHover()
 		msg.InputReference = ref
 		if view, ok := m.views[i].(message.Model); ok {
 			view.InvalidateRenderCache()
@@ -61,4 +65,45 @@ func (m *model) InputReferenceAt(x, y int) (lifecycle.InputReference, bool) {
 		}
 	}
 	return ref, false
+}
+
+// Old accepted reports can retain a stale child session ID. Only a runtime
+// report's anchored header may recover an exact node still in the registry.
+func (m *model) resolveInputReference(msg *types.Message) lifecycle.InputReference {
+	ref := m.subagents.Resolve(m.inputParentSessionID, msg.SenderID, msg.SenderName)
+	if ref.Kind != lifecycle.InputReferenceUnknown || msg.Type != types.MessageTypeRuntimeNotice {
+		return ref
+	}
+	header, ok := strings.CutPrefix(msg.ReceivedBody, "Subagent ")
+	if !ok {
+		return ref
+	}
+	quoted, err := strconv.QuotedPrefix(header)
+	if err != nil || !strings.HasPrefix(quoted, `"`) {
+		return ref
+	}
+	if _, err := strconv.Unquote(quoted); err != nil {
+		return ref
+	}
+	rest, ok := strings.CutPrefix(header[len(quoted):], " (")
+	if !ok {
+		return ref
+	}
+	id, rest, ok := strings.Cut(rest, ") ")
+	if !ok || id == "" {
+		return ref
+	}
+	verb := "finished its turn."
+	if strings.HasPrefix(rest, "failed.") {
+		verb = "failed."
+	}
+	tail, ok := strings.CutPrefix(rest, verb)
+	if !ok || (tail != "" && !strings.HasPrefix(tail, " ")) {
+		return ref
+	}
+	resolved := m.subagents.Resolve("", id, "")
+	if resolved.Kind == lifecycle.InputReferenceNode && resolved.ID == id {
+		return resolved
+	}
+	return ref
 }

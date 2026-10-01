@@ -147,7 +147,7 @@ func (p *chatPage) SetSplitPresentation(g *SplitPresentationGeometry) tea.Cmd {
 	if wasSidebarInteractive && !p.sidebarInteractive() {
 		p.releaseSidebarInput()
 	}
-	return tea.Batch(p.SetSize(p.width, p.height), SetSidebarPresentationActive(p, p.sidebarInteractive()))
+	return tea.Batch(p.SetSize(p.width, p.height), SetSidebarPresentationActive(p, !p.presentationHidden))
 }
 
 func (p *chatPage) applySplitPresentation() tea.Cmd {
@@ -273,7 +273,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 	if p.splitPresentation != nil {
 		layoutCmd = p.applySplitPresentation()
 	}
-	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, p.sidebarInteractive()))
+	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden))
 }
 
 func (p *chatPage) stopHiddenPresentation() {
@@ -294,6 +294,7 @@ func (p *chatPage) routeSplitMouseEvent(msg tea.Msg) tea.Cmd {
 	}
 	g := p.splitPresentation
 	if p.sidebarInteractive() && g.Shell.Sidebar.contains(x, y) {
+		p.messages.ClearReferenceHover()
 		model, cmd := p.sidebar.Update(msg)
 		p.sidebar = model.(sidebar.Model)
 		return cmd
@@ -303,6 +304,7 @@ func (p *chatPage) routeSplitMouseEvent(msg tea.Msg) tea.Cmd {
 		hoverCmd = p.sidebar.ClearSubagentHover()
 	}
 	if !p.PointerTargetsMessages(x, y) {
+		p.messages.ClearReferenceHover()
 		return hoverCmd
 	}
 	model, cmd := p.messages.Update(msg)

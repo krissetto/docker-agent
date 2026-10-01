@@ -198,7 +198,7 @@ func TestTypedInputPresentationModesLiveAndReload(t *testing.T) {
 				assert.Contains(t, out, input.Message.Content)
 				assert.NotContains(t, out, senderID)
 				if mode == "steer" {
-					assert.Contains(t, out, "director (ref 12345)")
+					assert.Contains(t, out, "director (12345)")
 				}
 			}
 			assert.Equal(t, live.messages[0].Type, restored.messages[0].Type)
@@ -230,7 +230,7 @@ func TestTypedInputPresentationModesLiveAndReload(t *testing.T) {
 				assert.NotContains(t, out, "system_info")
 				assert.NotContains(t, out, "private model")
 				if sender != "" {
-					assert.Contains(t, out, "worker (ref 12345) has finished their work")
+					assert.Contains(t, out, "worker (12345) has finished their work")
 				} else {
 					assert.Contains(t, out, "Runtime update received")
 				}
