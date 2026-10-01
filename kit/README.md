@@ -77,6 +77,39 @@ Reattach intentionally to the same sandbox with the same model arguments:
 sbx run --name async-agent-trial-1 -- --model openai/ACCESSIBLE_MODEL
 ```
 
+### Select your own team at launch
+
+The current source-built launcher accepts `--team PATH` (or `--team=PATH`) as
+its **first argument after SBX's `--`**, before any Docker Agent arguments.
+For a `team.yaml` in `/path/project`, use a kit release containing this launcher:
+
+```sh
+sbx run christopherpetito053/kagent:latest /path/project -- --team ./team.yaml
+```
+
+This selects that file directly; you do not need to rename it to
+`hackerspace.yaml` or install a workspace override. For a filename with spaces
+and an optional global model override:
+
+```sh
+sbx run christopherpetito053/kagent:latest /path/project -- \
+  --team './my team.yaml' --model openai/ACCESSIBLE_MODEL
+```
+
+Paths are resolved **inside the sandbox**: relative paths start at the mounted
+workspace, and absolute paths must already be accessible through the workspace
+or another SBX mount. The option does not mount arbitrary host files. A missing,
+unreadable or non-file path fails with an error; it never silently selects a
+different team. The selected YAML is validated by Docker Agent as usual.
+The historical immutable kit references above predate this launcher option.
+
+Only the leading `--team` option is consumed. All remaining arguments are passed
+unchanged to Docker Agent, including `--model`, `--exec`, `--session ID` and
+`--session=-1`. For example, append `--exec -- 'Review this project'` after the
+team path for a headless prompt; a literal `--team` after that second `--` is
+prompt text, not a launcher option. Supply the same team option when intentionally
+reattaching or resuming a session that uses your custom team.
+
 ### Bundled team and optional edits
 
 The full supplied configuration preserves the team instructions, model aliases
@@ -92,7 +125,7 @@ and tool restrictions:
   DMR/local LAN connectivity still requires an explicitly reviewed host policy.
   Historical OpenAI-only immutable references are unchanged.
 
-No configuration copy is required: the launcher uses the bundled
+Without `--team`, no configuration copy is required: the launcher uses the bundled
 `/opt/async-agent/hackerspace.yaml` when the workspace has no `hackerspace.yaml`.
 To prototype instructions, tools or models, optionally create your own Docker
 Agent `hackerspace.yaml` in the workspace (the
