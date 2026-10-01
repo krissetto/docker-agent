@@ -118,7 +118,7 @@ The full supplied configuration preserves the team instructions, model aliases
 and tool restrictions:
 
 - The current source-built team has seven agents. `root`, `director`, `greppy`,
-  `planner`, `engineer` and `reviewer` use OpenAI `gpt-6-1-sol`, retaining their
+  `planner`, `engineer` and `reviewer` use OpenAI `gpt-6.1-sol`, retaining their
   medium, high or low thinking budgets. `designer` uses Anthropic
   `claude-opus-5-5` with adaptive/high thinking.
 - `root` (Shelly) delegates directly to `director`, `engineer`, `designer` and

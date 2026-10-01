@@ -30,13 +30,13 @@ func TestTeam(t *testing.T) {
 		toolsets  []string
 		readFile  bool
 	}{
-		{"root", "openai", "gpt-6-1-sol", "gpt-6-1-sol", "medium", []string{"director", "engineer", "designer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
-		{"director", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"filesystem"}, true},
-		{"greppy", "openai", "gpt-6-1-sol", "gpt-6-1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"planner", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
-		{"engineer", "openai", "gpt-6-1-sol", "gpt-6-1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"root", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", []string{"director", "engineer", "designer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
+		{"director", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"filesystem"}, true},
+		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
+		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
 		{"designer", "anthropic", "claude-opus-5-5", "claude-opus-5-5", "adaptive/high", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"reviewer", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", nil, []string{"filesystem", "shell"}, false},
+		{"reviewer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
