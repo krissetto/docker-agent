@@ -22,6 +22,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/plans"
@@ -355,8 +356,8 @@ type appModel struct {
 	// defaultNewSessionDir, when non-empty, is the directory generic
 	// new-session actions (/new, Ctrl+T, the tab-bar and status-bar "+")
 	// spawn in instead of opening the working-directory picker. Set only
-	// when --working-dir was explicitly supplied on the CLI; a directory
-	// carried by the spawn request still wins.
+	// when --working-dir was explicitly supplied on the CLI outside a sandbox;
+	// a directory carried by the spawn request still wins.
 	defaultNewSessionDir string
 
 	// The independent panel shares canonical session data, not sidebar presentation.
@@ -462,10 +463,14 @@ func WithImageWriter(writer *tuiimage.Writer) Option {
 // WithDefaultWorkingDir makes generic new-session actions (/new, Ctrl+T,
 // the tab-bar and status-bar "+") spawn in dir instead of opening the
 // working-directory picker. A directory carried by the spawn request still
-// wins. Used when --working-dir was explicitly supplied on the CLI.
+// wins. Used when --working-dir was explicitly supplied on the CLI. Sandboxes
+// retain the picker: launchers supply this flag for the initial workspace,
+// not to disable choosing other directories visible inside the sandbox.
 func WithDefaultWorkingDir(dir string) Option {
 	return func(m *appModel) {
-		m.defaultNewSessionDir = dir
+		if !environment.InSandbox() {
+			m.defaultNewSessionDir = dir
+		}
 	}
 }
 
