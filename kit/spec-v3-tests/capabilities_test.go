@@ -1,6 +1,7 @@
 package specv3_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/docker/sandbox-kit-spec/v3/spec"
@@ -125,6 +126,49 @@ func TestCapabilityArity(t *testing.T) {
 			d.Capabilities = append(d.Capabilities, parse(t, capDocument(tc.typ, tc.second)).Capabilities...)
 			_, err := spec.Validate(d)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestWorkloadCredentialContract(t *testing.T) {
+	raw, err := os.ReadFile("../async-agent.yaml")
+	require.NoError(t, err)
+	d := parse(t, string(raw))
+	credentials, err := spec.CredentialsOfPhase(d.Capabilities, "runtime")
+	require.NoError(t, err)
+	require.Len(t, credentials, 4)
+	required := map[string]bool{}
+	for _, credential := range credentials {
+		required[credential.Service] = credential.Required
+		if credential.Service == "github" {
+			require.NotNil(t, credential.APIKey)
+			require.Equal(t, "GH_TOKEN", credential.APIKey.Name)
+			require.True(t, credential.APIKey.ProxyManaged)
+			require.Len(t, credential.APIKey.Inject, 2)
+		}
+	}
+	require.Equal(t, map[string]bool{"openai": true, "anthropic": true, "google": false, "github": false}, required)
+	install, err := spec.CredentialsOfPhase(d.Capabilities, "install")
+	require.NoError(t, err)
+	require.Empty(t, install)
+
+	for _, missing := range []string{"api.github.com", "github.com"} {
+		t.Run("missing runtime route "+missing, func(t *testing.T) {
+			d := parse(t, string(raw))
+			for i := range d.Capabilities {
+				if d.Capabilities[i].Type != spec.CapabilityNetworkPolicy {
+					continue
+				}
+				allow := []string{"api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com"}
+				for _, host := range []string{"api.github.com", "github.com"} {
+					if host != missing {
+						allow = append(allow, host)
+					}
+				}
+				d.Capabilities[i].Config = map[string]any{"runtime": map[string]any{"allow": allow}}
+			}
+			_, err := spec.Validate(d)
+			require.Error(t, err, "credential injection requires the matching runtime route")
 		})
 	}
 }

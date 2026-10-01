@@ -7,9 +7,9 @@ guidance come from the built-in harness.
 
 ## Run a published kit (consumer)
 
-You need an SBX installation supporting Kit v3 and the credentials for the
-providers you actually use configured in **SBX's host credential store**. The
-current source-built team uses services `openai` and `anthropic`; provider details
+You need an SBX installation supporting Kit v3 and credentials configured in
+**SBX's host credential store**. The current source-built kit declares `openai`
+and `anthropic` required, with `google` and `github` optional; setup details
 are listed below.
 You also need pull access if the kit is private. Do not put keys in the workspace,
 team YAML, build arguments, or image environment. The proxy retains real keys on
@@ -140,7 +140,7 @@ and tool restrictions:
   engineer and designer have filesystem, shell and todo; reviewer has filesystem
   and shell. Greppy and Planner keep discovery and analysis read-only.
 - Unused Anthropic and DMR model aliases (including a LAN base URL) are retained
-  from the supplied file. Current v3 supports the optional Anthropic host binding;
+  from the supplied file. Current v3 requires the Anthropic credential binding;
   DMR/local LAN connectivity still requires an explicitly reviewed host policy.
   Historical OpenAI-only immutable references are unchanged.
 
@@ -154,42 +154,127 @@ A `--model` override still takes precedence over models in the configuration.
 
 ## Provider credentials (v3)
 
-The current source-built v3 kit supports **only OpenAI, Anthropic and Google
-Gemini API credentials**. The engine itself still supports other providers,
-unchanged, but this kit does not grant their credentials or network access.
-Historical immutable references retain the policies with which they were built.
+The current source-built v3 kit supports **OpenAI, Anthropic and Google Gemini
+API credentials**, plus optional GitHub access for `gh` and HTTPS Git. The engine
+itself still supports other providers, unchanged, but this kit does not grant
+their credentials or network access. Historical immutable references retain the
+policies with which they were built; these changes require a new kit build.
 
-| Provider | Host service | Guest sentinel variable | Only allowed injection host | Header |
+| Service | Requirement | Guest sentinel variable | Exact injection hosts | Header |
 | --- | --- | --- | --- | --- |
-| OpenAI | `openai` | `OPENAI_API_KEY` | `api.openai.com` | `Authorization: Bearer %s` |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `api.anthropic.com` | `x-api-key: %s` |
-| Google Gemini | `google` | `GOOGLE_API_KEY` | `generativelanguage.googleapis.com` | `x-goog-api-key: %s` |
+| `openai` | Required | `OPENAI_API_KEY` | `api.openai.com` | `Authorization: Bearer %s` |
+| `anthropic` | Required | `ANTHROPIC_API_KEY` | `api.anthropic.com` | `x-api-key: %s` |
+| `google` | Optional | `GOOGLE_API_KEY` | `generativelanguage.googleapis.com` | `x-goog-api-key: %s` |
+| `github` | Optional | `GH_TOKEN` | `api.github.com`, `github.com` | `Authorization: Bearer %s` |
 
-All three credential capabilities are optional and proxy-managed. An unbound
-service can be skipped; this does **not** detect or automatically select the
-model's provider. Every service you bind is available in the sandbox. Bind only
-the services you need, preferably sandbox-scoped rather than globally, using
-`sbx secret set <service>` and your SBX version's interactive secret input and
-scoping options. The host retains real credentials; guest environment variables
-contain sentinels. Host environment variables are not imported automatically.
+All four credentials are runtime-only and proxy-managed. The host retains real
+credentials; guest environment variables contain sentinels, not usable secrets.
+Storing a secret and approving its domain binding are **separate steps**. This
+kit does not copy host environment variables, run guest login flows, or write
+credential files into the workspace or image.
 
-The current source-built team needs OpenAI for six agents and Anthropic for
-Designer. To override all seven agents with a single provider, use
-`--model anthropic/ACCESSIBLE_MODEL` or `--model google/ACCESSIBLE_MODEL` and bind
-that service. Google uses canonical `GOOGLE_API_KEY`; no duplicate
-`GEMINI_API_KEY` capability is needed. OpenAI's `openai_chatcompletions` and
-`openai_responses` API variants share the OpenAI binding.
+The current team needs OpenAI for six agents and Anthropic for Designer. Both
+credential declarations are required even when `--model` overrides every agent
+with one provider. Google and GitHub may be omitted independently; missing GitHub
+access does not prevent model use. Credential presence does not automatically
+select the model provider. Google uses canonical `GOOGLE_API_KEY`, not a duplicate
+`GEMINI_API_KEY` capability. OpenAI's `openai_chatcompletions` and
+`openai_responses` variants share the OpenAI binding.
+
+The v3 spec requires resolution to fail for an unsatisfied required credential.
+The inspected SBX implementation instead warns and permits launch without it;
+its proxy still withholds unapproved credentials. Do not treat successful startup
+as authentication proof: configure and approve both required model services.
+An optional unbound service supplies no authenticated access, even if a guest
+sentinel or its network routes are present.
 
 These declarations cover direct API credentials only—not ChatGPT/Copilot OAuth,
 Azure/custom endpoints, Bedrock SigV4/bearer tokens, Vertex ADC, Anthropic WIF,
-local DMR/Ollama connectivity, or OAuth refresh. No broad-provider extension
-examples are bundled. Supporting another mode requires a separately reviewed
-kit policy; do not work around proxy isolation by placing real keys in image
-environment variables, build arguments, or workspace files.
+local DMR/Ollama connectivity, or OAuth refresh. Supporting another mode requires
+a separately reviewed kit policy; never bypass proxy isolation with real keys in
+guest environment variables, build arguments, or workspace files.
 
-Schema and offline tests verify this exact three-service policy. They do not
-establish live SBX startup, proxy authentication, provider entitlement, or model
-behavior. No real provider credentials were read or used during validation.
+### Host secret setup and domain approval
+
+Use the **host** SBX CLI, with the same host user and `HOME`/`XDG_CONFIG_HOME`
+throughout. Prefer sandbox-scoped secrets. The following are setup instructions,
+not commands run during kit validation. Choose a fresh name and a published kit
+reference containing these changes (`KIT_REF`), plus an intended workspace:
+
+```sh
+NAME=async-agent-trial-2
+sbx secret set openai --sandbox "$NAME"
+sbx secret set anthropic --sandbox "$NAME"
+# Optional; omit when GitHub access is not wanted:
+sbx secret set github --sandbox "$NAME"
+sbx create --name "$NAME" "$KIT_REF" /path/to/workspace
+sbx run --name "$NAME"
+```
+
+`secret set` accepts masked interactive input, including before the named sandbox
+exists. Without `--sandbox`, secrets are global. To use an already authenticated
+**host** GitHub CLI as a dynamic source instead of entering a token:
+
+```sh
+sbx secret set github --sandbox "$NAME" \
+  --command 'gh auth token --hostname github.com'
+```
+
+SBX captures the command's output on the host; do not run it separately to print
+the token. The host `gh` executable and its configuration must remain outside
+sandbox-writable mounts. Avoid inline `--token` values, shell tracing, debug
+credential output, and storing tokens in this repository.
+
+Normal interactive creation reviews credential domain bindings. Approve only
+intended services and, for GitHub, exactly `api.github.com` and `github.com`.
+Stored secrets alone do not authorize injection. SBX persists approval in the
+**host** `$XDG_CONFIG_HOME/sbx/credentials.yaml` (default
+`~/.config/sbx/credentials.yaml`), separately from secret storage. Noninteractive
+creation needs approvals established beforehand; it is not an automatic grant.
+Declining Google or GitHub is supported. A missing required model binding can
+still allow launch in the inspected SBX, but model calls cannot use that secret.
+
+### GitHub CLI and HTTPS Git
+
+The pinned runtime base already includes `gh` and `git`; no new package or
+launcher login hook is needed. `GH_TOKEN` is the proxy sentinel used by `gh` and
+takes precedence over `GITHUB_TOKEN`. Leave `GH_HOST` unset or set it to
+`github.com`, **not** `api.github.com`. GitHub Enterprise hosts are outside this
+policy. Do not use guest `gh auth login`, `gh auth token`, `--show-token`,
+`GH_DEBUG=api`, or `gh auth setup-git` to export or persist credentials.
+
+REST and GraphQL use `api.github.com` (GraphQL is `/graphql`). Ordinary `gh`
+repository, issue and pull-request operations use the host token's permissions:
+select a least-privilege token with the required scopes, fine-grained repository
+grants, organization approval/SSO authorization and expiry for the intended work.
+Neither the kit nor a sentinel increases those permissions.
+
+For an operator's later checks, `gh api rate_limit` exercises API/proxy
+reachability but is public and **does not prove authentication**. Use a read-only
+operation on the intended permission-restricted repository, such as
+`gh api repos/OWNER/PRIVATE_REPO`, to check the actual grant. `gh auth status`
+can report failures for valid GitHub App/installation tokens because `/user`
+may return 403; its account, token-prefix and scope diagnostics cannot reliably
+describe the real host token behind a sentinel. Judge the intended operation,
+not status alone. No such live authenticated checks were performed here.
+
+Use credential-free HTTPS remotes, for example
+`https://github.com/OWNER/REPO.git`. The native proxy rewrites GitHub credentials
+on bare `github.com` to Basic `x-access-token:<host secret>` for HTTPS Git;
+the API uses Bearer auth. No guest token or credential helper setup is required.
+SSH remotes (`git@github.com:...`), SSH keys/agent forwarding and SSH bypass are
+not provided by this HTTP proxy policy.
+
+Only the two exact GitHub hosts above are allowed. Release uploads
+(`uploads.github.com`), archives (`codeload.github.com`), raw content, LFS or
+release-asset/CDN redirects may fail and need separately reviewed routes; do not
+add wildcard credential injection or send the GitHub token to redirected hosts.
+Copilot, GHCR and broad GitHub/CDN access are not included.
+
+Schema and offline policy tests verify the four services, requiredness, exact
+hosts and proxy-managed declarations. They do not establish live SBX startup,
+proxy authentication, provider entitlement, GitHub permissions or model behavior.
+No real provider/GitHub credentials were read or used during validation.
 
 ## Workspace and runtime boundaries
 
@@ -418,7 +503,7 @@ application/team/launcher hashes, and initialization without a model turn.
 The base digest supports linux/amd64 and linux/arm64.
 
 The offline fixtures cover all 14 m.5 capability types, alternative authoring
-forms, arguments and composition; the runnable workload uses four non-credential capabilities plus the optional provider bindings above.
+forms, arguments and composition; the runnable workload uses four non-credential capabilities plus the required and optional credentials above.
 Fixture validation is not runtime enforcement evidence. Run the separately
 pinned test module without adding the spec dependency to Docker Agent:
 
