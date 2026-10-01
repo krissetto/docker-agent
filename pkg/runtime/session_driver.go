@@ -88,6 +88,7 @@ type sessionDriver struct {
 	sess *session.Session
 
 	viewDormant bool
+	stoppedView bool
 
 	completionErr      error
 	persistenceFailure error
@@ -991,7 +992,7 @@ func (d *sessionDriver) beginReclaimLocked() bool {
 func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.reclaiming || d.stopped {
+	if d.reclaiming || (d.stopped && !d.stoppedView) {
 		return driverObservation{}
 	}
 	seed, live, cancel, cursor := d.events.SubscribeSequenced(d.sessionIDLocked(), since, buffer)
@@ -1039,6 +1040,7 @@ func (d *sessionDriver) stopAll(deleting bool) bool {
 	d.pauseCh = nil
 	d.pending = nil
 	d.stopped = true
+	d.stoppedView = false
 	d.resolveInteractionsLocked()
 	d.notifyTurnChangedLocked()
 	d.skillGeneration++
@@ -1074,6 +1076,20 @@ func (d *sessionDriver) stoppedAndSettled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.stopped && !d.running() && !d.starting() && !d.settling()
+}
+
+func (d *sessionDriver) stoppedViewReplaceable() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.stopped || d.running() || d.starting() || d.settling() || d.compactReserved || d.switchReserved || d.retryRunning || d.completionInFlight {
+		return false
+	}
+	select {
+	case <-d.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *sessionDriver) Settled() bool {

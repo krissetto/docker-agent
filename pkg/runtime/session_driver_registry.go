@@ -268,11 +268,16 @@ type restoreDriverReservation struct {
 	registry *sessionDriverRegistry
 	driver   *sessionDriver
 	id       string
+	replaces *sessionDriver
 }
 
 // PrepareRestore constructs a driver and resolves its model binding while it is
 // detached from global lookup, orphan adoption, pruning, and execution.
 func (g *sessionDriverRegistry) PrepareRestore(ctx context.Context, sess *session.Session) (*restoreDriverReservation, error) {
+	return g.prepareRestore(ctx, sess, nil)
+}
+
+func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *session.Session, replaces *sessionDriver) (*restoreDriverReservation, error) {
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "restore_prepare"}
 	}
@@ -297,13 +302,13 @@ func (g *sessionDriverRegistry) PrepareRestore(ctx context.Context, sess *sessio
 	}
 	d := newSessionDriver(g.r, sess)
 	d.SetModelBinding(modelRef, providers)
-	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID}
+	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID, replaces: replaces}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return nil, &SessionError{Kind: SessionErrorClosed, SessionID: sess.ID, Operation: "restore_prepare"}
 	}
-	if _, exists := g.drivers[sess.ID]; exists || g.reservations[sess.ID] != nil {
+	if g.drivers[sess.ID] != replaces || g.reservations[sess.ID] != nil || (replaces != nil && !replaces.stoppedViewReplaceable()) {
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "restore_collision"}
 	}
 	if _, deleted := g.deleted[sess.ID]; deleted {

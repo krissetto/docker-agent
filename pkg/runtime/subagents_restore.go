@@ -15,7 +15,7 @@ import (
 // driver, tree node or manager record is published, then commit the batch
 // atomically.
 
-func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.Durability) (subagent.Snapshot, error) {
+func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.Durability, records ...session.ChildRecord) (subagent.Snapshot, error) {
 	if snapshot.Version == 0 {
 		snapshot.Version = subagent.SnapshotVersion
 	}
@@ -25,11 +25,22 @@ func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.D
 	if snapshot.Durability == "" {
 		snapshot.Durability = durability
 	}
+	canonical := make(map[subagent.NodeID]subagent.NodeState, len(records))
+	for _, record := range records {
+		canonical[record.Node.ID] = record.Node.State
+	}
 	var normalize func([]subagent.NodeSnapshot, bool)
 	normalize = func(nodes []subagent.NodeSnapshot, ancestorStopped bool) {
 		for i := range nodes {
 			state := nodes[i].Node.State
-			nodeStopped := ancestorStopped || state == subagent.NodeStopped
+			inheritedStop := ancestorStopped
+			// Canonical stop is subtree-atomic; a later manual revival is node-local.
+			if stored, ok := canonical[nodes[i].Node.ID]; ok {
+				state = stored
+				nodes[i].Node.State = stored
+				inheritedStop = false
+			}
+			nodeStopped := inheritedStop || state == subagent.NodeStopped
 			if nodeStopped {
 				nodes[i].Node.State = subagent.NodeStopped
 			} else if state == subagent.NodeStarting || state == subagent.NodeRunning {
@@ -58,7 +69,7 @@ func (m *subagentManager) Restore(ctx context.Context, sess *session.Session, sn
 	if err != nil {
 		return subagent.Snapshot{}, err
 	}
-	normalized, err := normalizeRestoredSnapshot(canonical, m.storeDurability())
+	normalized, err := normalizeRestoredSnapshot(canonical, m.storeDurability(), records...)
 	if err != nil {
 		return subagent.Snapshot{}, err
 	}
@@ -197,34 +208,30 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 			}
 			state := node.State
 			var childAgent *agent.Agent
-			if ancestorStopped || state == subagent.NodeStopped {
+			activeName := node.Agent
+			if childSess != nil && childSess.AgentName != "" {
+				activeName = childSess.AgentName
+			}
+			candidate, resolveErr := m.r.team.Agent(activeName)
+			allowedAgent := false
+			for _, ref := range allowed {
+				if ref.Agent == node.Agent {
+					allowedAgent = true
+					break
+				}
+			}
+			invalid := ancestorStopped || resolveErr != nil || !allowedAgent || childSess == nil
+			if invalid {
 				state = subagent.NodeStopped
 			} else {
-				activeName := node.Agent
-				if childSess != nil && childSess.AgentName != "" {
-					activeName = childSess.AgentName
-				}
-				candidate, resolveErr := m.r.team.Agent(activeName)
-				if resolveErr == nil {
-					childAgent = candidate
-				}
-				allowedAgent := false
-				for _, ref := range allowed {
-					if ref.Agent == node.Agent {
-						allowedAgent = true
-						break
-					}
-				}
-				if resolveErr != nil || !allowedAgent || childSess == nil {
-					state = subagent.NodeStopped
-					childAgent = nil
-				} else if state != subagent.NodeFailed {
+				childAgent = candidate
+				if state != subagent.NodeFailed && state != subagent.NodeStopped {
 					state = subagent.NodeIdle
 				}
 			}
 			entry := &restoredNode{snapshot: snap, parentSessionID: parentSessionID, parentSess: parentSess, childSess: childSess, childAgent: childAgent, state: state}
 			prepared = append(prepared, entry)
-			if err := walk(snap.Children, node.SessionID, childSess, childAgent, state == subagent.NodeStopped); err != nil {
+			if err := walk(snap.Children, node.SessionID, childSess, childAgent, invalid); err != nil {
 				return err
 			}
 		}

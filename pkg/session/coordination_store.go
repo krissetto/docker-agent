@@ -14,12 +14,13 @@ import (
 var ErrRevisionConflict = errors.New("child revision conflict")
 
 type ChildRecord struct {
-	RootSessionID   string
-	ParentSessionID string
-	Node            subagent.Node
-	Revision        uint64
-	LastTurnID      string
-	Result          string
+	RootSessionID      string
+	ParentSessionID    string
+	Node               subagent.Node
+	Revision           uint64
+	LastTurnID         string
+	ReactivationTurnID string
+	Result             string
 }
 
 type ChildAdmission struct {

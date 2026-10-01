@@ -177,7 +177,13 @@ func (m *model) attachSubagentViewer(ctx context.Context, id string) {
 	if resolved, found := lookup.SubagentNodeForSession(id); found {
 		nodeID = resolved
 	}
-	info, ok := lookup.SubagentAttachInfo(nodeID)
+	resolve := lookup.SubagentAttachInfo
+	if reader, ok := m.app.Runtime().(interface {
+		SubagentViewInfo(subagent.NodeID) (runtime.SubagentAttachInfo, bool)
+	}); ok {
+		resolve = reader.SubagentViewInfo
+	}
+	info, ok := resolve(nodeID)
 	if !ok || info.Session == nil {
 		m.reportCapability("That subagent is no longer available to open.", nil)
 		return
@@ -196,10 +202,37 @@ func (m *model) attachSubagentViewer(ctx context.Context, id string) {
 			return
 		}
 	}
+	if m.sessionViews != nil {
+		m.acquireSessionView(ctx, info.Session.ID)
+		return
+	}
 	binding := runtime.SessionBinding{AgentName: info.Agent, Model: info.Session.AgentModelOverrides[info.Agent]}
 	viewerCtx, cancel := context.WithCancel(m.viewers.ctx())
-	application := app.New(viewerCtx, m.app.SessionRuntime(), info.Session, binding,
-		app.WithRuntimeServices(m.app.Runtime()), app.WithSubagentAttach(info))
+	var application *app.App
+	if preparer, ok := m.app.SessionRuntime().(runtime.SessionViewPreparer); ok {
+		prepared, err := preparer.PrepareSessionView(viewerCtx, info.Session.ID)
+		if err != nil {
+			cancel()
+			m.reportCapability(nil, err)
+			return
+		}
+		defer prepared.Abort()
+		committed, err := prepared.Commit(viewerCtx)
+		if err != nil {
+			cancel()
+			m.reportCapability(nil, err)
+			return
+		}
+		application, err = app.NewResolvedFromTemplate(viewerCtx, m.app.SessionRuntime(), committed, m.app)
+		if err != nil {
+			cancel()
+			m.reportCapability(nil, err)
+			return
+		}
+	} else {
+		application = app.New(viewerCtx, m.app.SessionRuntime(), info.Session, binding,
+			app.WithRuntimeServices(m.app.Runtime()), app.WithSubagentAttach(info))
+	}
 	if application.SessionHandle() == nil {
 		cancel()
 		m.reportCapability("The runtime could not resolve the subagent session handle.", nil)

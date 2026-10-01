@@ -87,6 +87,10 @@ func (s *viewerLifecycleLocalServices) SubagentAttachInfo(id subagent.NodeID) (r
 	return s.local.SubagentAttachInfo(id)
 }
 
+func (s *viewerLifecycleLocalServices) SubagentViewInfo(id subagent.NodeID) (runtime.SubagentAttachInfo, bool) {
+	return s.local.SubagentViewInfo(id)
+}
+
 func (s *viewerLifecycleLocalServices) SubagentNodeForSession(id string) (subagent.NodeID, bool) {
 	return s.local.SubagentNodeForSession(id)
 }
@@ -647,3 +651,46 @@ var (
 	_ app.Services         = (*viewerLifecycleLocalServices)(nil)
 	_ subagentViewerLookup = (*viewerLifecycleLocalServices)(nil)
 )
+
+func TestViewerLifecycleStoppedAttachRequiresFreshManualInput(t *testing.T) {
+	f := newViewerLifecycleFixture(t)
+	store := f.local.SessionStore()
+	records, err := store.(session.CoordinationStore).LoadChildren(t.Context(), f.root.Session().ID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	record := records[0]
+	record.Node.State = subagent.NodeStopped
+	require.NoError(t, store.(session.CoordinationStore).CommitChild(t.Context(), session.ChildCommit{ExpectedRevision: record.Revision, Record: record}))
+	// A cold runtime exercises the picker route without touching a terminal.
+	require.NoError(t, f.owner.Shutdown(t.Context()))
+	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
+		agent.New("root", "fixture root", agent.WithModel(&viewerLifecycleProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
+		agent.New("worker", "fixture worker", agent.WithModel(f.provider)),
+	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(f.root.Session().WorkingDir))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(local)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	f.local, f.owner, f.borrowed = local, owner, owner.Runtime()
+	f.services.local = local
+	root, err := store.GetSession(t.Context(), f.root.Session().ID)
+	require.NoError(t, err)
+	prepared, err := f.borrowed.(runtime.SessionViewPreparer).PrepareSessionView(t.Context(), root.ID)
+	require.NoError(t, err)
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	application, err := app.NewResolved(t.Context(), f.borrowed, committed, app.WithRuntimeServices(f.services))
+	require.NoError(t, err)
+	f.m.app, f.root = application, application
+	f.m.subscribeViewer(t.Context(), application)
+	childApp := f.attach(t, string(f.node))
+	assert.Empty(t, f.provider.calls)
+	require.NotNil(t, childApp.AttachedSubagent())
+	_, err = childApp.SessionHandle().Retry(t.Context())
+	require.Error(t, err)
+	submission, err := childApp.SessionHandle().Submit(t.Context(), runtime.TurnInput{Content: "manual revival"})
+	require.NoError(t, err)
+	call := viewerLifecycleNextCall(t, f.provider)
+	call.reply <- "revived response"
+	require.NoError(t, childApp.SessionHandle().AwaitTurn(t.Context(), submission.TurnID))
+	assert.Empty(t, f.provider.calls)
+}

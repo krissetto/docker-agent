@@ -609,7 +609,19 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 	commits := make([]session.ChildCommit, 0, len(stopped))
 	for _, child := range stopped {
 		if child.durable.Node.State == subagent.NodeStopped {
-			continue
+			// Repeated stop fences a prepared or published manual-view capability.
+			g := m.r.sessionDrivers
+			g.mu.Lock()
+			hasView := g.reservations[child.sessionID] != nil
+			if driver := g.drivers[child.sessionID]; driver != nil {
+				driver.mu.Lock()
+				hasView = hasView || driver.stoppedView
+				driver.mu.Unlock()
+			}
+			g.mu.Unlock()
+			if !hasView {
+				continue
+			}
 		}
 		record := child.durable
 		record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
@@ -1164,11 +1176,20 @@ type SubagentAttachInfo struct {
 // it as read-only. ok is false for unknown ids or subagents without a
 // session (failed spawns, unresumable restores).
 func (r *LocalRuntime) SubagentAttachInfo(id subagent.NodeID) (SubagentAttachInfo, bool) {
+	return r.subagentAttachInfo(id, true)
+}
+
+// SubagentViewInfo resolves presentation identity without restoring execution.
+func (r *LocalRuntime) SubagentViewInfo(id subagent.NodeID) (SubagentAttachInfo, bool) {
+	return r.subagentAttachInfo(id, false)
+}
+
+func (r *LocalRuntime) subagentAttachInfo(id subagent.NodeID, initialize bool) (SubagentAttachInfo, bool) {
 	rec, ok := r.subagents.Read(id)
 	if !ok {
 		return SubagentAttachInfo{}, false
 	}
-	if rec.state != subagent.NodeStopped {
+	if initialize && rec.state != subagent.NodeStopped {
 		if err := r.subagents.ensureChildDriver(r.ctx(), id); err != nil {
 			return SubagentAttachInfo{}, false
 		}

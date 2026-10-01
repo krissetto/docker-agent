@@ -625,6 +625,15 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 		return Submission{}, err
 	}
 	msg.RequestID = requestID
+	if operation == "submit" && !input.Retry {
+		if handled, err := h.reactivateStoppedView(ctx, msg); handled {
+			if err != nil {
+				return Submission{}, err
+			}
+			h.driver.WakePending()
+			return Submission{SessionID: h.sessionID, TurnID: requestID}, nil
+		}
+	}
 	queued, err := h.driver.post(ctx, msg, true)
 	if err != nil {
 		var sessionErr *SessionError

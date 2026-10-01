@@ -169,7 +169,7 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 	}
 	p.records = records
 	if len(canonical.Nodes) != 0 {
-		p.snapshot, err = normalizeRestoredSnapshot(canonical, r.sessionDurability())
+		p.snapshot, err = normalizeRestoredSnapshot(canonical, r.sessionDurability(), records...)
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +189,7 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 			if entry.snapshot.Node.SessionID != id {
 				continue
 			}
-			if entry.childSess == nil || entry.childAgent == nil || entry.state == subagent.NodeStopped || entry.parentSessionID != selected.ParentID || entry.snapshot.Node.Agent != selectedAgent {
+			if entry.childSess == nil || entry.childAgent == nil || entry.parentSessionID != selected.ParentID || entry.snapshot.Node.Agent != selectedAgent {
 				return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
 			}
 			p.info.Attach = &SubagentAttachInfo{NodeID: entry.snapshot.Node.ID, Agent: selectedAgent, Name: entry.snapshot.Node.DisplayName(), Session: selected.Clone(), ParentSessionID: entry.parentSessionID, ParentAgent: entry.parentSess.AgentName}
@@ -222,9 +222,11 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 	defer m.restoreMu.Unlock()
 	m.transitionMu.Lock()
 	defer m.transitionMu.Unlock()
+	stopped := make(map[string]bool)
 	candidates := []*session.Session{p.root}
 	for _, entry := range p.nodes {
-		if entry.childSess != nil && entry.childAgent != nil && entry.state != subagent.NodeStopped {
+		if entry.childSess != nil && entry.childAgent != nil && (entry.state != subagent.NodeStopped || entry.childSess.ID == id) {
+			stopped[entry.childSess.ID] = entry.state == subagent.NodeStopped
 			candidates = append(candidates, entry.childSess)
 		}
 	}
@@ -233,24 +235,35 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 			p.discard()
 			return nil, err
 		}
+		var replaces *sessionDriver
 		if existing, ok := g.Lookup(candidate.ID); ok {
 			existing.mu.Lock()
-			valid := !existing.stopped && existing.sess != nil && existing.sess.ParentID == candidate.ParentID && existing.AgentNameLocked() == candidate.AgentName
+			identityMatches := existing.sess != nil && existing.sess.ParentID == candidate.ParentID && existing.AgentNameLocked() == candidate.AgentName
+			valid := identityMatches && (!existing.stopped || (stopped[candidate.ID] && existing.stoppedView))
 			existing.mu.Unlock()
-			if !valid {
+			if !valid && identityMatches && stopped[candidate.ID] && existing.stoppedViewReplaceable() {
+				replaces = existing
+			} else if !valid {
 				p.discard()
 				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: candidate.ID, Operation: "prepare_view"}
 			}
-			p.existing[candidate.ID] = existing
-			continue
+			if replaces == nil {
+				p.existing[candidate.ID] = existing
+				continue
+			}
 		}
-		reservation, err := g.PrepareRestore(p.ctx(), candidate)
+		reservation, err := g.prepareRestore(p.ctx(), candidate, replaces)
 		if err != nil {
 			p.discard()
 			return nil, err
 		}
 		reservation.driver.mu.Lock()
 		reservation.driver.viewDormant = true
+		if stopped[candidate.ID] {
+			reservation.driver.stopped = true
+			reservation.driver.stoppedView = true
+			reservation.driver.pending = nil
+		}
 		reservation.driver.mu.Unlock()
 		p.reservations = append(p.reservations, reservation)
 	}
@@ -279,17 +292,29 @@ func (p *preparedSessionView) validateRegistryLocked() error {
 		if g.drivers[id] != expected {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: id, Operation: "commit_view"}
 		}
+		expected.mu.Lock()
+		invalidated := expected.stopped && !expected.stoppedView
+		expected.mu.Unlock()
+		if invalidated {
+			return ErrSessionStopped
+		}
 	}
 	for _, reservation := range p.reservations {
 		if _, deleted := g.deleted[reservation.id]; deleted {
 			return ErrSessionStopped
 		}
-		if g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != nil {
+		if g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != reservation.replaces {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: reservation.id, Operation: "commit_view"}
 		}
 	}
+	additional := 0
+	for _, reservation := range p.reservations {
+		if reservation.replaces == nil {
+			additional++
+		}
+	}
 	limit := g.maxSessionsLocked()
-	if limit == 0 || (limit > 0 && len(g.drivers)+len(p.reservations) > limit) {
+	if limit == 0 || (limit > 0 && len(g.drivers)+additional > limit) {
 		return &SessionError{Kind: SessionErrorCapacity, Operation: "commit_view", Reason: SessionErrorReasonLimit, Limit: limit}
 	}
 	return nil
@@ -337,6 +362,16 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	m, g := p.r.subagents, p.r.sessionDrivers
 	m.restoreMu.Lock()
 	defer m.restoreMu.Unlock()
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	for _, record := range p.records {
+		if current := m.children[record.Node.ID]; current != nil && current.durable.Revision != record.Revision {
+			m.mu.Unlock()
+			return CommittedSessionView{}, &SessionError{Kind: SessionErrorConflict, SessionID: record.Node.SessionID, Operation: "commit_view"}
+		}
+	}
+	m.mu.Unlock()
 	g.mu.Lock()
 	err := p.validateRegistryLocked()
 	g.mu.Unlock()
@@ -477,7 +512,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	}
 	for _, entry := range p.nodes {
 		node := entry.snapshot.Node
-		if _, exists := m.children[node.ID]; exists {
+		if _, exists := m.children[node.ID]; exists && byID[node.SessionID] == nil {
 			continue
 		}
 		parentAgent := ""
@@ -491,10 +526,15 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 			record.unwatch = driver.OnStarted(func() { m.markChildRunning(id) })
 			m.sessions[node.SessionID] = &sessionSubagents{node: node.ID}
 		}
+		if old := m.children[node.ID]; old != nil && old.unwatch != nil {
+			old.unwatch()
+		}
 		m.children[node.ID] = record
 	}
 	for _, reservation := range p.reservations {
-		reservation.driver.adopt(g.orphans[reservation.id])
+		if !reservation.driver.stoppedView {
+			reservation.driver.adopt(g.orphans[reservation.id])
+		}
 		g.drivers[reservation.id] = reservation.driver
 		delete(g.orphans, reservation.id)
 		delete(g.reservations, reservation.id)
