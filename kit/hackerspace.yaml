@@ -264,7 +264,7 @@ models:
 
 agents:
   root:
-    model: gpt-6.1-sol
+    model: gpt-6.1-sol-high
     description: Front counter bot for an engineering-focused makerspace
     welcome_message: yo, shelly here.
     instruction: |
