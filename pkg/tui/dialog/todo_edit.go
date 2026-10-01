@@ -246,8 +246,13 @@ func (d *todoEditDialog) prepareLayout() {
 	if d.saveError != "" {
 		d.inputRow = lipgloss.Height(styles.DialogContentStyle.Width(d.BodyContentWidth(width)).Render(d.saveError + "\nCtrl+R reloads the current description for retry; draft retained."))
 	}
-	d.input.SetSize(d.BodyContentWidth(width), max(1, d.Height()-d.inputRow))
-	width, header, body, footer := d.content()
+	// Measure at the final width without temporarily shrinking the cursor viewport.
+	d.input.SetSize(d.BodyContentWidth(width), max(d.input.SurfaceHeight(), 3+styles.EditorStyle.GetVerticalFrameSize()))
+	height := max(3, d.input.ContentLineCount()) + d.input.Frame().GetVerticalFrameSize()
+	width, header, _, footer := d.content()
+	// Allocate rows before resizing the editor, so a temporary oversized viewport
+	// cannot shift its scroll offset on every keystroke or wheel event.
+	body := strings.Repeat("\n", max(0, min(height+d.inputRow, d.Height())-1))
 	d.PrepareScrollableBody(styles.DialogStyle, width, header, body, footer)
 	d.input.SetSize(d.BodyContentWidth(width), max(1, d.bodyScroll.VisibleHeight()-d.inputRow))
 	width, header, body, footer = d.content()
