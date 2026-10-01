@@ -125,7 +125,7 @@ func (c *SidebarComponent) TodoByID(id string) (todo.Todo, bool) {
 
 func (c *SidebarComponent) ControlsAtLine(line int) bool {
 	c.RenderBody()
-	return RightActions(c.width, true).Remove >= 0 && line >= 0 && line < len(c.lineOffsets) && c.lineOffsets[line] == 0
+	return line >= 0 && line < len(c.lineOffsets) && c.lineOffsets[line] == 0
 }
 
 func (c *SidebarComponent) OffsetAtLine(line int) int {

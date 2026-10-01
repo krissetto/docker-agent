@@ -132,12 +132,31 @@ func (a RowActions) Render(text, status string, first bool) string {
 	return text + " " + styles.MutedStyle.Render("✎ ×")
 }
 
+// SidebarActions overlays edit/remove on the first line without reserving text width.
+func SidebarActions(width int) RowActions {
+	width = max(1, width)
+	prefix := min(2, width-1)
+	a := RowActions{Width: width, TextWidth: width - prefix, Status: -1, Edit: -1, Remove: -1}
+	if prefix > 0 {
+		a.Status = 0
+	}
+	if width >= 8 {
+		a.Edit, a.Remove = width-3, width-1
+	}
+	return a
+}
+
 func sidebarRowLines(description, status string, width int) []string {
-	a := RightActions(width, true)
+	a := SidebarActions(width)
+	prefix := a.Width - a.TextWidth
 	wrapped := strings.Split(ansi.Hardwrap(ansi.Wordwrap(ansi.Strip(strings.ReplaceAll(description, "\r", "")), a.TextWidth, ""), a.TextWidth, true), "\n")
 	rows := make([]string, len(wrapped))
 	for i, line := range wrapped {
-		rows[i] = a.Render(Description(ansi.Truncate(line, a.TextWidth, ""), status, false), status, i == 0)
+		lead := strings.Repeat(" ", prefix)
+		if i == 0 && a.Status >= 0 {
+			lead = StatusIcon(status) + strings.Repeat(" ", prefix-1)
+		}
+		rows[i] = lead + Description(ansi.Truncate(line, a.TextWidth, ""), status, false)
 	}
 	return rows
 }

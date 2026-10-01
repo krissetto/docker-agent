@@ -99,8 +99,9 @@ func TestRenderBodyUnheadedWidthAndThemeCache(t *testing.T) {
 	c.SetSize(40)
 	require.NoError(t, c.SetTodos(todoResult("alpha task")))
 	body := c.RenderBody()
-	assert.Equal(t, "alpha task", strings.TrimSpace(ansi.Strip(ansi.Cut(body, 0, 34))))
-	assert.Equal(t, "○ ✎ ×", ansi.Strip(ansi.Cut(body, 35, 40)))
+	assert.Equal(t, "alpha task", strings.TrimSpace(ansi.Strip(ansi.Cut(body, 2, 40))))
+	assert.Equal(t, "○ ", ansi.Strip(ansi.Cut(body, 0, 2)))
+	assert.NotContains(t, ansi.Strip(body), "✎")
 	assert.NotContains(t, body, "TO-DO")
 	assert.Contains(t, c.Render(), "TO-DO")
 	assert.Equal(t, body, c.RenderBody())
@@ -203,6 +204,34 @@ func TestSidebarRightActionsPaintAndHitContract(t *testing.T) {
 			if i > 0 {
 				require.NotContains(t, ansi.Strip(row), "✎")
 				require.NotContains(t, ansi.Strip(row), "×")
+			}
+		}
+	}
+}
+
+func TestSidebarTodoUsesFullDescriptionWidthAndLeftStatus(t *testing.T) {
+	for width := 1; width <= 80; width++ {
+		for _, status := range []string{"pending", "in-progress", "completed"} {
+			a := SidebarActions(width)
+			prefix := width - a.TextWidth
+			description := strings.Repeat("x", a.TextWidth) + "\n世界 é 👩‍💻 continuation"
+			rows := sidebarRowLines(description, status, width)
+			require.Equal(t, width, ansi.StringWidth(rows[0]), "idle description reaches the rightmost cell without a command gutter")
+			require.Equal(t, strings.Repeat("x", a.TextWidth), ansi.Strip(ansi.Cut(rows[0], prefix, width)))
+			if a.Status >= 0 {
+				require.Equal(t, ansi.Strip(StatusIcon(status)), ansi.Strip(ansi.Cut(rows[0], a.Status, a.Status+1)))
+				require.Equal(t, "status", a.PartAt(a.Status, true))
+			}
+			for i, row := range rows {
+				require.LessOrEqual(t, ansi.StringWidth(row), width)
+				require.NotContains(t, ansi.Strip(row), "✎")
+				require.NotContains(t, ansi.Strip(row), "×")
+				if i > 0 {
+					require.Equal(t, strings.Repeat(" ", prefix), ansi.Strip(ansi.Cut(row, 0, prefix)), "continuation aligns with description, not status")
+					for col := range width {
+						require.Equal(t, "text", a.PartAt(col, false))
+					}
+				}
 			}
 		}
 	}

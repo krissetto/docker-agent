@@ -43,6 +43,9 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 		m.invalidateHover()
 	}
 	part := actions.PartAt(localX, controls)
+	if (part == "edit" || part == "remove") && m.hoverValues["todo:"+item.ID+":row"].value <= 0 {
+		part = "text"
+	}
 	if part == "remove" {
 		if m.todoRemoveArmed != item.ID {
 			m.todoRemoveArmed = item.ID

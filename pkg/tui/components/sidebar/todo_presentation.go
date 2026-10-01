@@ -27,7 +27,10 @@ func (m *model) todoSummary(width int) string {
 
 func rowActions(width int, todo bool) (int, todotool.RowActions) {
 	indent := min(2, max(0, width-1))
-	return indent, todotool.RightActions(width-indent, todo)
+	if todo {
+		return indent, todotool.SidebarActions(width - indent)
+	}
+	return indent, todotool.RightActions(width-indent, false)
 }
 
 func (m *model) todoHoverKey(row placedRow, col int) string {
@@ -40,8 +43,11 @@ func (m *model) todoHoverText(row placedRow) string {
 }
 
 func (m *model) actionRowText(text, base string, first, todo, armed bool) string {
+	if todo {
+		return m.todoRowText(text, base, first, armed)
+	}
 	width := m.contentWidth(m.cachedNeedsScrollbar)
-	indent, actions := rowActions(width, todo)
+	indent, actions := rowActions(width, false)
 	if (!first || actions.Remove < 0) && m.hoverValues[base+"text"].value == 0 {
 		return text
 	}
@@ -71,4 +77,23 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 	}
 	out.WriteString(ansi.Cut(text, end, width))
 	return out.String()
+}
+
+func (m *model) todoRowText(text, base string, first, armed bool) string {
+	width := m.contentWidth(m.cachedNeedsScrollbar)
+	_, actions := rowActions(width, true)
+	progress := m.hoverValues[base+"row"].value
+	text = styles.HoverText(text, progress, styles.TextPrimary)
+	if !first || actions.Remove < 0 || progress <= 0 {
+		return text
+	}
+	// Only paint is occluded: wrapping, canonical text and continuation rows stay intact.
+	text = padRight(ansi.Truncate(text, width-4, "…"), width-4)
+	edit := styles.HoverText(styles.MutedStyle.Render("✎"), m.hoverValues[base+"edit"].value, styles.TextPrimary)
+	remove := styles.MutedStyle.Render("×")
+	if armed {
+		remove = styles.ErrorStyle.Render("×")
+	}
+	remove = styles.HoverText(remove, m.hoverValues[base+"remove"].value, styles.TextPrimary)
+	return text + " " + hoverAction(edit, progress) + " " + hoverAction(remove, progress)
 }
