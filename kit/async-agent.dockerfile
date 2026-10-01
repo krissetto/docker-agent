@@ -52,8 +52,9 @@ ARG ASYNC_AGENT_KIT_VERSION="0.1.0"
 LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION
 USER root
 COPY --from=builder --chmod=0755 /docker-agent /opt/async-agent/docker-agent
-COPY --from=task --chmod=0755 /task/task /usr/local/bin/task
-COPY --from=task --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
+COPY --from=task --chown=root:root --chmod=0755 /task/task /usr/local/bin/task
+RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task
+COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
 RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent
