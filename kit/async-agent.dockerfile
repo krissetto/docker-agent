@@ -29,11 +29,31 @@ xx-go build -trimpath -tags no_audio -ldflags "-s -w -linkmode=external -X githu
 xx-verify --static /docker-agent
 EOF_BUILD
 
+FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS task
+RUN apk add --no-cache curl
+WORKDIR /task
+ARG TARGETOS TARGETARCH
+# SHA256 pins from go-task/task v3.53.1's task_checksums.txt.
+RUN <<EOF_TASK
+set -eux
+test "$TARGETOS" = linux
+case "$TARGETARCH" in
+    amd64) checksum=a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7 ;;
+    arm64) checksum=e3ad19101493a0112e1f22ae8ccc54bf03e533b1076a0ca1e6c782a09ad2e588 ;;
+    *) echo "Unsupported Task architecture: $TARGETARCH" >&2; exit 1 ;;
+esac
+curl --fail --silent --show-error --location "https://github.com/go-task/task/releases/download/v3.53.1/task_linux_${TARGETARCH}.tar.gz" -o task.tar.gz
+printf '%s  task.tar.gz\n' "$checksum" | sha256sum -c -
+tar -xzf task.tar.gz task LICENSE
+EOF_TASK
+
 FROM docker/sandbox-templates:shell-docker@sha256:5fc81bc7a127e59d81b244a06831ae3212a0310b2e5a0349c54e29249e45e919 AS runtime
 ARG ASYNC_AGENT_KIT_VERSION="0.1.0"
 LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION
 USER root
 COPY --from=builder --chmod=0755 /docker-agent /opt/async-agent/docker-agent
+COPY --from=task --chmod=0755 /task/task /usr/local/bin/task
+COPY --from=task --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
 RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent

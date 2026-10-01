@@ -223,6 +223,13 @@ behavior. No real provider credentials were read or used during validation.
 - The base includes the agent user (UID 1000), bash, git and CA store, plus
   inherited Docker-in-Docker overhead despite this team not requiring MCP.
   Ensure the agent user can write the trial workspace.
+- Current source builds bundle the Go [Task runner](https://taskfile.dev/)
+  **3.53.1** at `/usr/local/bin/task`, on the agent user's PATH, for both
+  `linux/amd64` and `linux/arm64`. Official release archives are downloaded only
+  while building and verified against pinned SHA256 checksums from
+  [the upstream release](https://github.com/go-task/task/releases/download/v3.53.1/task_checksums.txt).
+  No runtime installation or Go toolchain is required to run `task --version`
+  or workspace Taskfiles. Existing sandboxes and historical images are unchanged.
 - This is one v3 workload; do not combine it with the built-in Docker Agent kit.
 
 ## Maintainers: build and publish
@@ -286,8 +293,8 @@ leave the local outputs available for inspection.
 All kit definitions, runtime assets, documentation and tests live in `kit/`.
 The `kit/async-agent.yaml` file is the v3 descriptor. Its ordinary companion
 `kit/async-agent.dockerfile` compiles Linux statically (`no_audio`, `xx-verify
---static`) and installs the custom binary, `hackerspace.yaml`, `launch.sh` and
-initial `user-config.yaml`.
+--static`) and installs the custom binary, `hackerspace.yaml`, `launch.sh`,
+initial `user-config.yaml`, and the checksum-pinned Task executable and license.
 
 ### Local source builds
 
