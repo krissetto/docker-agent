@@ -89,7 +89,7 @@ func (m *model) decoratePane(lines []string, width int) {
 	}
 }
 
-// Insert at most one row between semantic blocks, only when the viewport has room.
+// Keep semantic blocks spaced; the viewport scrolls rather than squeezing them.
 func (m *model) addBreathingRows(lines []string, boundaries []int) []string {
 	offsets := make(map[int]int, len(boundaries))
 	for _, row := range boundaries {

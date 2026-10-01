@@ -2335,9 +2335,7 @@ func (m *model) renderSections(contentWidth int) []string {
 		m.todoEnd = len(lines)
 	}
 
-	if m.viewportHeight() >= 12 && m.treeSectionStart+len(breathingBefore)+1 <= m.viewportHeight() {
-		lines = m.addBreathingRows(lines, breathingBefore)
-	}
+	lines = m.addBreathingRows(lines, breathingBefore)
 	m.decoratePane(lines, contentWidth)
 	return lines
 }

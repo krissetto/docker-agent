@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -261,33 +262,79 @@ func TestCollapsedPaneYoloAndModelHoverClickParity(t *testing.T) {
 	}
 }
 
-func TestPaneBreathingRowsYieldToSmallHeights(t *testing.T) {
+func TestPaneBreathingRowsStableAcrossHeights(t *testing.T) {
 	t.Parallel()
-	m := newVisibilityTestSidebar(t).model
-	m.SetSize(50, 30)
-	roomy := m.renderSections(49)
-	require.Empty(t, roomy[m.usageReadingLine-1])
-	require.Empty(t, roomy[m.agentIdentityRow-1], "identity/model block has breathing room below usage")
-	require.Equal(t, m.usageSectionEnd+1, m.agentIdentityRow, "exactly one affordable row separates usage from identity")
-	require.Equal(t, "root", ansi.Strip(roomy[m.agentIdentityRow]))
-	require.Equal(t, m.agentIdentityRow+1, m.modelStart, "model immediately follows canonical identity")
-	require.Contains(t, ansi.Strip(roomy[m.modelStart]), "gpt-4")
-	require.Contains(t, ansi.Strip(roomy[m.modelStart+1]), "openai")
-	assert.Empty(t, m.subagentHoverZone, "empty tree contributes no summary or spacer")
-	m.SetSize(50, 5)
-	compact := m.renderSections(49)
-	for _, line := range compact {
-		assert.NotEmpty(t, strings.TrimSpace(ansi.Strip(line)), "small viewports spend rows on content")
+	for _, gap := range []int{0, messages.SpacingCompact.BlankLines(), messages.SpacingNormal.BlankLines(), messages.SpacingRelaxed.BlankLines()} {
+		t.Run(strconv.Itoa(gap), func(t *testing.T) {
+			m := newVisibilityTestSidebar(t).model
+			m.SetSectionGap(gap)
+			m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "next request"}})
+			m.SetSubagentTree(collapseFixture())
+			require.NoError(t, m.SetTodos(makeTodos(1)))
+			m.SetSize(50, 50)
+			roomy := m.renderSections(49)
+			require.Empty(t, roomy[m.usageReadingLine-1])
+			require.Equal(t, m.usageSectionEnd+1, m.agentIdentityRow, "one row separates usage from identity")
+			require.Equal(t, "root", ansi.Strip(roomy[m.agentIdentityRow]))
+			require.Equal(t, m.agentIdentityRow+1, m.modelStart)
+			require.Contains(t, ansi.Strip(roomy[m.modelStart]), "gpt-4")
+			require.Contains(t, ansi.Strip(roomy[m.modelStart+1]), "openai")
+			anchors := []int{m.workingDirRow, m.usageReadingLine, m.usageSectionEnd, m.agentIdentityRow, m.modelStart, m.modelEnd, m.queueStart, m.queueEnd, m.summaryLine, m.todoSummaryLine, m.todoEnd}
+			for _, height := range []int{14, 13, 12, 5, 3, 2, 1, 0, 50} {
+				m.SetSize(50, height)
+				assert.Equal(t, roomy, m.renderSections(49), "height %d preserves content spacing for gap %d", height, gap)
+				assert.Equal(t, anchors, []int{m.workingDirRow, m.usageReadingLine, m.usageSectionEnd, m.agentIdentityRow, m.modelStart, m.modelEnd, m.queueStart, m.queueEnd, m.summaryLine, m.todoSummaryLine, m.todoEnd})
+				assert.Equal(t, gap, m.sectionGap)
+			}
+		})
 	}
-	for row, name := range m.agentClickZones {
-		assert.Contains(t, ansi.Strip(compact[row]), name)
+}
+
+func TestShortPaneScrollReachesSpacedSections(t *testing.T) {
+	t.Parallel()
+	for _, width := range []int{20, 40} {
+		for _, height := range []int{3, 5, 12} {
+			t.Run(strconv.Itoa(width)+"x"+strconv.Itoa(height), func(t *testing.T) {
+				m := newPlacementSidebar(t, false)
+				m.SetSectionGap(messages.SpacingNormal.BlankLines())
+				require.NoError(t, m.SetTodos(makeTodos(2)))
+				settlePlacement(t, m, m.SetSize(width, height))
+				require.True(t, m.cachedNeedsScrollbar)
+				require.Greater(t, len(m.cachedLines), m.viewportHeight())
+				assert.False(t, m.treeCollapsed)
+				assert.False(t, m.todosCollapsed)
+				first := requirePlaced(t, m, "title:0")
+				last := m.placement.rows[len(m.placement.rows)-1]
+				for _, endpoint := range []struct {
+					button tea.MouseButton
+					row    placedRow
+					y      int
+				}{
+					{tea.MouseWheelDown, last, m.viewportHeight() - 1},
+					{tea.MouseWheelUp, first, 0},
+				} {
+					for range len(m.cachedLines) {
+						m.updateScrollviewMouse(tea.MouseWheelMsg{Button: endpoint.button})
+					}
+					view := strings.Split(m.View(), "\n")
+					require.Len(t, view, height)
+					for _, line := range view {
+						assert.LessOrEqual(t, ansi.StringWidth(line), width)
+					}
+					assert.Contains(t, ansi.Strip(view[endpoint.y]), strings.TrimSpace(ansi.Strip(endpoint.row.text)))
+					row, hit := m.placementRowAt(m.layoutCfg.PaddingLeft, endpoint.y)
+					require.True(t, hit)
+					assert.Equal(t, endpoint.row.id, row.id, "hit geometry follows the scrolled content")
+					assert.Empty(t, strings.TrimSpace(ansi.Strip(view[height-2])), "footer breathing row stays pinned")
+					assert.Equal(t, strings.Repeat(" ", m.layoutCfg.PaddingLeft)+m.footerView(m.contentWidth(false)), view[height-1])
+					for x := range width {
+						action, _ := m.HandleClickType(x, height-2)
+						assert.Equal(t, ClickNone, action)
+					}
+				}
+			})
+		}
 	}
-	assert.Contains(t, ansi.Strip(compact[m.usageReadingLine]), "$0.00")
-	assert.Equal(t, m.usageSectionEnd, m.agentIdentityRow, "small viewports omit the breathing row, not identity")
-	assert.Equal(t, "root", ansi.Strip(compact[m.agentIdentityRow]))
-	assert.Equal(t, m.agentIdentityRow+1, m.modelStart)
-	assert.Contains(t, ansi.Strip(compact[m.modelStart]), "gpt-4")
-	assert.Contains(t, ansi.Strip(compact[m.modelStart+1]), "openai")
 }
 
 func TestBreathingRowsStableAcrossWarmAnimationFrames(t *testing.T) {
