@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -19,7 +21,6 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui"
-	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 )
 
@@ -44,9 +45,16 @@ func (p *tuiCancelProvider) CreateChatCompletionStream(ctx context.Context, _ []
 	return &tuiAnswerStream{}, nil
 }
 
-type tuiCancelStream struct{ done <-chan struct{} }
+type tuiCancelStream struct {
+	done    <-chan struct{}
+	started bool
+}
 
 func (s *tuiCancelStream) Recv() (chat.MessageStreamResponse, error) {
+	if !s.started {
+		s.started = true
+		return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "first response started"}}}}, nil
+	}
 	<-s.done
 	return chat.MessageStreamResponse{}, context.Canceled
 }
@@ -69,6 +77,7 @@ func (s *tuiAnswerStream) Recv() (chat.MessageStreamResponse, error) {
 func (*tuiAnswerStream) Close() {}
 
 func TestActualTUICancelImmediateSendShowsAcceptedTurnAndSettles(t *testing.T) {
+	isolateState(t)
 	p := &tuiCancelProvider{started: make(chan struct{})}
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(p)))))
 	require.NoError(t, err)
@@ -77,12 +86,21 @@ func TestActualTUICancelImmediateSendShowsAcceptedTurnAndSettles(t *testing.T) {
 	sess := session.New(session.WithID("cancel-ui"), session.WithAgentName("root"))
 	a := app.New(t.Context(), owner.Runtime(), sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
 	model := tui.New(t.Context(), nil, a, "", func() {}, tui.WithHideSidebar())
-	model.Update(messages.ApplySettingsMsg{Preferences: messages.Preferences{InterruptConfirmation: messages.InterruptModeNone}})
 	d := tuitest.New(t, model, 100, 30, tuitest.WithTimeout(5*time.Second))
+	openBehaviorSettings(d).
+		Press(tea.KeyDown).
+		Press(tea.KeyRight).
+		Press(tea.KeyRight).
+		WaitFor(tuitest.Contains("None (immediate)"))
+	saveSettingsAndWait(d)
 	d.Type("first prompt").Enter()
-	<-p.started
-	d.WaitFor(tuitest.Contains("first prompt"))
-	d.Press(27)
+	select {
+	case <-p.started:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("first prompt never reached provider; frame: %s", d.Frame())
+	}
+	d.WaitFor(tuitest.Contains("first response started"))
+	d.Press(tea.KeyEscape).WaitFor(tuitest.Contains("Double Esc within 3s cancels the response.")).Press(tea.KeyEscape)
 	d.Type("second prompt").Enter()
 	d.WaitFor(tuitest.Contains("second prompt"))
 	d.WaitFor(tuitest.Contains("second answer"))

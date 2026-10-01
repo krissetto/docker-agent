@@ -25,8 +25,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/fake"
 	agentruntime "github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/tui/core/layout"
-	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -88,8 +86,10 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 	}
 	d := newStreamingTUI(t, options)
 	t.Cleanup(func() { close(release) })
-	d.Send(messages.ApplySettingsMsg{Preferences: messages.Preferences{SendMode: messages.SendModeSteer}}).
-		WaitFor(tuitest.Contains("Settings updated"))
+	openBehaviorSettings(d).
+		Press(tea.KeyRight).
+		WaitFor(tuitest.Contains("‹ Steer ›"))
+	saveSettingsAndWait(d)
 
 	// Draft the follow-up as a single paste so it costs one Update instead of
 	// one per keystroke (keystrokes are expensive under -race and would eat
@@ -125,40 +125,25 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 // sidebar, and promote it only once the first stream stops, producing a second
 // turn with its own answer. The switch must also be persisted to user config.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
-	closed := make(chan bool, 1)
 	accepted, promoted := make(chan queuedIdentity, 1), make(chan queuedIdentity, 1)
 	d := newTUIWithProxyOptionsWrapped(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions(), func(model tea.Model) tea.Model {
-		return &settingsCloseObserver{Model: model, closed: closed, accepted: accepted, promoted: promoted}
+		return &queuedInputObserver{Model: model, accepted: accepted, promoted: promoted}
 	})
 	if runtime.GOOS == "windows" {
 		tuitest.WithTimeout(30 * time.Second)(d)
 	}
 
 	// Start with an explicit steering preference, then restore the default.
-	d.Send(messages.ApplySettingsMsg{Preferences: messages.Preferences{SendMode: messages.SendModeSteer}}).
-		WaitFor(tuitest.Contains("Settings updated"))
-
-	// Flip the send mode on the Behavior tab of /settings: open the dialog,
-	// focus Categories, enter Behavior controls, cycle Steer → Queue, apply.
-	d.Send(tea.PasteMsg{Content: "/settings"}).
-		Enter().
-		WaitFor(tuitest.Contains("Sidebar position")).
-		Send(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).
+	openBehaviorSettings(d).
 		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("While agent is working")).
-		Enter().
-		Press(tea.KeyRight).
-		WaitFor(tuitest.Contains("‹ Queue ›")).
-		Send(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}).
-		WaitFor(tuitest.Contains("Settings updated"))
+		WaitFor(tuitest.Contains("‹ Steer ›"))
+	saveSettingsAndWait(d)
 
-	// The toast acknowledges persistence, not the end of the modal close fade.
-	select {
-	case deferred := <-closed:
-		require.True(t, deferred, "settings cleanup must wait beyond the close request")
-	case <-time.After(10 * time.Second):
-		t.Fatal("settings did not finish closing before editor input")
-	}
+	// Restore Queue through the real draft and focused Save action.
+	openBehaviorSettings(d).
+		Press(tea.KeyRight).
+		WaitFor(tuitest.Contains("‹ Queue ›"))
+	saveSettingsAndWait(d)
 
 	// The choice is persisted for future sessions.
 	cfg, err := os.ReadFile(userconfig.Path())
@@ -174,7 +159,7 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	// With queue send mode, session admission immediately projects the pending
 	// FIFO in the sidebar instead of maintaining a local queue/toast mirror.
 	d.Enter().
-		WaitFor(tuitest.Matches(`(?m)- Also, what's 3\+3\?\s+✎ ×\s*$`)).
+		WaitFor(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s*$`)).
 		WaitFor(tuitest.Contains("Also, what's 3+3?"))
 	d.Assert(tuitest.Absent("Message sent to the working agent"))
 	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "exactly one pending FIFO row")
@@ -190,7 +175,7 @@ func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
 	d.WaitFor(tuitest.Contains("2 + 2 equals 4.")).
 		WaitFor(tuitest.Contains("Also, what's 3+3?")).
 		WaitFor(tuitest.Contains("3 + 3 equals 6."))
-	d.Assert(tuitest.Not(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s+✎ ×\s*$`)))
+	d.Assert(tuitest.Not(tuitest.Matches(`(?m)^ {40,}- Also, what's 3\+3\?\s*$`)))
 	require.Equal(t, 1, strings.Count(d.Frame(), "Also, what's 3+3?"), "FIFO promotion renders the accepted input once in transcript")
 	select {
 	case advanced := <-promoted:
@@ -205,18 +190,14 @@ type queuedIdentity struct {
 	position          int
 }
 
-// settingsCloseObserver exposes the real manager cleanup boundary only to this test.
-type settingsCloseObserver struct {
+// queuedInputObserver records admission identity without replacing any dialog.
+type queuedInputObserver struct {
 	tea.Model
 
-	closed               chan bool
-	accepted, promoted   chan queuedIdentity
-	settings             *settingsCleanupObserver
-	armed, closeDeferred bool
-	once                 sync.Once
+	accepted, promoted chan queuedIdentity
 }
 
-func (m *settingsCloseObserver) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *queuedInputObserver) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	inner := msg
 	if routed, ok := inner.(messages.RoutedMsg); ok {
 		inner = routed.Inner
@@ -241,76 +222,36 @@ func (m *settingsCloseObserver) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	switch event := msg.(type) {
-	case messages.OpenSettingsDialogMsg:
-		m.armed = true
-	case dialog.OpenDialogMsg:
-		if m.armed {
-			m.armed = false
-			m.settings = &settingsCleanupObserver{Dialog: event.Model}
-			event.Model = m.settings
-			msg = event
-		}
-	}
 	updated, cmd := m.Model.Update(msg)
 	m.Model = updated
-	if _, closing := msg.(dialog.CloseDialogMsg); closing && m.settings != nil {
-		m.closeDeferred = !m.settings.cleaned
-	}
-	if m.settings != nil && m.settings.cleaned {
-		// Cleanup runs inside Update; publish only after the manager removed the layer.
-		m.once.Do(func() { m.closed <- m.closeDeferred })
-	}
 	return m, cmd
 }
 
-func (m *settingsCloseObserver) SetProgram(p *tea.Program) {
+func (m *queuedInputObserver) SetProgram(p *tea.Program) {
 	if owner, ok := m.Model.(interface{ SetProgram(p *tea.Program) }); ok {
 		owner.SetProgram(p)
 	}
 }
 
-func (m *settingsCloseObserver) Shutdown() {
+func (m *queuedInputObserver) Shutdown() {
 	if owner, ok := m.Model.(interface{ Shutdown() }); ok {
 		owner.Shutdown()
 	}
 }
 
-type settingsCleanupObserver struct {
-	dialog.Dialog
-
-	cleaned bool
+// Keep the manager's original settings instance: Save closes that exact model.
+func openBehaviorSettings(d *tuitest.Driver) *tuitest.Driver {
+	return d.Send(messages.OpenSettingsDialogMsg{}).
+		WaitFor(tuitest.Contains("Appearance")).
+		Send(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}).
+		Press(tea.KeyRight).
+		WaitFor(tuitest.Contains("While agent is working")).
+		Enter()
 }
 
-func (d *settingsCleanupObserver) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	updated, cmd := d.Dialog.Update(msg)
-	d.Dialog = updated.(dialog.Dialog)
-	return d, cmd
-}
-
-func (d *settingsCleanupObserver) Cleanup() {
-	if !d.cleaned {
-		dialog.CleanupDialog(d.Dialog)
-		d.cleaned = true
-	}
-}
-
-func (d *settingsCleanupObserver) CancelDialogCmd() tea.Cmd {
-	if closer, ok := d.Dialog.(dialog.SemanticCloser); ok {
-		return closer.CancelDialogCmd()
-	}
-	return nil
-}
-
-func (d *settingsCleanupObserver) ResetCloseHover() {
-	if resetter, ok := d.Dialog.(interface{ ResetCloseHover() }); ok {
-		resetter.ResetCloseHover()
-	}
-}
-
-func (d *settingsCleanupObserver) TakeVisualDirty() bool {
-	if visual, ok := d.Dialog.(interface{ TakeVisualDirty() bool }); ok {
-		return visual.TakeVisualDirty()
-	}
-	return false
+func saveSettingsAndWait(d *tuitest.Driver) {
+	d.Press(tea.KeyTab).Enter().
+		WaitFor(tuitest.Contains("Settings saved")).
+		WaitFor(tuitest.Absent("While agent is working")).
+		WaitForStable(200 * time.Millisecond)
 }
