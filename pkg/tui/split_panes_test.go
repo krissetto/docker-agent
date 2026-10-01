@@ -463,11 +463,11 @@ func TestPaneRowCompositionSidebarOverlayMatchesOldCells(t *testing.T) {
 				continue
 			}
 			page := root.chatPages[id].(chat.SplitPresentation)
-			header := root.paneHeaderHeight()
-			if header > 0 {
-				add(root.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
+			areas := root.paneAreas(r)
+			if areas.title.H > 0 {
+				add(root.paneTitle(id, r.W), areas.title)
 			}
-			add(root.paneTranscript(id, page.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
+			add(root.paneTranscript(id, page.TranscriptView()), areas.transcript)
 		}
 		for _, divider := range root.paneGeometry.Dividers {
 			glyph := strings.Repeat("─", divider.Rect.W)
@@ -725,7 +725,7 @@ func TestPureBaseThemesRenderCanonicalPaneShellAndDialog(t *testing.T) {
 			pane := root.paneGeometry.Panes[root.paneFocus()]
 			selected := false
 			for row, line := range strings.Split(plain, "\n") {
-				if row < pane.Y || row >= pane.Y+pane.H-root.paneHeaderHeight() {
+				if row < pane.Y || row >= root.paneAreas(pane).gap.Y {
 					continue
 				}
 				segment := ansi.Cut(line, pane.X, pane.X+pane.W)

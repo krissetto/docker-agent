@@ -32,8 +32,9 @@ func TestRoutedVisiblePaneKeepsMessageReferencePresentation(t *testing.T) {
 		beforeCount := root.ar.ActiveCount()
 		page.Update(tea.MouseMotionMsg{X: rect.X + ansi.StringWidth(before), Y: rect.Y + y})
 		require.Equal(t, beforeCount+1, root.ar.ActiveCount(), "background ingestion cannot disable visible transcript hover")
-		chat.CancelSidebarPresentation(page)
-		require.Equal(t, beforeCount, root.ar.ActiveCount())
+		gap := root.paneAreas(rect).gap
+		root.Update(tea.MouseMotionMsg{X: gap.X, Y: gap.Y})
+		require.Equal(t, beforeCount, root.ar.ActiveCount(), "blank footer gap clears the unfocused pane's reference hover")
 		return
 	}
 	t.Fatalf("completion missing from visible pane: %q", ansi.Strip(frame))

@@ -103,7 +103,7 @@ func TestSplitChatImageClickUsesPaintedInactivePane(t *testing.T) {
 	x, y := -1, -1
 	bounds := root.paneGeometry.Panes["second"]
 	for row, line := range strings.Split(frame, "\n") {
-		if row < bounds.Y || row >= bounds.Y+bounds.H-root.paneHeaderHeight() {
+		if row < bounds.Y || row >= root.paneAreas(bounds).gap.Y {
 			continue
 		}
 		if at := strings.Index(line, "\x1b_cagent-image;"); at >= 0 {

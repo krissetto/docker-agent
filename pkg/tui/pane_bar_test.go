@@ -32,9 +32,12 @@ func TestPaneBottomBarGeometryAndPointerOwnership(t *testing.T) {
 					root.chatPage = page
 				}
 				bar := root.paneHeaderHeight()
-				require.Equal(t, r.H-bar, lipgloss.Height(page.TranscriptView()), "same transcript height, only its origin moves")
+				areas := root.paneAreas(r)
+				require.Equal(t, areas.transcript.H, lipgloss.Height(page.TranscriptView()), "viewport excludes the footer and its gap")
 				if bar > 0 {
-					require.GreaterOrEqual(t, r.H-bar, paneMinHeight-1)
+					require.GreaterOrEqual(t, areas.transcript.H, paneMinHeight-2)
+					require.Equal(t, 1, areas.gap.H)
+					require.Empty(t, strings.TrimSpace(ansi.Cut(rows[areas.gap.Y], r.X, r.X+r.W)))
 					bottom := ansi.Cut(rows[r.Y+r.H-1], r.X, r.X+r.W)
 					require.Equal(t, ansi.Strip(root.paneTitle(id, r.W)), bottom)
 					require.NotContains(t, bottom, "Send to")
@@ -142,4 +145,142 @@ func TestPaneBarCountsDirectSubagentsAcrossStatesAndRestoration(t *testing.T) {
 	require.Equal(t, 1, root.paneSubagentCount("profile", nodeID))
 	require.Contains(t, ansi.Strip(root.paneTitle("profile", 60)), "director (1)")
 	require.Zero(t, root.ar.ActiveCount(), "passive descendant count owns no spinner")
+}
+
+type filledPanePage struct{ *splitRecordingPage }
+
+func (p *filledPanePage) TranscriptView() string {
+	return strings.Repeat("\x1b[48;2;10;20;30mCONTENT\x1b[m\n", 200)
+}
+
+func TestPaneFooterGapRenderingAcrossLayoutsAndResize(t *testing.T) {
+	for _, shape := range []string{"columns", "rows", "nested"} {
+		t.Run(shape, func(t *testing.T) {
+			root := splitTestRoot(t)
+			edge := splitRight
+			if shape == "rows" {
+				edge = splitBottom
+			}
+			root.splitPane("second", "profile", edge)
+			if shape == "nested" {
+				root.splitPane("third", "second", splitBottom)
+			}
+			for id, page := range root.chatPages {
+				filled := &filledPanePage{&splitRecordingPage{Page: page}}
+				root.chatPages[id] = filled
+				if id == root.paneFocus() {
+					root.chatPage = filled
+				}
+			}
+			tree := root.panes.root
+			for _, size := range [][2]int{{120, 40}, {160, 50}, {64, 24}, {24, 12}, {1, 1}, {120, 40}} {
+				root.handleWindowResize(size[0], size[1])
+				for _, dim := range []bool{false, true} {
+					root.dimInactivePanes = dim
+					rows := strings.Split(root.composePanes(), "\n")
+					for id, r := range root.paneGeometry.Panes {
+						areas := root.paneAreas(r)
+						if len(root.paneGeometry.Panes) == 1 {
+							require.Equal(t, r, areas.transcript)
+							require.Zero(t, areas.gap.H)
+							require.Zero(t, areas.title.H)
+							continue
+						}
+						require.Equal(t, r.H-2, areas.transcript.H)
+						require.Equal(t, 1, areas.gap.H)
+						require.Equal(t, 1, areas.title.H)
+						require.Equal(t, r.Y+r.H-1, areas.title.Y)
+						content := ansi.Cut(rows[areas.gap.Y-1], r.X, r.X+r.W)
+						gap := ansi.Cut(rows[areas.gap.Y], r.X, r.X+r.W)
+						title := ansi.Cut(rows[areas.title.Y], r.X, r.X+r.W)
+						require.Contains(t, ansi.Strip(content), "CONTENT", "exactly one reserved blank row")
+						require.Empty(t, strings.TrimSpace(ansi.Strip(gap)))
+						for _, cell := range chromeCells(gap) {
+							require.Nil(t, cell.bg, "gap preserves terminal transparency")
+						}
+						require.Equal(t, ansi.Strip(root.paneTitle(id, r.W)), ansi.Strip(title))
+						if size == [2]int{120, 40} && !dim {
+							t.Logf("%s footer rows: %q / %q / %q", id, ansi.Strip(content), ansi.Strip(gap), ansi.Strip(title))
+						}
+					}
+				}
+				require.Same(t, tree, root.panes.root)
+			}
+		})
+	}
+}
+
+func TestPaneFooterGapIsNotAPointerTarget(t *testing.T) {
+	root := splitTestRoot(t)
+	root.splitPane("second", "profile", splitRight)
+	root.splitPane("third", "second", splitBottom)
+	for _, id := range root.panes.Sessions() {
+		page := installPaneRecorder(root, id)
+		areas := root.paneAreas(root.paneGeometry.Panes[id])
+		targets := page.Page.(interface{ PointerTargetsMessages(x, y int) bool })
+		for x := areas.gap.X; x < areas.gap.X+areas.gap.W; x++ {
+			require.True(t, targets.PointerTargetsMessages(x, areas.gap.Y-1))
+			require.False(t, targets.PointerTargetsMessages(x, areas.gap.Y))
+			require.False(t, targets.PointerTargetsMessages(x, areas.title.Y))
+			page.updates = nil
+			focus := root.paneFocus()
+			for range 2 {
+				root.Update(tea.MouseClickMsg{X: x, Y: areas.gap.Y, Button: tea.MouseLeft})
+				root.Update(tea.MouseMotionMsg{X: x, Y: areas.gap.Y, Button: tea.MouseLeft})
+				root.Update(tea.MouseReleaseMsg{X: x, Y: areas.gap.Y, Button: tea.MouseLeft})
+			}
+			root.Update(tea.MouseMotionMsg{X: x, Y: areas.gap.Y})
+			root.Update(messages.WheelCoalescedMsg{X: x, Y: areas.gap.Y, Delta: -1})
+			require.Equal(t, focus, root.paneFocus(), "gap is not a title focus target")
+			require.Empty(t, page.updates, "gap is not transcript content")
+			require.False(t, page.IsSelecting())
+			require.Nil(t, root.messagesScrollbar)
+			require.Nil(t, root.paneGesture)
+			require.False(t, root.tabBar.HasPointerCapture())
+			require.False(t, root.dialogMgr.Open())
+		}
+	}
+}
+
+func TestPaneFooterAreasTinyHeight(t *testing.T) {
+	root := &appModel{paneGeometry: splitGeometry{Panes: map[string]splitRect{"first": {}, "second": {}}}}
+	for height := range 7 {
+		r := splitRect{X: 3, Y: 5, W: 24, H: height}
+		areas := root.paneAreas(r)
+		require.Equal(t, height, areas.transcript.H+areas.gap.H+areas.title.H)
+		require.Equal(t, max(0, height-2), areas.transcript.H)
+		require.Equal(t, min(1, max(0, height-1)), areas.gap.H)
+		require.Equal(t, min(1, height), areas.title.H)
+		require.Equal(t, r.Y+height, areas.title.Y+areas.title.H)
+	}
+}
+
+func TestPaneSelectionCanFinishOverFooterGap(t *testing.T) {
+	root := splitTestRoot(t)
+	root.splitPane("second", "profile", splitBottom)
+	root.Update(&runtime.UserMessageEvent{Message: "selectable transcript", SessionPosition: 100000})
+	root.chatPage.ScrollToBottom()
+	frame := strings.Split(root.composePanes(), "\n")
+	r := root.paneGeometry.Panes[root.paneFocus()]
+	areas := root.paneAreas(r)
+	for y := r.Y; y < areas.gap.Y; y++ {
+		line := ansi.Cut(ansi.Strip(frame[y]), r.X, r.X+r.W)
+		before, _, found := strings.Cut(line, "selectable transcript")
+		if !found {
+			continue
+		}
+		x := r.X + ansi.StringWidth(before)
+		root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		require.True(t, root.chatPage.IsSelecting())
+		root.Update(tea.MouseMotionMsg{X: x + 8, Y: areas.gap.Y, Button: tea.MouseLeft})
+		require.True(t, root.chatPage.IsSelecting(), "existing selection keeps its outside-viewport capture")
+		root.Update(tea.MouseReleaseMsg{X: x + 8, Y: areas.gap.Y, Button: tea.MouseLeft})
+		require.False(t, root.chatPage.IsSelecting())
+		require.Equal(t, "second", root.paneFocus())
+		selected := strings.Split(root.composePanes(), "\n")
+		require.Equal(t, frame[areas.gap.Y], selected[areas.gap.Y], "gap is never painted as selected text")
+		require.Equal(t, frame[areas.title.Y], selected[areas.title.Y], "footer stays pinned outside selection")
+		return
+	}
+	t.Fatal("selection fixture missing")
 }

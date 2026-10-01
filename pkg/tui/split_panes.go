@@ -53,6 +53,23 @@ func (m *appModel) paneHeaderHeight() int {
 	return 0
 }
 
+type paneAreas struct {
+	transcript, gap, title splitRect
+}
+
+// The footer stays pinned; its transparent gap never belongs to the transcript.
+func (m *appModel) paneAreas(r splitRect) paneAreas {
+	titleHeight := min(max(0, r.H), m.paneHeaderHeight())
+	gapHeight := min(max(0, r.H-titleHeight), titleHeight)
+	transcript := r
+	transcript.H = max(0, r.H-titleHeight-gapHeight)
+	return paneAreas{
+		transcript: transcript,
+		gap:        splitRect{X: r.X, Y: r.Y + transcript.H, W: r.W, H: gapHeight},
+		title:      splitRect{X: r.X, Y: r.Y + transcript.H + gapHeight, W: r.W, H: titleHeight},
+	}
+}
+
 func (m *appModel) panesEnabled() bool {
 	return !m.leanMode && len(m.panes.Sessions()) > 1
 }
@@ -182,8 +199,7 @@ func (m *appModel) resizePanes() tea.Cmd {
 		if !visible {
 			continue
 		}
-		header := m.paneHeaderHeight()
-		transcript := splitRect{X: r.X, Y: r.Y, W: r.W, H: max(0, r.H-header)}
+		transcript := m.paneAreas(r).transcript
 		cmds = append(cmds, page.SetSize(m.width, m.contentHeight), page.(chat.SplitPresentation).SetSplitPresentation(&chat.SplitPresentationGeometry{
 			Transcript: presentationRect(transcript), Shell: shell, ShowSidebar: id == m.paneFocus(),
 		}))
@@ -340,11 +356,20 @@ func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Mo
 	if _, motion := msg.(tea.MouseMotionMsg); motion {
 		cmds = append(cmds, chat.ClearSidebarHover(m.chatPage))
 	}
+	areas := m.paneAreas(m.paneGeometry.Panes[id])
+	if !inPane(areas.transcript, x, y) {
+		if _, motion := msg.(tea.MouseMotionMsg); motion && id != m.paneFocus() {
+			cmds = append(cmds, chat.ClearSidebarHover(m.chatPages[id]))
+		}
+		if inPane(areas.gap, x, y) {
+			return m, tea.Batch(cmds...)
+		}
+	}
 	if focus && id != m.paneFocus() {
 		// Dispatch against the pane that was actually painted. Switching focus
 		// can replace composer chrome and resize this transcript before the
 		// press reaches it, turning a thumb press into an unrelated track hit.
-		if m.paneHeaderHeight() == 0 || y != m.paneGeometry.Panes[id].Y+m.paneGeometry.Panes[id].H-1 {
+		if inPane(areas.transcript, x, y) {
 			updated, cmd := m.chatPages[id].Update(msg)
 			page := updated.(chat.Page)
 			m.chatPages[id] = page
@@ -354,7 +379,7 @@ func (m *appModel) forwardPanePointer(msg tea.Msg, x, y int, focus bool) (tea.Mo
 		_, cmd := m.handleSwitchTab(id)
 		return m, tea.Batch(append(cmds, cmd)...)
 	}
-	if m.paneHeaderHeight() > 0 && y == m.paneGeometry.Panes[id].Y+m.paneGeometry.Panes[id].H-1 {
+	if !inPane(areas.transcript, x, y) {
 		return m, tea.Batch(cmds...)
 	}
 	if id == m.paneFocus() {
@@ -674,11 +699,11 @@ func (m *appModel) composePanes() string {
 		if !ok {
 			continue
 		}
-		header := m.paneHeaderHeight()
-		if header > 0 {
-			add("title:"+id, m.paneTitle(id, r.W), splitRect{X: r.X, Y: r.Y + r.H - header, W: r.W, H: header})
+		areas := m.paneAreas(r)
+		if areas.title.H > 0 {
+			add("title:"+id, m.paneTitle(id, r.W), areas.title)
 		}
-		add("transcript:"+id, m.paneTranscript(id, p.TranscriptView()), splitRect{X: r.X, Y: r.Y, W: r.W, H: r.H - header})
+		add("transcript:"+id, m.paneTranscript(id, p.TranscriptView()), areas.transcript)
 	}
 	for i, d := range m.paneGeometry.Dividers {
 		glyph := strings.Repeat("─", d.Rect.W)

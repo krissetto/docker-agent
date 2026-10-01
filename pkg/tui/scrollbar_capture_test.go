@@ -83,7 +83,7 @@ func startRootScrollbarCapture(t *testing.T, root *appModel, page *scrollbarCapt
 	geometry := page.MeasureSplitShell(root.width, root.contentHeight).TranscriptArea
 	if root.panePresentationEnabled() {
 		r := root.paneGeometry.Panes[root.paneFocus()]
-		geometry = chat.PresentationRect{X: r.X, Y: r.Y, Width: r.W, Height: r.H - root.paneHeaderHeight()}
+		geometry = presentationRect(root.paneAreas(r).transcript)
 	}
 	x, y := geometry.X+geometry.Width-1, geometry.Y+geometry.Height-1
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
@@ -99,8 +99,8 @@ func TestRootMessagesScrollbarReleaseAcrossRegions(t *testing.T) {
 		lean, split bool
 	}{{name: "full"}, {name: "lean", lean: true}, {name: "split", split: true}} {
 		t.Run(mode.name, func(t *testing.T) {
-			for _, region := range []string{"same-offset", "input", "banner", "separator", "tabs", "sidebar", "messagebar", "other-pane", "outside"} {
-				if mode.lean && (region == "separator" || region == "tabs" || region == "sidebar") || !mode.split && region == "other-pane" {
+			for _, region := range []string{"same-offset", "input", "banner", "separator", "tabs", "sidebar", "messagebar", "other-pane", "pane-gap", "outside"} {
+				if mode.lean && (region == "separator" || region == "tabs" || region == "sidebar") || !mode.split && (region == "other-pane" || region == "pane-gap") {
 					continue
 				}
 				t.Run(region, func(t *testing.T) {
@@ -125,6 +125,8 @@ func TestRootMessagesScrollbarReleaseAcrossRegions(t *testing.T) {
 					case "other-pane":
 						r := root.paneGeometry.Panes["second"]
 						x, y = r.X+r.W/2, r.Y+r.H/2
+					case "pane-gap":
+						x, y = root.paneAreas(root.paneGeometry.Panes[sessionID]).gap.X, root.paneAreas(root.paneGeometry.Panes[sessionID]).gap.Y
 					case "outside":
 						x, y = -20, root.height+20
 					}
@@ -267,7 +269,7 @@ func TestRootMessagesScrollbarCaptureStartsOnUnfocusedPane(t *testing.T) {
 	root.View()
 	require.Equal(t, "profile", root.paneFocus())
 	r := root.paneGeometry.Panes["second"]
-	root.Update(tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - root.paneHeaderHeight() - 1, Button: tea.MouseLeft})
+	root.Update(tea.MouseClickMsg{X: r.X + r.W - 1, Y: root.paneAreas(r).gap.Y - 1, Button: tea.MouseLeft})
 	require.Equal(t, "second", root.paneFocus())
 	require.Equal(t, r, root.paneGeometry.Panes["second"], "focus alone retains the painted thumb geometry")
 	require.True(t, second.IsMessagesScrollbarDragging())
@@ -299,7 +301,7 @@ func TestRootMessagesScrollbarUnfocusedPressUsesPaintedGeometry(t *testing.T) {
 		r := root.paneGeometry.Panes["second"]
 		second.Update(messages.WheelCoalescedMsg{Delta: 1_000_000, X: r.X, Y: r.Y})
 		root.View()
-		press := tea.MouseClickMsg{X: r.X + r.W - 1, Y: r.Y + r.H - root.paneHeaderHeight() - 1, Button: tea.MouseLeft}
+		press := tea.MouseClickMsg{X: r.X + r.W - 1, Y: root.paneAreas(r).gap.Y - 1, Button: tea.MouseLeft}
 		if !thumb {
 			press.X = r.X + r.W/2
 		}
