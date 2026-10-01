@@ -183,7 +183,7 @@ func TestDialogContextHelpSettingsAndContextSelection(t *testing.T) {
 	d.setFocus(settingsActions)
 	d.prepareBody()
 	_, sections = ContextHelp(d)
-	assert.Equal(t, "Apply", strings.TrimSpace(helpEntry(t, sections, "dialog.settings.selected-enter").Description))
+	assert.Equal(t, "Save", strings.TrimSpace(helpEntry(t, sections, "dialog.settings.selected-enter").Description))
 	assert.Equal(t, []string{"tab", "shift+tab"}, helpEntry(t, sections, "dialog.settings.focus-zone").Keys)
 
 	c := &contextDialog{selected: -1, breakdown: &runtime.ContextBreakdown{}}

@@ -26,7 +26,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
-	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
@@ -849,7 +848,11 @@ func (m *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
 
 // --- Theme picker ---
 
-func (m *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) {
+func (m *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) { return m.openThemePicker(0) }
+func (m *appModel) openThemePicker(settingsID uint64) (tea.Model, tea.Cmd) {
+	if settingsID != 0 && !m.settingsActive(settingsID) {
+		return m, nil
+	}
 	themeRefs, err := styles.ListThemeRefs()
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to list themes: %v", err))
@@ -883,6 +886,9 @@ func (m *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) {
 			IsDefault: ref == styles.DefaultThemeRef,
 			IsBuiltin: styles.IsBuiltinTheme(ref),
 		})
+	}
+	if settingsID != 0 {
+		return m.openSettingsThemePicker(choices, currentRef)
 	}
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewThemePickerDialog(choices, currentRef),
@@ -993,15 +999,12 @@ func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) 
 
 // --- Settings (/settings) ---
 
-// handleOpenSettingsDialog opens the /settings dialog. The Visuals tab is
-// omitted when there is no sidebar to customize (--sidebar=false); lean mode
-// never gets here (it has no overlay support, the message is dropped).
-func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
-	settings := userconfig.Get()
-	preferences := messages.Preferences{
-		Layout:                m.layoutSettings,
-		Panel:                 messages.NormalizePanelSettings(m.panelSettings),
-		SendMode:              m.sendMode,
+func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
+	return messages.Preferences{
+		Theme:                 settings.Theme,
+		Layout:                layoutSettingsFromConfig(settings.GetLayout()),
+		Panel:                 panelSettingsFromConfig(settings.GetPanel()),
+		SendMode:              messages.ParseSendMode(settings.GetBusySendMode()),
 		SplitDiffView:         settings.GetSplitDiffView(),
 		ExpandThinking:        settings.GetExpandThinking(),
 		HideToolResults:       settings.HideToolResults,
@@ -1020,49 +1023,6 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		SoundThreshold:        settings.GetSoundThreshold(),
 		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
 	}
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSettingsDialog(preferences, !m.hideSidebar),
-	})
-}
-
-// handleApplySettings applies the settings chosen in the /settings dialog
-// and persists them to the user config.
-func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model, tea.Cmd) {
-	preferences := msg.Preferences
-	model, cmd := m.applyLayoutSettings(preferences.Layout)
-	_, panelCmd := m.applyPanelSettings(preferences.Panel)
-	cmd = tea.Batch(cmd, panelCmd)
-	m.panelPreviewOriginal = nil
-
-	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
-	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
-	m.showBanner = preferences.ShowBanner
-	m.dimInactivePanes = preferences.DimInactivePanes
-	m.transparentBackground = preferences.TransparentBackground
-	m.viewCacheValid = false
-	for _, page := range m.chatPages {
-		page.SetSendMode(m.sendMode)
-		page.SetInterruptMode(m.interruptMode)
-		page.SetShowBanner(m.showBanner)
-	}
-	if m.sessionState.SplitDiffView() != preferences.SplitDiffView {
-		m.sessionState.SetSplitDiffView(preferences.SplitDiffView)
-		cmd = tea.Batch(cmd, m.updateChatCmd(editfile.ToggleDiffViewMsg{}))
-	}
-	m.sessionState.SetExpandThinking(preferences.ExpandThinking)
-	m.sessionState.SetHideToolResults(preferences.HideToolResults)
-	if m.imageWriter != nil {
-		m.imageWriter.SetEnabled(preferences.RenderImages)
-		tuiimage.SetRenderingEnabled(m.imageWriter.RenderingEnabled())
-	}
-	cmd = tea.Batch(cmd, m.tabBar.SetMaxTitleLength(preferences.TabTitleMaxLength))
-	cmd = tea.Batch(cmd, m.updateChatCmd(messages.SessionToggleChangedMsg{}), m.resizeAll())
-
-	if err := savePreferences(preferences); err != nil {
-		slog.Warn("Failed to save settings to user config", "error", err)
-		return model, tea.Batch(cmd, notification.WarningCmd("Settings applied but could not be saved"))
-	}
-	return model, tea.Batch(cmd, notification.SuccessCmd("Settings updated"))
 }
 
 // applyLayoutSettings applies the given layout to every chat page (all tabs
@@ -1115,81 +1075,83 @@ func panelSettingsFromConfig(p *userconfig.PanelSettings) messages.PanelSettings
 // savePreferences persists every value managed by the settings dialog.
 // Values matching their defaults are omitted to keep the config minimal.
 func savePreferences(p messages.Preferences) error {
-	return userconfig.Update(func(cfg *userconfig.Config) error {
-		if cfg.Settings == nil {
-			cfg.Settings = &userconfig.Settings{}
-		}
-		s := cfg.Settings
-		if p.SendMode == messages.SendModeSteer {
-			s.BusySendMode = string(messages.SendModeSteer)
-		} else {
-			s.BusySendMode = ""
-		}
-		s.SplitDiffView = boolPreference(p.SplitDiffView, true)
-		s.ExpandThinking = boolPreference(p.ExpandThinking, false)
-		s.RestoreTabs = boolPreference(p.RestoreTabs, false)
-		s.Snapshot = boolPreference(p.Snapshot, false)
-		s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
-		s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)
-		s.HideToolResults = p.HideToolResults
-		s.RenderImages = boolPreference(p.RenderImages, true)
-		s.ShowBanner = boolPreference(p.ShowBanner, true)
-		s.DimInactivePanes = boolPreference(p.DimInactivePanes, true)
-		s.TransparentBackground = boolPreference(p.TransparentBackground, true)
-		s.YOLO = p.YOLO
-		s.Lean = p.Lean
-		s.Sound = p.Sound
-		s.InterruptConfirmation = string(p.InterruptConfirmation)
-		if p.SoundThreshold == userconfig.DefaultSoundThreshold {
-			s.SoundThreshold = 0
-		} else {
-			s.SoundThreshold = p.SoundThreshold
-		}
-		if p.TabTitleMaxLength == userconfig.DefaultTabTitleMaxLength {
-			s.TabTitleMaxLength = 0
-		} else {
-			s.TabTitleMaxLength = p.TabTitleMaxLength
-		}
+	return userconfig.Update(func(cfg *userconfig.Config) error { return writePreferences(cfg, p) })
+}
 
-		panel := messages.NormalizePanelSettings(p.Panel)
-		if panel.Equal(messages.DefaultPanelSettings()) {
-			s.Panel = nil
-		} else {
-			elements := make([]string, len(panel.Elements))
-			for i, element := range panel.Elements {
-				elements[i] = string(element)
-			}
-			s.Panel = &userconfig.PanelSettings{Elements: elements}
-		}
+func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
+	if cfg.Settings == nil {
+		cfg.Settings = &userconfig.Settings{}
+	}
+	s := cfg.Settings
+	if p.SendMode == messages.SendModeSteer {
+		s.BusySendMode = string(messages.SendModeSteer)
+	} else {
+		s.BusySendMode = ""
+	}
+	s.SplitDiffView = boolPreference(p.SplitDiffView, true)
+	s.ExpandThinking = boolPreference(p.ExpandThinking, false)
+	s.RestoreTabs = boolPreference(p.RestoreTabs, false)
+	s.Snapshot = boolPreference(p.Snapshot, false)
+	s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
+	s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)
+	s.HideToolResults = p.HideToolResults
+	s.RenderImages = boolPreference(p.RenderImages, true)
+	s.ShowBanner = boolPreference(p.ShowBanner, true)
+	s.DimInactivePanes = boolPreference(p.DimInactivePanes, true)
+	s.TransparentBackground = boolPreference(p.TransparentBackground, true)
+	s.YOLO = p.YOLO
+	s.Lean = p.Lean
+	s.Sound = p.Sound
+	s.InterruptConfirmation = string(p.InterruptConfirmation)
+	if p.SoundThreshold == userconfig.DefaultSoundThreshold {
+		s.SoundThreshold = 0
+	} else {
+		s.SoundThreshold = p.SoundThreshold
+	}
+	if p.TabTitleMaxLength == userconfig.DefaultTabTitleMaxLength {
+		s.TabTitleMaxLength = 0
+	} else {
+		s.TabTitleMaxLength = p.TabTitleMaxLength
+	}
 
-		layout := p.Layout
-		// Normalize before the default comparison so an unnormalized zero
-		// value ("") and the explicit default ("compact") both clear the entry.
-		layout.SidebarInfoMode = messages.ParseSidebarInfoMode(string(layout.SidebarInfoMode))
-		if layout == (messages.LayoutSettings{SidebarPosition: messages.SidebarRight, SectionSpacing: messages.SpacingNormal, SidebarInfoMode: messages.InfoModeCompact}) {
-			s.Layout = nil
-			return nil
+	panel := messages.NormalizePanelSettings(p.Panel)
+	if panel.Equal(messages.DefaultPanelSettings()) {
+		s.Panel = nil
+	} else {
+		elements := make([]string, len(panel.Elements))
+		for i, element := range panel.Elements {
+			elements[i] = string(element)
 		}
-		position := string(layout.SidebarPosition)
-		if layout.SidebarPosition == messages.SidebarRight {
-			position = ""
-		}
-		spacing := string(layout.SectionSpacing)
-		if layout.SectionSpacing == messages.SpacingNormal {
-			spacing = ""
-		}
-		infoMode := string(layout.SidebarInfoMode)
-		if layout.SidebarInfoMode == messages.InfoModeCompact {
-			infoMode = ""
-		}
-		s.Layout = &userconfig.LayoutSettings{
-			SidebarPosition: position, SectionSpacing: spacing, SidebarInfoMode: infoMode,
-			ActiveAgentsOnly: layout.ActiveAgentsOnly,
-			HideSessionPath:  layout.HideSessionPath, HideUsage: layout.HideUsage,
-			HideAgents: layout.HideAgents, HideTools: layout.HideTools, HideTodos: layout.HideTodos,
-		}
+		s.Panel = &userconfig.PanelSettings{Elements: elements}
+	}
+
+	layout := p.Layout
+	// Normalize before the default comparison so an unnormalized zero
+	// value ("") and the explicit default ("compact") both clear the entry.
+	layout.SidebarInfoMode = messages.ParseSidebarInfoMode(string(layout.SidebarInfoMode))
+	if layout == (messages.LayoutSettings{SidebarPosition: messages.SidebarRight, SectionSpacing: messages.SpacingNormal, SidebarInfoMode: messages.InfoModeCompact}) {
+		s.Layout = nil
 		return nil
-	})
+	}
+	position := string(layout.SidebarPosition)
+	if layout.SidebarPosition == messages.SidebarRight {
+		position = ""
+	}
+	spacing := string(layout.SectionSpacing)
+	if layout.SectionSpacing == messages.SpacingNormal {
+		spacing = ""
+	}
+	infoMode := string(layout.SidebarInfoMode)
+	if layout.SidebarInfoMode == messages.InfoModeCompact {
+		infoMode = ""
+	}
+	s.Layout = &userconfig.LayoutSettings{
+		SidebarPosition: position, SectionSpacing: spacing, SidebarInfoMode: infoMode,
+		ActiveAgentsOnly: layout.ActiveAgentsOnly,
+		HideSessionPath:  layout.HideSessionPath, HideUsage: layout.HideUsage,
+		HideAgents: layout.HideAgents, HideTools: layout.HideTools, HideTodos: layout.HideTodos,
+	}
+	return nil
 }
 
 func boolPreference(value, defaultValue bool) *bool {

@@ -284,9 +284,9 @@ func dialogReferenceSections() []help.Section {
 			{ID: "dialog.settings.categories", Keys: []string{"left", "h", "right", "l"}, Description: "Previous/next category", Condition: "Categories; each remembers its selected row."},
 			{ID: "dialog.settings.enter-controls", Keys: []string{"enter", "space"}, Description: "Enter category controls", Condition: "Categories."},
 			{ID: "dialog.settings.adjust-setting", Keys: []string{"left", "h", "right", "l"}, Description: "Adjust selected enum or number", Condition: "Controls; numeric bounds apply."},
-			{ID: "dialog.settings.activate-setting", Keys: []string{"enter", "space"}, Description: "Toggle, advance, or choose theme; never apply", Condition: "Controls; auto-approve requires confirmation. Theme picker saves separately."},
+			{ID: "dialog.settings.activate-setting", Keys: []string{"enter", "space"}, Description: "Toggle, advance, or choose theme; never save", Condition: "Controls; display changes preview until Save. Auto-approve requires confirmation."},
 			{ID: "dialog.settings.reorder-panel", Keys: []string{"ctrl+up", "ctrl+down"}, Description: "Reorder selected panel element", Condition: "Controls in Panel."},
-			{ID: "dialog.settings.apply-settings-and-close", Keys: []string{"ctrl+s"}, Description: "Apply settings and close", Condition: "Any selected target."},
+			{ID: "dialog.settings.save-settings-and-close", Keys: []string{"enter", "space", "mouse action pill"}, Description: "Save settings and close", Condition: "Save action focused or clicked; Ctrl+S is unbound."},
 			{ID: "dialog.settings.scroll-body", Keys: []string{"pgup", "pgdown", "mouse wheel", "scrollbar click/drag"}, Description: "Scroll without moving selection", Condition: "Visible body."},
 		}},
 		{ID: "dialog.working-dir-picker", Title: "Working directory", Entries: []help.Entry{

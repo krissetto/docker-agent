@@ -251,7 +251,7 @@ func TestCanvasPreferenceLiveFullLeanLoadingAndError(t *testing.T) {
 				root.err = errors.New("error fixture")
 			}
 			for _, transparent := range []bool{true, false, true} {
-				root.handleApplySettings(messages.ApplySettingsMsg{Preferences: messages.Preferences{TransparentBackground: transparent}})
+				previewCanvasPreferenceForTest(t, root, transparent)
 				view := root.View()
 				cell := chromeCells(view.Content)[0]
 				if transparent {
@@ -291,7 +291,7 @@ func TestRootMessageBarCanvasPreferenceAndStatus(t *testing.T) {
 					require.Contains(t, ansi.Strip(root.renderMessageBar()), "todos unavailable")
 				}
 				for _, transparent := range []bool{true, false, true} {
-					root.handleApplySettings(messages.ApplySettingsMsg{Preferences: messages.Preferences{TransparentBackground: transparent, Panel: settings}})
+					previewCanvasPreferenceForTest(t, root, transparent)
 					view := root.View()
 					painted := layoutTerminalCells(view.Content)[39]
 					for x, cell := range local {
@@ -307,4 +307,25 @@ func TestRootMessageBarCanvasPreferenceAndStatus(t *testing.T) {
 			}
 		}
 	}
+}
+
+func previewCanvasPreferenceForTest(t *testing.T, root *appModel, transparent bool) {
+	t.Helper()
+	if root.transparentBackground == transparent {
+		root.viewCacheValid = false
+		root.resizeAll()
+		return
+	}
+	// The root rendering assertion must not include the settings overlay.
+	_, cmd := root.handleOpenSettingsDialog()
+	open, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	tx := root.settingsTransaction
+	tx.original.TransparentBackground = root.transparentBackground
+	tx.preview.TransparentBackground = root.transparentBackground
+	tx.editor = dialog.NewSettingsDialog(tx.original, true, tx.id).(dialog.SettingsEditor)
+	open.Model = tx.editor
+	open.Model.SetSize(120, 50)
+	settingsPreview(t, root, open.Model, "Transparent background")
+	root.settingsTransaction = nil
 }

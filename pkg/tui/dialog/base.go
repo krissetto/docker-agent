@@ -553,13 +553,14 @@ func (dc *Content) Build() string {
 
 // Action connects a visible action pill to its existing keyboard path.
 type Action struct {
-	Label        string
-	Description  string
-	Primary      bool
-	Key          tea.KeyPressMsg
-	Disabled     bool
-	Default      bool
-	HideShortcut bool
+	Label         string
+	Description   string
+	Primary       bool
+	Key           tea.KeyPressMsg
+	Disabled      bool
+	Default       bool
+	HideShortcut  bool
+	HideFocusHint bool
 }
 
 func (a Action) shortcut() string {

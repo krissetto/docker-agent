@@ -86,6 +86,13 @@ func (w *Writer) Supported() bool {
 	return w.supported
 }
 
+// Enabled reports the display preference independently of terminal capability.
+func (w *Writer) Enabled() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.enabled
+}
+
 // RenderingEnabled reports whether both the user setting and terminal support allow images.
 func (w *Writer) RenderingEnabled() bool {
 	w.mu.Lock()

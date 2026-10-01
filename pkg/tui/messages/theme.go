@@ -3,21 +3,30 @@ package messages
 // Theme messages control theme selection, preview, and hot-reload.
 type (
 	// OpenThemePickerMsg opens the theme picker dialog.
-	OpenThemePickerMsg struct{}
+	OpenThemePickerMsg struct{ SettingsID uint64 }
 
 	// ChangeThemeMsg applies the specified theme.
 	ChangeThemeMsg struct {
-		ThemeRef string // Theme reference to apply
+		SettingsID uint64
+		PickerID   uint64
+		Revision   uint64
+		ThemeRef   string // Theme reference to apply
 	}
 
 	// ThemePreviewMsg previews a theme without committing.
 	ThemePreviewMsg struct {
+		SettingsID  uint64
+		PickerID    uint64
+		Revision    uint64
 		ThemeRef    string // Theme reference to preview
 		OriginalRef string // Original theme to restore on cancel
 	}
 
 	// ThemeCancelPreviewMsg cancels theme preview and restores original.
 	ThemeCancelPreviewMsg struct {
+		SettingsID  uint64
+		PickerID    uint64
+		Revision    uint64
 		OriginalRef string // Theme reference to restore
 	}
 

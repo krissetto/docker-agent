@@ -106,7 +106,7 @@ func TestHandleApplySettings_RetainsInterruptMode(t *testing.T) {
 
 	prefs := defaultTestPreferences()
 	prefs.InterruptConfirmation = messages.InterruptModeNone
-	_, _ = m.handleApplySettings(messages.ApplySettingsMsg{Preferences: prefs})
+	saveSettingsDraftForTest(t, m, prefs)
 
 	assert.Equal(t, messages.InterruptModeNone, m.interruptMode,
 		"the preference is retained for future pages")
@@ -128,7 +128,8 @@ func TestHandleApplySettings_NormalizesInvalidInterruptMode(t *testing.T) {
 
 	prefs := defaultTestPreferences()
 	prefs.InterruptConfirmation = messages.InterruptMode("bogus")
-	_, _ = m.handleApplySettings(messages.ApplySettingsMsg{Preferences: prefs})
+	m.interruptMode = messages.InterruptModeNone
+	saveSettingsDraftForTest(t, m, prefs)
 
 	assert.Equal(t, messages.InterruptModeAlways, m.interruptMode)
 	assert.Equal(t, messages.InterruptModeAlways, m.chatPage.(*mockChatPage).interruptMode,

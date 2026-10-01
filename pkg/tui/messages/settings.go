@@ -213,6 +213,7 @@ func (p Preferences) Equal(other Preferences) bool {
 
 // Preferences contains the persistent values managed by the settings dialog.
 type Preferences struct {
+	Theme                 string
 	Layout                LayoutSettings
 	Panel                 PanelSettings
 	SendMode              SendMode
@@ -240,6 +241,17 @@ type (
 	// OpenSettingsDialogMsg opens the settings dialog (/settings).
 	OpenSettingsDialogMsg struct{}
 
+	PreviewSettingsMsg struct {
+		TransactionID uint64
+		Revision      uint64
+		Preferences   Preferences
+	}
+
+	CancelSettingsMsg struct {
+		TransactionID uint64
+		Revision      uint64
+	}
+
 	// PreviewLayoutMsg applies layout settings live without persisting them.
 	PreviewLayoutMsg struct {
 		Layout LayoutSettings
@@ -258,7 +270,9 @@ type (
 	// ApplySettingsMsg applies the settings chosen in the dialog and
 	// persists them to the user config.
 	ApplySettingsMsg struct {
-		Preferences Preferences
+		TransactionID uint64
+		Revision      uint64
+		Preferences   Preferences
 	}
 
 	// CancelLayoutPreviewMsg restores the layout that was active before a preview.

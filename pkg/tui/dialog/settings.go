@@ -156,7 +156,24 @@ func (b *settingsBody) section(title string) {
 	b.add(styles.MutedStyle.Render(title))
 }
 
+// SettingsEditor is the root-owned settings transaction's draft surface.
+type SettingsEditor interface {
+	Dialog
+	Disposed() bool
+	Revision() uint64
+	SetTheme(string)
+	SaveFailed(error)
+	Finish()
+}
+
+const settingsSaveKey rune = -1001
+
 type settingsDialog struct {
+	transactionID uint64
+	revision      uint64
+	disposed      bool
+	saving        bool
+	saveError     string
 	BaseDialog
 
 	original       messages.Preferences
@@ -174,7 +191,11 @@ type settingsDialog struct {
 	revealSelected bool
 }
 
-func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialog {
+func NewSettingsDialog(preferences messages.Preferences, showVisuals bool, transactionID ...uint64) Dialog {
+	var id uint64
+	if len(transactionID) > 0 {
+		id = transactionID[0]
+	}
 	preferences.Layout.SidebarPosition = messages.ParseSidebarPosition(string(preferences.Layout.SidebarPosition))
 	preferences.Layout.SectionSpacing = messages.ParseSectionSpacing(string(preferences.Layout.SectionSpacing))
 	preferences.Layout.SidebarInfoMode = messages.ParseSidebarInfoMode(string(preferences.Layout.SidebarInfoMode))
@@ -197,12 +218,37 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool) Dialo
 			order = append(order, element)
 		}
 	}
-	return &settingsDialog{BaseDialog: BaseDialog{bodyMaxHeight: 34, bodyCompactTitle: true}, original: preferences, current: current, showVisuals: showVisuals, panelOrder: order}
+	return &settingsDialog{transactionID: id, BaseDialog: BaseDialog{bodyMaxHeight: 34, bodyCompactTitle: true}, original: preferences, current: current, showVisuals: showVisuals, panelOrder: order}
 }
 
-func (d *settingsDialog) Init() tea.Cmd { return nil }
+func (d *settingsDialog) Init() tea.Cmd    { return nil }
+func (d *settingsDialog) Disposed() bool   { return d.disposed }
+func (d *settingsDialog) Revision() uint64 { return d.revision }
+func (d *settingsDialog) Cleanup()         { d.disposed = true }
+func (d *settingsDialog) Finish()          { d.disposed = true }
+func (d *settingsDialog) SaveFailed(err error) {
+	d.saving = false
+	d.saveError = "Settings could not be saved: " + err.Error()
+	d.prepareBody()
+	d.MarkVisualDirty()
+}
+func (d *settingsDialog) SetTheme(ref string) {
+	d.current.Theme = ref
+	d.revision++
+	d.prepareBody()
+	d.MarkVisualDirty()
+}
+func (d *settingsDialog) preview() tea.Cmd {
+	d.revision++
+	p := d.current
+	p.Panel = messages.NormalizePanelSettings(p.Panel)
+	return core.CmdHandler(messages.PreviewSettingsMsg{TransactionID: d.transactionID, Revision: d.revision, Preferences: p})
+}
 
 func (d *settingsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if d.disposed || (d.saving && isUserInputMsg(msg)) {
+		return d, nil
+	}
 	if preparesDialogBody(msg) {
 		defer func() {
 			d.prepareBody()
@@ -329,11 +375,15 @@ func (d *settingsDialog) moveSelection(delta int) {
 }
 
 func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
+	if d.disposed || d.saving || msg.String() == "ctrl+s" {
+		return nil
+	}
+	if msg.Code == settingsSaveKey {
+		return d.apply()
+	}
 	switch msg.String() {
 	case "esc", "q", "ctrl+c":
 		return d.cancel()
-	case "ctrl+s":
-		return d.apply()
 	case "tab", "shift+tab":
 		delta := 1
 		if msg.Mod&tea.ModShift != 0 {
@@ -428,7 +478,7 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 		switch d.selected[d.tab] {
 		case rowTheme:
 			if delta > 0 {
-				return core.CmdHandler(messages.OpenThemePickerMsg{})
+				return core.CmdHandler(messages.OpenThemePickerMsg{SettingsID: d.transactionID})
 			}
 		case rowPosition:
 			d.current.Layout.SidebarPosition = cycleValue(sidebarPositions, d.current.Layout.SidebarPosition, delta)
@@ -465,9 +515,7 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 		case rowShowBanner:
 			d.current.ShowBanner = !d.current.ShowBanner
 		}
-		if d.selected[d.tab] >= rowPosition && d.selected[d.tab] <= rowTodos {
-			return core.CmdHandler(messages.PreviewLayoutMsg{Layout: d.current.Layout})
-		}
+		return d.preview()
 	case tabBehavior:
 		switch d.selected[d.tab] {
 		case rowSendMode:
@@ -531,28 +579,25 @@ func stepValue(current, delta, step, minimum, maximum int) int {
 }
 
 func (d *settingsDialog) apply() tea.Cmd {
-	if d.current.Equal(d.original) {
-		return d.cancel()
+	if d.disposed || d.saving {
+		return nil
 	}
+	d.saving = true
+	d.saveError = ""
+	d.revision++
 	preferences := d.current
 	preferences.Panel = messages.NormalizePanelSettings(preferences.Panel)
-	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.ApplySettingsMsg{Preferences: preferences}))
+	return core.CmdHandler(messages.ApplySettingsMsg{TransactionID: d.transactionID, Revision: d.revision, Preferences: preferences})
 }
 
 func (d *settingsDialog) CancelDialogCmd() tea.Cmd { return d.cancel() }
 
 func (d *settingsDialog) cancel() tea.Cmd {
-	cmds := []tea.Cmd{closeDialogCmd()}
-	if d.current.Layout != d.original.Layout {
-		cmds = append(cmds, core.CmdHandler(messages.CancelLayoutPreviewMsg{Original: d.original.Layout}))
+	if d.disposed || d.saving {
+		return nil
 	}
-	if d.panelPreviewed || !d.current.Panel.Equal(d.original.Panel) {
-		cmds = append(cmds, core.CmdHandler(messages.CancelPanelPreviewMsg{Original: messages.NormalizePanelSettings(d.original.Panel)}))
-	}
-	if len(cmds) == 1 {
-		return cmds[0]
-	}
-	return tea.Sequence(cmds...)
+	d.revision++
+	return core.CmdHandler(messages.CancelSettingsMsg{TransactionID: d.transactionID, Revision: d.revision})
 }
 
 func (d *settingsDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
@@ -579,22 +624,10 @@ func (d *settingsDialog) bodyParts() (int, string, string, string, map[int]int) 
 	d.rowHits = body.hits
 	header := RenderTitle("Settings", inner, styles.DialogTitleStyle) + "\n" + RenderSeparator(inner) + "\n" + d.renderTabBar(inner)
 	footer := d.RenderPickerFooter(inner, d.actions()...)
-	helpText := "Tab zone · ↑↓ setting · Enter edit · Ctrl+S apply"
-	if d.focus == settingsCategories {
-		helpText = "Tab zone · ←→ category · Enter open"
+	if d.saveError != "" {
+		header += "\n" + styles.ErrorStyle.Width(inner).Render(d.saveError)
 	}
-	if d.focus == settingsActions {
-		helpText = "Tab zone · ←→ action · Enter select"
-	}
-	if inner < 40 {
-		helpText = "Tab zone · ↵ edit"
-	}
-	help := styles.MutedStyle.Render(ansi.Truncate(helpText, inner, ""))
-	d.actionRows = append([]dialogActionRow{{text: ansi.Strip(help)}}, d.actionRows...)
-	for i := range d.actionLines {
-		d.actionLines[i]++
-	}
-	return width, header, strings.Join(body.lines, "\n"), help + "\n" + footer, body.rows
+	return width, header, strings.Join(body.lines, "\n"), footer, body.rows
 }
 
 func (d *settingsDialog) frameStyle() lipgloss.Style {
@@ -663,12 +696,11 @@ func (d *settingsDialog) renderTabBar(width int) string {
 }
 
 func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
-	theme := styles.GetPersistedThemeRef()
+	theme := d.current.Theme
 	if theme == "" {
 		theme = styles.DefaultThemeRef
 	}
 	d.addControl(body, rowTheme, "Theme", theme+" · Choose…", false, false)
-	body.add(styles.MutedStyle.Render("Theme picker saves separately from Settings."))
 	body.section("Display")
 	d.addToggle(body, rowTransparentBackground, "Transparent background", d.current.TransparentBackground)
 	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
@@ -728,12 +760,11 @@ func (d *settingsDialog) renderPanelTab(body *settingsBody) {
 			}
 		}
 	}
-	body.add(styles.MutedStyle.Render("Ctrl+↑/↓ reorders the selected element."))
 }
 
 func (d *settingsDialog) panelPreview() tea.Cmd {
 	d.panelPreviewed = true
-	return core.CmdHandler(messages.PreviewPanelMsg{Panel: messages.NormalizePanelSettings(d.current.Panel)})
+	return d.preview()
 }
 
 func (d *settingsDialog) togglePanel() tea.Cmd {
@@ -955,5 +986,5 @@ func renderLayoutPreview(s messages.LayoutSettings, maxWidth int) string {
 }
 
 func (d *settingsDialog) actions() []Action {
-	return []Action{{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}}, {Label: "Apply", Primary: true, Key: tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}}}
+	return []Action{{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}}, {Label: "Save", Primary: true, HideShortcut: true, HideFocusHint: true, Disabled: d.saving, Key: tea.KeyPressMsg{Code: settingsSaveKey}}}
 }

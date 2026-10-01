@@ -145,7 +145,7 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 		}
 		controls := help.Section{ID: "dialog.settings.controls", Title: "Selected setting controls", Entries: []help.Entry{{
 			ID: "dialog.settings.selected-enter", Keys: []string{"enter", "space"}, Description: label,
-			Condition: "Controls; edits the draft, never applies Settings. Theme picker saves separately.",
+			Condition: "Controls; display changes preview until Save. Theme selection is part of the draft.",
 		}}}
 		if d.adjustable(d.selected[d.tab]) {
 			controls.Entries = append(controls.Entries, help.Entry{ID: "dialog.settings.control.adjust", Keys: []string{"left", "h", "right", "l"}, Description: "Previous/decrease or next/increase", Condition: "Enabled selected enum or number; numeric bounds apply."})

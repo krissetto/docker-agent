@@ -18,7 +18,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/commands"
-	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -61,7 +60,7 @@ func TestHandleApplySettings_AppliesShowBanner(t *testing.T) {
 
 	prefs := defaultTestPreferences()
 	prefs.ShowBanner = false
-	_, _ = m.handleApplySettings(messages.ApplySettingsMsg{Preferences: prefs})
+	saveSettingsDraftForTest(t, m, prefs)
 
 	assert.False(t, m.showBanner, "the preference is retained for future pages")
 	assert.False(t, m.chatPage.(*mockChatPage).showBanner, "the active page hides the banner")

@@ -362,6 +362,7 @@ type appModel struct {
 	// The independent panel shares canonical session data, not sidebar presentation.
 	panelSettings            messages.PanelSettings
 	panelPreviewOriginal     *messages.PanelSettings
+	settingsTransaction      *settingsTransaction
 	panelData                map[string]*panelSessionData
 	panelWorkingDir          string
 	panelFocused             messages.PanelElement
@@ -1443,6 +1444,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Dialog lifecycle ---
 
 	case dialog.OpenDialogMsg:
+		if state, ok := msg.Model.(interface{ Disposed() bool }); ok && state.Disposed() {
+			return m, nil
+		}
 		identity := app.InteractionIdentity(msg.OriginatingEvent)
 		if identity.InteractionID != "" && m.application != nil {
 			if head := m.application.Presentation(); head != nil && !head.HasInteraction(identity) {
@@ -1450,7 +1454,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m.forwardDialog(msg)
-	case dialog.CloseDialogMsg, dialog.HideDialogMsg, dialog.ClosePlanDetailMsg:
+	case dialog.CloseDialogMsg, dialog.CloseDialogByModelMsg, dialog.CloseAllDialogsMsg, dialog.HideDialogMsg, dialog.ClosePlanDetailMsg:
 		return m.forwardDialog(msg)
 
 	case dialog.ExitConfirmedMsg:
@@ -1788,15 +1792,24 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Theme picker ---
 
 	case messages.OpenThemePickerMsg:
-		return m.handleOpenThemePicker()
+		return m.openThemePicker(msg.SettingsID)
 
 	case messages.ChangeThemeMsg:
+		if msg.SettingsID != 0 {
+			return m.handleSettingsTheme(msg)
+		}
 		return m.handleChangeTheme(msg.ThemeRef)
 
 	case messages.ThemePreviewMsg:
+		if msg.SettingsID != 0 {
+			return m.handleSettingsTheme(msg)
+		}
 		return m.handleThemePreview(msg.ThemeRef)
 
 	case messages.ThemeCancelPreviewMsg:
+		if msg.SettingsID != 0 {
+			return m.handleSettingsTheme(msg)
+		}
 		return m.handleThemeCancelPreview(msg.OriginalRef)
 
 	case messages.ThemeChangedMsg:
@@ -1825,6 +1838,10 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.PreviewLayoutMsg:
 		return m.applyLayoutSettings(msg.Layout)
 
+	case messages.PreviewSettingsMsg:
+		return m.handleSettingsPreview(msg)
+	case messages.CancelSettingsMsg:
+		return m.handleSettingsCancel(msg)
 	case messages.ApplySettingsMsg:
 		return m.handleApplySettings(msg)
 
@@ -2205,6 +2222,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 	// Rebuild all per-session UI components.
 	m.initSessionComponents(activeID, m.application, newSess)
+	m.rollbackSettings()
 	m.dialogMgr.Cleanup()
 	m.dialogMgr = dialog.New(m.ar)
 	m.modelPickerGeneration++
@@ -4280,6 +4298,7 @@ func (m *appModel) cleanupManagedResources() {
 // cleanup, so calling both is safe: whichever runs second either finds the
 // work done or blocks until it is.
 func (m *appModel) Shutdown() {
+	m.rollbackSettings()
 	m.notification.Cleanup()
 	m.panelAnimation.Stop()
 	m.cleanupManagedResources()
@@ -4305,6 +4324,7 @@ func (m *appModel) cleanupAll() {
 			animation.StopView(m.messageBar)
 		}
 		m.modelPickerGeneration++
+		m.rollbackSettings()
 		m.dialogMgr.Cleanup()
 		m.editorHeightMotion.Cancel()
 		if m.contextBar != nil {

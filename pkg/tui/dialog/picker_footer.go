@@ -76,7 +76,7 @@ func (b *BaseDialog) RenderPickerFooter(width int, actions ...Action) string {
 	if primary >= 0 {
 		a := actions[primary]
 		label := a.Label
-		if primary == selected {
+		if primary == selected && !a.HideFocusHint {
 			label += " ↵"
 		} else {
 			label += "  "

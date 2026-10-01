@@ -308,3 +308,16 @@ func TestGraphicsFlushWriteFailureAllowsRetryWithoutClearingDirtyState(t *testin
 	require.NoError(t, err)
 	assert.False(t, writer.RequestFlush())
 }
+
+func TestWriterEnabledIsIndependentOfTerminalSupport(t *testing.T) {
+	var output bytes.Buffer
+	writer := NewWriter(&output)
+	writer.SetSupported(false)
+	writer.SetEnabled(true)
+	require.True(t, writer.Enabled())
+	require.False(t, writer.RenderingEnabled())
+	writer.SetEnabled(false)
+	writer.SetSupported(true)
+	require.False(t, writer.Enabled())
+	require.False(t, writer.RenderingEnabled())
+}

@@ -35,7 +35,9 @@ type themePickerDialog struct {
 
 	// originalThemeRef is the theme ref active when the dialog opened. It is
 	// used to restore on cancel.
-	originalThemeRef string
+	originalThemeRef               string
+	settingsID, pickerID, revision uint64
+	disposed                       bool
 	// lastPreviewRef avoids re-applying the same preview repeatedly (e.g.,
 	// during filtering).
 	lastPreviewRef string
@@ -107,9 +109,22 @@ func themeSortKeys(t ThemeChoice) pickerSortKeys {
 	}
 }
 
+func NewSettingsThemePickerDialog(themes []ThemeChoice, original string, settingsID, pickerID uint64) Dialog {
+	d := NewThemePickerDialog(themes, original).(*themePickerDialog)
+	d.settingsID, d.pickerID = settingsID, pickerID
+	return d
+}
+func (d *themePickerDialog) Cleanup()         { d.disposed = true }
+func (d *themePickerDialog) Disposed() bool   { return d.disposed }
+func (d *themePickerDialog) Revision() uint64 { return d.revision }
+
 func (d *themePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *themePickerDialog) CancelDialogCmd() tea.Cmd {
+	if d.settingsID != 0 {
+		d.revision++
+		return core.CmdHandler(messages.ThemeCancelPreviewMsg{SettingsID: d.settingsID, PickerID: d.pickerID, Revision: d.revision})
+	}
 	return tea.Sequence(
 		closeDialogCmd(),
 		core.CmdHandler(messages.ThemeCancelPreviewMsg{OriginalRef: d.originalThemeRef}),
@@ -117,6 +132,9 @@ func (d *themePickerDialog) CancelDialogCmd() tea.Cmd {
 }
 
 func (d *themePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if d.disposed {
+		return d, nil
+	}
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
 		d.BlurActions()
 	}
@@ -212,6 +230,10 @@ func (d *themePickerDialog) handleSelection() tea.Cmd {
 	if d.selected < 0 || d.selected >= len(d.filtered) {
 		return nil
 	}
+	if d.settingsID != 0 {
+		d.revision++
+		return core.CmdHandler(messages.ChangeThemeMsg{SettingsID: d.settingsID, PickerID: d.pickerID, Revision: d.revision, ThemeRef: d.filtered[d.selected].Ref})
+	}
 	return tea.Sequence(
 		closeDialogCmd(),
 		core.CmdHandler(messages.ChangeThemeMsg{ThemeRef: d.filtered[d.selected].Ref}),
@@ -229,7 +251,9 @@ func (d *themePickerDialog) emitPreview() tea.Cmd {
 		return nil
 	}
 	d.lastPreviewRef = selected.Ref
+	d.revision++
 	return core.CmdHandler(messages.ThemePreviewMsg{
+		SettingsID: d.settingsID, PickerID: d.pickerID, Revision: d.revision,
 		ThemeRef:    selected.Ref,
 		OriginalRef: d.originalThemeRef,
 	})

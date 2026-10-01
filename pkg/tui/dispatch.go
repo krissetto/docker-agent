@@ -111,6 +111,7 @@ func (m *appModel) updateDialogCmd(msg tea.Msg) tea.Cmd {
 	}
 	updated, cmd := m.dialogMgr.Update(msg)
 	m.dialogMgr = updated.(dialog.Manager)
+	cmd = tea.Batch(cmd, m.reconcileSettings())
 	if _, opening := msg.(dialog.OpenDialogMsg); opening && m.dialogMgr.Open() && !m.dialogMgr.TopIsBackground() {
 		cmds := []tea.Cmd{cmd, chat.ClearSidebarHover(m.chatPage)}
 		if m.tabBar != nil {
