@@ -48,12 +48,13 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 	}
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	indent, actions := rowActions(width, false)
-	if (!first || actions.Remove < 0) && m.hoverValues[base+"text"].value == 0 {
+	progress := m.hoverValues[base+"row"].value
+	if (!first || actions.Remove < 0) && progress == 0 {
 		return text
 	}
 	var out strings.Builder
 	end := indent + actions.TextWidth
-	out.WriteString(styles.HoverText(ansi.Cut(text, 0, end), m.hoverValues[base+"text"].value, styles.TextPrimary))
+	out.WriteString(styles.HoverText(ansi.Cut(text, 0, end), progress, styles.TextPrimary))
 	if !first || actions.Remove < 0 {
 		out.WriteString(ansi.Cut(text, end, width))
 		return out.String()
@@ -72,7 +73,7 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 			paint = styles.ErrorStyle.Render("×")
 		}
 		paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
-		out.WriteString(hoverAction(paint, m.hoverValues[base+"row"].value))
+		out.WriteString(hoverAction(paint, progress))
 		end = col + 1
 	}
 	out.WriteString(ansi.Cut(text, end, width))

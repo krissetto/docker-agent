@@ -223,6 +223,98 @@ func TestQueueActionsNarrowGeometryAndConfirmationLifetime(t *testing.T) {
 	}
 }
 
+func TestQueueItemHoverKeepsTextHighlightedAcrossControls(t *testing.T) {
+	for _, cleanup := range []string{"leave", "modal"} {
+		t.Run(cleanup, func(t *testing.T) {
+			m := newPlacementSidebar(t, false)
+			m.SetSize(40, 60)
+			items := []QueuedMessage{
+				{ID: "first", Text: "Unicode 界é 👩‍💻\ncontinuation"},
+				{ID: "next", Text: "Adjacent unchanged item"},
+			}
+			settlePlacement(t, m, m.SetQueuedMessages(items))
+			first := requirePlaced(t, m, "queue:first:0")
+			next := requirePlaced(t, m, "queue:first:1")
+			adjacent := requirePlaced(t, m, "queue:next:0")
+			width := m.contentWidth(m.cachedNeedsScrollbar)
+			indent, actions := rowActions(width, false)
+			y := int(first.y) - m.scrollview.ScrollOffset()
+			idle := m.View()
+			adjacentIdle := m.placementText(adjacent, width)
+			_, renders := m.CacheStats()
+			settlePlacement(t, m, m.updateRegionHover(m.layoutCfg.PaddingLeft+indent, y))
+			highlight := sidebarCells(m.placementText(first, width))[:indent+actions.TextWidth]
+			continuation := m.placementText(next, width)
+			rowHover := m.hoverValues["queue:first:row"]
+			require.Equal(t, hoverValue{value: 1, target: 1}, rowHover)
+			for _, part := range []struct {
+				col  int
+				name string
+			}{{actions.Edit, "edit"}, {actions.Remove, "remove"}, {0, "text"}} {
+				cmd := m.updateRegionHover(m.layoutCfg.PaddingLeft+indent+part.col, y)
+				require.Equal(t, "queue:first:"+part.name, m.hoverTarget)
+				for range 20 {
+					require.Equal(t, rowHover, m.hoverValues["queue:first:row"], "zone motion cannot restart item hover")
+					require.Equal(t, highlight, sidebarCells(m.placementText(first, width))[:indent+actions.TextWidth], "text stays highlighted through every action transition")
+					require.Equal(t, continuation, m.placementText(next, width))
+					if !m.ar.HasActive() {
+						require.Nil(t, cmd)
+						break
+					}
+					cmd = advancePlacement(t, m, cmd)
+				}
+				require.Equal(t, 1.0, m.hoverValues[m.hoverTarget].value)
+				for _, action := range []struct {
+					col   int
+					name  string
+					glyph string
+				}{{actions.Edit, "edit", "✎"}, {actions.Remove, "remove", "×"}} {
+					progress := m.hoverValues["queue:first:"+action.name].value
+					if action.name == part.name {
+						require.Equal(t, 1.0, progress)
+					} else {
+						require.Zero(t, progress)
+					}
+					paint := styles.HoverText(styles.MutedStyle.Render(action.glyph), progress, styles.TextPrimary)
+					require.Equal(t, sidebarCells(hoverAction(paint, 1))[0], sidebarCells(m.placementText(first, width))[indent+action.col])
+				}
+				require.Equal(t, first, requirePlaced(t, m, first.id))
+				require.Equal(t, next, requirePlaced(t, m, next.id))
+				require.Equal(t, adjacentIdle, m.placementText(adjacent, width))
+				m.View()
+				invalidations, _ := m.CacheStats()
+				for range 20 {
+					require.Nil(t, m.updateRegionHover(m.layoutCfg.PaddingLeft+indent+part.col, y))
+					m.View()
+				}
+				afterInvalidations, afterRenders := m.CacheStats()
+				require.Equal(t, invalidations, afterInvalidations, "settled hover does no idle work")
+				require.Equal(t, renders, afterRenders, "hover never rebuilds semantic queue rows")
+				require.Zero(t, m.ar.ActiveCount())
+				require.Nil(t, m.ar.Continue())
+			}
+			require.Equal(t, items, m.queuedMessages)
+			require.False(t, m.ConfirmQueuedRemoval("first"))
+			if cleanup == "leave" {
+				settlePlacement(t, m, m.ClearSubagentHover())
+			} else {
+				m.updateRegionHover(m.layoutCfg.PaddingLeft+indent+actions.Remove, y)
+				require.True(t, m.ar.HasActive())
+				m.CancelHover()
+				m.ReconcileLayout()
+			}
+			require.Empty(t, m.hoverValues)
+			require.Empty(t, m.hoverTarget)
+			require.Empty(t, m.queueRemoveArmed)
+			require.Zero(t, m.ar.ActiveCount())
+			require.Nil(t, m.ar.Continue())
+			require.Equal(t, idle, m.View())
+			_, after := m.CacheStats()
+			require.Equal(t, renders, after)
+		})
+	}
+}
+
 func TestQueueActionHoverUsesSharedAnimationAndStableRows(t *testing.T) {
 	m := newHoverSidebar(t)
 	settleTreePresentation(t, m, m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "Unicode 界é 👩‍💻\ncontinuation"}}))
