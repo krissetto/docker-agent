@@ -31,7 +31,7 @@ type todoEditDialog struct {
 
 // NewTodoEditDialog preserves a dirty draft until its own save result arrives.
 func NewTodoEditDialog(scope messages.TodoScope, id, content string, editorID uint64, save func(uint64, string, string) tea.Cmd) Dialog {
-	input := editor.NewInput(editor.InputConfig{Unlimited: true, NewlineKeys: []string{"enter", "ctrl+j", "shift+enter"}})
+	input := editor.NewInput(editor.InputConfig{Unlimited: true, NewlineKeys: []string{"ctrl+j", "shift+enter"}})
 	input.SetValue(content)
 	input.Focus()
 	return &todoEditDialog{scope: scope, id: id, expected: content, latest: content, editorID: editorID, save: save, input: input}
@@ -148,7 +148,7 @@ func (d *todoEditDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if msg.Code == tea.KeyEscape {
 			return d, d.CancelDialogCmd()
 		}
-		if msg.Code == tea.KeyEnter && msg.Mod&tea.ModCtrl != 0 {
+		if msg.Code == tea.KeyEnter && (msg.Mod == 0 || msg.Mod == tea.ModCtrl) {
 			cmd := d.beginSave()
 			return d, cmd
 		}
@@ -232,13 +232,11 @@ func (d *todoEditDialog) content() (width int, header, body, footer string) {
 	if d.saving {
 		label = "Saving…"
 	}
-	footer = d.RenderPickerFooter(d.ContentWidth(width, 2), Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}}, Action{Label: label, HideShortcut: true, Primary: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: d.saving})
-	hint := styles.MutedStyle.Width(d.ContentWidth(width, 2)).Render("Enter newline · Ctrl+Enter Save")
-	footer = hint + "\n" + footer
-	d.actionRows = append(make([]dialogActionRow, lipgloss.Height(hint)), d.actionRows...)
-	for i := range d.actionLines {
-		d.actionLines[i] += lipgloss.Height(hint)
-	}
+	contentWidth := d.ContentWidth(width, 2)
+	padding := min(2, max(0, (contentWidth-3)/2))
+	footer = d.renderActions(contentWidth, lipgloss.Right, 2, padding,
+		Action{Label: "Cancel", HideShortcut: true, HideFocusHint: true, Key: tea.KeyPressMsg{Code: tea.KeyEscape}},
+		Action{Label: label, Default: true, HideShortcut: true, HideFocusHint: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter}, Disabled: d.saving})
 	return width, header, body, footer
 }
 

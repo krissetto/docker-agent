@@ -145,7 +145,7 @@ func TestDialogContextHelpFormsAndPendingState(t *testing.T) {
 	d.SetSize(80, 24)
 	_, sections := ContextHelp(d)
 	assert.Contains(t, helpEntry(t, sections, "dialog.pending-message-edit.save-full-draft").Condition, "Unavailable now")
-	assert.Equal(t, []string{"enter", "ctrl+m"}, helpEntry(t, sections, "dialog.pending-message-edit.editing.insert-newline").Keys)
+	assert.Equal(t, []string{"shift+enter", "ctrl+j"}, helpEntry(t, sections, "dialog.pending-message-edit.editing.insert-newline").Keys)
 	d.saving = true
 	context, sections := ContextHelp(d)
 	assert.Contains(t, context, "saving")

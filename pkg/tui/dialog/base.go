@@ -616,7 +616,7 @@ func (b *BaseDialog) renderActions(contentWidth int, alignment lipgloss.Position
 		}
 		label := action.Label
 		shortcut := action.shortcut()
-		if index == selected {
+		if index == selected && !action.HideFocusHint {
 			if shortcut != "" {
 				shortcut = "↵ " + shortcut
 			} else {

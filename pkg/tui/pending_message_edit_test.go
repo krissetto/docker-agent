@@ -68,7 +68,7 @@ func TestActualProgramQueuedEditRetainsIdentityOrderAndFailureDraft(t *testing.T
 			program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			require.Eventually(t, func() bool { return sidebarProgramSnapshot(t, program).open }, time.Second, time.Millisecond)
 			program.Send(tea.PasteMsg{Content: " EDITED"})
-			program.Send(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+			program.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 			var edit runtime.SessionEdit
 			select {
 			case edit = <-handle.edits:

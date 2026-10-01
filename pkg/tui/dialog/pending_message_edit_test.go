@@ -103,9 +103,9 @@ func TestPendingMessageEditKeyboardAndMouseSave(t *testing.T) {
 	}).(*pendingMessageEditDialog)
 	d.SetSize(70, 20)
 	_, _ = d.Update(tea.PasteMsg{Content: "first"})
-	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	_, _ = d.Update(tea.PasteMsg{Content: "second"})
-	assert.Zero(t, calls, "content Enter inserts newline, never saves")
+	assert.Zero(t, calls, "Shift+Enter inserts newline, never saves")
 	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	assert.True(t, d.ActionsFocused())
 	_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
@@ -293,12 +293,12 @@ func TestEditDialogsShareLiteralComposerSurface(t *testing.T) {
 			}
 			d.SetSize(80, 24)
 			d.Update(tea.PasteMsg{Content: content})
-			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 			d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 			require.Zero(t, calls)
 			require.Equal(t, content+"\n", input.Value())
 			view := ansi.Strip(d.View())
-			require.Contains(t, view, "Enter newline · Ctrl+Enter Save")
+			require.NotContains(t, view, "Enter newline")
 			require.Contains(t, view, "Cancel")
 			require.NotContains(t, strings.ToLower(view), "esc")
 			require.NotContains(t, view, "@paste-")
@@ -321,7 +321,7 @@ func TestEditDialogIsolatedRenderedSurface(t *testing.T) {
 	require.NotContains(t, view, "History")
 }
 
-func TestEditDialogFootersMatchSettingsConvention(t *testing.T) {
+func TestEditDialogFootersUseSelectedExitStyleButtons(t *testing.T) {
 	for _, kind := range []string{"todo", "queued"} {
 		for _, size := range [][2]int{{140, 40}, {70, 20}, {24, 8}, {10, 4}} {
 			t.Run(fmt.Sprintf("%s/%dx%d", kind, size[0], size[1]), func(t *testing.T) {
@@ -347,30 +347,33 @@ func TestEditDialogFootersMatchSettingsConvention(t *testing.T) {
 				require.LessOrEqual(t, lipgloss.Width(view), size[0])
 				require.LessOrEqual(t, lipgloss.Height(view), size[1])
 				_, _, _, footer := content()
-				require.True(t, base.pickerFooter, "Settings uses shared RenderPickerFooter")
+				require.False(t, base.pickerFooter, "Exit dialog uses shared renderActions buttons")
 				cells := uv.NewStyledString(footer).Lines(ansi.GraphemeWidth)
 				for y, row := range base.actionRows {
 					for _, hit := range row.hits {
 						for x := hit.x; x < hit.x+hit.width; x++ {
-							if hit.key.Code == tea.KeyEscape {
-								require.Nil(t, cells[y][x].Style.Bg, "Cancel is a plain dim hint")
-							} else {
-								require.NotNil(t, cells[y][x].Style.Bg, "Save is the sole primary pill")
+							require.NotNil(t, cells[y][x].Style.Bg, "both actions have visible button backgrounds")
+							expected := styles.BackgroundAlt
+							if hit.key.Code == tea.KeyEnter {
+								expected = styles.Selected
 							}
+							require.Equal(t, expected, cells[y][x].Style.Bg)
 						}
 					}
 				}
+				require.NotContains(t, footer, "↵")
+				require.NotContains(t, strings.ToLower(footer), "enter")
+				require.NotContains(t, strings.ToLower(footer), "esc")
+				require.Equal(t, 1, base.selectedAction(base.actions), "Save is selected while typing")
+				require.False(t, base.ActionsFocused())
 				if size[0] >= 70 {
-					line := strings.Split(ansi.Strip(footer), "\n")[1]
-					require.True(t, strings.HasPrefix(line, "Cancel"))
-					require.True(t, strings.HasSuffix(line, " Save   "), "primary pill is right aligned")
-					x, y := familyActionCell(t, d, "Cancel")
-					r := newDialogRuntime()
-					row, col := d.Position()
-					base.UpdateFooterHover(tea.MouseMotionMsg{X: x, Y: y}, r, NewDialogLayout(d.View(), row, col))
-					require.True(t, base.footerHover.Running(), "Cancel uses the shared hint hover")
-					base.StopFooterHover()
-					require.Zero(t, r.ActiveCount())
+					require.Len(t, base.actionRows, 1)
+					hits := base.actionRows[0].hits
+					require.Len(t, hits, 2)
+					require.Equal(t, 10, hits[0].width, "Cancel has exit-style two-cell padding")
+					require.Equal(t, 8, hits[1].width)
+					require.Equal(t, hits[0].x+hits[0].width+2, hits[1].x)
+					require.Equal(t, base.ContentWidth(base.ComputeDialogWidth(85, 50, 110), 2), hits[1].x+hits[1].width)
 				}
 				d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
 				require.Equal(t, 1, calls)
@@ -388,6 +391,68 @@ func TestEditDialogFootersMatchSettingsConvention(t *testing.T) {
 				require.NotNil(t, cmd, "focused Cancel must dispatch Escape rather than insert a newline")
 				require.IsType(t, CloseDialogByModelMsg{}, cmd())
 				require.Equal(t, 1, calls)
+			})
+		}
+	}
+}
+
+func TestEditDialogsEnterSavesTypingAndCancelIsExplicit(t *testing.T) {
+	for _, kind := range []string{"todo", "queued"} {
+		for _, action := range []string{"enter", "cancel-click", "cancel-keyboard", "save-keyboard"} {
+			t.Run(kind+"/"+action, func(t *testing.T) {
+				calls := 0
+				value := ""
+				save := func(v string) tea.Cmd {
+					calls++
+					value = v
+					return func() tea.Msg { return nil }
+				}
+				var d Dialog
+				var input *editor.Input
+				if kind == "todo" {
+					ed := NewTodoEditDialog(messages.TodoScope{}, "id", "original", 1, func(_ uint64, expected, v string) tea.Cmd {
+						require.Equal(t, "original", expected)
+						return save(v)
+					}).(*todoEditDialog)
+					d, input = ed, ed.input
+				} else {
+					ed := NewPendingMessageEditDialog("s", "t", "original", 1, save).(*pendingMessageEditDialog)
+					d, input = ed, ed.input
+				}
+				d.SetSize(80, 24)
+				require.True(t, input.Focused())
+				d.Update(tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModCtrl})
+				d.Update(tea.KeyPressMsg{Code: '!', Text: "!"})
+				d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+				d.Update(tea.PasteMsg{Content: "literal\nmultiline"})
+				d.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
+				require.Equal(t, "original!\nliteral\nmultiline\n", input.Value())
+				require.Zero(t, calls)
+				var cmd tea.Cmd
+				switch action {
+				case "enter":
+					_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+				case "cancel-click":
+					x, y := familyActionCell(t, d, "Cancel")
+					_, cmd = d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+				case "cancel-keyboard", "save-keyboard":
+					d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+					if action == "save-keyboard" {
+						d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+					}
+					_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+				}
+				require.NotNil(t, cmd)
+				if strings.HasPrefix(action, "cancel") {
+					require.Zero(t, calls)
+					require.IsType(t, CloseDialogByModelMsg{}, cmd())
+				} else {
+					require.Equal(t, 1, calls)
+					require.Equal(t, input.Value(), value)
+					d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+					d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+					require.Equal(t, 1, calls, "in-flight save cannot submit twice")
+				}
 			})
 		}
 	}
