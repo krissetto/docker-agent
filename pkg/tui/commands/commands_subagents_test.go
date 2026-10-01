@@ -14,8 +14,7 @@ func TestSubagentCommands(t *testing.T) {
 	parser := newTestParser()
 	for _, name := range []string{"subagent-view", "subagent-attach"} {
 		command := parser.Parse("/" + name + "  a0b1c ")
-		require.NotNil(t, command)
-		assert.Equal(t, messages.OpenSubagentMsg{NodeID: "a0b1c"}, command())
+		assert.Nil(t, command)
 	}
 	command := parser.Parse("/subagents")
 	require.NotNil(t, command)
@@ -25,7 +24,7 @@ func TestSubagentCommands(t *testing.T) {
 	assert.IsType(t, messages.ReturnToPreviousSessionMsg{}, command())
 	for _, item := range builtInSessionCommands() {
 		switch item.SlashCommand {
-		case "/subagents", "/subagent-view", "/subagent-attach", "/back":
+		case "/subagents", "/back":
 			assert.True(t, item.Immediate)
 			assert.False(t, item.Hidden)
 			assert.NotEmpty(t, item.Description)

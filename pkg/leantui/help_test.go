@@ -34,7 +34,7 @@ func TestLeanHelpCategoriesAndWidth(t *testing.T) {
 	for _, heading := range []string{
 		"Lean terminal help", "Composer and sending", "Cursor and history", "Editing",
 		"Command and argument completion", "Response and application controls",
-		"Tool confirmation (takes priority over all other keys)", "Terminal key aliases",
+		"Tool confirmation (when the subagent picker is closed)", "Terminal key aliases",
 	} {
 		position := strings.Index(text, heading)
 		require.Greater(t, position, previous, heading)

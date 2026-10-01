@@ -86,6 +86,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.SubagentTreeEvent:
 		snapshot := e.Snapshot
 		m.subagentSnapshot = &snapshot
+		if m.screen.Subagents != nil {
+			m.screen.Subagents.Update(snapshot)
+		}
 		if m.inputReferences == nil {
 			m.inputReferences = subagentindex.New()
 		}

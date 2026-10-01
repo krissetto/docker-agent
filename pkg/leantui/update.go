@@ -32,6 +32,10 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 		m.handleBackgroundColor(k.Typ == ui.KeyBackgroundDark)
 		return
 	}
+	if m.screen.Subagents != nil {
+		m.handleSubagentPickerKey(ctx, k)
+		return
+	}
 	if m.transcriber != nil && m.transcriber.IsRunning() && (k.Typ == ui.KeyEnter || k.Typ == ui.KeyEsc) {
 		m.stopSpeech()
 		if k.Typ == ui.KeyEsc {
@@ -1051,6 +1055,7 @@ func (m *model) resetConversation() {
 	m.lifecycle = lifecycle.State{}
 	m.elicitations, m.maxIterations = nil, nil
 	m.subagentSnapshot = nil
+	m.screen.Subagents = nil
 	m.majorHighWater = [2]uint64{}
 	m.majorNoticeVisible = false
 	m.screen.Transcript.ClearActive()
@@ -1146,7 +1151,8 @@ func (m *model) commitHelp() {
 			}
 		}
 		entry("Disabled commands are rejected, including direct slash input.")
-		entry("/subagents lists descendants; /subagent-view and /subagent-attach open the same live viewer.")
+		entry("/subagents opens the tree: Up/Down select, Left/Right collapse/expand, Home/End first/last.")
+		entry("Enter opens the selected live viewer without sending; Esc closes the tree without cancelling work.")
 		entry("Sending targets the visible viewer. /back restores its predecessor without cancelling execution.")
 		entry("Restored · paused sessions wait for /resume; related sessions require their own explicit Resume.")
 		entry("/attach <path> adds a draft attachment; /drop lists draft and session files.")
@@ -1191,7 +1197,7 @@ func (m *model) commitHelp() {
 		entry("Shift+Tab: cycle thinking effort when the current model/runtime supports it.")
 		entry("Ctrl+L: clear/redraw the screen, without resetting the conversation.")
 
-		heading("Tool confirmation (takes priority over all other keys)")
+		heading("Tool confirmation (when the subagent picker is closed)")
 		entry("Y / y: approve once. A / a: always approve this tool.")
 		entry("B / b: auto-approve safe tools (balanced). S / s: approve autonomously for the session.")
 		entry("N / n / Esc: reject. R / r: reject with a reason; Enter submits it, Esc goes back.")

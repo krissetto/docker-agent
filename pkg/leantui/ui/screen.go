@@ -13,6 +13,7 @@ type Screen struct {
 	Autocomplete    *Autocomplete
 	Status          StatusModel
 	Confirm         *ConfirmModel
+	Subagents       *SubagentPicker
 }
 
 func NewScreen(workingDir, branch, editorPlaceholder string, historyStore ...*history.History) *Screen {
@@ -27,6 +28,9 @@ func NewScreen(workingDir, branch, editorPlaceholder string, historyStore ...*hi
 // Frame produces the full terminal frame and cursor position.
 func (s *Screen) Frame(width, height, spinnerFrame int, busy bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) (lines []string, cursorLine, cursorCol int) {
 	width, height = max(1, width), max(1, height)
+	if s.Subagents != nil {
+		return s.Subagents.Render(width, height), 0, 0
+	}
 	lines = s.Transcript.Lines(width, spinnerFrame, busy, sessionState, pendingUsers)
 
 	// The normal-screen transcript may grow into scrollback; the editable

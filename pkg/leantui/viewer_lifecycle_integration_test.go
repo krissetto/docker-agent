@@ -158,7 +158,7 @@ func newViewerLifecycleFixture(t *testing.T) *viewerLifecycleFixture {
 	provider := &viewerLifecycleProvider{calls: make(chan viewerLifecycleCall, 16)}
 	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "fixture root", agent.WithModel(&viewerLifecycleProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
-		agent.New("worker", "fixture worker", agent.WithModel(provider)),
+		agent.New("worker", "fixture worker", agent.WithModel(provider), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
 	)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(local)
@@ -249,7 +249,7 @@ func viewerLifecycleAttachment(t *testing.T, dir, name string) messages.Attachme
 
 func (f *viewerLifecycleFixture) attach(t *testing.T, id string) *app.App {
 	t.Helper()
-	f.m.handleViewerCommand(t.Context(), "subagent-attach", id)
+	f.m.attachSubagentViewer(t.Context(), id)
 	require.NotSame(t, f.root, f.m.app)
 	require.Equal(t, f.child.ID(), f.m.app.SessionHandle().ID())
 	require.Same(t, f.borrowed, f.m.app.SessionRuntime())
@@ -298,7 +298,7 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 			assert.Equal(t, []messages.Attachment{originalAttachment}, f.m.draftAttachments)
 			assert.Contains(t, viewerLifecycleText(f.m), "original committed history")
 			assert.NotContains(t, viewerLifecycleText(f.m), "completed child history")
-			f.m.handleViewerCommand(t.Context(), "subagent-view", f.child.ID())
+			f.m.attachSubagentViewer(t.Context(), f.child.ID())
 			assert.Same(t, childApp, f.m.app, "exact session ID returns to the existing App")
 			assert.Same(t, childHandle, f.m.app.SessionHandle())
 			assert.Same(t, childScreen, f.m.screen)
@@ -335,7 +335,7 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 			assert.NotContains(t, viewerLifecycleText(f.m), "child follow-up answer")
 			assert.Equal(t, "original unsent draft", f.m.screen.Editor.Text())
 			assert.Equal(t, []messages.Attachment{originalAttachment}, f.m.draftAttachments)
-			f.m.handleViewerCommand(t.Context(), "subagent-attach", f.child.ID())
+			f.m.attachSubagentViewer(t.Context(), f.child.ID())
 			assert.Same(t, childApp, f.m.app)
 			assert.Same(t, childHandle, f.m.app.SessionHandle())
 			assert.Contains(t, viewerLifecycleText(f.m), "child follow-up answer")
@@ -359,17 +359,17 @@ func TestViewerLifecycleCanonicalAttachActiveAndCompleted(t *testing.T) {
 func TestViewerLifecycleExactCanonicalLookupRejectsAliases(t *testing.T) {
 	f := newViewerLifecycleFixture(t)
 	for _, id := range []string{f.child.ID()[:8], "worker", string(f.node)[:4], "fffffff"} {
-		f.m.handleViewerCommand(t.Context(), "subagent-attach", id)
+		f.m.attachSubagentViewer(t.Context(), id)
 		assert.Same(t, f.root, f.m.app)
 		assert.Empty(t, f.m.viewers.back)
-		assert.Contains(t, viewerLifecycleText(f.m), "exact node or session ID")
+		assert.Contains(t, viewerLifecycleText(f.m), "no longer available to open")
 	}
 	childApp := f.attach(t, f.child.ID())
 	assert.Equal(t, f.node, childApp.AttachedSubagent().NodeID)
 	f.m.handleViewerCommand(t.Context(), "back", "")
-	f.m.handleViewerCommand(t.Context(), "subagent-attach", string(f.node))
+	f.m.attachSubagentViewer(t.Context(), string(f.node))
 	assert.Same(t, childApp, f.m.app)
-	f.m.handleViewerCommand(t.Context(), "subagent-attach", f.child.ID())
+	f.m.attachSubagentViewer(t.Context(), f.child.ID())
 	assert.Contains(t, viewerLifecycleText(f.m), "Already viewing this session")
 	require.Len(t, f.m.viewers.back, 1)
 }
@@ -543,7 +543,7 @@ func TestViewerLifecycleRemoteUnsupportedAndAdmissionFailureAreTruthful(t *testi
 			t.Cleanup(m.app.Close)
 			require.NotNil(t, m.app.SessionHandle())
 			assert.False(t, runtime.IsLocalSessionHandle(m.app.SessionHandle()))
-			m.handleViewerCommand(t.Context(), "subagent-attach", "abcde")
+			m.attachSubagentViewer(t.Context(), "abcde")
 			assert.Contains(t, viewerLifecycleText(m), "does not expose live subagent attachment")
 			m.spawnViewer(t.Context(), "", false)
 			assert.Contains(t, viewerLifecycleText(m), "not configured")

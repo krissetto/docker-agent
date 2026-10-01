@@ -132,7 +132,7 @@ func TestBuiltinDescriptorsAreUnique(t *testing.T) {
 		seen[command.Name] = true
 		assert.NotEmpty(t, command.Desc)
 	}
-	for _, command := range []string{"attach", "drop", "subagents", "subagent-view", "subagent-attach", "back", "plans", "settings", "fork", "pause", "permissions", "respond"} {
+	for _, command := range []string{"attach", "drop", "subagents", "back", "plans", "settings", "fork", "pause", "permissions", "respond"} {
 		assert.True(t, seen[command], command)
 	}
 }

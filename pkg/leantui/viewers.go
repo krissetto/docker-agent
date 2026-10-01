@@ -2,8 +2,6 @@ package leantui
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/gitbranch"
@@ -14,7 +12,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
-	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 )
 
@@ -149,7 +146,7 @@ type subagentViewerLookup interface {
 	SubagentNodeForSession(sessionID string) (subagent.NodeID, bool)
 }
 
-func (m *model) handleViewerCommand(ctx context.Context, command, id string) {
+func (m *model) handleViewerCommand(ctx context.Context, command, _ string) {
 	if command == "back" {
 		if m.viewers == nil || len(m.viewers.back) == 0 {
 			m.reportCapability("No previous viewer.", nil)
@@ -163,10 +160,12 @@ func (m *model) handleViewerCommand(ctx context.Context, command, id string) {
 		}
 		return
 	}
-	if command == "subagents" || id == "" {
-		m.listSubagentViewers()
-		return
+	if command == "subagents" {
+		m.openSubagentPicker()
 	}
+}
+
+func (m *model) attachSubagentViewer(ctx context.Context, id string) {
 	lookup, ok := m.app.Runtime().(subagentViewerLookup)
 	if !ok {
 		m.reportCapability("This runtime does not expose live subagent attachment.", nil)
@@ -180,7 +179,7 @@ func (m *model) handleViewerCommand(ctx context.Context, command, id string) {
 	}
 	info, ok := lookup.SubagentAttachInfo(nodeID)
 	if !ok || info.Session == nil {
-		m.reportCapability("No attachable subagent with that exact node or session ID.", nil)
+		m.reportCapability("That subagent is no longer available to open.", nil)
 		return
 	}
 	if info.Session.ID == m.app.Session().ID {
@@ -214,53 +213,7 @@ func (m *model) handleViewerCommand(ctx context.Context, command, id string) {
 	target.watchViewerBranch(viewerCtx)
 	m.focusViewer(target, true)
 	m.refreshCommands(ctx)
-	m.reportCapability("Live subagent viewer: "+info.Name+" · "+string(info.NodeID)+". Sending targets this session; /back returns without cancelling it.", nil)
-}
-
-func (m *model) listSubagentViewers() {
-	snapshot := m.subagentSnapshot
-	if snapshot == nil {
-		snapshot = m.app.Session().GetSubagentTree()
-	}
-	if snapshot == nil {
-		m.reportCapability("No subagents in this session.", nil)
-		return
-	}
-	var choices []ui.Command
-	self := subagent.SessionRootID(m.app.Session().ID)
-	if attached := m.app.AttachedSubagent(); attached != nil {
-		self = attached.NodeID
-	}
-	var walk func([]subagent.NodeSnapshot, int)
-	walk = func(nodes []subagent.NodeSnapshot, depth int) {
-		for _, entry := range nodes {
-			if entry.Node.ID != self && !strings.HasPrefix(string(entry.Node.ID), "root:") {
-				id := string(entry.Node.ID)
-				name := entry.Node.DisplayName()
-				node, indent := entry.Node, strings.Repeat("  ", depth)
-				m.screen.Transcript.AddBlock(func(width int) []string {
-					return ui.WrapANSI(indent+styles.AgentIdentityStyle(node.Agent, false).Render(name)+ui.StMuted().Render(fmt.Sprintf(" · %s · %v", id, node.State)), width)
-				})
-				choices = append(choices, ui.Command{Name: name + " · " + id, Desc: "Live viewer; explicit send targets this session", Value: id})
-			}
-			walk(entry.Children, depth+1)
-		}
-	}
-	var find func([]subagent.NodeSnapshot) bool
-	find = func(nodes []subagent.NodeSnapshot) bool {
-		for _, entry := range nodes {
-			if entry.Node.ID == self {
-				walk(entry.Children, 0)
-				return true
-			}
-			if find(entry.Children) {
-				return true
-			}
-		}
-		return false
-	}
-	find(snapshot.Nodes)
-	m.completeArgument("subagent-attach", choices)
+	m.reportCapability("Live subagent viewer: "+info.Name+". Sending targets this session; /back returns without cancelling it.", nil)
 }
 
 func (m *model) spawnViewer(ctx context.Context, directory string, fork bool) {

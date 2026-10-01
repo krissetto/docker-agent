@@ -86,33 +86,11 @@ func builtInSessionCommands() []Item {
 			ID:           "session.subagents",
 			Label:        "Subagents",
 			SlashCommand: "/subagents",
-			Description:  "List subagent sessions",
+			Description:  "Browse the subagent tree and open a live session",
 			Category:     "Session",
 			Immediate:    true,
 			Execute: func(arg string) tea.Cmd {
 				return core.CmdHandler(messages.ShowSubagentSessionsMsg{})
-			},
-		},
-		{
-			ID:           "session.subagent.view",
-			Label:        "View Subagent",
-			SlashCommand: "/subagent-view",
-			Description:  "Open a live subagent viewer; sending targets that session",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				return core.CmdHandler(messages.OpenSubagentMsg{NodeID: strings.TrimSpace(arg)})
-			},
-		},
-		{
-			ID:           "session.subagent.attach",
-			Label:        "Attach Subagent",
-			SlashCommand: "/subagent-attach",
-			Description:  "Attach a live subagent viewer by exact node or session ID",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				return core.CmdHandler(messages.OpenSubagentMsg{NodeID: strings.TrimSpace(arg)})
 			},
 		},
 		{

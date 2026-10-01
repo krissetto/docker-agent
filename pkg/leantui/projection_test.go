@@ -71,7 +71,7 @@ func TestLeanTypedQueueHistoryAndReplay(t *testing.T) {
 	out := view()
 	assert.NotContains(t, out, "runtime secret")
 	assert.Equal(t, 1, strings.Count(out, "clean agent body <system_info>agent literal</system_info>"))
-	assert.Contains(t, out, "worker (ref child)")
+	assert.Contains(t, out, "worker (child)")
 	assert.Equal(t, 3, strings.Count(out, "<system_info>literal user</system_info>"))
 	reset.Snapshot.PendingInputs = nil
 	m.handleEvent(t.Context(), reset)
@@ -90,7 +90,7 @@ func TestLeanAgentMarkdownRemainsReadableLiteralText(t *testing.T) {
 	body := "<system_info>agent literal</system_info>\n**readable Markdown**\n```go\nfmt.Println(42)\n```"
 	m.handleEvent(t.Context(), &runtime.UserMessageEvent{TurnID: "agent", Message: body, InputOrigin: session.InputOriginAgent, InputMode: "steer", SenderID: "child", SenderName: "worker", SessionPosition: 0})
 	out := ansi.Strip(strings.Join(m.screen.Transcript.Lines(100, 0, false, m.sessionState, nil), "\n"))
-	assert.Contains(t, out, "worker (ref child)")
+	assert.Contains(t, out, "worker (child)")
 	assert.Contains(t, out, "<system_info>agent literal</system_info>")
 	assert.Contains(t, out, "**readable Markdown**")
 	assert.Contains(t, out, "fmt.Println(42)")
@@ -120,8 +120,8 @@ func TestLeanTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() string {
 		out := ansi.Strip(strings.Join(m.screen.Transcript.Lines(100, 0, false, m.sessionState, nil), "\n"))
-		assert.Equal(t, 1, strings.Count(out, "worker (ref 12345) has finished their work"))
-		assert.Contains(t, out, "worker (ref 12345)")
+		assert.Equal(t, 1, strings.Count(out, "worker (12345) has finished their work"))
+		assert.Contains(t, out, "worker (12345)")
 		assert.Contains(t, out, "clean steering **literal** body")
 		assert.Contains(t, out, strings.TrimSpace(ui.PromptText)+" original parent delegation", "delegation must reuse the user prompt presentation")
 		assert.NotContains(t, out, "private runtime payload")
@@ -141,7 +141,7 @@ func TestLeanDirectTypedInputMode(t *testing.T) {
 			m.handleEvent(t.Context(), &runtime.UserMessageEvent{TurnID: "direct", Message: "clean input", InputOrigin: session.InputOriginAgent, InputMode: mode, SenderName: "worker", SenderID: "12345678-long-id"})
 			out := ansi.Strip(strings.Join(m.screen.Transcript.Lines(100, 0, false, m.sessionState, nil), "\n"))
 			assert.Contains(t, out, strings.TrimSpace(ui.PromptText)+" clean input")
-			assert.Contains(t, out, "worker (ref 12345)")
+			assert.Contains(t, out, "worker (12345)")
 			assert.NotContains(t, out, "12345678-long-id")
 			assert.Empty(t, m.pendingUsers)
 		})

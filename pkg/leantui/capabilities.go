@@ -207,7 +207,7 @@ func (m *model) handleCapabilityCommand(ctx context.Context, name, arg string, m
 		} else {
 			m.runBangCommand(ctx, arg)
 		}
-	case "subagents", "subagent-view", "subagent-attach", "back":
+	case "subagents", "back":
 		m.handleViewerCommand(ctx, name, arg)
 	case "panes":
 		m.reportCapability("Pane layouts require the full TUI and are unavailable in standalone lean. Use /subagents and /back to navigate session viewers.", nil)
