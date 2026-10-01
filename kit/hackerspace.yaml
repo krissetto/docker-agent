@@ -45,6 +45,11 @@ models:
     model: gpt-5.6-luna
     thinking_budget: xhigh
 
+  gpt-6-astra-high:
+    provider: openai
+    model: gpt-6-astra
+    thinking_budget: high
+
   gpt-6.1-sol-low:
     provider: openai
     model: gpt-6.1-sol
@@ -312,7 +317,7 @@ agents:
       - type: todo
 
   director:
-    model: gpt-6.1-sol-high
+    model: gpt-6-astra-high
     description: Shop lead who coordinates development specialists for substantial coding work and reports concise handoffs
     instruction: |
       Behind Shelly's counter, Director is the shop lead with rolled sleeves and a small, well-used notebook.

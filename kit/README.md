@@ -117,10 +117,10 @@ reattaching or resuming a session that uses your custom team.
 The full supplied configuration preserves the team instructions, model aliases
 and tool restrictions:
 
-- The current source-built team has seven agents. `root`, `director`, `greppy`,
-  `planner`, `engineer` and `reviewer` use OpenAI `gpt-6.1-sol`, retaining their
-  medium, high or low thinking budgets. `designer` uses Anthropic
-  `claude-opus-5-5` with adaptive/high thinking.
+- The current source-built team has seven agents. `director` uses OpenAI
+  `gpt-6-astra` with high thinking. `root`, `greppy`, `planner`, `engineer` and
+  `reviewer` use OpenAI `gpt-6.1-sol`, retaining their medium, high or low thinking
+  budgets. `designer` uses Anthropic `claude-opus-5-5` with adaptive/high thinking.
 - `root` (Shelly) delegates directly to `director`, `engineer`, `designer` and
   `reviewer`. `director` can delegate to all five workers: `greppy`, `planner`,
   `engineer`, `designer` and `reviewer`; its only base tool is filesystem `read_file`.
