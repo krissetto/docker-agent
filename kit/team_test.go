@@ -83,6 +83,46 @@ func TestTeam(t *testing.T) {
 	}
 }
 
+func TestTeamGuidance(t *testing.T) {
+	cfg, err := config.Load(t.Context(), config.NewFileSource("hackerspace.yaml"))
+	require.NoError(t, err)
+	for _, expected := range []struct {
+		name     string
+		guidance []string
+	}{
+		{"root", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the maker explicitly asks"}},
+		{"director", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks"}},
+		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
+		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "not for every ui edit"}},
+		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change"}},
+		{"reviewer", []string{"only when the user explicitly asks", "never as a routine gate"}},
+	} {
+		t.Run(expected.name, func(t *testing.T) {
+			a, ok := cfg.Agents.Lookup(expected.name)
+			require.True(t, ok)
+			instruction := strings.Join(strings.Fields(strings.ToLower(a.Instruction)), " ")
+			for _, guidance := range expected.guidance {
+				assert.Contains(t, instruction, guidance)
+			}
+			if expected.name == "root" || expected.name == "director" || expected.name == "engineer" || expected.name == "designer" {
+				for _, guidance := range []string{"simplicity", "safety or correctness", "single-line commit subjects", "descriptive branch names", "unless the user explicitly asks"} {
+					assert.Contains(t, instruction, guidance)
+				}
+			}
+		})
+	}
+	for _, a := range cfg.Agents {
+		text := a.Description + " " + a.Instruction
+		for _, child := range a.Subagents {
+			text += " " + child.Description
+		}
+		text = strings.Join(strings.Fields(strings.ToLower(text)), " ")
+		for _, outdated := range []string{"must participate in every", "required for every task", "every frontend development or visual/ux code task", "require designer involvement"} {
+			assert.NotContains(t, text, outdated)
+		}
+	}
+}
+
 func TestNativeKit(t *testing.T) {
 	descriptor, err := os.ReadFile("async-agent.yaml")
 	require.NoError(t, err)

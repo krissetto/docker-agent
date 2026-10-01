@@ -124,10 +124,18 @@ and tool restrictions:
 - `root` (Shelly) delegates directly to `director`, `engineer`, `designer` and
   `reviewer`. `director` can delegate to all five workers: `greppy`, `planner`,
   `engineer`, `designer` and `reviewer`; its only base tool is filesystem `read_file`.
-- Engineer is the general engineering workhorse. Designer owns visual craft and
-  must participate in every frontend development or visual/UX code task. Each team
-  stays on one goal, with small careful iterations and proportionate checks.
-  Independent review is used only when the user explicitly asks, never as a routine gate.
+- Engineer is the default doer for most implementation, debugging and general tasks,
+  including UI changes with clear UX/design direction. Designer is used less often,
+  for targeted UX advice or web frontend code such as React and interface craft;
+  advice-only help is welcome, and not every UI change needs Designer.
+- Each team stays on one goal. Short, standalone goals and useful constraints leave
+  makers free to execute without micromanagement, polling or duplicate work. Favor
+  simplicity, small careful iterations and proportionate checks, not bureaucracy
+  or overengineering; safety and correctness still matter. Independent review is
+  used only when the user explicitly asks, never as a routine gate.
+- Commit subjects are plain single lines and branch names are plain and descriptive.
+  Type prefixes such as `fix()`, `fix:`, `feat:`, `fix/` or `feature/` are used only
+  when the user explicitly asks.
 - `planner` has filesystem `read_file`, shell and todo tools; root, greppy,
   engineer and designer have filesystem, shell and todo; reviewer has filesystem
   and shell. Greppy and Planner keep discovery and analysis read-only.
