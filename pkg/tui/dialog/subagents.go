@@ -38,17 +38,44 @@ type subagentsDialog struct {
 	pointerKnown       bool
 	hoverAnimation     animation.Subscription
 	animationBound     bool
+	spinnerAnimation   animation.Subscription
+	runtime            *animation.Runtime
+	spinnerFrame       string
 }
 
-func NewSubagentsDialog(nodes []subagent.NodeSnapshot, titles map[string]string) Dialog {
-	d := &subagentsDialog{pickerCore: newPickerCore(pickerLayout{WidthPercent: 85, MinWidth: 36, MaxWidth: 120, HeightPercent: 85, MaxHeight: 40, ListOverhead: 7}, ""), nodes: subagentview.Sorted(nodes), titles: maps.Clone(titles), collapsed: map[subagent.NodeID]bool{}}
+func NewSubagentsDialog(nodes []subagent.NodeSnapshot, titles map[string]string, selected ...subagent.NodeID) Dialog {
+	d := &subagentsDialog{pickerCore: newPickerCore(pickerLayout{WidthPercent: 85, MinWidth: 36, MaxWidth: 120, HeightPercent: 85, MaxHeight: 40, ListOverhead: 6}, ""), nodes: subagentview.Sorted(nodes), titles: maps.Clone(titles), collapsed: map[subagent.NodeID]bool{}}
 	d.textInput.Blur()
-	d.rebuild("")
+	id := subagent.NodeID("")
+	if len(selected) > 0 {
+		id = selected[0]
+	}
+	d.rebuild(id)
 	return d
 }
 func (d *subagentsDialog) Init() tea.Cmd { return nil }
 func (d *subagentsDialog) rebuild(id subagent.NodeID) {
+	previous := d.rows
 	d.rows = subagentview.Rows(d.nodes, d.collapsed)
+	// If a node disappears, prefer its surviving ancestor over an unrelated row.
+	for id != "" {
+		found := false
+		for _, row := range d.rows {
+			found = found || row.Node.ID == id
+		}
+		if found {
+			break
+		}
+		parent := subagent.NodeID("")
+		for _, row := range previous {
+			if row.Node.ID == id {
+				parent = row.Parent
+				break
+			}
+		}
+		id = parent
+	}
+	d.lastClickIndex = -1
 	d.selected = min(d.selected, max(0, len(d.rows)-1))
 	for i, row := range d.rows {
 		if row.Node.ID == id {
@@ -72,6 +99,14 @@ func (d *subagentsDialog) attach() tea.Cmd {
 	}
 	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.OpenSubagentMsg{NodeID: string(id)}))
 }
+func (d *subagentsDialog) move(delta int) {
+	if len(d.rows) == 0 {
+		return
+	}
+	d.selected = (d.selected + delta + len(d.rows)) % len(d.rows)
+	d.lastClickIndex = -1
+}
+
 func (d *subagentsDialog) branch(expand bool) {
 	if len(d.rows) == 0 {
 		return
@@ -95,10 +130,14 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			d.ensureSelectedVisible()
 		}
 		cmd = tea.Batch(cmd, d.syncHover())
+		if _, resizing := msg.(tea.WindowSizeMsg); !resizing {
+			d.syncSpinner()
+		}
 	}()
 	switch msg := msg.(type) {
 	case animation.TickMsg:
 		d.tickHover(msg)
+		d.tickSpinner(msg)
 	case tea.MouseMotionMsg:
 		d.pointerX, d.pointerY, d.pointerKnown = msg.X, msg.Y, true
 		_, cmd = d.scrollview.Update(msg)
@@ -116,7 +155,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			return d, nil
 		}
 		id := d.selectedID()
-		if msg.Nodes != nil {
+		if msg.Nodes != nil || msg.Titles == nil {
 			d.nodes = subagentview.Sorted(msg.Nodes)
 		}
 		if msg.Titles != nil {
@@ -129,13 +168,14 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 	case tea.WindowSizeMsg:
 		return d, d.SetSize(msg.Width, msg.Height)
 	case tea.KeyPressMsg:
+		d.lastClickIndex = -1
 		switch msg.String() {
 		case "esc", "q", "ctrl+c":
 			return d, closeDialogCmd()
 		case "up", "k":
-			d.navigate(-1, len(d.rows), d.selectedLine)
+			d.move(-1)
 		case "down", "j":
-			d.navigate(1, len(d.rows), d.selectedLine)
+			d.move(1)
 		case "home":
 			d.navigate(-d.selected, len(d.rows), d.selectedLine)
 		case "end":
@@ -149,7 +189,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 		case "right", "l":
 			d.branch(true)
 		case "space":
-			if len(d.rows) > 0 {
+			if len(d.rows) > 0 && d.rows[d.selected].Branch {
 				d.branch(d.collapsed[d.selectedID()])
 			}
 		case "enter":
@@ -207,8 +247,8 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	}
 	actions := actionsForKeys("enter", "Attach")
 	actions[0].Disabled = d.selectedID() == ""
+	actions[0].HideFocusHint = true
 	footer := d.RenderPickerFooter(inner, actions...)
-	footer = d.PickerFooterHelp(footer, "↑↓ choose · ←→/Space fold", inner)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

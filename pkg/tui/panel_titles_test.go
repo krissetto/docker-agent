@@ -20,8 +20,8 @@ func TestPanelTitlesMetadataOnlyCapturedIDsAndResetFence(t *testing.T) {
 	root.application = application
 	root.supervisor.GetRunner("profile").App = application
 	data := root.panelOwnerData("profile")
-	data.nodes = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", Agent: "worker", SessionID: "child-session"}}}
-	d := dialog.NewSubagentsDialog(data.nodes, nil)
+	data.treeNodes = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", Agent: "worker", SessionID: "child-session"}}}
+	d := dialog.NewSubagentsDialog(data.treeNodes, nil)
 	root.updateDialogCmd(dialog.OpenDialogMsg{Model: d})
 	cmd := root.loadPanelTitles(d, data)
 	require.Zero(t, rt.listings.Load(), "metadata reads stay off owner loop")
@@ -55,4 +55,28 @@ func TestPanelTitlesDismissCancellationAndOwnerFence(t *testing.T) {
 	result.owner = "profile"
 	root.acceptPanelTitles(result)
 	require.NotContains(t, ansi.Strip(replacement.View()), "Wrong owner title", "result must match exact dialog instance")
+}
+
+func TestPanelTitlesIncludesAncestorAndSiblingOfAttachedView(t *testing.T) {
+	root := panelFixture(t)
+	sess := root.application.Session()
+	rt := &sourceRuntimeFixture{lifecycleSessions: newLifecycleSessions(), metadata: []runtime.SessionSummaryEntry{{SessionID: "ancestor-session", Title: "Ancestor generated title"}, {SessionID: "sibling-session", Title: "Sibling generated title"}}}
+	application := app.New(t.Context(), rt, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}), app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "child"}))
+	root.application = application
+	root.supervisor.GetRunner("profile").App = application
+	snapshot := panelTree("ancestor-session", subagent.NodeIdle).Snapshot
+	snapshot.Nodes[0].Children[0].Node.SessionID = sess.ID
+	snapshot.Nodes[0].Children = append(snapshot.Nodes[0].Children, subagent.NodeSnapshot{Node: subagent.Node{ID: "sibling", Agent: "sibling", SessionID: "sibling-session"}})
+	application.Session().SetSubagentTree(&snapshot)
+	data := root.panelOwnerData("profile")
+	d := dialog.NewSubagentsDialog(data.treeNodes, nil, "child")
+	root.updateDialogCmd(dialog.OpenDialogMsg{Model: d})
+	cmd := root.loadPanelTitles(d, data)
+	result := cmd().(panelTitlesMsg)
+	require.Contains(t, result.titles, "ancestor-session")
+	require.Contains(t, result.titles, "sibling-session")
+	root.acceptPanelTitles(result)
+	require.Contains(t, ansi.Strip(d.View()), "Ancestor generated title")
+	require.Contains(t, ansi.Strip(d.View()), "Sibling generated title")
+	require.Zero(t, rt.prepares.Load(), "inspection never prepares or submits to a session")
 }

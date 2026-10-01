@@ -49,13 +49,13 @@ func TestSubagentsTreeNavigationTitlesAndBounds(t *testing.T) {
 	require.NotContains(t, strings.Join([]string{d.View()}, ""), "mutated")
 }
 
-func TestSubagentsDistinctIdentityBranchGuidesAndAttach(t *testing.T) {
+func TestSubagentsCanonicalIdentityBranchGuidesAndAttach(t *testing.T) {
 	nodes := []subagent.NodeSnapshot{{Node: subagent.Node{ID: "aaaaa-canonical", Agent: "worker"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "bbbbb-canonical", Agent: "worker"}}, {Node: subagent.Node{ID: "ccccc-canonical", Agent: "worker"}}}}, {Node: subagent.Node{ID: "ddddd-canonical", Agent: "worker"}}}
 	d := NewSubagentsDialog(nodes, nil).(*subagentsDialog)
 	d.SetSize(100, 25)
 	require.Equal(t, []string{"├─", "│ ├─", "│ └─", "└─"}, []string{d.rows[0].Guides, d.rows[1].Guides, d.rows[2].Guides, d.rows[3].Guides})
 	for _, id := range []string{"#aaaaa", "#bbbbb", "#ccccc", "#ddddd"} {
-		require.Contains(t, ansi.Strip(d.View()), id)
+		require.NotContains(t, ansi.Strip(d.View()), id)
 	}
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -66,4 +66,42 @@ func TestSubagentsDistinctIdentityBranchGuidesAndAttach(t *testing.T) {
 		}
 	}
 	require.Equal(t, "bbbbb-canonical", attached)
+}
+
+func TestSubagentsRefreshPreservesIdentityAndFallsBackToAncestor(t *testing.T) {
+	nodes := []subagent.NodeSnapshot{{Node: subagent.Node{ID: "parent", Agent: "parent"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", Agent: "child"}}}}, {Node: subagent.Node{ID: "other", Agent: "other"}}}
+	d := NewSubagentsDialog(nodes, nil, "child").(*subagentsDialog)
+	d.SetSize(100, 30)
+	require.Equal(t, subagent.NodeID("child"), d.selectedID())
+	nodes = append([]subagent.NodeSnapshot{{Node: subagent.Node{ID: "new", Agent: "new"}}}, nodes...)
+	d.Update(SubagentsRefreshMsg{Dialog: d, Nodes: nodes})
+	require.Equal(t, subagent.NodeID("child"), d.selectedID())
+	d.Update(SubagentsRefreshMsg{Dialog: d, Titles: map[string]string{"title": "loaded"}})
+	require.Equal(t, subagent.NodeID("child"), d.selectedID())
+	nodes[1].Children = nil
+	d.Update(SubagentsRefreshMsg{Dialog: d, Nodes: nodes})
+	require.Equal(t, subagent.NodeID("parent"), d.selectedID())
+	d.Update(SubagentsRefreshMsg{Dialog: d})
+	require.Empty(t, d.rows)
+	require.Empty(t, d.selectedID())
+	require.Contains(t, ansi.Strip(d.View()), "No subagents")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.Nil(t, cmd)
+}
+
+func TestSubagentsWrapAndDisclosureNeverAttach(t *testing.T) {
+	d := subagentsPresentationFixture()
+	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	require.Equal(t, subagent.NodeID("other-child"), d.selectedID())
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	require.Equal(t, subagent.NodeID("parent-full"), d.selectedID())
+	for range 2 {
+		x, y := d.bodyX+d.prepared[0].chevron, d.bodyY+d.prepared[0].start
+		_, cmd := d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		for _, msg := range collectMsgs(cmd) {
+			_, opens := msg.(messages.OpenSubagentMsg)
+			require.False(t, opens)
+		}
+	}
+	require.False(t, d.collapsed["parent-full"])
 }

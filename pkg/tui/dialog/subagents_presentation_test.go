@@ -19,7 +19,7 @@ import (
 func subagentsPresentationFixture() *subagentsDialog {
 	nodes := []subagent.NodeSnapshot{
 		{Node: subagent.Node{ID: "parent-full", Agent: "director", SessionID: "parent-session", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{
-			{Node: subagent.Node{ID: "child-full", Agent: "工作 👩‍💻", SessionID: "child-session", State: subagent.NodeRunning}},
+			{Node: subagent.Node{ID: "child-full", Agent: "工作 👩‍💻", SessionID: "child-session", State: subagent.NodeIdle}},
 			{Node: subagent.Node{ID: "child-two", Agent: "worker", State: subagent.NodeIdle}},
 		}},
 		{Node: subagent.Node{ID: "other-full", Agent: "director", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "other-child", Agent: "worker"}}}},
@@ -131,7 +131,7 @@ func TestSubagentsScrollResizeAndFoldRehitStationaryPointer(t *testing.T) {
 	require.Equal(t, d.hovered, d.selectedID())
 	d.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
 	require.Equal(t, subagent.NodeID("agent-79"), d.selectedID())
-	require.Contains(t, ansi.Strip(d.View()), "#agent")
+	require.Contains(t, ansi.Strip(d.View()), "worker")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	g := d.prepared[0]
 	d.Update(tea.MouseClickMsg{X: d.bodyX + g.chevron, Y: d.bodyY + g.start, Button: tea.MouseLeft})
@@ -224,4 +224,46 @@ func TestSubagentsWaitingAttentionAndScrollbarGeometry(t *testing.T) {
 	require.Equal(t, selected, d.selectedID())
 	require.Empty(t, d.hovered)
 	d.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+}
+
+func TestSubagentsRunningSpinnerLifecycleAndSharedHover(t *testing.T) {
+	d := subagentsPresentationFixture()
+	d.nodes[0].Node.State = subagent.NodeRunning
+	d.rebuild("")
+	ar := newDialogRuntime()
+	d.BindAnimationRuntime(ar)
+	t.Cleanup(d.Cleanup)
+	d.Update(tea.MouseMotionMsg{X: d.bodyX + 5, Y: d.bodyY})
+	require.True(t, d.spinnerAnimation.IsActive())
+	initial := d.View()
+	for range 20 {
+		tick := acceptedDialogTick(ar, ar.Continue())
+		before, after := tick.ElapsedBounds()
+		value := d.hover[d.hovered].value
+		d.Update(tick)
+		require.Equal(t, animation.HoverStep(value, 1, after-before), d.hover[d.hovered].value)
+	}
+	require.NotEqual(t, initial, d.View())
+	require.False(t, d.hoverAnimation.IsActive(), "hover settles independently of spinner")
+	require.True(t, d.spinnerAnimation.IsActive())
+	d.nodes[0].Node.WaitingOn = "approval"
+	d.Update(SubagentsRefreshMsg{Dialog: d, Nodes: d.nodes})
+	require.False(t, d.spinnerAnimation.IsActive(), "waiting agent does not spin")
+	require.Zero(t, ar.ActiveCount())
+	d.nodes[0].Node.WaitingOn = ""
+	d.Update(SubagentsRefreshMsg{Dialog: d, Nodes: d.nodes})
+	require.True(t, d.spinnerAnimation.IsActive())
+	d.StopAnimations()
+	require.Zero(t, ar.ActiveCount())
+	d.SetSize(70, 20)
+	require.Zero(t, ar.ActiveCount(), "resizing an occluded dialog cannot restart spinner")
+}
+
+func TestSubagentsCompactStatusAppearsOnlyOnce(t *testing.T) {
+	d := NewSubagentsDialog([]subagent.NodeSnapshot{{Node: subagent.Node{ID: "canonical-hidden", Agent: "director", State: subagent.NodeRunning, WaitingOn: "children"}}}, nil).(*subagentsDialog)
+	d.SetSize(45, 18)
+	view := ansi.Strip(d.View())
+	require.Equal(t, 1, strings.Count(view, "running"))
+	require.NotContains(t, view, "#canon")
+	require.Contains(t, view, "waiting: children")
 }

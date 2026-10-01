@@ -165,7 +165,7 @@ func (m *appModel) syncPanelTreeDialog() {
 	if data == nil || data.treeDialog != top {
 		return
 	}
-	m.updateDialogCmd(dialog.SubagentsRefreshMsg{Dialog: top, Nodes: data.nodes})
+	m.updateDialogCmd(dialog.SubagentsRefreshMsg{Dialog: top, Nodes: data.treeNodes})
 }
 
 var todoEditorSequence atomic.Uint64

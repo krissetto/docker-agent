@@ -2,7 +2,6 @@ package dialog
 
 import (
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -19,8 +18,7 @@ type subagentRowGeometry struct {
 }
 
 type subagentHover struct {
-	value, from, target float64
-	elapsed             time.Duration
+	value, target float64
 }
 
 // Roots have no implied super-root; only descendants own tree connectors.
@@ -49,6 +47,13 @@ func (d *subagentsDialog) renderRows(width int) ([]string, []subagentRowGeometry
 		prefix := lead + styles.MutedStyle.Render(guides)
 		room := max(1, width-ansi.StringWidth(prefix))
 		state := cleanDetail(string(row.Node.State))
+		if row.Node.State == subagent.NodeRunning && row.Node.WaitingOn == "" {
+			frame := d.spinnerFrame
+			if frame == "" {
+				frame = animation.TabBusy.FrameAt(0)
+			}
+			state = frame + " " + state
+		}
 		if row.Node.WaitingOn != "" {
 			state += " · waiting: " + cleanDetail(row.Node.WaitingOn)
 		}
@@ -57,7 +62,7 @@ func (d *subagentsDialog) renderRows(width int) ([]string, []subagentRowGeometry
 		}
 		fullState := state
 		stateWidth := min(ansi.StringWidth(state), max(0, room-20))
-		if stateWidth < 4 {
+		if stateWidth < 4 || stateWidth < ansi.StringWidth(state) {
 			stateWidth = 0
 		}
 		identityRoom := room
@@ -68,14 +73,10 @@ func (d *subagentsDialog) renderRows(width int) ([]string, []subagentRowGeometry
 		if row.Branch && identityRoom >= 4 {
 			controlWidth = 2
 		}
-		id := " #" + subagent.ShortID(string(row.Node.ID))
-		if identityRoom-controlWidth < ansi.StringWidth(id)+3 {
-			id = ""
-		}
-		name := ansi.Truncate(cleanDetail(row.Node.DisplayName()), max(1, identityRoom-controlWidth-ansi.StringWidth(id)), "…")
+		name := ansi.Truncate(cleanDetail(row.Node.DisplayName()), max(1, identityRoom-controlWidth), "…")
 		hover := d.hover[row.Node.ID].value
 		identity := styles.HoverText(styles.AgentIdentityStyle(row.Node.Agent, false).Render(name), hover, styles.TextPrimary)
-		primary := prefix + identity + styles.MutedStyle.Render(id)
+		primary := prefix + identity
 		if controlWidth > 0 {
 			g.chevron = ansi.StringWidth(primary) + 1
 			chevron := "⌄"
@@ -179,6 +180,8 @@ func (d *subagentsDialog) page(direction int) {
 
 func (d *subagentsDialog) BindAnimationRuntime(runtime *animation.Runtime) {
 	d.hoverAnimation.SetRuntime(runtime)
+	d.spinnerAnimation.SetRuntime(runtime)
+	d.runtime = runtime
 	d.animationBound = true
 }
 
@@ -207,7 +210,7 @@ func (d *subagentsDialog) syncHover() tea.Cmd {
 			target = 1
 		}
 		if state.target != target {
-			state.from, state.target, state.elapsed = state.value, target, 0
+			state.target = target
 			if !d.animationBound {
 				state.value = target
 			}
@@ -228,9 +231,7 @@ func (d *subagentsDialog) tickHover(tick animation.TickMsg) {
 	before, after := tick.ElapsedBounds()
 	running := false
 	for id, state := range d.hover {
-		state.elapsed += after - before
-		p := min(1, float64(state.elapsed)/float64(animation.ShortDuration))
-		state.value = state.from + (state.target-state.from)*animation.EaseOutCubic(p)
+		state.value = animation.HoverStep(state.value, state.target, after-before)
 		running = running || state.value != state.target
 		if state.value == 0 && state.target == 0 {
 			delete(d.hover, id)
@@ -245,8 +246,39 @@ func (d *subagentsDialog) tickHover(tick animation.TickMsg) {
 	tick.MarkDirty()
 }
 
+func (d *subagentsDialog) syncSpinner() {
+	if !d.animationBound {
+		return
+	}
+	if d.Height() < 5 || d.Width() < 8 {
+		d.spinnerAnimation.Stop()
+		return
+	}
+	start, end := d.scrollview.ScrollOffset(), d.scrollview.ScrollOffset()+d.scrollview.VisibleHeight()
+	for i, row := range d.rows {
+		if i < len(d.prepared) && d.prepared[i].end > start && d.prepared[i].start < end && row.Node.State == subagent.NodeRunning && row.Node.WaitingOn == "" {
+			d.spinnerAnimation.Start()
+			return
+		}
+	}
+	d.spinnerAnimation.Stop()
+}
+
+func (d *subagentsDialog) tickSpinner(tick animation.TickMsg) {
+	if !d.spinnerAnimation.IsActive() {
+		return
+	}
+	frame := animation.TabBusy.FrameAt(d.runtime.Now())
+	if frame != d.spinnerFrame {
+		d.spinnerFrame = frame
+		d.MarkVisualDirty()
+		tick.MarkDirty()
+	}
+}
+
 func (d *subagentsDialog) StopAnimations() {
 	d.hoverAnimation.Stop()
+	d.spinnerAnimation.Stop()
 	d.hover, d.hovered, d.pointerKnown = nil, "", false
 	d.MarkVisualDirty()
 }

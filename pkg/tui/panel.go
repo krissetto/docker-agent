@@ -33,7 +33,8 @@ type panelSessionData struct {
 	sessionID                        string
 	generation, revision             uint64
 	workspace                        string
-	nodes                            []subagent.NodeSnapshot
+	nodes, treeNodes                 []subagent.NodeSnapshot
+	treeLiveObserved                 bool
 	todos                            []session.Todo
 	todosKnown, requested, attempted bool
 }
@@ -81,6 +82,7 @@ func (m *appModel) panelOwnerData(owner string) *panelSessionData {
 		}
 		if snapshot := sess.GetSubagentTree(); snapshot != nil {
 			data.nodes = panelChildren(runner.App, snapshot)
+			data.treeNodes = panelTreeNodes(runner.App, snapshot)
 		}
 		m.panelData[owner] = data
 	}
@@ -104,6 +106,67 @@ func panelChildren(a *app.App, snapshot *subagent.Snapshot) []subagent.NodeSnaps
 	return nil
 }
 
+// Keep navigation rooted at the enclosing tree, not the attached viewer's descendants.
+func panelTreeNodes(a *app.App, snapshot *subagent.Snapshot) []subagent.NodeSnapshot {
+	if a == nil || a.Session() == nil || snapshot == nil {
+		return nil
+	}
+	var attached subagent.NodeID
+	if node := a.AttachedSubagent(); node != nil {
+		attached = node.NodeID
+	}
+	focused, ok := subagentview.Root(*snapshot, a.Session().ID, attached)
+	if !ok {
+		return nil
+	}
+	for _, root := range snapshot.Nodes {
+		if _, found := subagentview.Find([]subagent.NodeSnapshot{root}, focused.Node.ID); found {
+			return subagentview.Sorted([]subagent.NodeSnapshot{root})
+		}
+	}
+	return nil
+}
+
+func (data *panelSessionData) refreshTree(snapshot *subagent.Snapshot) bool {
+	nodes := panelTreeNodes(data.application, snapshot)
+	if nodes == nil && len(data.treeNodes) > 0 {
+		if root, ok := subagentview.Find(snapshot.Nodes, data.treeNodes[0].Node.ID); ok {
+			nodes = subagentview.Sorted([]subagent.NodeSnapshot{root})
+		}
+	}
+	if nodes == nil && !data.treeLiveObserved {
+		return false
+	}
+	if nodes != nil {
+		data.treeLiveObserved = true
+	}
+	data.treeNodes = nodes
+	data.nodes = panelChildren(data.application, snapshot)
+	return true
+}
+
+func (m *appModel) openSubagentsTree() tea.Cmd {
+	data := m.panelOwnerData(m.paneFocus())
+	if data == nil {
+		return nil
+	}
+	if source, ok := data.application.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && source.SubagentTree() != nil {
+		snapshot := source.SubagentTree().Snapshot()
+		if data.treeLiveObserved || panelTreeNodes(data.application, &snapshot) != nil {
+			data.refreshTree(&snapshot)
+		}
+	}
+	selected := subagent.NodeID("")
+	if node := data.application.AttachedSubagent(); node != nil {
+		selected = node.NodeID
+	} else if root, ok := subagentview.Root(subagent.Snapshot{Nodes: data.treeNodes}, data.sessionID, ""); ok {
+		selected = root.Node.ID
+	}
+	d := dialog.NewSubagentsDialog(data.treeNodes, m.panelTitles(data.treeNodes), selected)
+	data.treeDialog = d
+	return tea.Sequence(core.CmdHandler(dialog.OpenDialogMsg{Model: d}), m.loadPanelTitles(d, data))
+}
+
 func (m *appModel) ingestPanelEvent(owner string, event runtime.Event) {
 	if _, reset := event.(*app.SessionResetEvent); reset {
 		m.closePanelDialogs(m.panelData[owner])
@@ -117,21 +180,14 @@ func (m *appModel) ingestPanelEvent(owner string, event runtime.Event) {
 	case *app.SessionResetEvent:
 		if event.Snapshot.Session != nil {
 			data.workspace = event.Snapshot.Session.WorkingDir
-			data.nodes = panelChildren(m.supervisor.GetRunner(owner).App, event.Snapshot.Session.GetSubagentTree())
+			data.nodes = panelChildren(data.application, event.Snapshot.Session.GetSubagentTree())
+			data.treeNodes = panelTreeNodes(data.application, event.Snapshot.Session.GetSubagentTree())
 		}
 	case *app.SessionViewEvent:
 		data.workspace = event.Session.WorkingDir
 	case *runtime.SubagentTreeEvent:
-		a := m.supervisor.GetRunner(owner).App
-		var attached subagent.NodeID
-		if node := a.AttachedSubagent(); node != nil {
-			attached = node.NodeID
-		}
-		if _, ok := subagentview.Root(event.Snapshot, data.sessionID, attached); ok {
-			data.nodes = panelChildren(a, &event.Snapshot)
-			if owner == m.paneFocus() {
-				m.syncPanelTreeDialog()
-			}
+		if data.refreshTree(&event.Snapshot) && owner == m.paneFocus() {
+			m.syncPanelTreeDialog()
 		}
 	case *runtime.SessionTitleEvent:
 		if data.treeDialog != nil && m.dialogMgr.TopDialog() == data.treeDialog {
@@ -302,9 +358,7 @@ func (m *appModel) openPanelElement(id messages.PanelElement) tea.Cmd {
 	lines := []string{data.workspace}
 	switch id {
 	case messages.PanelSubagents:
-		d := dialog.NewSubagentsDialog(data.nodes, m.panelTitles(data.nodes))
-		data.treeDialog = d
-		return tea.Sequence(core.CmdHandler(dialog.OpenDialogMsg{Model: d}), m.loadPanelTitles(d, data))
+		return m.openSubagentsTree()
 	case messages.PanelTodos:
 		return m.openTodos(messages.OpenTodosMsg{})
 	}

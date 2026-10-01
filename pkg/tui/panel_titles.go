@@ -49,7 +49,7 @@ func (m *appModel) loadPanelTitles(d dialog.Dialog, data *panelSessionData) tea.
 	}
 	ctx, cancel := context.WithTimeout(m.ctx(), 3*time.Second)
 	d.(interface{ SetCancel(func()) }).SetCancel(cancel)
-	result := panelTitlesMsg{data: data, application: m.application, owner: m.paneFocus(), sessionID: data.sessionID, generation: data.generation, dialog: d, titles: m.panelTitles(data.nodes)}
+	result := panelTitlesMsg{data: data, application: m.application, owner: m.paneFocus(), sessionID: data.sessionID, generation: data.generation, dialog: d, titles: m.panelTitles(data.treeNodes)}
 	return func() tea.Msg {
 		defer cancel()
 		entries, err := catalog.ListSessionSummaries(ctx, runtime.SessionSummaryOptions{IncludeChildren: true})
