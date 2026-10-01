@@ -199,10 +199,13 @@ behavior. No real provider credentials were read or used during validation.
   auto-update off, disables telemetry, and passes the SBX workspace as working
   directory. Data/config/cache use Docker Agent's default locations; keep
   transcripts private.
-- Fresh sandboxes from current source builds hide the ASCII-art startup banner.
+- Fresh sandboxes from current source builds hide the ASCII-art startup banner,
+  enable **YOLO** (automatic tool approval), and restore open tabs across app
+  restarts. Tab restoration uses the same sandbox's saved state; it does not
+  carry tabs into a newly created sandbox.
   The image seeds `/home/agent/.config/cagent/config.yaml` from
   [`user-config.yaml`](user-config.yaml), with agent-owned directories (0700) and
-  file (0600), so ordinary **Settings** can re-enable and save the banner.
+  file (0600), so ordinary **Settings** can change and save these preferences.
   The launcher never writes or resets user settings. Mounted user configuration
   and custom config directories take precedence; non-kit defaults are unchanged.
   Existing sandboxes and historical published images are not changed.

@@ -1,2 +1,4 @@
 settings:
   show_banner: false
+  YOLO: true
+  restore_tabs: true
