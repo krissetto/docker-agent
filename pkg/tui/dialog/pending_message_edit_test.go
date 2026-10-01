@@ -2,11 +2,13 @@ package dialog
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -317,4 +319,76 @@ func TestEditDialogIsolatedRenderedSurface(t *testing.T) {
 	require.Contains(t, view, "Cancel")
 	require.NotContains(t, view, "Attachments")
 	require.NotContains(t, view, "History")
+}
+
+func TestEditDialogFootersMatchSettingsConvention(t *testing.T) {
+	for _, kind := range []string{"todo", "queued"} {
+		for _, size := range [][2]int{{140, 40}, {70, 20}, {24, 8}, {10, 4}} {
+			t.Run(fmt.Sprintf("%s/%dx%d", kind, size[0], size[1]), func(t *testing.T) {
+				var d Dialog
+				var base *BaseDialog
+				var content func() (int, string, string, string)
+				calls := 0
+				if kind == "todo" {
+					ed := NewTodoEditDialog(messages.TodoScope{}, "id", "draft", 1, func(uint64, string, string) tea.Cmd {
+						calls++
+						return func() tea.Msg { return nil }
+					}).(*todoEditDialog)
+					d, base, content = ed, &ed.BaseDialog, ed.content
+				} else {
+					ed := NewPendingMessageEditDialog("s", "t", "draft", 1, func(string) tea.Cmd {
+						calls++
+						return func() tea.Msg { return nil }
+					}).(*pendingMessageEditDialog)
+					d, base, content = ed, &ed.BaseDialog, ed.content
+				}
+				d.SetSize(size[0], size[1])
+				view := d.View()
+				require.LessOrEqual(t, lipgloss.Width(view), size[0])
+				require.LessOrEqual(t, lipgloss.Height(view), size[1])
+				_, _, _, footer := content()
+				require.True(t, base.pickerFooter, "Settings uses shared RenderPickerFooter")
+				cells := uv.NewStyledString(footer).Lines(ansi.GraphemeWidth)
+				for y, row := range base.actionRows {
+					for _, hit := range row.hits {
+						for x := hit.x; x < hit.x+hit.width; x++ {
+							if hit.key.Code == tea.KeyEscape {
+								require.Nil(t, cells[y][x].Style.Bg, "Cancel is a plain dim hint")
+							} else {
+								require.NotNil(t, cells[y][x].Style.Bg, "Save is the sole primary pill")
+							}
+						}
+					}
+				}
+				if size[0] >= 70 {
+					line := strings.Split(ansi.Strip(footer), "\n")[1]
+					require.True(t, strings.HasPrefix(line, "Cancel"))
+					require.True(t, strings.HasSuffix(line, " Save   "), "primary pill is right aligned")
+					x, y := familyActionCell(t, d, "Cancel")
+					r := newDialogRuntime()
+					row, col := d.Position()
+					base.UpdateFooterHover(tea.MouseMotionMsg{X: x, Y: y}, r, NewDialogLayout(d.View(), row, col))
+					require.True(t, base.footerHover.Running(), "Cancel uses the shared hint hover")
+					base.StopFooterHover()
+					require.Zero(t, r.ActiveCount())
+				}
+				d.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+				require.Equal(t, 1, calls)
+				_, _, _, _ = content()
+				for _, row := range base.actionRows {
+					for _, hit := range row.hits {
+						require.Equal(t, tea.KeyEscape, hit.key.Code, "saving removes Save hit targets")
+					}
+				}
+				d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+				key, ok := base.SelectedActionKey()
+				require.True(t, ok)
+				require.Equal(t, tea.KeyEscape, key.Code, "focus skips disabled Save")
+				_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+				require.NotNil(t, cmd, "focused Cancel must dispatch Escape rather than insert a newline")
+				require.IsType(t, CloseDialogByModelMsg{}, cmd())
+				require.Equal(t, 1, calls)
+			})
+		}
+	}
 }

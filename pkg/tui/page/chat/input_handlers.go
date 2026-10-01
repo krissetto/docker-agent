@@ -118,6 +118,9 @@ func copyWorkingDirToClipboard(wd string) tea.Cmd {
 func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
 	hit := NewHitTest(p)
 	target := hit.At(msg.X, msg.Y)
+	if target != TargetSidebarContent || msg.Button != tea.MouseLeft {
+		p.sidebar.ResetTodoClick()
+	}
 	sessionID := ""
 	if p.app != nil && p.app.Session() != nil {
 		sessionID = p.app.Session().ID

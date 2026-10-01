@@ -102,6 +102,7 @@ func (m *model) tickHover(tick animation.TickMsg) {
 }
 
 func (m *model) cancelHover() {
+	m.ResetTodoClick()
 	m.hoverAnimation.Stop()
 	m.hoverValues = nil
 	m.hoverTarget = ""

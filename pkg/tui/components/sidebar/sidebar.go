@@ -108,6 +108,7 @@ type Model interface {
 	SetSessionStarred(starred bool)
 	SetQueuedMessages(messages []QueuedMessage) tea.Cmd
 	ConfirmQueuedRemoval(id string) bool
+	ResetTodoClick()
 	ReconcileLayout() tea.Cmd
 	SetPresentationActive(active bool) tea.Cmd
 	// SetSectionVisibility controls which optional sidebar sections are rendered.
@@ -348,6 +349,7 @@ type model struct {
 	todoComp          *todotool.SidebarComponent
 	todoScope         messages.TodoScope
 	todoRemoveArmed   string
+	lastTodoClick     todoBodyClick
 	ragIndexing       map[string]*ragIndexingState // strategy name -> indexing state
 	spinner           spinner.Spinner
 	spinnerActive     bool // true when spinner is registered with animation coordinator
@@ -634,6 +636,7 @@ func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
 }
 
 func (m *model) SetTodos(result *tools.ToolCallResult) error {
+	m.ResetTodoClick()
 	m.invalidateCache()
 	return m.todoComp.SetTodos(result)
 }
@@ -915,6 +918,7 @@ func (m *model) SetSectionVisibility(v SectionVisibility) {
 	if m.sectionVisibility == v {
 		return
 	}
+	m.ResetTodoClick()
 	m.sectionVisibility = v
 	m.invalidateCache()
 }
@@ -927,6 +931,7 @@ func (m *model) SetSectionGap(lines int) {
 	if m.sectionGap == lines {
 		return
 	}
+	m.ResetTodoClick()
 	m.sectionGap = lines
 	m.invalidateCache()
 }
@@ -1558,6 +1563,9 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := m.SetSize(msg.Width, msg.Height)
 		return m, cmd
 	case tea.MouseMotionMsg:
+		if msg.Button != tea.MouseNone || msg.X-m.xPos != m.lastTodoClick.x || msg.Y-m.yPos != m.lastTodoClick.y {
+			m.ResetTodoClick()
+		}
 		if msg.X-m.xPos != m.branchCapture.x || msg.Y-m.yPos != m.branchCapture.y {
 			m.branchCapture = branchCapture{}
 		}
@@ -1574,6 +1582,9 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return m, cmd
 	case tea.MouseClickMsg:
+		if msg.Button != tea.MouseLeft {
+			m.ResetTodoClick()
+		}
 		if msg.X-m.xPos != m.branchCapture.x || msg.Y-m.yPos != m.branchCapture.y {
 			m.branchCapture = branchCapture{}
 		}
@@ -1607,6 +1618,9 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
+		if release, ok := msg.(tea.MouseReleaseMsg); !ok || release.X-m.xPos != m.lastTodoClick.x || release.Y-m.yPos != m.lastTodoClick.y {
+			m.ResetTodoClick()
+		}
 		if release, ok := msg.(tea.MouseReleaseMsg); ok && (release.X-m.xPos != m.branchCapture.x || release.Y-m.yPos != m.branchCapture.y) {
 			m.branchCapture = branchCapture{}
 		}
@@ -3002,6 +3016,7 @@ func (m *model) updateSubagentHover(y int) {
 // ClearSubagentHover resets subagent hover state, e.g. when the mouse leaves
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
+	m.ResetTodoClick()
 	if m.queueRemoveArmed != "" {
 		m.queueRemoveArmed = ""
 		m.invalidateHover()
@@ -3747,6 +3762,9 @@ func (m *model) updateTitleInputWidth() {
 
 // SetPosition sets the absolute position of the component on screen
 func (m *model) SetPosition(x, y int) tea.Cmd {
+	if m.xPos != x || m.yPos != y {
+		m.ResetTodoClick()
+	}
 	m.xPos = x
 	m.yPos = y
 	m.updateScrollviewPosition()
@@ -3768,6 +3786,7 @@ func (m *model) SetMode(mode Mode) {
 	if m.mode == mode {
 		return
 	}
+	m.ResetTodoClick()
 	m.mode = mode
 	m.invalidateCache()
 }
@@ -3783,6 +3802,7 @@ func (m *model) SetMirroredPadding(mirrored bool) {
 	if m.layoutCfg == cfg {
 		return
 	}
+	m.ResetTodoClick()
 	m.layoutCfg = cfg
 	m.updateScrollviewPosition()
 	m.updateTitleInputWidth()

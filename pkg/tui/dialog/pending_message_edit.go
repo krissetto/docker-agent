@@ -131,6 +131,9 @@ func (d *pendingMessageEditDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				msg = action
 			}
 		}
+		if msg.Code == tea.KeyEscape {
+			return d, d.CancelDialogCmd()
+		}
 		if msg.Code == tea.KeyEnter && msg.Mod&tea.ModCtrl != 0 {
 			cmd := d.beginSave()
 			return d, cmd
@@ -209,7 +212,7 @@ func (d *pendingMessageEditDialog) content() (width int, header, body, footer st
 	if d.saving {
 		label = "Saving…"
 	}
-	footer = d.RenderActions(d.ContentWidth(width, 2), Action{Label: label, HideShortcut: true, Primary: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: d.saving}, Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}})
+	footer = d.RenderPickerFooter(d.ContentWidth(width, 2), Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: tea.KeyEscape}}, Action{Label: label, HideShortcut: true, Primary: true, Key: tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl}, Disabled: d.saving})
 	hint := styles.MutedStyle.Width(d.ContentWidth(width, 2)).Render("Enter newline · Ctrl+Enter Save")
 	footer = hint + "\n" + footer
 	d.actionRows = append(make([]dialogActionRow, lipgloss.Height(hint)), d.actionRows...)

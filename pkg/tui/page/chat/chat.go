@@ -653,6 +653,11 @@ func Cleanup(page Page) {
 
 // Update handles messages and updates the page state
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseWheelMsg, msgtypes.WheelCoalescedMsg:
+		p.sidebar.ResetTodoClick()
+	}
+
 	if snapshot, ok := msg.(msgtypes.TodosSnapshotMsg); ok {
 		return p, p.forwardToSidebar(snapshot)
 	}

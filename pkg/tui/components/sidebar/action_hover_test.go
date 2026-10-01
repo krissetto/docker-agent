@@ -120,7 +120,7 @@ func TestActionHoverClearsOnScrollResizeAndModal(t *testing.T) {
 					if todo {
 						cmd, handled := m.todoClick(m.layoutCfg.PaddingLeft+w-1, 0)
 						require.True(t, handled)
-						require.IsType(t, messages.OpenTodosMsg{}, cmd())
+						require.Nil(t, cmd, "single-click todo continuation is inert")
 					} else {
 						result, id := m.HandleClickType(m.layoutCfg.PaddingLeft+w-1, 0)
 						require.Equal(t, ClickQueuedMessage, result)
