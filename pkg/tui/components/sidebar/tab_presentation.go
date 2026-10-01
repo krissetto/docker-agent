@@ -83,6 +83,12 @@ func (m *model) preserveChangedRows(target []placedRow) {
 func (m *model) placementText(row placedRow, width int) string {
 	text := row.text
 	if !row.target {
+		switch {
+		case strings.HasPrefix(row.id, "todo:") && row.payload != "":
+			return m.todoHoverText(row)
+		case strings.HasPrefix(row.id, "queue:") && row.payload != "":
+			return m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false, false)
+		}
 		return text
 	}
 	switch {

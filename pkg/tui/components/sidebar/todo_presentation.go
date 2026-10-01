@@ -42,22 +42,33 @@ func (m *model) todoHoverText(row placedRow) string {
 func (m *model) actionRowText(text, base string, first, todo, armed bool) string {
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	indent, actions := rowActions(width, todo)
-	if first && armed && actions.Remove >= 0 {
-		col := indent + actions.Remove
-		text = ansi.Cut(text, 0, col) + styles.ErrorStyle.Render("×") + ansi.Cut(text, col+1, width)
+	if (!first || actions.Remove < 0) && m.hoverValues[base+"text"].value == 0 {
+		return text
+	}
+	var out strings.Builder
+	end := indent + actions.TextWidth
+	out.WriteString(styles.HoverText(ansi.Cut(text, 0, end), m.hoverValues[base+"text"].value, styles.TextPrimary))
+	if !first || actions.Remove < 0 {
+		out.WriteString(ansi.Cut(text, end, width))
+		return out.String()
 	}
 	for _, part := range []struct {
-		name       string
-		start, end int
-	}{{"text", 0, indent + actions.TextWidth}, {"status", actions.Status + indent, actions.Status + indent + 1}, {"edit", actions.Edit + indent, actions.Edit + indent + 1}, {"remove", actions.Remove + indent, actions.Remove + indent + 1}} {
-		if part.name != "text" && (!first || part.start < indent) {
+		name string
+		col  int
+	}{{"status", actions.Status}, {"edit", actions.Edit}, {"remove", actions.Remove}} {
+		if part.col < 0 {
 			continue
 		}
-		value := m.hoverValues[base+part.name].value
-		if value == 0 {
-			continue
+		col := indent + part.col
+		out.WriteString(ansi.Cut(text, end, col))
+		paint := ansi.Cut(text, col, col+1)
+		if part.name == "remove" && armed {
+			paint = styles.ErrorStyle.Render("×")
 		}
-		text = ansi.Cut(text, 0, part.start) + styles.HoverText(ansi.Cut(text, part.start, part.end), value, styles.TextPrimary) + ansi.Cut(text, part.end, width)
+		paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
+		out.WriteString(hoverAction(paint, m.hoverValues[base+"row"].value))
+		end = col + 1
 	}
-	return text
+	out.WriteString(ansi.Cut(text, end, width))
+	return out.String()
 }

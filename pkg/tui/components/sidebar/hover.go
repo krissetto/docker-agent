@@ -2,17 +2,16 @@ package sidebar
 
 import (
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 type hoverValue struct {
-	value, target, from float64
-	elapsed             time.Duration
+	value, target float64
 }
 
 func (m *model) hoverText(text, key string) string {
@@ -25,6 +24,12 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 	}
 	if key == m.hoverTarget {
 		return nil
+	}
+	if m.todoRemoveArmed != "" && !strings.HasPrefix(key, "todo:"+m.todoRemoveArmed+":") {
+		m.todoRemoveArmed = ""
+	}
+	if m.queueRemoveArmed != "" && !strings.HasPrefix(key, "queue:"+m.queueRemoveArmed+":") {
+		m.queueRemoveArmed = ""
 	}
 	m.hoverTarget = key
 	m.invalidateHover()
@@ -42,6 +47,10 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 		}
 	} else if key != "" {
 		active[key] = true
+		if strings.HasPrefix(key, "todo:") || strings.HasPrefix(key, "queue:") {
+			base := key[:strings.LastIndex(key, ":")]
+			active[base+":row"] = true
+		}
 	}
 	for name := range active {
 		if _, ok := m.hoverValues[name]; !ok {
@@ -54,7 +63,7 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 			target = 1
 		}
 		if state.target != target {
-			state.from, state.target, state.elapsed = state.value, target, 0
+			state.target = target
 			m.hoverValues[name] = state
 		}
 	}
@@ -74,14 +83,7 @@ func (m *model) tickHover(tick animation.TickMsg) {
 	changed, running := false, false
 	for key, state := range m.hoverValues {
 		old := state.value
-		switch {
-		case strings.HasPrefix(key, "directory"):
-			state.elapsed += after - before
-			p := min(1, float64(state.elapsed)/float64(animation.ShortDuration))
-			state.value = state.from + (state.target-state.from)*animation.EaseOutCubic(p)
-		default:
-			state.value = animation.HoverStep(state.value, state.target, after-before)
-		}
+		state.value = animation.HoverStep(state.value, state.target, after-before)
 		changed = changed || old != state.value
 		running = running || state.value != state.target
 		if state.value == 0 && state.target == 0 {
@@ -140,4 +142,12 @@ func (m *model) invalidateHover() {
 	onlyHover := !m.cacheDirty || m.hoverOnlyDirty
 	m.invalidateAnimation()
 	m.hoverOnlyDirty = onlyHover
+}
+
+// A terminal's transparent background is unknown: hide glyphs, never RGB-camouflage them.
+func hoverAction(text string, progress float64) string {
+	if progress <= 0 {
+		return strings.Repeat(" ", ansi.StringWidth(text))
+	}
+	return styles.HoverText(text, progress, styles.TextPrimary)
 }

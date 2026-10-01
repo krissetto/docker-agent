@@ -102,7 +102,7 @@ func TestDirectoryFolderIconDedicatedRawPathAction(t *testing.T) {
 	}
 }
 
-func TestDirectoryArrowFadesAtStableSingleCell(t *testing.T) {
+func TestDirectoryArrowRevealsAtStableSingleCell(t *testing.T) {
 	t.Parallel()
 	m := newHoverSidebar(t)
 	width := 30
@@ -115,10 +115,14 @@ func TestDirectoryArrowFadesAtStableSingleCell(t *testing.T) {
 		cells := sidebarCells(line)
 		require.Len(t, cells, width)
 		arrow := cells[width-2]
-		assert.Equal(t, directoryIcon, arrow.glyph)
+		if progress == 0 {
+			assert.Equal(t, " ", arrow.glyph)
+		} else {
+			assert.Equal(t, directoryIcon, arrow.glyph)
+		}
 		expected := sidebarCells(directoryActionIcon(directoryIcon, progress, progress))
 		require.Len(t, expected, 1)
-		assert.Equal(t, color.NRGBAModel.Convert(expected[0].fg), color.NRGBAModel.Convert(arrow.fg))
+		assert.Equal(t, expected[0].fg, arrow.fg)
 		assert.Nil(t, arrow.bg, "arrow has no box/background fill")
 		name := ansi.Strip(ansi.Cut(line, 0, width-directoryReserve()))
 		if baseName == "" {
@@ -157,8 +161,8 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 		} else {
 			copyBase = styles.TextPrimary
 		}
-		assert.Equal(t, color.NRGBAModel.Convert(copyBase), color.NRGBAModel.Convert(cells[width-5].fg))
-		assert.Equal(t, color.NRGBAModel.Convert(arrowBase), color.NRGBAModel.Convert(cells[width-2].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(copyBase, .25)), color.NRGBAModel.Convert(cells[width-5].fg))
+		assert.Equal(t, color.NRGBAModel.Convert(styles.Brighten(arrowBase, .25)), color.NRGBAModel.Convert(cells[width-2].fg))
 		result, payload := m.HandleClickType(x, y)
 		if x == arrowX {
 			assert.Equal(t, ClickOpenWorkingDir, result)
@@ -171,7 +175,7 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 	assert.Zero(t, m.ar.ActiveCount())
 	cells := sidebarCells(m.directoryRow(width))
 	for _, x := range []int{width - 5, width - 2} {
-		assert.Equal(t, color.NRGBAModel.Convert(styles.Background), color.NRGBAModel.Convert(cells[x].fg), "all icons fade out with the row")
+		assert.Equal(t, " ", cells[x].glyph, "idle icons are absent on any background")
 	}
 }
 

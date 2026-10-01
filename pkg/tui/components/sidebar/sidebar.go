@@ -1524,6 +1524,7 @@ func (m *model) updateScrollviewMouse(msg tea.Msg) tea.Cmd {
 	beforeOffset, beforeDragging := m.scrollview.ScrollOffset(), m.scrollview.IsDragging()
 	_, cmd := m.scrollview.Update(msg)
 	if m.scrollview.ScrollOffset() != beforeOffset || m.scrollview.IsDragging() != beforeDragging {
+		m.CancelHover()
 		m.visualGeneration++
 	}
 	return cmd
@@ -2169,7 +2170,19 @@ func (m *model) renderFromCache() string {
 	}
 
 	m.scrollview.SetSize(regionWidth, m.viewportHeight())
-	m.scrollview.SetContent(m.cachedLines, len(m.cachedLines))
+	lines := slices.Clone(m.cachedLines)
+	for i, meta := range m.queueRows {
+		if y := m.queueStart + i; meta.turnID != "" && y < len(lines) {
+			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false, m.queueRemoveArmed == meta.turnID)
+		}
+	}
+	for y := m.todoSummaryLine + 2; m.todoSummaryLine >= 0 && y < m.todoEnd; y++ {
+		line := y - m.todoSummaryLine - 2
+		if item, ok := m.todoComp.TodoAtLine(line); ok {
+			lines[y] = m.actionRowText(lines[y], "todo:"+item.ID+":", m.todoComp.ControlsAtLine(line), true, m.todoRemoveArmed == item.ID)
+		}
+	}
+	m.scrollview.SetContent(lines, len(lines))
 
 	content := ""
 	if m.viewportHeight() > 0 {
@@ -3708,6 +3721,7 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 	if m.width == width && m.height == height {
 		return nil // Dimensions unchanged — skip cache invalidation
 	}
+	m.CancelHover()
 	m.width = width
 	m.height = height
 	m.hoveredTreeRow = -1

@@ -131,7 +131,7 @@ func assertPlacementPaintAndHits(t *testing.T, m *model) string {
 		row, hit := m.placementRowAt(x, y)
 		assert.Equal(t, exists && painted.target && painted.alpha > 0, hit, "row %d", y)
 		if exists {
-			assert.Equal(t, strings.TrimSpace(ansi.Strip(painted.text)), strings.TrimSpace(ansi.Strip(ansi.Cut(lines[y], x, x+width))), "painted row %d", y)
+			assert.Equal(t, strings.TrimSpace(ansi.Strip(m.placementText(painted, m.contentWidth(m.cachedNeedsScrollbar)))), strings.TrimSpace(ansi.Strip(ansi.Cut(lines[y], x, x+width))), "painted row %d", y)
 		}
 		if hit {
 			assert.Equal(t, painted.id, row.id)

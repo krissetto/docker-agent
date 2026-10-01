@@ -39,5 +39,5 @@ func directoryActionIcon(icon string, emphasis, reveal float64) string {
 	r, g, b := styles.ColorToRGB(styles.MutedStyle.GetForeground())
 	pr, pg, pb := styles.ColorToRGB(styles.TextPrimary)
 	foreground := styles.RGBToColor(r+(pr-r)*emphasis, g+(pg-g)*emphasis, b+(pb-b)*emphasis)
-	return styles.FadeLine(styles.BaseStyle.Foreground(foreground).Render(icon), reveal)
+	return hoverAction(styles.BaseStyle.Foreground(foreground).Render(icon), reveal)
 }

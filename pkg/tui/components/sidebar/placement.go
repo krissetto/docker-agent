@@ -372,11 +372,9 @@ func (m *model) placementView() string {
 		if ok {
 			text = row.text
 			if updated, found := fresh[row.id]; found {
-				text = updated
+				row.text = updated
 			}
-			if _, themed := fresh[row.id]; !themed {
-				text = m.placementText(row, width)
-			}
+			text = m.placementText(row, width)
 		}
 		cached := &m.placement.padded[i]
 		if cached.width != width || cached.text != text || cached.alpha != row.alpha {

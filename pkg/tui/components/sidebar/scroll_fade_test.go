@@ -38,7 +38,7 @@ func TestPlacedSidebarReusesSharedViewportFadeAndKeepsFooter(t *testing.T) {
 		rows := make([]string, height)
 		for i := range rows {
 			if row, ok := painted[offset+i]; ok {
-				rows[i] = padRight(row.text, m.contentWidth(m.cachedNeedsScrollbar))
+				rows[i] = padRight(m.placementText(row, m.contentWidth(m.cachedNeedsScrollbar)), m.contentWidth(m.cachedNeedsScrollbar))
 			}
 		}
 		reference := scrollview.New()
