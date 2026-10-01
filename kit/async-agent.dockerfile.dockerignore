@@ -1,4 +1,4 @@
-# Only compilation inputs and the two runtime assets enter this kit's context.
+# Only compilation inputs and the three runtime assets enter this kit's context.
 **
 !go.mod
 !go.sum
@@ -22,6 +22,7 @@
 !pkg/tui/styles/themes/*.yaml
 !kit/launch.sh
 !kit/hackerspace.yaml
+!kit/user-config.yaml
 **/*_test.go
 **/testdata/**
 **/fixtures/**

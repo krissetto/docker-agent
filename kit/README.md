@@ -191,6 +191,13 @@ behavior. No real provider credentials were read or used during validation.
   auto-update off, disables telemetry, and passes the SBX workspace as working
   directory. Data/config/cache use Docker Agent's default locations; keep
   transcripts private.
+- Fresh sandboxes from current source builds hide the ASCII-art startup banner.
+  The image seeds `/home/agent/.config/cagent/config.yaml` from
+  [`user-config.yaml`](user-config.yaml), with agent-owned directories (0700) and
+  file (0600), so ordinary **Settings** can re-enable and save the banner.
+  The launcher never writes or resets user settings. Mounted user configuration
+  and custom config directories take precedence; non-kit defaults are unchanged.
+  Existing sandboxes and historical published images are not changed.
 - Current source builds keep SQLite WAL enabled in sandboxes, with FULL
   synchronous durability unchanged. Keep database files on sandbox-local Linux
   storage, not the host-shared workspace or a network filesystem: WAL requires
@@ -268,7 +275,8 @@ leave the local outputs available for inspection.
 All kit definitions, runtime assets, documentation and tests live in `kit/`.
 The `kit/async-agent.yaml` file is the v3 descriptor. Its ordinary companion
 `kit/async-agent.dockerfile` compiles Linux statically (`no_audio`, `xx-verify
---static`) and installs the custom binary, `hackerspace.yaml` and `launch.sh`.
+--static`) and installs the custom binary, `hackerspace.yaml`, `launch.sh` and
+initial `user-config.yaml`.
 
 ### Local source builds
 
@@ -324,7 +332,7 @@ runs install exactly once per create or startup after every boot.
 ### Build inputs and validation
 
 - Companion-specific `.dockerignore` permits Go source, required embedded assets
-  and this team's two runtime files. Tests, fixtures, `.git`, dotenv files,
+  and this kit's three runtime assets. Tests, fixtures, `.git`, dotenv files,
   databases and unrelated artifacts are excluded. Source edits, including
   untracked matching Go files, are built. Review inputs: hardcoded secrets in
   legitimate source files cannot be automatically filtered out. These exclusions

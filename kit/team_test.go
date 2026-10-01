@@ -146,10 +146,14 @@ func TestNativeKit(t *testing.T) {
 	assert.Contains(t, string(recipe), "xx-verify --static /docker-agent")
 	assert.Contains(t, string(recipe), `ENTRYPOINT ["/opt/async-agent/launch.sh"]`)
 	assert.Contains(t, string(recipe), `COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml`)
+	assert.Contains(t, string(recipe), `RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent`)
+	assert.Contains(t, string(recipe), `COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml`)
+	assert.NotContains(t, string(recipe), "DOCKER_AGENT_CONFIG_DIR")
 	assert.NotContains(t, string(recipe), "COPY . ")
 	ignore, err := os.ReadFile("async-agent.dockerfile.dockerignore")
 	require.NoError(t, err)
 	assert.Contains(t, string(ignore), "!kit/hackerspace.yaml\n")
+	assert.Contains(t, string(ignore), "!kit/user-config.yaml\n")
 }
 
 func TestKitPublicationIdentity(t *testing.T) {
