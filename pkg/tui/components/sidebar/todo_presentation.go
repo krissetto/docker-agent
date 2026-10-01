@@ -69,11 +69,12 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 		col := indent + part.col
 		out.WriteString(ansi.Cut(text, end, col))
 		paint := ansi.Cut(text, col, col+1)
-		if part.name == "remove" && armed {
-			paint = styles.ErrorStyle.Render("×")
+		if part.name == "remove" {
+			out.WriteString(removeAction(m.hoverValues[base+part.name].value, progress, armed))
+		} else {
+			paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
+			out.WriteString(hoverAction(paint, progress))
 		}
-		paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
-		out.WriteString(hoverAction(paint, progress))
 		end = col + 1
 	}
 	out.WriteString(ansi.Cut(text, end, width))
@@ -91,10 +92,20 @@ func (m *model) todoRowText(text, base string, first, armed bool) string {
 	// Only paint is occluded: wrapping, canonical text and continuation rows stay intact.
 	text = padRight(ansi.Truncate(text, width-4, "…"), width-4)
 	edit := styles.HoverText(styles.MutedStyle.Render("✎"), m.hoverValues[base+"edit"].value, styles.TextPrimary)
-	remove := styles.MutedStyle.Render("×")
-	if armed {
-		remove = styles.ErrorStyle.Render("×")
+	remove := removeAction(m.hoverValues[base+"remove"].value, progress, armed)
+	return text + " " + hoverAction(edit, progress) + " " + remove
+}
+
+func removeAction(emphasis, reveal float64, armed bool) string {
+	if reveal <= 0 {
+		return " "
 	}
-	remove = styles.HoverText(remove, m.hoverValues[base+"remove"].value, styles.TextPrimary)
-	return text + " " + hoverAction(edit, progress) + " " + hoverAction(remove, progress)
+	if armed {
+		emphasis = 1
+	}
+	// Blend after row highlighting so the destructive endpoint stays the theme's error color.
+	r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
+	er, eg, eb := styles.ColorToRGB(styles.Error)
+	foreground := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
+	return styles.BaseStyle.Foreground(foreground).Render("×")
 }

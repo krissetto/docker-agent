@@ -276,7 +276,11 @@ func TestQueueItemHoverKeepsTextHighlightedAcrossControls(t *testing.T) {
 						require.Zero(t, progress)
 					}
 					paint := styles.HoverText(styles.MutedStyle.Render(action.glyph), progress, styles.TextPrimary)
-					require.Equal(t, sidebarCells(hoverAction(paint, 1))[0], sidebarCells(m.placementText(first, width))[indent+action.col])
+					paint = hoverAction(paint, 1)
+					if action.name == "remove" {
+						paint = removeAction(progress, 1, false)
+					}
+					require.Equal(t, sidebarCells(paint)[0], sidebarCells(m.placementText(first, width))[indent+action.col])
 				}
 				require.Equal(t, first, requirePlaced(t, m, first.id))
 				require.Equal(t, next, requirePlaced(t, m, next.id))
