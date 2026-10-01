@@ -183,6 +183,11 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 					}
 				}
 				if !hasScroll {
+					if family == "tool-confirmation" {
+						for i := range section.Entries {
+							section.Entries[i].Keys = []string{"mouse wheel", "scrollbar click/drag"}
+						}
+					}
 					sections = append(sections, section)
 				}
 			}

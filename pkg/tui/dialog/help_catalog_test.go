@@ -97,6 +97,8 @@ func TestDialogContextHelpSelectedEnterAndSnapshotPurity(t *testing.T) {
 	_, sections := ContextHelp(d)
 	entry := helpEntry(t, sections, "dialog.tool-confirmation.selected-enter")
 	assert.Equal(t, "No", entry.Description)
+	assert.Equal(t, []string{"mouse wheel", "scrollbar click/drag"}, helpEntry(t, sections, "dialog.shared-body.scroll-body").Keys)
+	assert.Contains(t, helpEntry(t, ReferenceHelp(), "dialog.shared-body.scroll-body").Keys, "pgup", "other dialogs retain page scrolling")
 	require.Len(t, d.actions, 6)
 	d.FocusDefaultAction()
 	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})

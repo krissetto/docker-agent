@@ -40,14 +40,14 @@ var (
 type toolConfirmationDialog struct {
 	BaseDialog
 
-	msg                             *runtime.ToolCallConfirmationEvent
-	keyMap                          toolconfirm.KeyMap
-	sessionState                    ConfirmationSessionState
-	permissionPattern               string // cached permission pattern for this tool call
-	choicesStart                    int
-	choiceScroll                    *scrollview.Model
-	choiceHeight, descriptionHeight int
-	decisionQuestion                bool
+	msg               *runtime.ToolCallConfirmationEvent
+	keyMap            toolconfirm.KeyMap
+	sessionState      ConfirmationSessionState
+	permissionPattern string // cached permission pattern for this tool call
+	choicesStart      int
+	choiceScroll      *scrollview.Model
+	choiceHeight      int
+	decisionQuestion  bool
 }
 
 func (d *toolConfirmationDialog) dialogDimensions() (dialogWidth, contentWidth int) {
@@ -67,12 +67,12 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 
 func (d *toolConfirmationDialog) options() []Action {
 	return []Action{
-		{Label: "No", Description: "Reject this tool call without running it.", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
-		{Label: "Yes, once", Description: "Allow only this tool call. Future calls still require permission.", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
-		{Label: "Always allow tool", Description: "Allow this call and future calls matching " + d.permissionPattern + ".", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
-		{Label: "Balanced mode", Description: "Allow this call and switch this session to Balanced mode: classifier-safe calls run automatically; other calls still require permission.", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
-		{Label: "Allow all tools", Description: "Allow this call and all future tool calls in this session without confirmation.", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
-		{Label: "Reject with reason", Description: "Choose or write a rejection reason before rejecting this call. Cancel returns here without answering.", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
+		{Label: "No", Key: tea.KeyPressMsg{Code: 'N', Text: "N"}, Default: true, HideShortcut: true},
+		{Label: "Yes, once", Key: tea.KeyPressMsg{Code: 'Y', Text: "Y"}},
+		{Label: "Always allow tool", Key: tea.KeyPressMsg{Code: 'T', Text: "T"}},
+		{Label: "Balanced mode", Key: tea.KeyPressMsg{Code: 'B', Text: "B"}},
+		{Label: "Allow all tools", Key: tea.KeyPressMsg{Code: 'A', Text: "A"}},
+		{Label: "Reject with reason", Key: tea.KeyPressMsg{Code: 'R', Text: "R"}},
 	}
 }
 
@@ -80,23 +80,41 @@ func (d *toolConfirmationDialog) renderOptions(contentWidth int) string {
 	if d.choiceScroll != nil {
 		contentWidth = d.choiceScroll.ContentWidth()
 	}
-	choices := d.options()
-	for i := range choices {
-		choices[i].Description = ""
-		choices[i].Label = ansi.Truncate(choices[i].Label, max(1, contentWidth-8), "…")
+	width := max(1, contentWidth)
+	indent := min(2, width-1)
+	d.actions = d.options()
+	d.actionRows = nil
+	d.actionLines = make([]int, len(d.actions))
+	labelWidth := 0
+	for _, action := range d.actions {
+		labelWidth = max(labelWidth, lipgloss.Width(action.Label))
 	}
-	return d.RenderChoices(contentWidth, choices...)
-}
-
-func (d *toolConfirmationDialog) renderNavigation(contentWidth int) string {
-	help := "↑/↓ choose · Enter confirm · shortcut/click applies · PgUp/PgDn inputs"
-	if contentWidth < 80 {
-		help = "↑/↓ choose · Enter confirm · PgUp/PgDn inputs"
+	labelWidth = min(labelWidth, max(1, width-indent-5))
+	selected := d.selectedAction(d.actions)
+	var rendered []string
+	for i, action := range d.actions {
+		style := styles.NoStyle.Foreground(styles.TextPrimary)
+		prefix := strings.Repeat(" ", indent)
+		if i == selected {
+			style = style.Foreground(styles.SelectedFg).Background(styles.Selected).Bold(true)
+			if indent > 0 {
+				prefix = "›" + strings.Repeat(" ", indent-1)
+			}
+		}
+		label := ansi.Truncate(action.Label, labelWidth, "…")
+		if shortcut := action.shortcut(); shortcut != "" {
+			label += strings.Repeat(" ", labelWidth-lipgloss.Width(label)+2) + "[" + shortcut + "]"
+		}
+		text := ansi.Truncate(prefix+label, width, "")
+		text += strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
+		d.actionLines[i] = len(d.actionRows)
+		d.actionRows = append(d.actionRows, dialogActionRow{
+			text: text,
+			hits: []dialogActionHit{{width: width, key: action.Key}},
+		})
+		rendered = append(rendered, style.Render(text))
 	}
-	if contentWidth < 50 || d.height < 10 {
-		help = ansi.Truncate("↑↓ · ↵", contentWidth, "")
-	}
-	return styles.MutedStyle.Width(contentWidth).Align(lipgloss.Left).Render(help)
+	return strings.Join(rendered, "\n")
 }
 
 // safetyConventionKeys group a blast-radius assessment into a readable warning.
@@ -221,7 +239,7 @@ func (d *toolConfirmationDialog) renderMetadata(contentWidth int) string {
 
 // NewToolConfirmationDialog creates a new tool confirmation dialog
 func NewToolConfirmationDialog(_ *animation.Runtime, msg *runtime.ToolCallConfirmationEvent, sessionState ConfirmationSessionState) Dialog {
-	// Build and cache the permission pattern for display and use
+	// Cache the permission pattern for the tool-specific approval.
 	pattern := toolconfirm.BuildPermissionPattern(msg.ToolCall)
 
 	return &toolConfirmationDialog{
@@ -460,19 +478,17 @@ func (d *toolConfirmationDialog) prepareLayout() {
 	}
 	d.choiceScroll.SetSize(inner, max(1, d.choiceHeight))
 	options := d.renderOptions(inner)
-	maxDescription := 1
-	for _, option := range d.options() {
-		maxDescription = max(maxDescription, lipgloss.Height(ansi.Hardwrap(option.Description, inner, true)))
-	}
-	d.descriptionHeight = min(3, maxDescription, max(0, available-12))
-	d.decisionQuestion = available >= 12
+	d.decisionQuestion = available >= 14
 	questionRows := 0
 	if d.decisionQuestion {
-		questionRows = 1
+		questionRows = 2
 	}
-	d.choiceHeight = min(lipgloss.Height(options), max(1, available-2-questionRows-d.descriptionHeight))
+	d.choiceHeight = min(lipgloss.Height(options), max(1, available-1-questionRows))
 	d.choiceScroll.SetSize(inner, d.choiceHeight)
 	d.choiceScroll.SetContent(strings.Split(options, "\n"), lipgloss.Height(options))
+	if d.bodyScroll == nil {
+		d.bodyScroll = d.newScrollview(scrollview.WithKeyMap(nil), scrollview.WithReserveScrollbarSpace(true))
+	}
 	_, _, header, body, footer := d.content()
 	d.PrepareScrollableBody(style, width, header, body, footer)
 	d.choicesStart = d.bodyY + d.bodyHeight + d.bodyFooterGap + questionRows
@@ -488,24 +504,9 @@ func (d *toolConfirmationDialog) renderDecisions(width int) string {
 	}
 	var parts []string
 	if d.decisionQuestion {
-		parts = append(parts, styles.DialogQuestionStyle.Render(toolconfirm.Question))
+		parts = append(parts, styles.DialogQuestionStyle.Render(toolconfirm.Question), "")
 	}
 	parts = append(parts, options)
-	if d.descriptionHeight > 0 {
-		selected := max(0, d.selectedAction(d.actions))
-		lines := strings.Split(ansi.Hardwrap(d.options()[selected].Description, width, true), "\n")
-		for i := range d.descriptionHeight {
-			line := " "
-			if i < len(lines) {
-				line = lines[i]
-				if i == d.descriptionHeight-1 && len(lines) > d.descriptionHeight {
-					line = ansi.Truncate(line, max(1, width-1), "") + "…"
-				}
-			}
-			parts = append(parts, styles.MutedStyle.Width(width).Render(line))
-		}
-	}
-	parts = append(parts, d.renderNavigation(width))
 	return strings.Join(parts, "\n")
 }
 

@@ -55,7 +55,7 @@ func TestToolConfirmationDialog_CompactRealShellLSGeometry(t *testing.T) {
 	assert.Contains(t, plain, "cmd:")
 	assert.Contains(t, plain, "ls")
 	assert.Less(t, lipgloss.Height(view), height,
-		"a short proposed call stays content-sized with its inputs and described choices")
+		"a short proposed call stays content-sized with its inputs and choices")
 	row, col := dialog.Position()
 	assert.Equal(t, (height-lipgloss.Height(view))/2, row)
 	assert.Equal(t, (width-lipgloss.Width(view))/2, col)
@@ -429,8 +429,8 @@ func TestToolConfirmationDialogPlainActionsSafeDefaultAndSelectedPolicies(t *tes
 			d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
 			d.SetSize(160, 40)
 			initial := ansi.Strip(d.View())
-			assert.Contains(t, initial, "No ↵")
-			assert.NotContains(t, initial, "No ↵ N")
+			assert.Contains(t, initial, "› No")
+			assert.NotContains(t, initial, "No [N]")
 			for _, old := range []string{"Y yes Y", "N no N", "T always allow", "B balanced B", "A all tools A"} {
 				assert.NotContains(t, initial, old)
 			}
@@ -438,14 +438,14 @@ func TestToolConfirmationDialogPlainActionsSafeDefaultAndSelectedPolicies(t *tes
 				_, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 			}
 			view := d.View()
-			assert.Equal(t, 1, strings.Count(ansi.Strip(view), "↵"))
-			assert.Contains(t, strings.Join(strings.Fields(ansi.Strip(view)), " "), tc.explanation)
+			assert.NotContains(t, ansi.Strip(view), "↵")
+			assert.NotContains(t, strings.Join(strings.Fields(ansi.Strip(view)), " "), tc.explanation)
 			assertToolActionsNotUnderlined(t, view)
 			footer := strings.Fields(ansi.Strip(d.renderOptions(120)))
 			for _, alias := range []string{"Y", "T", "B", "A", "R"} {
 				count := 0
 				for _, word := range footer {
-					if word == alias {
+					if word == "["+alias+"]" {
 						count++
 					}
 				}
@@ -557,7 +557,7 @@ func TestToolConfirmationDialogReasonCancelReturnsUnansweredNoDefault(t *testing
 	selected, ok = parent.SelectedActionKey()
 	require.True(t, ok)
 	assert.Equal(t, 'N', selected.Code)
-	assert.Contains(t, ansi.Strip(parent.View()), "No ↵")
+	assert.Contains(t, ansi.Strip(parent.View()), "› No")
 	_, cmd = parent.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	response, ok := findMsg[tuimessages.InteractionResponseMsg](collectMsgs(cmd))
 	require.True(t, ok)
@@ -635,11 +635,11 @@ func assertToolActionsNotUnderlined(t *testing.T, view string) {
 	}
 }
 
-func TestToolConfirmationDialogVerticalDecisionsAndTruthfulHelp(t *testing.T) {
+func TestToolConfirmationDialogVerticalDecisionsAndBracketedShortcuts(t *testing.T) {
 	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
 	d.SetSize(165, 47)
 	view := ansi.Strip(d.View())
-	labels := []string{"No ↵", "Yes, once", "Always allow tool", "Balanced mode", "Allow all tools", "Reject with reason"}
+	labels := []string{"› No", "Yes, once", "Always allow tool", "Balanced mode", "Allow all tools", "Reject with reason"}
 	lastRow := -1
 	for _, label := range labels {
 		y, _, found := locateInView(d, label)
@@ -647,9 +647,9 @@ func TestToolConfirmationDialogVerticalDecisionsAndTruthfulHelp(t *testing.T) {
 		assert.Greater(t, y, lastRow, "choices must occupy distinct vertical rows")
 		lastRow = y
 	}
-	assert.Contains(t, view, "↑/↓ choose")
-	assert.Contains(t, view, "Enter confirm")
-	assert.Contains(t, view, "shortcut/click applies")
+	assert.NotContains(t, view, "↑/↓ choose")
+	assert.NotContains(t, view, "Enter confirm")
+	assert.NotContains(t, view, "shortcut/click applies")
 	assert.NotContains(t, view, "Esc")
 	assert.NotContains(t, view, "Close")
 }
@@ -690,37 +690,53 @@ func TestToolConfirmationDialogVerticalNavigationThenDismissDeniesOnce(t *testin
 	}
 }
 
-func TestToolConfirmationDialogDescriptionsAndHelpPlacement(t *testing.T) {
+func TestToolConfirmationDialogChoicesHaveAlignedHintsWithoutDescriptions(t *testing.T) {
 	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
 	d.SetSize(165, 47)
 	view := d.View()
 	row, col := d.Position()
 	dl := NewDialogLayout(view, row, col)
+	shortcutX := -1
 	for _, action := range d.actions {
 		y, x, found := locateInView(d, action.Label)
 		require.True(t, found)
 		key, hit := d.ActionKeyAt(x, y, dl)
 		require.True(t, hit)
 		assert.Equal(t, action.Key, key)
+		if shortcut := action.shortcut(); shortcut != "" {
+			hy, hx, found := locateInView(d, "["+shortcut+"]")
+			require.True(t, found)
+			assert.Equal(t, y, hy)
+			assert.GreaterOrEqual(t, hx-x-lipgloss.Width(action.Label), 2)
+			if shortcutX >= 0 {
+				assert.Equal(t, shortcutX, hx)
+			}
+			shortcutX = hx
+		}
 	}
-	assert.Contains(t, ansi.Strip(view), "Reject this tool call without running it.")
-	assert.NotContains(t, ansi.Strip(view), "classifier-safe calls run automatically")
-
-	helpY, helpX, found := locateInView(d, "↑/↓ choose")
+	questionY, _, found := locateInView(d, "Do you want to allow this tool call?")
 	require.True(t, found)
-	bodyX, _, _, _ := d.BodyScrollBounds()
-	assert.Equal(t, bodyX, helpX, "help is aligned to the left content edge")
-	lastY, _, found := locateInView(d, "Reject with reason")
-	require.True(t, found)
-	assert.Greater(t, helpY, lastY+1, "help is below the choices and descriptions")
-	_, hit := d.ActionKeyAt(helpX, helpY, dl)
-	assert.False(t, hit, "help is never an action target")
+	assert.Equal(t, questionY+2, d.choicesStart, "one blank row separates the question and choices")
+	assertToolConfirmationNoRoutineHints(t, view)
 }
 
-func TestToolConfirmationDialogOverflowKeepsPreviewAndFixedHelp(t *testing.T) {
+func assertToolConfirmationNoRoutineHints(t *testing.T, view string) {
+	t.Helper()
+	plain := ansi.Strip(view)
+	for _, removed := range []string{
+		"Reject this tool call without running it.", "Allow only this tool call.",
+		"future calls matching", "classifier-safe calls run automatically",
+		"all future tool calls in this session", "Choose or write a rejection reason",
+		"↑/↓", "↑↓", "Enter confirm", "shortcut/click applies", "PgUp", "PgDn", "↵",
+	} {
+		assert.NotContains(t, plain, removed)
+	}
+}
+
+func TestToolConfirmationDialogOverflowKeepsPreviewAndChoices(t *testing.T) {
 	event := newConfirmationEvent(nil)
 	event.ToolCall.Function.Arguments = `{"cmd":"` + strings.Repeat("long proposed command ", 100) + `"}`
-	for _, size := range [][2]int{{165, 30}, {80, 16}, {30, 8}, {20, 6}} {
+	for _, size := range [][2]int{{165, 30}, {80, 24}, {80, 16}, {30, 8}, {20, 6}} {
 		d := NewToolConfirmationDialog(animation.NewRuntime(), event, &service.SessionState{}).(*toolConfirmationDialog)
 		d.SetSize(size[0], size[1])
 		initial := ansi.Strip(d.View())
@@ -729,12 +745,6 @@ func TestToolConfirmationDialogOverflowKeepsPreviewAndFixedHelp(t *testing.T) {
 		action, ok := d.SelectedActionKey()
 		require.True(t, ok)
 		assert.Equal(t, 'N', action.Code)
-		help := "↑/↓ choose"
-		if size[0] <= 30 {
-			help = "↑↓"
-		}
-		helpY, helpX, found := locateInView(d, help)
-		require.True(t, found)
 		_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 		assert.Nil(t, cmd)
 		assert.Zero(t, d.BodyScrollOffset(), "choosing never scrolls proposed arguments")
@@ -743,18 +753,15 @@ func TestToolConfirmationDialogOverflowKeepsPreviewAndFixedHelp(t *testing.T) {
 			row, col := d.Position()
 			dl := NewDialogLayout(view, row, col)
 			y, x, found := locateInView(d, "›")
-			require.True(t, found, "selected label is visible even when its description is taller than the viewport")
+			require.True(t, found, "selected label is visible even in a tiny viewport")
 			key, hit := d.ActionKeyAt(x, y, dl)
 			require.True(t, hit)
 			selected, ok := d.SelectedActionKey()
 			require.True(t, ok)
 			assert.Equal(t, selected, key)
-			actualY, actualX, found := locateInView(d, help)
-			require.True(t, found)
-			assert.Equal(t, helpY, actualY, "help stays fixed at the bottom while choices scroll")
-			assert.Equal(t, helpX, actualX)
 			assert.LessOrEqual(t, lipgloss.Height(view), size[1])
 			assert.LessOrEqual(t, lipgloss.Width(view), size[0])
+			assertToolConfirmationNoRoutineHints(t, view)
 			_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 			assert.Nil(t, cmd)
 		}
@@ -792,7 +799,7 @@ func TestToolConfirmationIndependentDecisionRegion(t *testing.T) {
 			t.Logf("%dx%d\n%s", size[0], size[1], ansi.Strip(view))
 			require.LessOrEqual(t, lipgloss.Height(view), size[1])
 			require.LessOrEqual(t, lipgloss.Width(view), size[0])
-			require.Contains(t, ansi.Strip(view), "No ↵")
+			require.Contains(t, ansi.Strip(view), "› No")
 			require.NotContains(t, ansi.Strip(view), "Esc")
 			if size[1] >= 24 {
 				for _, choice := range d.options() {
@@ -807,12 +814,15 @@ func TestToolConfirmationIndependentDecisionRegion(t *testing.T) {
 			bodyOffset := d.BodyScrollOffset()
 			d.Update(tea.MouseWheelMsg{X: d.bodyX, Y: d.choicesStart, Button: tea.MouseWheelDown})
 			require.Equal(t, bodyOffset, d.BodyScrollOffset(), "choice wheel cannot move arguments")
-			d.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-			require.GreaterOrEqual(t, d.BodyScrollOffset(), bodyOffset)
+			for _, code := range []rune{tea.KeyPgDown, tea.KeyPgUp} {
+				_, cmd := d.Update(tea.KeyPressMsg{Code: code})
+				require.Nil(t, cmd)
+				require.Equal(t, bodyOffset, d.BodyScrollOffset(), "page keys do not scroll tool inputs")
+			}
 			for range 6 {
 				oldHeight := lipgloss.Height(d.View())
 				d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-				require.Equal(t, oldHeight, lipgloss.Height(d.View()), "selection descriptions reserve stable height")
+				require.Equal(t, oldHeight, lipgloss.Height(d.View()), "selection preserves stable height")
 				require.Contains(t, ansi.Strip(d.View()), "›")
 			}
 			require.False(t, d.responseSent)
@@ -820,23 +830,20 @@ func TestToolConfirmationIndependentDecisionRegion(t *testing.T) {
 	}
 }
 
-func TestToolConfirmationSelectedDescriptionIsStableAndNotAnAction(t *testing.T) {
+func TestToolConfirmationChoiceRegionIsStableAndBounded(t *testing.T) {
 	d := NewToolConfirmationDialog(animation.NewRuntime(), newConfirmationEvent(nil), &service.SessionState{}).(*toolConfirmationDialog)
 	d.SetSize(80, 24)
 	initialHeight := lipgloss.Height(d.View())
-	for selected := range 6 {
+	for range 6 {
 		view := d.View()
 		row, col := d.Position()
 		dl := NewDialogLayout(view, row, col)
 		require.Equal(t, initialHeight, lipgloss.Height(view))
 		for y := d.choicesStart + d.choiceHeight; y < row+dl.Height; y++ {
 			_, hit := d.ActionKeyAt(d.bodyX, y, dl)
-			require.False(t, hit, "description and navigation cannot authorize")
+			require.False(t, hit, "space below choices cannot authorize")
 		}
-		lines := strings.Split(ansi.Strip(view), "\n")
-		description := strings.Join(lines[d.choicesStart+d.choiceHeight-row:d.choicesStart+d.choiceHeight-row+d.descriptionHeight], " ")
-		want := strings.Split(d.options()[selected].Description, " ")[:3]
-		require.Contains(t, strings.Join(strings.Fields(description), " "), strings.Join(want, " "))
+		assertToolConfirmationNoRoutineHints(t, view)
 		d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 }
