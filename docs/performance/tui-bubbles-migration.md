@@ -219,8 +219,8 @@ and getter repairs: **PASS 17.967s, exit 0**, preserved as
 separately recorded. These are bounded race passes, not a
 claim that the full repository race suite ran or passed.
 
-**Unrestricted `go build ./...` is blocked**, not green: preserved ignored file
-`dist/kit/v2.cVNprC/evidence/validate-spec.go:2:35` imports missing module
+**Unrestricted `go build ./...` is blocked**, not green: a preserved ignored
+`validate-spec.go` evidence file under `dist/kit/` imports missing module
 `github.com/docker/sandboxes/sandboxlib/kit`. That untracked artifact is ignored by
 `.gitignore:2` (`dist`); its reported creation/modification timestamp
 2026-09-22 14:57:29 predates this task. It was left untouched, as were existing

@@ -156,13 +156,10 @@ func TestKitPublicationIdentity(t *testing.T) {
 		assert.Contains(t, docs, namespace+"/kagent")
 		assert.NotContains(t, docs, "REPO='"+namespace+"/docker-agent'")
 	}
-	assert.Contains(t, docs, "name: async-agent-subagents-reborn")
 	assert.NotContains(t, docs, "christopherpetito053/async-agent")
 	assert.NotContains(t, docs, "christopherpetito234/async-agent")
 	assert.Contains(t, docs, "built-in `docker-agent`")
 	assert.Contains(t, docs, "task kit -- namespace/kagent:trial")
-	assert.Contains(t, docs, "task kit:build-v2 -- namespace/kagent:trial-v2")
-	assert.Contains(t, docs, "namespace/kagent:trial-v2-runtime")
 	assert.Contains(t, docs, "KIT_REF='christopherpetito053/kagent@sha256:1c2ec35cc46b1886e2774e34249a764c8ae703f4e8e30828fef6ea3de4b28442'")
 	assert.NotContains(t, docs, "REPLACE_WITH_VERIFIED_PUBLISHED_DIGEST")
 	assert.Contains(t, docs, "christopherpetito053/docker-agent@sha256:1c2ec35cc46b1886e2774e34249a764c8ae703f4e8e30828fef6ea3de4b28442")
@@ -171,29 +168,6 @@ func TestKitPublicationIdentity(t *testing.T) {
 	assert.Contains(t, docs, "does not support this nested source layout")
 	assert.NotContains(t, docs, "sbx run --name async-agent-source-trial-1")
 	assert.NotContains(t, docs, "sbx kit inspect async-agent.yaml")
-
-	descriptor, err := os.ReadFile("v2/spec.yaml")
-	require.NoError(t, err)
-	var kit struct {
-		SchemaVersion string `yaml:"schemaVersion"`
-		Name          string `yaml:"name"`
-		Sandbox       struct {
-			Image      string   `yaml:"image"`
-			Entrypoint []string `yaml:"entrypoint"`
-		} `yaml:"sandbox"`
-	}
-	require.NoError(t, yaml.Unmarshal(descriptor, &kit))
-	assert.Equal(t, "2", kit.SchemaVersion)
-	assert.Equal(t, "kagent", kit.Name)
-	assert.Equal(t, "christopherpetito053/kagent@sha256:e1410a8adf0af4349483b876ae18b3a9bdccdd4eb8c175e95fc137bd834fa7ed", kit.Sandbox.Image)
-	assert.Equal(t, []string{"/opt/async-agent/launch.sh"}, kit.Sandbox.Entrypoint)
-	assert.Contains(t, docs, "KIT_REF='christopherpetito053/kagent@sha256:b0be556365b6283520d312d4fdd33a37bce528602831a56ed272a87f5c43cac5'")
-	assert.Contains(t, docs, "christopherpetito053/docker-agent@sha256:b335ad9f1cc5905a4f34d6884a2ec0a3e27a10a5b1fa872239f366e8a0dbb7ec")
-	assert.Contains(t, docs, "christopherpetito053/kagent:v2-runtime-subagents-reborn")
-	assert.Contains(t, docs, strings.SplitN(kit.Sandbox.Image, "@", 2)[1])
-	recipe, err := os.ReadFile("async-agent-v2.dockerfile")
-	require.NoError(t, err)
-	assert.Contains(t, string(recipe), "FROM christopherpetito053/docker-agent@sha256:b2f47711c41597764baeafe8e53ebbd688a60aa4ca5946a64070402755984b49")
 }
 
 func TestKitDiagnostics(t *testing.T) {

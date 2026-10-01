@@ -5,9 +5,6 @@ its binary, launcher and the full **hackerspace.yaml** team: you do not need thi
 source checkout, Python, Go, or local compilation. Async tools and coordination
 guidance come from the built-in harness.
 
-For the separately published Kit v2 equivalent, see [Kit v2](#kit-v2-equivalent)
-below; its explicit v2 name already avoids the built-in agent collision.
-
 ## Run a published kit (consumer)
 
 You need an SBX installation supporting Kit v3 and the credentials for the
@@ -38,15 +35,11 @@ The published tags are:
 | Artifact | Published tag | Immutable digest |
 | --- | --- | --- |
 | v3 workload | `subagents-reborn` | `sha256:1c2ec35cc46b1886e2774e34249a764c8ae703f4e8e30828fef6ea3de4b28442` |
-| v2 kit | `v2-kit-subagents-reborn` | `sha256:b0be556365b6283520d312d4fdd33a37bce528602831a56ed272a87f5c43cac5` |
-| v2 runtime image (not a kit reference) | `v2-runtime-subagents-reborn` | `sha256:e1410a8adf0af4349483b876ae18b3a9bdccdd4eb8c175e95fc137bd834fa7ed` |
 
-The existing v3 and runtime artifacts were copied from complete local OCI
-archives with **no application rebuild**. Remote top-level index bytes match
+The existing v3 artifact was copied from a complete local OCI
+archive with **no application rebuild**. Remote top-level index bytes match
 the originals exactly, including descriptor annotations, platform manifests
 and provenance; every referenced blob is accessible in the new repository.
-The v2 kit was republished with `name: kagent` and its runtime reference changed
-to this repository; its provider permissions and credential policy are unchanged.
 Original `christopherpetito053/docker-agent` references were not modified by
 this publication. Their tags returned `not found` during the final registry
 recheck; use the verified `kagent` references above.
@@ -161,8 +154,7 @@ behavior. No real provider credentials were read or used during validation.
 - The base includes the agent user (UID 1000), bash, git and CA store, plus
   inherited Docker-in-Docker overhead despite this team not requiring MCP.
   Ensure the agent user can write the trial workspace.
-- This is one v3 workload; do not combine it with the built-in v2 Docker Agent
-  kit.
+- This is one v3 workload; do not combine it with the built-in Docker Agent kit.
 
 ## Maintainers: build and publish
 
@@ -176,13 +168,12 @@ publication. From the **source checkout root**:
 task kit                                      # kagent:local-v3
 task kit -- namespace/kagent:trial             # same as build-v3
 task kit:build-v3 -- namespace/kagent:trial
-task kit:build-v2 -- namespace/kagent:trial-v2   # kit + trial-v2-runtime
 ```
 
-Defaults are `kagent:local-v3` and `kagent:local-v2`. Pass at most one mutable
+The default is `kagent:local-v3`. Pass at most one mutable
 image reference; an omitted tag becomes `latest`. References like
 `namespace/kagent:trial` imply Docker Hub (`docker.io/namespace/kagent:trial`).
-Bare names, including the defaults, expand to `docker.io/library/kagent:…`;
+Bare names, including the default, expand to `docker.io/library/kagent:…`;
 use a namespace you own to publish, not the reserved `library` namespace.
 Explicit registries such as `ghcr.io` and `localhost:5000` are preserved;
 `docker.io/kagent:tag` also expands to `docker.io/library/kagent:tag`.
@@ -190,7 +181,7 @@ Builds, push prompts and generated digest pins all use the expanded reference.
 Choose a v3 repository ending in `kagent`, not `docker-agent`, to avoid the
 built-in registration collision.
 The build context is always the repository root. The target platform defaults to
-`linux/amd64`; for v3, a comma-separated list builds a multi-platform OCI index. `KIT_PLATFORM` overrides
+`linux/amd64`; a comma-separated list builds a multi-platform OCI index. `KIT_PLATFORM` overrides
 `DOCKER_DEFAULT_PLATFORM`:
 
 ```sh
@@ -200,7 +191,7 @@ KIT_PLATFORM=linux/amd64,linux/arm64 task kit:build-v3 -- namespace/kagent:lates
 
 Each successful build retains a unique directory under ignored `dist/kit/` and
 prints its path, tagged reference and immutable digest. The **authoritative OCI
-layout** preserves provenance. For v3, the exact descriptor, schema-version and
+layout** preserves provenance. The exact descriptor, schema-version and
 capabilities annotations are promoted locally from the selected platform
 manifest to the top-level index before its final digest is computed. Every
 requested platform must be present and carry identical Kit annotations; missing
@@ -210,8 +201,8 @@ intact. No registry inspection or repair is needed.
 For a single platform, a second cached Buildx invocation loads the same runtime
 into local Docker with provenance disabled for Docker image-store portability.
 Multi-platform v3 exports skip this load: use the authoritative OCI index for
-publication and verify each child platform separately. Kit v2 remains a
-single-platform build. **A Docker-loaded image loses kit metadata and is not an SBX kit reference.** Do not publish it with
+publication and verify each child platform separately. **A Docker-loaded image
+loses kit metadata and is not an SBX kit reference.** Do not publish it with
 `docker push`; publication copies only the authoritative OCI layout using ORAS.
 The OCI layout itself is not automatically imported into SBX either.
 
@@ -300,8 +291,8 @@ docker buildx build . -f kit/async-agent.yaml --platform linux/amd64 \
 go test ./kit
 ```
 
-The relocated descriptor and both Dockerfiles have passed root-context Buildx
-builds with `--output type=cacheonly`; the v3 build compiled and statically
+The relocated descriptor and its companion Dockerfile have passed root-context
+Buildx builds with `--output type=cacheonly`; the v3 build compiled and statically
 verified the binary and copied both relocated runtime assets. These checks
 used public build dependencies and did not publish or load an image into SBX.
 
@@ -357,90 +348,3 @@ pinned test module without adding the spec dependency to Docker Agent:
 ```sh
 (cd kit/spec-v3-tests && TMPDIR=/private/tmp go test ./...)
 ```
-
-## Kit v2 equivalent
-
-The published **linux/amd64** v2 kit is
-`christopherpetito053/kagent:v2-kit-subagents-reborn`. It is a genuine
-`schemaVersion: "2"` OCI kit artifact, not a retagged v3 image. Its explicit
-`name: kagent` survives loading independently of the OCI repository basename.
-The local [spec.yaml](v2/spec.yaml) and remote artifact have the same effective
-spec and pin the separate runtime image in the same repository:
-`christopherpetito053/kagent:v2-runtime-subagents-reborn` resolves to
-`sha256:e1410a8adf0af4349483b876ae18b3a9bdccdd4eb8c175e95fc137bd834fa7ed`.
-
-The legacy `christopherpetito053/docker-agent:v2-kit-subagents-reborn`
-(`christopherpetito053/docker-agent@sha256:b335ad9f1cc5905a4f34d6884a2ec0a3e27a10a5b1fa872239f366e8a0dbb7ec`)
-was not modified by this publication; its last verified descriptor had
-`name: async-agent-subagents-reborn` and runtime
-`christopherpetito053/docker-agent:v2-runtime-subagents-reborn`. Its tag now
-returns `not found`. Compared with that last verified legacy kit, only the new
-kit's name and runtime repository changed.
-
-The historical published runtime derives from the immutable published v3
-application image in `async-agent-v2.dockerfile`. New Task builds compile source
-as described below. The binary, six-agent team, launcher, non-root user
-and environment are unchanged. Only the image entrypoint becomes
-`/usr/bin/tini --` with an empty CMD so v2's sandbox idle keeper can start;
-`sandbox.entrypoint` separately runs `/opt/async-agent/launch.sh` for the agent
-session. No built-in Docker Agent kit, setup scripts or extra providers are
-inherited by the descriptor.
-
-### Run the published v2 kit
-
-Use an SBX release that supports this v2 schema, configure the `openai` service
-in SBX's host credential store, and choose a fresh workspace and sandbox name:
-
-```sh
-KIT_REF='christopherpetito053/kagent@sha256:b0be556365b6283520d312d4fdd33a37bce528602831a56ed272a87f5c43cac5'
-workspace="$HOME/async-agent-v2-trial-1"
-mkdir "$workspace" &&
-sbx run --name async-agent-v2-trial-1 "$KIT_REF" "$workspace" -- \
-  --model openai/ACCESSIBLE_MODEL
-```
-
-Replace `ACCESSIBLE_MODEL` with a model your account can use. The same launcher
-arguments, global model override, optional workspace `hackerspace.yaml`, and
-workspace boundaries described above apply. Append `--exec --dry-run` for
-initialization without a model turn. Use the **kit** reference with `sbx run`,
-not the runtime image reference.
-
-The v2 descriptor grants only `api.openai.com` and declares the same
-proxy-managed `OPENAI_API_KEY` sentinel plus `Authorization: Bearer` injection.
-SBX host policy may additionally allow registry mirrors in either kit format.
-Schema validation does not prove third-party consent or live authentication;
-no live SBX proxy/authentication or model call was tested. Local runtime smoke
-checks used a fake key with networking disabled. No `--yolo` is enabled.
-
-### Build and publish v2
-
-```sh
-task kit:build-v2                              # kagent:local-v2
-task kit:build-v2 -- namespace/kagent:trial-v2
-```
-
-The requested reference is the **v2 kit artifact**, not a Docker runtime image.
-The runtime uses the same repository and the kit tag plus `-runtime` (for example
-`namespace/kagent:trial-v2-runtime`). Tags whose runtime suffix would exceed
-Docker's 128-character limit are rejected before building.
-
-This workflow compiles current source through `kit/async-agent.dockerfile`'s
-`runtime-v2` target, sharing the v3 application/runtime stages. It retains
-`/usr/bin/tini --` and an empty CMD for v2's idle keeper; the kit's
-`sandbox.entrypoint` starts the launcher. The default final Dockerfile target
-still uses the v3 launcher. The historical `async-agent-v2.dockerfile` and tracked
-`v2/spec.yaml` remain unchanged published fixtures, not the source-build recipe.
-
-The durable output directory contains `runtime/` and `kit/` OCI layouts and a
-generated `spec.yaml`. Only `sandbox.image` changes in this generated copy: it
-pins the requested repository to the **runtime's OCI top-level digest**, not a
-Docker image/config ID. ORAS packs the YAML as the config with media type
-`application/vnd.docker.sandbox.kit.v2.spec+yaml` and artifact type
-`application/vnd.docker.sandbox.kit.v2`, using OCI 1.1's canonical empty `{}`
-layer (no payload tar). The kit is never loaded as a Docker image.
-
-Approval publishes the runtime OCI layout **first**, then the kit OCI layout.
-Use the resulting immutable **kit** reference with `sbx run`, never the runtime
-reference. Both formats intentionally register as `kagent`; do not combine them
-in one sandbox. Building or publishing is not a live SBX authentication/model
-test and does not require provider credentials.

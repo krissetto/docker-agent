@@ -11,11 +11,4 @@ tasks:
     env:
       KIT_CLI_ARGS: "{{.CLI_ARGS}}"
     cmds:
-      - bash kit/build.sh v3 "$KIT_CLI_ARGS"
-
-  build-v2:
-    desc: Build a Kit v2 and its source runtime (default kagent:local-v2)
-    env:
-      KIT_CLI_ARGS: "{{.CLI_ARGS}}"
-    cmds:
-      - bash kit/build.sh v2 "$KIT_CLI_ARGS"
+      - bash kit/build.sh "$KIT_CLI_ARGS"

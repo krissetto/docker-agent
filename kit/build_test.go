@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -138,7 +137,7 @@ func TestKitBuildDefaultsAndCancellation(t *testing.T) {
 		task, ref, answer string
 		tty               bool
 	}{
-		{"kit", "docker.io/library/kagent:local-v3", "", false}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "\n", true}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "no\n", true}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "yes\n", false}, {"kit:build-v2", "docker.io/library/kagent:local-v2-runtime", "", false},
+		{"kit", "docker.io/library/kagent:local-v3", "", false}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "\n", true}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "no\n", true}, {"kit:build-v3", "docker.io/library/kagent:local-v3", "yes\n", false},
 	} {
 		t.Run(tc.task+"/"+tc.answer, func(t *testing.T) {
 			f := newKitBuildFixture(t)
@@ -154,12 +153,7 @@ func TestKitBuildDefaultsAndCancellation(t *testing.T) {
 				assert.Equal(t, tc.ref, kitArg(build.Args, "--tag"))
 				assert.Equal(t, f.root, build.Cwd)
 				assert.Contains(t, build.Args, f.root)
-				if tc.task == "kit:build-v2" {
-					assert.Equal(t, "runtime-v2", kitArg(build.Args, "--target"))
-					assert.Equal(t, filepath.Join(f.root, "kit/async-agent.dockerfile"), kitArg(build.Args, "-f"))
-				} else {
-					assert.Equal(t, filepath.Join(f.root, "kit/async-agent.yaml"), kitArg(build.Args, "-f"))
-				}
+				assert.Equal(t, filepath.Join(f.root, "kit/async-agent.yaml"), kitArg(build.Args, "-f"))
 				assert.NotContains(t, build.Args, "--push")
 			}
 			assert.Contains(t, builds[0].Args, "--provenance=mode=min")
@@ -176,6 +170,7 @@ func TestKitBuildAliasNormalizesReference(t *testing.T) {
 		{"", "docker.io/library/kagent:local-v3"},
 		{"kagent", "docker.io/library/kagent:latest"},
 		{"kagent:chosen", "docker.io/library/kagent:chosen"},
+		{"kagent:" + strings.Repeat("a", 128), "docker.io/library/kagent:" + strings.Repeat("a", 128)},
 		{"team/custom:chosen", "docker.io/team/custom:chosen"},
 		{"team/custom", "docker.io/team/custom:latest"},
 		{"docker.io/kagent:chosen", "docker.io/library/kagent:chosen"},
@@ -218,12 +213,6 @@ func TestKitBuildRejectsUnsafeReferences(t *testing.T) {
 			assert.NoFileExists(t, filepath.Join(f.root, "INJECTED"))
 		})
 	}
-	t.Run("runtime tag overflow", func(t *testing.T) {
-		f := newKitBuildFixture(t)
-		calls, out, err := f.run(t, "kit:build-v2", "repo:"+strings.Repeat("a", 121), "", false)
-		require.Error(t, err, out)
-		assert.Empty(t, calls)
-	})
 }
 
 func TestKitBuildRejectsMultipleArguments(t *testing.T) {
@@ -283,77 +272,18 @@ func TestKitBuildV3PublishedRoot(t *testing.T) {
 	assert.Equal(t, "keep-root", annotations["test.root"])
 }
 
-func TestKitBuildV2ArtifactAndPublicationOrder(t *testing.T) {
-	for _, tc := range []struct {
-		name, ref, repository, tag string
-		fail                       bool
-	}{
-		{"approved", "localhost:5000/team/kit:trial", "localhost:5000/team/kit", "trial", false},
-		{"runtime failure", "localhost:5000/team/kit:trial", "localhost:5000/team/kit", "trial", true},
-		{"Docker Hub namespace", "team/kit:trial", "docker.io/team/kit", "trial", false},
-		{"Docker Hub latest", "team/kit", "docker.io/team/kit", "latest", false},
-		{"Docker Hub default", "", "docker.io/library/kagent", "local-v2", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newKitBuildFixture(t)
-			if tc.fail {
-				t.Setenv("KIT_TEST_FAIL_COPY", "1")
-			}
-			before, err := os.ReadFile(filepath.Join(f.root, "kit/v2/spec.yaml"))
-			require.NoError(t, err)
-			calls, out, err := f.run(t, "kit:build-v2", tc.ref, "y\n", true)
-			if tc.fail {
-				require.Error(t, err, out)
-			} else {
-				require.NoError(t, err, out)
-			}
-			after, err := os.ReadFile(filepath.Join(f.root, "kit/v2/spec.yaml"))
-			require.NoError(t, err)
-			assert.Equal(t, before, after)
-			pushes := kitCalls(calls, "oras", "push")
-			require.Len(t, pushes, 1)
-			args := pushes[0].Args
-			assert.Contains(t, args, "--oci-layout")
-			assert.Equal(t, "v1.1", kitArg(args, "--image-spec"))
-			assert.Equal(t, "application/vnd.docker.sandbox.kit.v2", kitArg(args, "--artifact-type"))
-			assert.True(t, strings.HasSuffix(kitArg(args, "--config"), ":application/vnd.docker.sandbox.kit.v2.spec+yaml"))
-			spec, err := os.ReadFile(filepath.Join(f.root, "packed-spec.yaml"))
-			require.NoError(t, err)
-			var parsed struct {
-				Sandbox struct {
-					Image string `yaml:"image"`
-				} `yaml:"sandbox"`
-			}
-			require.NoError(t, yaml.Unmarshal(spec, &parsed))
-			digest, err := os.ReadFile(filepath.Join(f.root, "runtime-digest"))
-			require.NoError(t, err)
-			assert.Equal(t, tc.repository+"@"+string(digest), parsed.Sandbox.Image)
-			builds := kitCalls(calls, "docker", "buildx")
-			require.Len(t, builds, 2)
-			for _, build := range builds {
-				assert.Equal(t, tc.repository+":"+tc.tag+"-runtime", kitArg(build.Args, "--tag"))
-			}
-			assert.Contains(t, out, "Runtime: "+tc.repository+":"+tc.tag+"-runtime ("+parsed.Sandbox.Image+")")
-			assert.Contains(t, out, "Built kit: "+tc.repository+":"+tc.tag)
-			assert.Contains(t, out, "Immutable kit reference (after publication): "+tc.repository+"@sha256:")
-			copies := kitCalls(calls, "oras", "cp")
-			want := 2
-			if tc.fail {
-				want = 1
-			}
-			require.Len(t, copies, want)
-			assert.Equal(t, tc.repository+":"+tc.tag+"-runtime", copies[0].Args[len(copies[0].Args)-1])
-			if !tc.fail {
-				assert.Equal(t, tc.repository+":"+tc.tag, copies[1].Args[len(copies[1].Args)-1])
-			}
-			assert.Empty(t, kitCalls(calls, "docker", "push"))
-		})
-	}
+func TestKitBuildPublicationFailure(t *testing.T) {
+	f := newKitBuildFixture(t)
+	t.Setenv("KIT_TEST_FAIL_COPY", "1")
+	calls, out, err := f.run(t, "kit:build-v3", "", "y\n", true)
+	require.Error(t, err, out)
+	assert.Len(t, kitCalls(calls, "oras", "cp"), 1)
+	assert.NotContains(t, out, "Published kit:")
 }
 
 // Only Docker and ORAS are replaced. The real Task shell quoting, build helper,
 // OCI metadata transformation, and confirmation gate execute without a daemon.
-const kitBuildStub = `import hashlib,json,os,pathlib,shutil,sys,tarfile
+const kitBuildStub = `import hashlib,json,os,pathlib,sys,tarfile
 p=pathlib.Path
 args=sys.argv[1:]; tool=p(sys.argv[0]).name; home=p(os.environ['KIT_TEST_ROOT'])
 with open(os.environ['KIT_TEST_LOG'],'a') as f: f.write(json.dumps(dict(tool=tool,args=args,cwd=os.getcwd()))+'\n')
@@ -386,7 +316,7 @@ def fixture(layout):
  root=dict(schemaVersion=2,mediaType='application/vnd.oci.image.index.v1+json',manifests=manifests,annotations={'test.root':'keep-root'})
  desc=blob(layout,root);desc['annotations']={'org.opencontainers.image.ref.name':'latest'}
  (layout/'index.json').write_text(json.dumps(dict(schemaVersion=2,manifests=[desc])))
- (home/'original.json').write_text(json.dumps(root));(home/'runtime-digest').write_text(desc['digest'])
+ (home/'original.json').write_text(json.dumps(root))
 if tool=='docker':
  if args[:2]==['buildx','build']:
   if os.environ.get('KIT_TEST_FAIL_BUILD'): sys.exit(7)
@@ -402,15 +332,6 @@ if tool=='docker':
  if args==['buildx','version'] or args==['version']:sys.exit(0)
  sys.exit('unexpected docker invocation')
 if args[0]=='version':sys.exit(0)
-if args[0]=='push':
- assert '--oci-layout' in args
- config=opt('--config').rsplit(':',1)[0];shutil.copyfile(config,home/'packed-spec.yaml')
- source=next(a for a in args[1:] if a.endswith(':kit'));layout=p(source.rsplit(':',1)[0]);layout.mkdir(parents=True,exist_ok=True)
- raw=p(config).read_bytes();digest=hashlib.sha256(raw).hexdigest();path=layout/'blobs/sha256'/digest;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(raw)
- conf=dict(mediaType='application/vnd.docker.sandbox.kit.v2.spec+yaml',digest='sha256:'+digest,size=len(raw))
- desc=blob(layout,dict(schemaVersion=2,mediaType='application/vnd.oci.image.manifest.v1+json',artifactType='application/vnd.docker.sandbox.kit.v2',config=conf,layers=[]));desc['annotations']={'org.opencontainers.image.ref.name':'kit'}
- (layout/'index.json').write_text(json.dumps(dict(schemaVersion=2,manifests=[desc])));(layout/'oci-layout').write_text('{"imageLayoutVersion":"1.0.0"}')
- print('Digest: '+desc['digest']);sys.exit(0)
 if args[0]=='cp':
  n=len(list(home.glob('snapshot-*.json')))+1
  source=args[-2];layout=p(source.rsplit(':',1)[0]);selector=source.rsplit(':',1)[1];idx=json.loads((layout/'index.json').read_text());desc=next(d for d in idx['manifests'] if d.get('annotations',{}).get('org.opencontainers.image.ref.name')==selector)
@@ -466,9 +387,4 @@ func TestKitPlatformListValidation(t *testing.T) {
 			assert.Empty(t, calls)
 		})
 	}
-	f := newKitBuildFixture(t)
-	t.Setenv("KIT_PLATFORM", "linux/amd64,linux/arm64")
-	calls, out, err := f.run(t, "kit:build-v2", "", "", false)
-	require.Error(t, err, out)
-	assert.Empty(t, calls)
 }

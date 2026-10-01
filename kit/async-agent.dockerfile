@@ -42,11 +42,6 @@ ENV DOCKER_AGENT_AUTO_UPDATE=0 \
     TELEMETRY_ENABLED=false
 USER agent
 
-FROM runtime AS runtime-v2
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD []
-
-# Keep the frontend's default target on the v3 launcher.
 FROM runtime AS runtime-v3
 ENTRYPOINT ["/opt/async-agent/launch.sh"]
 CMD []
