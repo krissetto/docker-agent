@@ -2,7 +2,7 @@
 schemaVersion: "3"
 kind: workload
 displayName: Custom Docker Agent async subagents
-description: Static Docker Agent with the six-agent async hackerspace team.
+description: Static Docker Agent with the seven-agent async hackerspace team.
 sourceUrl: https://github.com/docker/docker-agent
 licenses: [Apache-2.0]
 version: "${{ kit.args.kitVersion }}"

@@ -19,21 +19,24 @@ import (
 func TestTeam(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource("hackerspace.yaml"))
 	require.NoError(t, err)
-	require.Len(t, cfg.Agents, 6)
+	require.Len(t, cfg.Agents, 7)
 	for _, expected := range []struct {
 		name      string
+		provider  string
+		modelName string
 		model     string
 		effort    string
 		subagents []string
 		toolsets  []string
 		readFile  bool
 	}{
-		{"root", "gpt-6-astra", "medium", []string{"director", "implementer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
-		{"director", "gpt-6-astra-high", "high", []string{"greppy", "planner", "implementer"}, []string{"filesystem"}, true},
-		{"greppy", "gpt-6-astra-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"planner", "gpt-6-astra-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
-		{"implementer", "gpt-6-astra", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"reviewer", "gpt-6-astra-high", "high", nil, []string{"filesystem", "shell"}, false},
+		{"root", "openai", "gpt-6-1-sol", "gpt-6-1-sol", "medium", []string{"director", "engineer", "designer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
+		{"director", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"filesystem"}, true},
+		{"greppy", "openai", "gpt-6-1-sol", "gpt-6-1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"planner", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
+		{"engineer", "openai", "gpt-6-1-sol", "gpt-6-1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"designer", "anthropic", "claude-opus-5-5", "claude-opus-5-5", "adaptive/high", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"reviewer", "openai", "gpt-6-1-sol", "gpt-6-1-sol-high", "high", nil, []string{"filesystem", "shell"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
@@ -42,8 +45,8 @@ func TestTeam(t *testing.T) {
 			assert.Equal(t, expected.model, a.Model)
 			model, ok := cfg.Models[a.Model]
 			require.True(t, ok)
-			assert.Equal(t, "openai", model.Provider)
-			assert.Equal(t, "gpt-6-astra", model.Model)
+			assert.Equal(t, expected.provider, model.Provider)
+			assert.Equal(t, expected.modelName, model.Model)
 			require.NotNil(t, model.ThinkingBudget)
 			assert.Equal(t, expected.effort, model.ThinkingBudget.Effort)
 			assert.ElementsMatch(t, expected.subagents, a.Subagents.AgentNames())
@@ -63,6 +66,7 @@ func TestTeam(t *testing.T) {
 			}
 			assert.NotEmpty(t, a.Instruction)
 			assert.NotContains(t, a.Instruction, "# Async subagents")
+			assert.NotContains(t, strings.ToLower(a.Instruction), "implementer")
 		})
 	}
 	root, ok := cfg.Agents.Lookup("root")

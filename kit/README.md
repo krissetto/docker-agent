@@ -9,7 +9,8 @@ guidance come from the built-in harness.
 
 You need an SBX installation supporting Kit v3 and the credentials for the
 providers you actually use configured in **SBX's host credential store**. The
-bundled team uses service `openai`; alternative providers are listed below.
+current source-built team uses services `openai` and `anthropic`; provider details
+are listed below.
 You also need pull access if the kit is private. Do not put keys in the workspace,
 team YAML, build arguments, or image environment. The proxy retains real keys on
 the host and supplies guest sentinel variables. Normal model conversations incur
@@ -57,10 +58,11 @@ sbx run --name async-agent-trial-1 "$KIT_REF" "$workspace" -- \
   --model openai/ACCESSIBLE_MODEL
 ```
 
-The bundled six agents default to OpenAI `gpt-6-astra` with medium, high or low
-thinking budgets. If your account lacks access, use the global
+The historical published kit's six agents default to OpenAI `gpt-6-astra` with
+medium, high or low thinking budgets. If your account lacks access, use the global
 `--model openai/ACCESSIBLE_MODEL` argument shown above with an available model;
-it overrides **all six agents**. Omit it to retain the bundled model settings.
+it overrides **all agents**, including Designer in a current source build. Omit it
+to retain the bundled model settings.
 The current source-built v3 kit grants the reviewed provider hosts in the
 [credential matrix](#provider-credentials-v3); historical immutable references
 above remain OpenAI-only. No `--yolo` is enabled.
@@ -115,11 +117,20 @@ reattaching or resuming a session that uses your custom team.
 The full supplied configuration preserves the team instructions, model aliases
 and tool restrictions:
 
-- `root` (Shelly) delegates to `director`, `implementer` and `reviewer`.
-- `director` delegates to `greppy`, `planner` and `implementer`; its only base
-  tool is filesystem `read_file`.
-- `planner` has filesystem `read_file`, shell and todo tools; root, greppy and
-  implementer have filesystem, shell and todo; reviewer has filesystem and shell.
+- The current source-built team has seven agents. `root`, `director`, `greppy`,
+  `planner`, `engineer` and `reviewer` use OpenAI `gpt-6-1-sol`, retaining their
+  medium, high or low thinking budgets. `designer` uses Anthropic
+  `claude-opus-5-5` with adaptive/high thinking.
+- `root` (Shelly) delegates directly to `director`, `engineer`, `designer` and
+  `reviewer`. `director` can delegate to all five workers: `greppy`, `planner`,
+  `engineer`, `designer` and `reviewer`; its only base tool is filesystem `read_file`.
+- Engineer is the general engineering workhorse. Designer owns visual craft and
+  must participate in every frontend development or visual/UX code task. Each team
+  stays on one goal, with small careful iterations and proportionate checks.
+  Independent review is used only when the user explicitly asks, never as a routine gate.
+- `planner` has filesystem `read_file`, shell and todo tools; root, greppy,
+  engineer and designer have filesystem, shell and todo; reviewer has filesystem
+  and shell. Greppy and Planner keep discovery and analysis read-only.
 - Unused Anthropic and DMR model aliases (including a LAN base URL) are retained
   from the supplied file. Current v3 supports the optional Anthropic host binding;
   DMR/local LAN connectivity still requires an explicitly reviewed host policy.
@@ -154,7 +165,8 @@ the services you need, preferably sandbox-scoped rather than globally, using
 scoping options. The host retains real credentials; guest environment variables
 contain sentinels. Host environment variables are not imported automatically.
 
-The default bundled team still selects OpenAI. To override all six agents, use
+The current source-built team needs OpenAI for six agents and Anthropic for
+Designer. To override all seven agents with a single provider, use
 `--model anthropic/ACCESSIBLE_MODEL` or `--model google/ACCESSIBLE_MODEL` and bind
 that service. Google uses canonical `GOOGLE_API_KEY`; no duplicate
 `GEMINI_API_KEY` capability is needed. OpenAI's `openai_chatcompletions` and
@@ -290,7 +302,7 @@ shell, user and workspace contract. `agent-sessions@1` describes the existing
 CLI: a headless prompt is `--exec -- PROMPT`, resume is `--session ID`, and
 continue is `--session=-1`. No unsupported session-list command is advertised.
 Prompts stay single argv values, including a leading dash or shell metacharacter.
-These declarations do not change the six-agent team or enable `--yolo`.
+These declarations do not change the team or enable `--yolo`.
 
 Optional lifecycle diagnostics default to **off**. With a compatible SBX,
 `--kit-arg diagnostics=on` opts in to markers beneath
