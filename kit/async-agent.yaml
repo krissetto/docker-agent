@@ -91,7 +91,6 @@ capabilities:
     optional: true
     config:
       filename: ASYNC_AGENT_KIT.md
-      contentFile: ./kit/async-agent-context.md
   - type: com.docker.sandbox/agent-skills@1
     optional: true
     config:

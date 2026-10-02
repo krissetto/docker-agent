@@ -1,5 +1,0 @@
-schemaVersion: "3"
-kind: set
-kits:
-  - ref: example.invalid/fixture/workload:0.1.0
-  - ref: example.invalid/fixture/mixin:1.0.0

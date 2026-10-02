@@ -1,11 +1,6 @@
 # https://taskfile.dev
 version: "3"
 
-includes:
-  kit:
-    taskfile: ./kit/Taskfile.yml
-    dir: .
-
 vars:
   GIT_TAG:
     sh: echo "${GIT_TAG:-$(git describe --tags --exact-match 2>/dev/null || echo dev)}"
@@ -17,6 +12,21 @@ env:
   GIT_COMMIT: "{{.GIT_COMMIT}}"
 
 tasks:
+  kit:
+    desc: Export a local Kit v3 OCI archive (no load or push; see docs/kit.md)
+    env:
+      KIT_REFERENCE: "{{.CLI_ARGS}}"
+    cmds:
+      - |
+        set -eu
+        mkdir -p dist/kit
+        output=$(mktemp -d dist/kit/v3.XXXXXX)
+        docker buildx build . -f kit/async-agent.yaml \
+          --platform "${KIT_PLATFORM:-${DOCKER_DEFAULT_PLATFORM:-linux/amd64}}" \
+          --tag "${KIT_REFERENCE:-kagent:local-v3}" \
+          --output "type=oci,dest=$output/kit.oci.tar"
+        printf 'Local OCI archive (not published or imported into SBX): %s/kit.oci.tar\n' "$output"
+
   default:
     desc: Run lint, test, and build
     aliases: [dev]

@@ -23,7 +23,6 @@
 !kit/launch.sh
 !kit/hackerspace.yaml
 !kit/user-config.yaml
-!kit/async-agent-context.md
 **/*_test.go
 **/testdata/**
 **/fixtures/**

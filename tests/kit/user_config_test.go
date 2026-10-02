@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"os"
@@ -27,7 +27,7 @@ func TestKitUserConfig(t *testing.T) {
 	assert.Empty(t, cfg.GetSettings().GetSafety())
 	assert.False(t, cfg.GetSettings().GetRestoreTabs())
 
-	bundled, err := os.ReadFile("user-config.yaml")
+	bundled, err := os.ReadFile(kitPath(t, "user-config.yaml"))
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700))
 	require.NoError(t, os.WriteFile(configPath, bundled, 0o600))

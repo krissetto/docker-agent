@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"maps"
@@ -59,7 +59,7 @@ func TestKitCredentialPolicy(t *testing.T) {
 	seen := map[string]bool{}
 	var allowed, injected []string
 	networkPolicies := 0
-	for _, cap := range readKitCapabilities(t, "async-agent.yaml") {
+	for _, cap := range readKitCapabilities(t, kitPath(t, "async-agent.yaml")) {
 		switch cap.Type {
 		case "com.docker.sandbox/network-policy@1":
 			networkPolicies++

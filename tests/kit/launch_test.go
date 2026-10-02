@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"os"
@@ -16,7 +16,7 @@ func TestLauncherTeamSelection(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX runtime launcher")
 	}
-	script, err := os.ReadFile("launch.sh")
+	script, err := os.ReadFile(kitPath(t, "launch.sh"))
 	require.NoError(t, err)
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)

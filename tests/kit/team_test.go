@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"os"
@@ -17,7 +17,7 @@ import (
 )
 
 func TestTeam(t *testing.T) {
-	cfg, err := config.Load(t.Context(), config.NewFileSource("hackerspace.yaml"))
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
 	require.Len(t, cfg.Agents, 7)
 	for _, expected := range []struct {
@@ -86,7 +86,7 @@ func TestTeam(t *testing.T) {
 }
 
 func TestTeamGuidance(t *testing.T) {
-	cfg, err := config.Load(t.Context(), config.NewFileSource("hackerspace.yaml"))
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
 	for _, expected := range []struct {
 		name     string
@@ -126,7 +126,7 @@ func TestTeamGuidance(t *testing.T) {
 }
 
 func TestNativeKit(t *testing.T) {
-	descriptor, err := os.ReadFile("async-agent.yaml")
+	descriptor, err := os.ReadFile(kitPath(t, "async-agent.yaml"))
 	require.NoError(t, err)
 	var kit struct {
 		SchemaVersion string                    `yaml:"schemaVersion"`
@@ -171,6 +171,27 @@ func TestNativeKit(t *testing.T) {
 	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "volume", "long-running"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
+	require.Len(t, kit.Capabilities, 14)
+	for _, capability := range kit.Capabilities {
+		switch capability.Type {
+		case "com.docker.sandbox/credential@1":
+			// Per-service requiredness and exact grants are checked in providers_test.go.
+		case "com.docker.sandbox/network-policy@1", "com.docker.sandbox/sbx@1":
+			assert.False(t, capability.Optional)
+		default:
+			assert.True(t, capability.Optional, capability.Type)
+		}
+	}
+	for kind, expected := range map[string]map[string]any{
+		"agent-context": {"filename": "ASYNC_AGENT_KIT.md"},
+		"agent-skills":  {"path": "/home/agent/.agents/skills", "mode": "readonly"},
+		"ssh-agent":     {"phase": "runtime", "unrestricted": false, "sign": []any{"git"}},
+		"volume":        {"path": "/home/agent/.cagent", "mode": "0700"},
+		"git-identity":  nil,
+		"long-running":  nil,
+	} {
+		assert.Equal(t, expected, kit.Capabilities[byType["com.docker.sandbox/"+kind+"@1"][0]].Config, kind)
+	}
 	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
 	assert.Equal(t, map[string]any{
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
@@ -181,7 +202,7 @@ func TestNativeKit(t *testing.T) {
 	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
 	assert.True(t, lifecycle.Optional)
 	require.Len(t, lifecycle.Config, 2)
-	recipe, err := os.ReadFile("async-agent.dockerfile")
+	recipe, err := os.ReadFile(kitPath(t, "async-agent.dockerfile"))
 	require.NoError(t, err)
 	assert.Contains(t, string(recipe), "xx-go build")
 	assert.Contains(t, string(recipe), `ARG ASYNC_AGENT_KIT_VERSION="0.1.0"`)
@@ -193,41 +214,18 @@ func TestNativeKit(t *testing.T) {
 	assert.Contains(t, string(recipe), `COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml`)
 	assert.NotContains(t, string(recipe), "DOCKER_AGENT_CONFIG_DIR")
 	assert.NotContains(t, string(recipe), "COPY . ")
-	ignore, err := os.ReadFile("async-agent.dockerfile.dockerignore")
+	ignore, err := os.ReadFile(kitPath(t, "async-agent.dockerfile.dockerignore"))
 	require.NoError(t, err)
 	assert.Contains(t, string(ignore), "!kit/hackerspace.yaml\n")
 	assert.Contains(t, string(ignore), "!kit/user-config.yaml\n")
-	assert.Contains(t, string(ignore), "!kit/async-agent-context.md\n")
 	assert.Contains(t, string(recipe), "/home/agent/.config/cagent /home/agent/.cagent")
-}
-
-func TestKitPublicationIdentity(t *testing.T) {
-	readme, err := os.ReadFile("README.md")
-	require.NoError(t, err)
-	docs := string(readme)
-	for _, namespace := range []string{"christopherpetito053", "christopherpetito234"} {
-		assert.Contains(t, docs, namespace+"/kagent")
-		assert.NotContains(t, docs, "REPO='"+namespace+"/docker-agent'")
-	}
-	assert.NotContains(t, docs, "christopherpetito053/async-agent")
-	assert.NotContains(t, docs, "christopherpetito234/async-agent")
-	assert.Contains(t, docs, "built-in `docker-agent`")
-	assert.Contains(t, docs, "task kit -- namespace/kagent:trial")
-	assert.Contains(t, docs, "KIT_REF='christopherpetito053/kagent@sha256:1c2ec35cc46b1886e2774e34249a764c8ae703f4e8e30828fef6ea3de4b28442'")
-	assert.NotContains(t, docs, "REPLACE_WITH_VERIFIED_PUBLISHED_DIGEST")
-	assert.Contains(t, docs, "christopherpetito053/docker-agent@sha256:1c2ec35cc46b1886e2774e34249a764c8ae703f4e8e30828fef6ea3de4b28442")
-	assert.NotContains(t, docs, "KIT_REF='christopherpetito053/docker-agent@sha256:1c2ec35")
-	assert.Contains(t, docs, "docker buildx build . -f kit/async-agent.yaml")
-	assert.Contains(t, docs, "does not support this nested source layout")
-	assert.NotContains(t, docs, "sbx run --name async-agent-source-trial-1")
-	assert.NotContains(t, docs, "sbx kit inspect async-agent.yaml")
 }
 
 func TestKitDiagnostics(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX lifecycle hooks")
 	}
-	descriptor, err := os.ReadFile("async-agent.yaml")
+	descriptor, err := os.ReadFile(kitPath(t, "async-agent.yaml"))
 	require.NoError(t, err)
 	type hook struct {
 		Command []string `yaml:"command"`
@@ -292,7 +290,7 @@ func TestLauncher(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX runtime launcher")
 	}
-	script, err := os.ReadFile("launch.sh")
+	script, err := os.ReadFile(kitPath(t, "launch.sh"))
 	require.NoError(t, err)
 	home := t.TempDir()
 	workspace := filepath.Join(home, "workspace")

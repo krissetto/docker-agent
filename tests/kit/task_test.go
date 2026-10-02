@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 )
 
 func TestKitTaskPackaging(t *testing.T) {
-	recipe, err := os.ReadFile("async-agent.dockerfile")
+	recipe, err := os.ReadFile(kitPath(t, "async-agent.dockerfile"))
 	require.NoError(t, err)
 	_, stage, found := strings.Cut(string(recipe), "FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS task\n")
 	require.True(t, found, "download tools run on the builder architecture")
@@ -36,7 +36,7 @@ func TestKitTaskPackaging(t *testing.T) {
 	assert.NotContains(t, runtime, "curl ")
 	assert.NotContains(t, runtime, "wget ")
 
-	setup, err := os.ReadFile("../.github/actions/setup-go/action.yml")
+	setup, err := os.ReadFile(repositoryPath(t, ".github", "actions", "setup-go", "action.yml"))
 	require.NoError(t, err)
 	assert.Contains(t, string(setup), "version: 3.53.1\n", "kit and CI use the same Task release")
 }

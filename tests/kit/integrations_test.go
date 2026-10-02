@@ -1,4 +1,4 @@
-package asyncsubagents_test
+package kit_test
 
 import (
 	"context"
@@ -25,12 +25,11 @@ import (
 )
 
 func TestKitContextAndSkillsDiscovery(t *testing.T) {
-	teamYAML, err := os.ReadFile("hackerspace.yaml")
+	teamYAML, err := os.ReadFile(kitPath(t, "hackerspace.yaml"))
 	require.NoError(t, err)
-	cfg, err := config.Load(t.Context(), config.NewFileSource("hackerspace.yaml"))
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
-	profile, err := os.ReadFile("async-agent-context.md")
-	require.NoError(t, err)
+	profile := []byte("Host-contributed kit guidance.")
 	home := t.TempDir()
 	workspace := filepath.Join(home, "workspace", "project")
 	require.NoError(t, os.MkdirAll(workspace, 0o700))
