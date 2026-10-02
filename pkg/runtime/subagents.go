@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
@@ -48,6 +49,7 @@ type sessionSubagents struct {
 	topLevel bool
 	sess     *session.Session
 	unwatch  func()
+	driver   weak.Pointer[sessionDriver]
 }
 
 // childRecord retains what read_subagent / send_message / reporting need about
@@ -140,6 +142,11 @@ func (m *subagentManager) Tree() *subagent.Tree { return m.tree }
 // top-level session) a synthetic root node is created. Caller holds m.mu.
 func (m *subagentManager) ensureSessionLocked(sess *session.Session, agentName string, node subagent.NodeID) *sessionSubagents {
 	if st, ok := m.sessions[sess.ID]; ok {
+		if st.topLevel && m.r.sessionDrivers != nil && !m.closed {
+			if driver, ok := m.r.sessionDrivers.Lookup(sess.ID); ok {
+				m.bindRootDriverLocked(sess.ID, st, driver)
+			}
+		}
 		return st
 	}
 	st := &sessionSubagents{node: node}
@@ -155,28 +162,59 @@ func (m *subagentManager) ensureSessionLocked(sess *session.Session, agentName s
 			}
 		}
 		_ = m.tree.Add(subagent.Node{ID: st.node, Agent: agentName, State: state})
-		if m.r.sessionDrivers != nil {
+		if m.r.sessionDrivers != nil && !m.closed {
 			if driver, ok := m.r.sessionDrivers.Lookup(sess.ID); ok {
-				st.sess = nil
-				sessionID := sess.ID
-				unwatchStarted := driver.OnStarted(func() { m.updateRootLifecycle(sessionID, subagent.NodeRunning, "") })
-				unwatchSettled := driver.OnSettled(func() {
-					current, ok := m.r.sessionDrivers.Lookup(sessionID)
-					if !ok {
-						return
-					}
-					if lastErr := current.LastError(); lastErr != "" {
-						m.updateRootLifecycle(sessionID, subagent.NodeFailed, lastErr)
-						return
-					}
-					m.updateRootLifecycle(sessionID, subagent.NodeIdle, "")
-				})
-				st.unwatch = func() { unwatchStarted(); unwatchSettled() }
+				m.bindRootDriverLocked(sess.ID, st, driver)
 			}
 		}
 	}
 	m.sessions[sess.ID] = st
 	return st
+}
+
+// bindPublishedRootDriver reconnects an already tracked root to a published
+// driver without making mere session creation a topology mutation. Registry
+// callers must release their lock before calling this, and bind before waking
+// accepted input so restored roots observe the first resumed turn.
+func (m *subagentManager) bindPublishedRootDriver(driver *sessionDriver) {
+	if driver == nil || driver.identityParent != "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if tracked := m.sessions[driver.identityID]; tracked != nil && tracked.topLevel {
+		m.bindRootDriverLocked(driver.identityID, tracked, driver)
+	}
+}
+
+// bindRootDriverLocked binds projection callbacks to one driver generation,
+// independently of topology registration. Caller holds m.mu. Weak references
+// let idle registry eviction reclaim the driver and its transcript.
+func (m *subagentManager) bindRootDriverLocked(sessionID string, st *sessionSubagents, driver *sessionDriver) {
+	ref := weak.Make(driver)
+	if m.closed || !st.topLevel || st.driver == ref {
+		return
+	}
+	if st.unwatch != nil {
+		st.unwatch()
+	}
+	st.sess = nil
+	st.driver = ref
+	unwatchStarted := driver.OnStarted(func() {
+		m.updateRootLifecycle(sessionID, ref, subagent.NodeRunning, "")
+	})
+	unwatchSettled := driver.OnSettled(func() {
+		current := ref.Value()
+		if current == nil {
+			return
+		}
+		if lastErr := current.LastError(); lastErr != "" {
+			m.updateRootLifecycle(sessionID, ref, subagent.NodeFailed, lastErr)
+			return
+		}
+		m.updateRootLifecycle(sessionID, ref, subagent.NodeIdle, "")
+	})
+	st.unwatch = func() { unwatchStarted(); unwatchSettled() }
 }
 
 // persistSnapshot mirrors each dirty root's subtree onto its owning top-level
@@ -247,15 +285,14 @@ func (m *subagentManager) ensureRoot(sess *session.Session, agentName string) {
 	m.ensureSessionLocked(sess, agentName, "")
 }
 
-func (m *subagentManager) updateRootLifecycle(sessionID string, state subagent.NodeState, errMsg string) {
+func (m *subagentManager) updateRootLifecycle(sessionID string, driver weak.Pointer[sessionDriver], state subagent.NodeState, errMsg string) {
 	m.mu.Lock()
 	tracked := m.sessions[sessionID]
-	if tracked == nil || !tracked.topLevel || m.closed {
+	if tracked == nil || !tracked.topLevel || tracked.driver != driver || m.closed {
 		m.mu.Unlock()
 		return
 	}
 	nodeID := tracked.node
-	m.mu.Unlock()
 	_ = m.tree.Update(nodeID, func(node *subagent.Node) {
 		node.State = state
 		node.Error = errMsg
@@ -266,6 +303,7 @@ func (m *subagentManager) updateRootLifecycle(sessionID string, state subagent.N
 			node.WaitingOn = ""
 		}
 	})
+	m.mu.Unlock()
 	m.persistSnapshot()
 }
 
@@ -605,14 +643,15 @@ func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 // Stopped subagents keep their record so read_subagent still works, but accept
 // no future input.
 func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string, error) {
-	m.r.sessionDrivers.runMu.Lock()
+	// The manager gate serializes child admission with the canonical stop.
+	// Starting drivers recheck that gate after reserving capacity, so durable
+	// I/O must not hold the registry-wide run admission mutex.
 	m.transitionMu.Lock()
 	m.mu.Lock()
 	rec := m.children[id]
 	if rec == nil || rec.parentSession != parentID {
 		m.mu.Unlock()
 		m.transitionMu.Unlock()
-		m.r.sessionDrivers.runMu.Unlock()
 		return "", fmt.Errorf("no owned subagent with id %q", id)
 	}
 	name := rec.name
@@ -653,7 +692,6 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 	if err != nil {
 		m.mu.Unlock()
 		m.transitionMu.Unlock()
-		m.r.sessionDrivers.runMu.Unlock()
 		return "", err
 	}
 	for _, commit := range commits {
@@ -681,7 +719,6 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 	for _, child := range stopped {
 		m.r.sessionDrivers.StopAll(child.sessionID)
 	}
-	m.r.sessionDrivers.runMu.Unlock()
 	for _, child := range stopped {
 		if d, ok := m.r.sessionDrivers.Lookup(child.sessionID); ok {
 			d.Wait()
@@ -1049,6 +1086,9 @@ func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) e
 	m.metricsMu.Lock()
 	m.mu.Lock()
 	for id := range deleting {
+		if tracked := m.sessions[id]; tracked != nil && tracked.unwatch != nil {
+			tracked.unwatch()
+		}
 		delete(m.sessions, id)
 	}
 	var targetNode subagent.NodeID
@@ -1114,7 +1154,7 @@ func (m *subagentManager) CloseContext(ctx context.Context) error {
 	persist := m.persist
 	m.persistMu.Unlock()
 	if persist != nil {
-		return persist.close()
+		return persist.closeContext(ctx)
 	}
 	return nil
 }

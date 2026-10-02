@@ -30,7 +30,7 @@ type (
 )
 
 func NewSpawn(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSpawn, lookup, references...))
+	return toolcommon.NewBase(ar, msg, sessionState, renderer(newSpawnRenderer(), lookup, references...))
 }
 
 func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {

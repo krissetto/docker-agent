@@ -2,8 +2,10 @@ package chatserver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +20,10 @@ type testRuntimeSupervisor struct {
 
 func (*testRuntimeSupervisor) Runtime() runtime.SessionRuntime { return nil }
 
-func (s *testRuntimeSupervisor) Shutdown(context.Context) error {
+func (s *testRuntimeSupervisor) Shutdown(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.shutdowns++
@@ -152,4 +157,59 @@ func TestRuntimePool_DiscardsRuntimeAfterFailedDrain(t *testing.T) {
 	require.Len(t, *created, 2)
 	require.NoError(t, releaseNext(t.Context(), true))
 	require.NoError(t, p.Shutdown(t.Context()))
+}
+
+func TestRuntimePool_RetriesFailedShutdown(t *testing.T) {
+	for _, path := range []string{"shutdown", "release", "eviction"} {
+		t.Run(path, func(t *testing.T) {
+			p, created := newTestRuntimePool(t, 1)
+			_, release, err := p.Get("root")
+			require.NoError(t, err)
+			expired, cancel := context.WithCancel(t.Context())
+			cancel()
+			switch path {
+			case "shutdown":
+				require.ErrorIs(t, p.Shutdown(expired), context.Canceled)
+				require.NoError(t, p.Shutdown(t.Context()))
+			case "release":
+				require.ErrorIs(t, release(expired, false), context.Canceled)
+				require.NoError(t, release(t.Context(), true))
+			case "eviction":
+				_, releaseNext, err := p.Get("root")
+				require.NoError(t, err)
+				require.NoError(t, release(t.Context(), true))
+				require.ErrorIs(t, releaseNext(expired, true), context.Canceled)
+				require.NoError(t, releaseNext(t.Context(), true))
+			}
+			assert.Equal(t, 1, (*created)[0].shutdownCount(), "failed drain must retain retry ownership")
+			require.NoError(t, p.Shutdown(t.Context()))
+			assert.Equal(t, 1, (*created)[0].shutdownCount(), "successful cleanup must not repeat")
+		})
+	}
+}
+
+func TestRuntimePool_ShutdownRetriesAbandonedReleaseAndEviction(t *testing.T) {
+	for _, eviction := range []bool{false, true} {
+		t.Run(fmt.Sprint("eviction=", eviction), func(t *testing.T) {
+			p, created := newTestRuntimePool(t, 1)
+			_, release, err := p.Get("root")
+			require.NoError(t, err)
+			expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			defer cancel()
+			if eviction {
+				_, releaseNext, err := p.Get("root")
+				require.NoError(t, err)
+				require.NoError(t, release(t.Context(), true))
+				require.ErrorIs(t, releaseNext(expired, true), context.DeadlineExceeded)
+			} else {
+				require.ErrorIs(t, release(expired, false), context.DeadlineExceeded)
+			}
+			require.NoError(t, p.Shutdown(t.Context()))
+			for _, owner := range *created {
+				assert.Equal(t, 1, owner.shutdownCount())
+			}
+			_, _, err = p.Get("root")
+			require.ErrorIs(t, err, errInvalidRuntime)
+		})
+	}
 }

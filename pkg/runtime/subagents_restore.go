@@ -349,7 +349,7 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 
 	insertedSessions := []string{sess.ID}
 	insertedChildren := make([]subagent.NodeID, 0, len(prepared))
-	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true}
+	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true, sess: sess}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
 		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, agent: entry.childAgent, durable: session.ChildRecord{Node: node}, unwatch: entry.unwatch}
@@ -428,6 +428,7 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 		releaseInitialized()
 		return subagent.Snapshot{}, err
 	}
+	m.ensureSessionLocked(sess, root.Agent, "")
 	m.mu.Unlock()
 
 	// Pending accepted input becomes executable only after the complete topology,
@@ -538,10 +539,31 @@ func (m *subagentManager) canonicalSnapshotWithLimit(ctx context.Context, root *
 		}
 	}
 	rootNode := subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: agentName, State: subagent.NodeIdle}
+	// Child records own identity, topology and lifecycle. Usage counters are
+	// maintained by the tree projection, not child transition commits.
+	projected := map[subagent.NodeID]subagent.Node{}
+	var collectMetrics func([]subagent.NodeSnapshot)
+	collectMetrics = func(nodes []subagent.NodeSnapshot) {
+		for _, item := range nodes {
+			projected[item.Node.ID] = item.Node
+			collectMetrics(item.Children)
+		}
+	}
+	collectMetrics(legacy.Nodes)
+	mergeMetrics := func(node subagent.Node) subagent.Node {
+		if projection, ok := projected[node.ID]; ok && projection.SessionID == node.SessionID {
+			node.Cost = max(node.Cost, projection.Cost)
+			node.InputTokens = max(node.InputTokens, projection.InputTokens)
+			node.OutputTokens = max(node.OutputTokens, projection.OutputTokens)
+			node.ToolCalls = max(node.ToolCalls, projection.ToolCalls)
+		}
+		return node
+	}
+	rootNode = mergeMetrics(rootNode)
 	children := map[subagent.NodeID][]subagent.Node{}
 	known := map[subagent.NodeID]bool{}
 	for _, record := range records {
-		children[record.Node.Parent] = append(children[record.Node.Parent], record.Node)
+		children[record.Node.Parent] = append(children[record.Node.Parent], mergeMetrics(record.Node))
 		known[record.Node.ID] = true
 	}
 	// A failed multi-row legacy migration is retryable: canonical rows win, but
@@ -593,6 +615,14 @@ func (m *subagentManager) canonicalSnapshotWithLimit(ctx context.Context, root *
 		}
 		return snap, nil
 	}
-	snap, err := build(rootNode, map[subagent.NodeID]bool{})
+	visited := map[subagent.NodeID]bool{}
+	snap, err := build(rootNode, visited)
+	if err == nil {
+		for _, record := range records {
+			if !visited[record.Node.ID] {
+				return subagent.Snapshot{}, nil, fmt.Errorf("invalid restored topology: unreachable canonical child %q", record.Node.ID)
+			}
+		}
+	}
 	return subagent.Snapshot{Version: subagent.SnapshotVersion, Durability: m.storeDurability(), Root: rootNode.ID, Nodes: []subagent.NodeSnapshot{snap}}, records, err
 }

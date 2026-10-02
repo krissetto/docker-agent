@@ -392,9 +392,13 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.cancelImageClick()
 	}
 	var cmds []tea.Cmd
-	animatedBeforeTick := false
+	var animatedBeforeTick []int
 	if _, ok := msg.(animation.TickMsg); ok {
-		animatedBeforeTick = m.hasAnimatedContent()
+		for i := range m.messages {
+			if m.itemNeedsTick(i) {
+				animatedBeforeTick = append(animatedBeforeTick, i)
+			}
+		}
 	}
 
 	switch msg := msg.(type) {
@@ -519,8 +523,12 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Tick dirtiness is program-wide. Do not rebuild the entire transcript
 		// merely because the root/sidebar spinner advanced; only message-owned
 		// animated content can change this component's lines.
-		if tick.Dirty() && (animatedBeforeTick || m.hasAnimatedContent()) {
-			m.renderDirty = true
+		if tick.Dirty() {
+			// Retain pending tool frames between deltas, but evict animated
+			// ranges on frame changes, including a block's terminal fade tick.
+			for _, i := range animatedBeforeTick {
+				m.invalidateItem(i)
+			}
 		}
 		m.tickReferenceHover(tick)
 	}
@@ -1529,9 +1537,8 @@ func (m *model) shouldCacheMessage(index int) bool {
 	msg := m.messages[index]
 	switch msg.Type {
 	case types.MessageTypeToolCall:
-		return msg.ToolStatus == types.ToolStatusCompleted ||
-			msg.ToolStatus == types.ToolStatusError ||
-			msg.ToolStatus == types.ToolStatusConfirmation
+		// Mutations invalidate this item; animation ticks evict live frames.
+		return true
 	case types.MessageTypeToolResult:
 		return true
 	case types.MessageTypeAssistant:
@@ -3040,25 +3047,25 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 // requires tick-driven updates (spinners, fades, etc.). Used to decide whether
 // to invalidate the render cache on animation ticks.
 func (m *model) hasAnimatedContent() bool {
-	for i, msg := range m.messages {
-		switch msg.Type {
-		case types.MessageTypeSpinner, types.MessageTypeLoading:
-			// Spinner/loading messages always need ticks
+	for i := range m.messages {
+		if m.itemNeedsTick(i) {
 			return true
-		case types.MessageTypeToolCall:
-			// Tool calls with pending/running status have spinners
-			if msg.ToolStatus == types.ToolStatusPending ||
-				msg.ToolStatus == types.ToolStatusRunning {
-				return true
-			}
-		case types.MessageTypeAssistantReasoningBlock:
-			// Check if reasoning block needs tick updates
-			if i < len(m.views) {
-				if block, ok := m.views[i].(*reasoningblock.Model); ok {
-					if block.NeedsTick() {
-						return true
-					}
-				}
+		}
+	}
+	return false
+}
+
+func (m *model) itemNeedsTick(i int) bool {
+	msg := m.messages[i]
+	switch msg.Type {
+	case types.MessageTypeSpinner, types.MessageTypeLoading:
+		return true
+	case types.MessageTypeToolCall:
+		return msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning
+	case types.MessageTypeAssistantReasoningBlock:
+		if i < len(m.views) {
+			if block, ok := m.views[i].(*reasoningblock.Model); ok {
+				return block.NeedsTick()
 			}
 		}
 	}

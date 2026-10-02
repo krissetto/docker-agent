@@ -6,6 +6,8 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,4 +126,120 @@ func TestSequentialSendsWithPersistentHistoryBeyondMailboxLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, roots, historySize+1, "sends must not recreate sessions or clear stored history")
 	assert.Len(t, loaded.GetAllMessages(), 2*historySize, "the supplied snapshot remains detached")
+}
+
+type confirmationProvider struct{ stubProvider }
+
+func (confirmationProvider) CreateChatCompletionStream(_ context.Context, messages []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	for _, message := range messages {
+		if message.Role == chat.MessageRoleTool {
+			return &sequentialReplyStream{responses: []chat.MessageStreamResponse{{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "finished"}, FinishReason: chat.FinishReasonStop}}}}}, nil
+		}
+	}
+	return &sequentialReplyStream{responses: []chat.MessageStreamResponse{{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{ID: "probe-call", Type: "function", Function: tools.FunctionCall{Name: "probe", Arguments: "{}"}}}}, FinishReason: chat.FinishReasonToolCalls}}}}}, nil
+}
+
+type confirmationTools struct{ executions atomic.Int32 }
+
+func (ts *confirmationTools) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "probe", Parameters: map[string]any{"type": "object"}, Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+		ts.executions.Add(1)
+		return tools.ResultSuccess("executed"), nil
+	}}}, nil
+}
+
+func TestRealToolConfirmationRoundTrip(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		for _, approve := range []bool{false, true} {
+			t.Run(fmt.Sprintf("explicit=%v/approve=%v", explicit, approve), func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				ts := &confirmationTools{}
+				tm := team.New(team.WithAgents(agent.New("root", "Use probe.", agent.WithModel(confirmationProvider{}), agent.WithToolSets(ts))))
+				s, err := New(ctx, Config{Team: tm})
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, s.Close()) })
+				out, err := s.Send(ctx, "use tool")
+				require.NoError(t, err)
+				var token string
+				var done bool
+				for event := range out {
+					require.NoError(t, event.Err)
+					if event.Tool != nil && event.Tool.NeedsConfirmation {
+						token = event.Tool.RequestID
+						require.NotEmpty(t, token)
+						bad := runtime.ResumeApprove()
+						bad.RequestID = "wrong-token"
+						require.Error(t, s.Confirm(ctx, bad))
+						req := runtime.ResumeReject("no")
+						if approve {
+							req = runtime.ResumeApprove()
+						}
+						if explicit {
+							req.RequestID = token
+						}
+						require.NoError(t, s.Confirm(ctx, req))
+						req.RequestID = token
+						require.Error(t, s.Confirm(ctx, req), "a consumed interaction cannot be replayed")
+					}
+					done = done || event.Done
+				}
+				require.NotEmpty(t, token)
+				require.True(t, done)
+				want := int32(0)
+				if approve {
+					want = 1
+				}
+				assert.Equal(t, want, ts.executions.Load())
+			})
+		}
+	}
+}
+
+type blockedResponseHandle struct {
+	runtime.SessionHandle
+	entered chan struct{}
+	proceed chan struct{}
+}
+
+func (h *blockedResponseHandle) Respond(ctx context.Context, response runtime.InteractionResponse) error {
+	close(h.entered)
+	<-h.proceed
+	return h.SessionHandle.Respond(ctx, response)
+}
+
+func TestConfirmRacingRestartKeepsCapturedBinding(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	s, err := New(ctx, Config{Team: newCodeBuiltTeam()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	original := s.handle
+	blocked := &blockedResponseHandle{SessionHandle: original, entered: make(chan struct{}), proceed: make(chan struct{})}
+	s.handle = blocked
+	result := make(chan error, 1)
+	go func() { req := runtime.ResumeApprove(); req.RequestID = "stale"; result <- s.Confirm(ctx, req) }()
+	<-blocked.entered
+	require.NoError(t, s.Restart())
+	require.NotEqual(t, original.ID(), s.handle.ID())
+	close(blocked.proceed)
+	require.Error(t, <-result)
+	// Exercise the lock capture/write boundary under the race detector as well.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 50 {
+			req := runtime.ResumeApprove()
+			req.RequestID = "stale"
+			assert.Error(t, s.Confirm(ctx, req))
+		}
+	})
+	for range 50 {
+		require.NoError(t, s.Restart())
+	}
+	wg.Wait()
+}
+
+func TestConfirmUninitializedHandle(t *testing.T) {
+	s := &Session{rt: newFakeRuntime()}
+	require.ErrorIs(t, s.Confirm(t.Context(), runtime.ResumeApprove()), ErrNotInitialized)
 }

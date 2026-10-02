@@ -225,7 +225,7 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	}
 
 	// New tool call - add to entries and track position in content sequence
-	view := tool.New(m.ar, msg, m.sessionState)
+	view := tool.New(m.ar, msg, m.sessionState, m.subagents)
 	view.SetSize(m.contentWidth(), 0)
 	toolIndex := len(m.toolEntries)
 	m.toolEntries = append(m.toolEntries, toolEntry{msg: msg, view: view})

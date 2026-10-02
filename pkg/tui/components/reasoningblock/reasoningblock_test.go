@@ -14,9 +14,11 @@ import (
 
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -680,4 +682,19 @@ func TestReasoningBlockNeedsTick(t *testing.T) {
 	fakeNow = completionTime.Add(completedToolVisibleDuration + completedToolFadeDuration + time.Second)
 	block.Update(animation.TickMsg{})
 	assert.False(t, block.NeedsTick(), "Block should not need tick after grace period ends")
+}
+
+func TestNewAndUpdatedToolResolveSharedSubagentIndex(t *testing.T) {
+	index := subagentindex.New()
+	index.Reset(subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "beef1", Agent: "researcher", State: subagent.NodeRunning}}}})
+	block := New(animation.NewRuntime(), "shared-index", "root", &service.SessionState{}, index)
+	t.Cleanup(block.StopAnimation)
+	msg := types.ToolCallMessage("root", tools.ToolCall{ID: "call-1", Function: tools.FunctionCall{Name: subagent.ToolReadSubagent, Arguments: `{"subagent_id":"beef1"}`}}, tools.Tool{Name: subagent.ToolReadSubagent}, types.ToolStatusRunning)
+	block.AddToolCall(msg)
+	initial := ansi.Strip(block.View())
+	require.Contains(t, initial, "researcher")
+	block.AddToolCall(msg)
+	require.Equal(t, initial, ansi.Strip(block.View()))
+	block.UpdateToolResult("call-1", "", types.ToolStatusCompleted, nil)
+	require.Contains(t, ansi.Strip(block.View()), "researcher")
 }

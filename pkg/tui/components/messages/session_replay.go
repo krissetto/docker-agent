@@ -105,6 +105,9 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 	for ops := 0; r.renderPosition < len(m.views) && ops < 32; ops++ {
 		i := r.renderPosition
 		if view, ok := m.views[i].(message.Model); ok {
+			// Capture the same presentation state renderItem will use.
+			view.SetSelected(m.focused && i == m.selectedMessageIndex)
+			view.SetHovered(i == m.hoveredMessageIndex)
 			if r.prepared != nil && r.preparedIndex == i {
 				message.ApplyPreparedRender(view, r.prepared)
 				r.prepared = nil
@@ -125,6 +128,11 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 			}
 		}
 		item := m.renderItem(i, m.views[i])
+		if view, ok := m.views[i].(message.Model); ok {
+			// The transcript now owns these lines. Do not retain a second full
+			// ANSI document on every historical (or last replayed) message view.
+			message.ReleasePreparedRender(view)
+		}
 		start := len(r.lines)
 		r.offsets[i] = start
 		if item.segments != nil {

@@ -3,6 +3,7 @@ package embeddedchat
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -141,7 +142,9 @@ func TestInitialSessionResumesConversation(t *testing.T) {
 type fakeRuntime struct {
 	dagentruntime.UnsupportedSessionHandle
 
-	events chan dagentruntime.Event
+	events        chan dagentruntime.Event
+	interactionMu sync.Mutex
+	interactions  map[string]dagentruntime.InteractionKind
 
 	runCtxs       []context.Context
 	resumes       []dagentruntime.ResumeRequest
@@ -151,7 +154,7 @@ type fakeRuntime struct {
 }
 
 func newFakeRuntime() *fakeRuntime {
-	return &fakeRuntime{events: make(chan dagentruntime.Event, 8)}
+	return &fakeRuntime{events: make(chan dagentruntime.Event, 8), interactions: make(map[string]dagentruntime.InteractionKind)}
 }
 
 func (f *fakeRuntime) CreateSession(context.Context, *session.Session, dagentruntime.SessionBinding) (dagentruntime.SessionHandle, error) {
@@ -184,8 +187,24 @@ func (f *fakeRuntime) Observe(ctx context.Context, _ dagentruntime.ObserveOption
 	go func() {
 		defer close(out)
 		for event := range f.events {
+			var kind dagentruntime.InteractionKind
+			switch event.(type) {
+			case *dagentruntime.ToolCallConfirmationEvent:
+				kind = dagentruntime.InteractionConfirmation
+			case *dagentruntime.ElicitationRequestEvent:
+				kind = dagentruntime.InteractionElicitation
+			case *dagentruntime.MaxIterationsReachedEvent:
+				kind = dagentruntime.InteractionMaxIterations
+			}
+			id := ""
+			if kind != "" {
+				id = "interaction-" + string(kind)
+				f.interactionMu.Lock()
+				f.interactions[id] = kind
+				f.interactionMu.Unlock()
+			}
 			select {
-			case out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", Event: event}:
+			case out <- dagentruntime.SessionEvent{SessionID: "session", TurnID: "request", InteractionID: id, Event: event}:
 			case <-ctx.Done():
 				return
 			}
@@ -203,6 +222,12 @@ func (f *fakeRuntime) Status(context.Context) (dagentruntime.SessionStatus, erro
 }
 
 func (f *fakeRuntime) Respond(_ context.Context, response dagentruntime.InteractionResponse) error {
+	f.interactionMu.Lock()
+	defer f.interactionMu.Unlock()
+	if response.InteractionID == "" || f.interactions[response.InteractionID] != response.Kind {
+		return errors.New("unknown interaction")
+	}
+	delete(f.interactions, response.InteractionID)
 	if response.Kind == dagentruntime.InteractionElicitation {
 		f.elicitations = append(f.elicitations, response.Elicitation.Action)
 	} else {
@@ -308,6 +333,7 @@ func TestSessionSendSurfacesConfirmationAndConfirmResumesRuntime(t *testing.T) {
 	require.NotNil(t, event.Tool)
 	require.True(t, event.Tool.NeedsConfirmation)
 	require.Equal(t, call, event.Tool.Call)
+	require.NotEmpty(t, event.Tool.RequestID)
 
 	require.NoError(t, s.Confirm(t.Context(), dagentruntime.ResumeApproveTool("write_file(*)")))
 	require.Len(t, rt.resumes, 1)

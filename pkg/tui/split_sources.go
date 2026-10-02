@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
-	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
@@ -181,20 +180,15 @@ func (m *appModel) adoptPaneSource() tea.Cmd {
 		m.cancelPaneSource()
 		return notification.ErrorCmd("Cannot adopt canonical pane view: " + err.Error())
 	}
-	id := tx.replaceRoute
-	if id == "" {
-		id, err = m.supervisor.AddSession(m.ctx(), application, info.Session, info.WorkingDir, nil)
-		if err != nil {
-			application.Close()
-			m.cancelPaneSource()
-			return notification.ErrorCmd("Cannot supervise pane view: " + err.Error())
-		}
-	} else {
-		m.supervisor.ReplaceRunnerApp(m.ctx(), id, supervisor.SpawnedSession{App: application, Session: info.Session, Ownership: supervisor.RuntimeBorrowed}, info.WorkingDir)
+	id, initCmd, err := m.adoptSessionView(application, info.Session, info.WorkingDir, sessionViewPolicy{replaceRoute: tx.replaceRoute})
+	if err != nil {
+		application.Close()
+		m.cancelPaneSource()
+		return notification.ErrorCmd("Cannot supervise pane view: " + err.Error())
+	}
+	if tx.replaceRoute != "" {
 		delete(m.pendingRestores, id)
 	}
-	m.createSessionComponents(id, application, info.Session)
-	page, editor := m.chatPages[id], m.editors[id]
 	m.capturePaneSidebarSettings()
 	m.commitPaneWorkspace(tx.next)
 	m.paneSource = nil
@@ -205,5 +199,5 @@ func (m *appModel) adoptPaneSource() tea.Cmd {
 		destination = tx.destination
 	}
 	_, focus := m.handleSwitchTab(destination)
-	return tea.Batch(m.routePaneCmd(id, tea.Batch(page.Init(), chat.WatchGitBranch(page), editor.Init())), focus)
+	return tea.Batch(initCmd, focus)
 }

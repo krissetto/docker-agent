@@ -152,3 +152,47 @@ func BenchmarkSubagentMetricsRootPersistence(b *testing.B) {
 		}
 	}
 }
+
+func TestSubagentRootAndChildMetricsSurviveCanonicalRestart(t *testing.T) {
+	rt, store, root := newRestoreFixture(t)
+	child := session.New(session.WithID("metrics-child"), session.WithAgentName("planner"), session.WithParentID(root.ID))
+	target, err := rt.team.Agent("planner")
+	require.NoError(t, err)
+	require.NoError(t, rt.subagents.registerIdleChild(root, "root", child, target, subagent.AllowedSubagent{Agent: "planner"}))
+	id, ok := rt.subagents.nodeForSession(child.ID)
+	require.True(t, ok)
+	root.SetTokensAndCost(101, 51, 1.25)
+	child.SetTokensAndCost(202, 82, 2.5)
+	rt.subagents.updateSessionMetrics(root, 3)
+	rt.subagents.updateSessionMetrics(child, 7)
+	_, err = rt.subagents.stopChild(root.ID, id)
+	require.NoError(t, err)
+	rootBefore, _ := rt.subagents.tree.Node(subagent.SessionRootID(root.ID))
+	childBefore, _ := rt.subagents.tree.Node(id)
+	records, err := store.(session.CoordinationStore).LoadChildren(t.Context(), root.ID)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Zero(t, records[0].Node.ToolCalls, "metrics live in the persisted projection, not transition records")
+	require.NoError(t, rt.subagents.CloseContext(t.Context()))
+	rt.sessionDrivers.Close()
+
+	restarted, err := NewLocalRuntime(t.Context(), rt.team, WithSessionStore(store))
+	require.NoError(t, err)
+	t.Cleanup(restarted.subagents.Close)
+	t.Cleanup(restarted.sessionDrivers.Close)
+	loaded, err := store.GetSession(t.Context(), root.ID)
+	require.NoError(t, err)
+	snapshot, err := restarted.RestoreSubagentTree(t.Context(), loaded)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	for _, before := range []subagent.Node{rootBefore, childBefore} {
+		after, ok := restarted.subagents.tree.Node(before.ID)
+		require.True(t, ok)
+		require.Equal(t, before.Cost, after.Cost)
+		require.Equal(t, before.InputTokens, after.InputTokens)
+		require.Equal(t, before.OutputTokens, after.OutputTokens)
+		require.Equal(t, before.ToolCalls, after.ToolCalls)
+	}
+	after, _ := restarted.subagents.tree.Node(id)
+	require.Equal(t, subagent.NodeStopped, after.State)
+}

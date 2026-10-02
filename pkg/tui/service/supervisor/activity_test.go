@@ -1,9 +1,12 @@
 package supervisor
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -114,4 +117,73 @@ func TestDeriveTabActivityRepeatedSnapshotIsIdempotent(t *testing.T) {
 	snapshot := activitySnapshot(subagent.NodeRunning, "")
 	first := deriveTabActivity(snapshot, "child", messages.TabActivityNone)
 	assert.Equal(t, first, deriveTabActivity(snapshot, "child", messages.TabActivityNone))
+}
+
+type activityTreeServices struct {
+	app.Services
+	tree  *subagent.Tree
+	reads atomic.Int32
+}
+
+func (s *activityTreeServices) SubagentTree() *subagent.Tree {
+	s.reads.Add(1)
+	return s.tree
+}
+
+func sharedTreeSupervisor(tb testing.TB, count int) (*Supervisor, *activityTreeServices) {
+	tb.Helper()
+	s := New(nil)
+	services := &activityTreeServices{tree: subagent.NewTree()}
+	nodes := make([]subagent.Node, count)
+	for i := range count {
+		id := fmt.Sprintf("tab-%d", i)
+		node := subagent.SessionRootID(id)
+		nodes[i] = subagent.Node{ID: node, Agent: "agent", State: subagent.NodeIdle}
+		sess := session.New(session.WithID(id))
+		a := app.New(tb.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(services))
+		s.runners[id] = &SessionTab{ID: id, App: a}
+		s.order = append(s.order, id)
+	}
+	require.NoError(tb, services.tree.AddSubtree(nodes))
+	tb.Cleanup(s.Shutdown)
+	return s, services
+}
+
+func TestTabActivitySharesOneTreeSnapshotPerRebuild(t *testing.T) {
+	s, services := sharedTreeSupervisor(t, 2)
+	cache := make(map[*subagent.Tree]subagent.Snapshot)
+	activity, _ := tabActivity(s.runners["tab-0"], cache)
+	require.Equal(t, messages.TabActivityNone, activity)
+	require.Len(t, cache, 1)
+	require.NoError(t, services.tree.AddSubtree([]subagent.Node{{ID: "child", Parent: subagent.SessionRootID("tab-1"), Agent: "agent", State: subagent.NodeRunning}}))
+	activity, _ = tabActivity(s.runners["tab-1"], cache)
+	require.Equal(t, messages.TabActivityNone, activity, "one rebuild sees one coherent tree head")
+	tabs, _ := s.GetTabs()
+	require.Equal(t, messages.TabActivityDescendantRunning, tabs[1].Activity, "the next rebuild sees new tree activity")
+}
+
+func TestTabNotificationsCoalesceBeforeTreeReads(t *testing.T) {
+	s, services := sharedTreeSupervisor(t, 20)
+	delivered := make(chan messages.TabsUpdatedMsg, 1)
+	s.mu.Lock()
+	s.tabSender = func(msg messages.TabsUpdatedMsg) { delivered <- msg }
+	for range 100 {
+		s.notifyTabsUpdated()
+	}
+	require.Zero(t, services.reads.Load(), "invalidations must not build tab snapshots")
+	s.mu.Unlock()
+	require.Len(t, (<-delivered).Tabs, 20)
+}
+
+func BenchmarkTabsSharedTree(b *testing.B) {
+	for _, count := range []int{10, 100, 500} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			s, _ := sharedTreeSupervisor(b, count)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				s.GetTabs()
+			}
+		})
+	}
 }

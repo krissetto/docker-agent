@@ -241,21 +241,11 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 		_, cmd := m.handleSwitchTab(existing.ID)
 		return cmd
 	}
-	id := request.target
-	if id == "" {
-		var err error
-		id, err = m.supervisor.AddSession(m.ctx(), application, sess, sess.WorkingDir, nil)
-		if err != nil {
-			application.Close()
-			return notification.ErrorCmd(err.Error())
-		}
-	} else {
-		if editor := m.editors[id]; editor != nil {
-			editor.Cleanup()
-		}
-		m.supervisor.ReplaceRunnerApp(m.ctx(), id, supervisor.SpawnedSession{App: application, Session: sess, Ownership: supervisor.RuntimeBorrowed}, sess.WorkingDir)
+	id, initCmd, err := m.adoptSessionView(application, sess, sess.WorkingDir, sessionViewPolicy{replaceRoute: request.target})
+	if err != nil {
+		application.Close()
+		return notification.ErrorCmd(err.Error())
 	}
-	m.createSessionComponents(id, application, sess)
 	m.chatPages[id].SetSidebarSettings(request.sidebar)
 	delete(m.pendingRestores, id)
 	sidebarCmd := m.applySidebarCollapsed(id)
@@ -273,7 +263,6 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 	}
 	m.replacePaneWorkspaceRoute(request.target, id)
 	_, focusCmd := m.handleSwitchTab(id)
-	initCmd := m.routePaneCmd(id, tea.Batch(m.chatPages[id].Init(), chat.WatchGitBranch(m.chatPages[id]), m.editors[id].Init()))
 	if request.send != nil {
 		generation, _ := m.supervisor.RouteGeneration(id)
 		return tea.Sequence(tea.Batch(initCmd, focusCmd, sidebarCmd, persistenceWarning), stampSendCommand(id, generation, func() tea.Msg { return *request.send }))

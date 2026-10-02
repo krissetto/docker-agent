@@ -783,73 +783,84 @@ func TestSessionHTTPPersistedSessionRestoresUsingServerOwnedSource(t *testing.T)
 }
 
 func TestSessionHTTPLocalRuntimeColdChildRestoresRootTree(t *testing.T) {
-	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	provider := sessionHTTPProvider{}
-	newRuntime := func() runtime.SessionRuntimeSupervisor {
-		rt, runtimeErr := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
-			agent.New("root", "prompt", agent.WithModel(provider), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
-			agent.New("worker", "prompt", agent.WithModel(provider)),
-		)), runtime.WithSessionStore(store))
-		require.NoError(t, runtimeErr)
-		return runtime.NewSessionRuntimeSupervisor(rt)
-	}
-	root := session.New(session.WithID("persisted-root"), session.WithAgentName("root"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
-	child := session.New(session.WithID("persisted-child"), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{sessionAgentAttribute: "worker"}))
-	require.NoError(t, store.AddSession(t.Context(), root))
-	require.NoError(t, store.AddSession(t.Context(), child))
-	treeRoot := subagent.SessionRootID(root.ID)
-	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), root.ID, subagent.Snapshot{Root: treeRoot, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: treeRoot, Agent: "root", State: subagent.NodeRunning}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "worker-node", Agent: "worker", Parent: treeRoot, SessionID: child.ID, State: subagent.NodeIdle}}}}}}))
+	for _, factoryRouting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("factory=%t", factoryRouting), func(t *testing.T) {
+			store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			provider := sessionHTTPProvider{}
+			workspace := t.TempDir()
+			newRuntime := func() runtime.SessionRuntimeSupervisor {
+				rt, runtimeErr := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
+					agent.New("root", "prompt", agent.WithModel(provider), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
+					agent.New("worker", "prompt", agent.WithModel(provider)),
+				)), runtime.WithSessionStore(store), runtime.WithWorkingDir(normalizeDir(workspace)))
+				require.NoError(t, runtimeErr)
+				return runtime.NewSessionRuntimeSupervisor(rt)
+			}
+			root := session.New(session.WithID("persisted-root"), session.WithWorkingDir(workspace), session.WithAgentName("root"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
+			child := session.New(session.WithID("persisted-child"), session.WithWorkingDir(workspace), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{sessionAgentAttribute: "worker"}))
+			require.NoError(t, store.AddSession(t.Context(), root))
+			require.NoError(t, store.AddSession(t.Context(), child))
+			treeRoot := subagent.SessionRootID(root.ID)
+			require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), root.ID, subagent.Snapshot{Root: treeRoot, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: treeRoot, Agent: "root", State: subagent.NodeRunning}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "worker-node", Agent: "worker", Parent: treeRoot, SessionID: child.ID, State: subagent.NodeIdle}}}}}}))
 
-	owner := newRuntime()
-	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
-	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(owner.Runtime()))
-	srv := NewWithManager(sm, "")
-	const callers = 12
-	start := make(chan struct{})
-	codes := make(chan int, callers)
-	var wg sync.WaitGroup
-	for range callers {
-		wg.Go(func() {
-			<-start
-			codes <- sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+child.ID+"/status", "", "").Code
+			var sm *SessionManager
+			if factoryRouting {
+				factory := &factoryRecorder{store: store}
+				_, sm = newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+			} else {
+				owner := newRuntime()
+				t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+				sm = NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(owner.Runtime()))
+			}
+			srv := NewWithManager(sm, "")
+			const callers = 12
+			start := make(chan struct{})
+			codes := make(chan int, callers)
+			var wg sync.WaitGroup
+			for range callers {
+				wg.Go(func() {
+					<-start
+					codes <- sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+child.ID+"/status", "", "").Code
+				})
+			}
+			close(start)
+			wg.Wait()
+			close(codes)
+			for code := range codes {
+				assert.Equal(t, http.StatusOK, code)
+			}
+
+			submit := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+child.ID+"/messages", `{"content":"continue"}`, "")
+			require.Equal(t, http.StatusAccepted, submit.Code, submit.Body.String())
+			httpServer := httptest.NewServer(srv.e)
+			defer httpServer.Close()
+			attachCtx, cancelAttach := context.WithCancel(t.Context())
+			attachReq, err := http.NewRequestWithContext(attachCtx, http.MethodGet, httpServer.URL+"/api/v2/sessions/"+child.ID+"/events", http.NoBody)
+			require.NoError(t, err)
+			attached, err := http.DefaultClient.Do(attachReq)
+			require.NoError(t, err)
+			reader := bufio.NewReader(attached.Body)
+			for {
+				line, readErr := reader.ReadString('\n')
+				require.NoError(t, readErr)
+				if strings.HasPrefix(line, "data: ") {
+					assert.Contains(t, line, `"type":"snapshot"`)
+					break
+				}
+			}
+			cancelAttach()
+			require.NoError(t, attached.Body.Close())
+
+			_, rootPublished := sm.runtimeSessions.Load(root.ID)
+			childActive, childPublished := sm.runtimeSessions.Load(child.ID)
+			assert.True(t, rootPublished)
+			require.True(t, childPublished)
+			assert.Equal(t, child.ID, childActive.handle.ID())
+			assert.Equal(t, "worker", childActive.handle.AgentName())
 		})
 	}
-	close(start)
-	wg.Wait()
-	close(codes)
-	for code := range codes {
-		assert.Equal(t, http.StatusOK, code)
-	}
-
-	submit := sessionRequest(t, srv, http.MethodPost, "/api/v2/sessions/"+child.ID+"/messages", `{"content":"continue"}`, "")
-	require.Equal(t, http.StatusAccepted, submit.Code, submit.Body.String())
-	httpServer := httptest.NewServer(srv.e)
-	defer httpServer.Close()
-	attachCtx, cancelAttach := context.WithCancel(t.Context())
-	attachReq, err := http.NewRequestWithContext(attachCtx, http.MethodGet, httpServer.URL+"/api/v2/sessions/"+child.ID+"/events", http.NoBody)
-	require.NoError(t, err)
-	attached, err := http.DefaultClient.Do(attachReq)
-	require.NoError(t, err)
-	reader := bufio.NewReader(attached.Body)
-	for {
-		line, readErr := reader.ReadString('\n')
-		require.NoError(t, readErr)
-		if strings.HasPrefix(line, "data: ") {
-			assert.Contains(t, line, `"type":"snapshot"`)
-			break
-		}
-	}
-	cancelAttach()
-	require.NoError(t, attached.Body.Close())
-
-	_, rootPublished := sm.runtimeSessions.Load(root.ID)
-	childActive, childPublished := sm.runtimeSessions.Load(child.ID)
-	assert.True(t, rootPublished)
-	require.True(t, childPublished)
-	assert.Equal(t, child.ID, childActive.handle.ID())
-	assert.Equal(t, "worker", childActive.handle.AgentName())
 }
 
 func TestSessionHTTPCatalogDoesNotCreateObserversAndKeepsUnknownStatus(t *testing.T) {

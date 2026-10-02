@@ -299,7 +299,7 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 		// local session would be. A default never overrides a stated policy.
 		// The canonical runtime persists the session on creation.
 		if defaults, ok := registry.(runtime.SafetyDefaults); ok {
-			if policy := defaults.AuthorSafetyDefault(sess); policy != "" {
+			if policy := authorSafetyDefault(c.Request().Context(), defaults, sess); policy != "" {
 				sess.SetSafetyPolicy(policy)
 			}
 		}

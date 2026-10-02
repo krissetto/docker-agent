@@ -70,17 +70,16 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 		return Submission{}, err
 	}
 	d := h.driver
-	// The same generation-admission lock used by v2 prevents append/start races.
-	d.r.sessionDrivers.runMu.Lock()
+	// The driver lock (and maintenance reservation during tool evaluation)
+	// prevents starts before the atomic input append. Global admission is only
+	// needed when prepareStart reserves the generation, never during storage.
 	d.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		return Submission{}, err
 	}
 	if err := d.admitLocked(SessionOperationPost); err != nil {
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		return Submission{}, err
 	}
 	marker := session.UserMessage("")
@@ -102,13 +101,11 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	receipt, found, lookupErr := d.lookupLegacyBatchLocked(ctx, "run:"+id, []session.Item{session.NewMessageItem(marker)})
 	if lookupErr != nil {
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		return Submission{}, lookupErr
 	}
 	if found {
 		err = d.reconcileLegacyBatchLocked(ctx, receipt)
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		if err == nil {
 			d.WakePending()
 		}
@@ -116,7 +113,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	}
 	if d.running() || d.starting() || d.settling() || d.compactReserved || d.skillOperationID != "" {
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		return Submission{}, &SessionError{Kind: SessionErrorConflict, SessionID: h.sessionID, Operation: "legacy_run", Reason: SessionErrorReasonBusy}
 	}
 	originalAgent := d.sess.AgentName
@@ -134,7 +130,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 		}
 		if _, targetErr := h.runtime.team.Agent(cmd.Agent); targetErr != nil {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, targetErr
 		}
 		targets[i] = cmd.Agent
@@ -143,13 +138,11 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	if modelRef != "" {
 		if !h.runtime.SupportsModelSwitching() {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, sessionUnsupported(h.sessionID, SessionOperationSetModel)
 		}
 		providers, err = h.runtime.resolveModelProviders(ctx, originalAgent, modelRef)
 		if err != nil {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, err
 		}
 	}
@@ -160,7 +153,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 		activeRef, providers, err = h.runtime.resolveSessionModelBinding(ctx, candidate, "")
 		if err != nil {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, err
 		}
 	}
@@ -179,7 +171,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 		d.switchReserved = false
 		if d.stopped {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, ErrSessionStopped
 		}
 	}
@@ -187,7 +178,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	for _, input := range inputs {
 		if input.Retry {
 			d.mu.Unlock()
-			d.r.sessionDrivers.runMu.Unlock()
 			return Submission{}, errors.New("legacy batch input cannot request retry")
 		}
 		message := session.UserMessage(input.Content, input.MultiContent...)
@@ -199,7 +189,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	items = append(items, session.NewMessageItem(marker))
 	if !limitAllows(len(d.pending), d.pendingLimit()) {
 		d.mu.Unlock()
-		d.r.sessionDrivers.runMu.Unlock()
 		return Submission{}, ErrSessionCapacity
 	}
 	var duplicate bool
@@ -241,7 +230,6 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 	if err == nil && !duplicate {
 		runCtx, generation, callbacks, startErr = d.prepareStartAdmissionLocked(d.r.lifetime(), true)
 	}
-	d.r.sessionDrivers.runMu.Unlock()
 	if err != nil {
 		return Submission{}, err
 	}

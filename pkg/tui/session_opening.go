@@ -157,7 +157,7 @@ func (m *appModel) finishSubagentOpening(result subagentOpenedMsg) tea.Cmd {
 		_, cmd := m.handleSwitchTab(existing.ID)
 		return tea.Batch(discard, cmd)
 	}
-	id, err := m.supervisor.AddSession(m.ctx(), a, a.Session(), a.Session().WorkingDir, nil)
+	id, initCmd, err := m.adoptSessionView(a, a.Session(), a.Session().WorkingDir, sessionViewPolicy{asyncReplay: true})
 	if err != nil {
 		m.cancelSessionOpening()
 		return tea.Batch(discard, notification.ErrorCmd(err.Error()))
@@ -168,13 +168,10 @@ func (m *appModel) finishSubagentOpening(result subagentOpenedMsg) tea.Cmd {
 	r.installed = true
 	r.target = id
 	// Commit canonical focus only after validating the complete acquisition.
-	m.createSessionComponents(id, a, a.Session())
-	chat.EnableAsyncReplay(m.chatPages[id])
-	initCmd := m.routePaneCmd(id, m.chatPages[id].Init())
 	m.opening = nil
 	_, cmd := m.handleSwitchTab(id)
 	m.opening = r
-	cmd = tea.Batch(cmd, initCmd, m.routePaneCmd(id, chat.WatchGitBranch(m.chatPages[id])), m.editors[id].Init())
+	cmd = tea.Batch(cmd, initCmd)
 	m.editor.Blur()
 	tabs, active := m.supervisor.GetTabs()
 	return tea.Batch(cmd, m.setTabs(tabs, active))

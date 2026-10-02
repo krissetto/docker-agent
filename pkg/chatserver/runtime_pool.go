@@ -26,12 +26,15 @@ type runtimePool struct {
 	mu       sync.Mutex
 	idle     map[string]*list.List
 	borrowed map[*idleRuntime]struct{}
+	draining map[*idleRuntime]struct{}
 	closed   bool
 }
 
 type idleRuntime struct {
-	owner runtime.SessionRuntimeSupervisor
-	rt    runtime.SessionRuntime
+	owner    runtime.SessionRuntimeSupervisor
+	rt       runtime.SessionRuntime
+	stopping chan struct{}
+	stopped  bool
 }
 
 // errInvalidRuntime is returned when a caller asks for a runtime for an
@@ -50,6 +53,7 @@ func newRuntimePool(ctx context.Context, t *team.Team, maxIdle int) *runtimePool
 		maxIdle:  maxIdle,
 		idle:     make(map[string]*list.List),
 		borrowed: make(map[*idleRuntime]struct{}),
+		draining: make(map[*idleRuntime]struct{}),
 	}
 	p.new = func() (runtime.SessionRuntimeSupervisor, error) {
 		rt, err := runtime.NewLocalRuntime(p.ctx(), p.team,
@@ -95,8 +99,9 @@ func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Co
 	entry := &idleRuntime{owner: owner, rt: owner.Runtime()}
 	p.mu.Lock()
 	if p.closed {
+		p.draining[entry] = struct{}{}
 		p.mu.Unlock()
-		_ = owner.Shutdown(p.ctx())
+		_ = p.drain(p.ctx(), entry)
 		return nil, nil, errInvalidRuntime
 	}
 	p.borrowed[entry] = struct{}{}
@@ -105,24 +110,31 @@ func (p *runtimePool) Get(agent string) (runtime.SessionRuntime, func(context.Co
 }
 
 func (p *runtimePool) release(agent string, entry *idleRuntime) func(context.Context, bool) error {
+	// Returning a lease happens once; draining its discarded/evicted owner is retryable.
 	var once sync.Once
-	var err error
+	var discarded *idleRuntime
 	return func(ctx context.Context, reusable bool) error {
-		once.Do(func() { err = p.put(ctx, agent, entry, reusable) })
-		return err
+		once.Do(func() { discarded = p.put(agent, entry, reusable) })
+		if discarded != nil {
+			return p.drain(ctx, discarded)
+		}
+		return nil
 	}
 }
 
-func (p *runtimePool) put(ctx context.Context, agent string, entry *idleRuntime, reusable bool) error {
+func (p *runtimePool) put(agent string, entry *idleRuntime, reusable bool) *idleRuntime {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if _, ok := p.borrowed[entry]; !ok {
-		p.mu.Unlock()
+		if _, draining := p.draining[entry]; draining {
+			return entry
+		}
 		return nil
 	}
 	delete(p.borrowed, entry)
 	if !reusable || p.closed || p.maxIdle == 0 {
-		p.mu.Unlock()
-		return entry.owner.Shutdown(ctx)
+		p.draining[entry] = struct{}{}
+		return entry
 	}
 	idle := p.idle[agent]
 	if idle == nil {
@@ -131,12 +143,44 @@ func (p *runtimePool) put(ctx context.Context, agent string, entry *idleRuntime,
 	}
 	idle.PushBack(entry)
 	if idle.Len() <= p.maxIdle {
-		p.mu.Unlock()
 		return nil
 	}
 	evicted := idle.Remove(idle.Front()).(*idleRuntime)
-	p.mu.Unlock()
-	return evicted.owner.Shutdown(ctx)
+	p.draining[evicted] = struct{}{}
+	return evicted
+}
+
+// drain serializes attempts without making callers wait beyond their deadline.
+// Failed owners stay reachable by Shutdown even if a lease is never retried.
+func (p *runtimePool) drain(ctx context.Context, entry *idleRuntime) error {
+	for {
+		p.mu.Lock()
+		if entry.stopped {
+			p.mu.Unlock()
+			return nil
+		}
+		if done := entry.stopping; done != nil {
+			p.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		entry.stopping = make(chan struct{})
+		p.mu.Unlock()
+		err := entry.owner.Shutdown(ctx)
+		p.mu.Lock()
+		if err == nil {
+			entry.stopped = true
+			delete(p.draining, entry)
+		}
+		close(entry.stopping)
+		entry.stopping = nil
+		p.mu.Unlock()
+		return err
+	}
 }
 
 func (p *runtimePool) Shutdown(ctx context.Context) error {
@@ -145,22 +189,24 @@ func (p *runtimePool) Shutdown(ctx context.Context) error {
 	}
 	p.mu.Lock()
 	p.closed = true
-	owners := make([]runtime.SessionRuntimeSupervisor, 0)
 	for entry := range p.borrowed {
-		owners = append(owners, entry.owner)
+		p.draining[entry] = struct{}{}
 	}
 	for _, idle := range p.idle {
 		for elem := idle.Front(); elem != nil; elem = elem.Next() {
-			owners = append(owners, elem.Value.(*idleRuntime).owner)
+			p.draining[elem.Value.(*idleRuntime)] = struct{}{}
 		}
 	}
 	p.idle = make(map[string]*list.List)
 	p.borrowed = make(map[*idleRuntime]struct{})
+	entries := make([]*idleRuntime, 0, len(p.draining))
+	for entry := range p.draining {
+		entries = append(entries, entry)
+	}
 	p.mu.Unlock()
-
-	errs := make([]error, 0, len(owners))
-	for _, owner := range owners {
-		errs = append(errs, owner.Shutdown(ctx))
+	errs := make([]error, 0, len(entries))
+	for _, entry := range entries {
+		errs = append(errs, p.drain(ctx, entry))
 	}
 	return errors.Join(errs...)
 }

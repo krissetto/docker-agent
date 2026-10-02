@@ -13,6 +13,11 @@ import (
 
 func (m *model) RefreshInputReferences() {
 	for i, msg := range m.messages {
+		// Tool renderers resolve names/colors from the shared index on render,
+		// including tool children whose enclosing reasoning message has no ref.
+		if msg.Type == types.MessageTypeToolCall || msg.Type == types.MessageTypeAssistantReasoningBlock {
+			m.invalidateItem(i)
+		}
 		if lifecycle.IsUserInput(msg.InputOrigin) {
 			continue
 		}

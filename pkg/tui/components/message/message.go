@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -44,8 +45,8 @@ type Model interface {
 	// are preserved; calling View() afterwards still produces correct output
 	// without retaining a per-view render cache or IncrementalRenderer.
 	Finalize()
-	// HasLiveRenderState reports whether this view currently retains a
-	// populated renderCache or an IncrementalRenderer instance. Used by tests
+	// HasLiveRenderState reports whether this view currently retains
+	// prepared output, a populated renderCache or an IncrementalRenderer. Used by tests
 	// to assert that finalized views have actually released their per-message
 	// render state without reaching into unexported fields via reflection.
 	HasLiveRenderState() bool
@@ -107,8 +108,9 @@ type messageModel struct {
 	// IncrementalRenderer between calls — both are pure caches whose memory
 	// dominates a long session, and they are not worth keeping for messages
 	// that are unlikely to be re-rendered hot.
-	finalized bool
-	prepared  *PreparedRender
+	finalized      bool
+	prepared       *PreparedRender
+	renderRevision uint64 // owner mutations invalidate in-flight prepared work
 
 	markdownImages  map[string]tuiimage.Inline
 	loadingImages   map[string]bool
@@ -141,6 +143,7 @@ type markdownImagePlaceholder struct {
 // can change its output. The key is small enough (a string and a few flags)
 // that comparing it is much cheaper than rendering markdown.
 type renderCache struct {
+	media          []types.AssistantMedia
 	inputReference lifecycle.InputReference
 	sender         string
 	inputOrigin    session.InputOrigin
@@ -237,7 +240,7 @@ func (mv *messageModel) SetMessage(msg *types.Message) tea.Cmd {
 	// mutable buffer only if AppendContent actually resumes this message.
 	mv.contentBuf.Reset()
 	mv.imageScanOffset = -1
-	mv.renderCache.valid = false
+	mv.invalidateOutput()
 	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.InputOrigin == session.InputOriginAgent {
 		return nil
 	}
@@ -262,7 +265,7 @@ func (mv *messageModel) AppendContent(content string) tea.Cmd {
 	mv.contentBuf.WriteString(content)
 	mv.message.Content = mv.contentBuf.String()
 	mv.syncSpinner()
-	mv.renderCache.valid = false
+	mv.invalidateOutput()
 	// Keep only an offset into canonical content. The one-byte lookback finds an
 	// opener split as "!" then "[" without retaining or duplicating streamed text.
 	if mv.imageScanOffset < 0 {
@@ -340,22 +343,30 @@ func (mv *messageModel) loadMarkdownImageReferences(refs []tuiimage.MarkdownRefe
 func (mv *messageModel) SetSelected(selected bool) {
 	if mv.selected != selected {
 		mv.selected = selected
-		mv.renderCache.valid = false
+		mv.invalidateOutput()
 	}
 }
 
 func (mv *messageModel) SetHovered(hovered bool) {
 	if mv.hovered != hovered {
 		mv.hovered = hovered
-		mv.renderCache.valid = false
+		mv.invalidateOutput()
 	}
+}
+
+// invalidateOutput invalidates both synchronous and worker-rendered output.
+// Incremental markdown state can survive append-only content mutations.
+func (mv *messageModel) invalidateOutput() {
+	mv.renderRevision++
+	mv.prepared = nil
+	mv.renderCache = renderCache{}
 }
 
 // InvalidateRenderCache drops the memoized render so the next Render re-styles
 // the message (used when process-global styling such as the agent color
 // registry changes underneath otherwise-identical inputs).
 func (mv *messageModel) InvalidateRenderCache() {
-	mv.renderCache = renderCache{}
+	mv.invalidateOutput()
 	mv.streamLines = assistantStreamLines{}
 	mv.segmentCodeBlocks = nil
 	if mv.mdRenderer != nil {
@@ -388,7 +399,7 @@ func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			}
 			maps.Copy(mv.markdownImages, loaded.images)
 			mv.markdownImageID++
-			mv.renderCache.valid = false
+			mv.invalidateOutput()
 		}
 		return mv, func() tea.Msg { return markdownImageRenderedMsg{} }
 	}
@@ -403,7 +414,7 @@ func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 // Toggle switches between expanded and collapsed state.
 func (mv *messageModel) Toggle() {
 	mv.expanded = !mv.expanded
-	mv.renderCache.valid = false
+	mv.invalidateOutput()
 }
 
 // IsToggleAt preserves existing line-wide controls, but replies toggle only at the chevron.
@@ -558,7 +569,11 @@ func (mv *messageModel) View() string {
 // and from Height()) skip the expensive markdown parse.
 func (mv *messageModel) Render(width int) string {
 	if mv.preparedValid(width) {
-		return mv.prepared.output
+		output := mv.prepared.output
+		if mv.finalized {
+			mv.prepared = nil
+		}
+		return output
 	}
 	mv.ensureTheme()
 	msg := mv.message
@@ -587,7 +602,8 @@ func (mv *messageModel) Render(width int) string {
 			c.receivedBody == msg.ReceivedBody &&
 			c.inputMode == msg.InputMode &&
 			c.sameAgent == mv.sameAgentAsPrevious(msg) &&
-			c.imageID == mv.markdownImageID {
+			c.imageID == mv.markdownImageID &&
+			slices.Equal(c.media, msg.AssistantMedia) {
 			return c.result
 		}
 	}
@@ -596,6 +612,7 @@ func (mv *messageModel) Render(width int) string {
 
 	if cacheable {
 		mv.renderCache = renderCache{
+			media:          slices.Clone(msg.AssistantMedia),
 			valid:          true,
 			content:        msg.Content,
 			receivedBody:   msg.ReceivedBody,
@@ -901,7 +918,14 @@ func appendAssistantMediaLines(rendered string, media []types.AssistantMedia, wi
 	if len(blocks) == 0 {
 		return rendered
 	}
-	joined := strings.Join(blocks, "\n\n")
+	return appendRenderedAssistantMedia(rendered, strings.Join(blocks, "\n\n"))
+}
+
+// Shared by synchronous and prepared rendering; media ANSI is captured on the owner.
+func appendRenderedAssistantMedia(rendered, joined string) string {
+	if joined == "" {
+		return rendered
+	}
 	if rendered = strings.TrimRight(rendered, "\n\r\t "); rendered == "" {
 		return joined
 	}
@@ -1093,7 +1117,7 @@ func (mv *messageModel) Finalize() {
 	if mv.message == nil || mv.message.Type != types.MessageTypeAssistant {
 		return
 	}
-	mv.renderCache = renderCache{}
+	mv.invalidateOutput()
 	// This releases only the builder's ownership. Streamed canonical Content
 	// may still alias its backing allocation, which must remain intact.
 	mv.contentBuf.Reset()
@@ -1108,17 +1132,17 @@ func (mv *messageModel) Finalize() {
 }
 
 // HasLiveRenderState reports whether this view still retains per-message
-// render state — either a populated renderCache or an IncrementalRenderer
-// instance. Used as a structural assertion in regression tests that verify
-// Finalize() actually released what it was supposed to release.
+// render state — prepared output, a populated renderCache or an
+// IncrementalRenderer instance. Tests use this to assert that Finalize()
+// actually released what it was supposed to release.
 func (mv *messageModel) HasLiveRenderState() bool {
-	return mv.renderCache.result != "" || mv.mdRenderer != nil
+	return mv.prepared != nil || mv.renderCache.result != "" || mv.mdRenderer != nil
 }
 
 // SetSize sets the dimensions of the message view
 func (mv *messageModel) SetSize(width, height int) tea.Cmd {
 	if mv.width != width {
-		mv.renderCache.valid = false
+		mv.invalidateOutput()
 	}
 	mv.width = width
 	mv.height = height

@@ -243,7 +243,7 @@ func TestActualProgramSplitGestureFocusModalAndOrderedRelease(t *testing.T) {
 }
 
 func TestSplitSendAttachmentFollowUpAndStaleClosedReplacedOwners(t *testing.T) {
-	for _, retire := range []string{"focus", "closed", "replaced"} {
+	for _, retire := range []string{"focus", "closed", "replaced", "reopened"} {
 		t.Run(retire, func(t *testing.T) {
 			root := splitTestRoot(t)
 			first := installPaneRecorder(root, "profile")
@@ -255,6 +255,12 @@ func TestSplitSendAttachmentFollowUpAndStaleClosedReplacedOwners(t *testing.T) {
 			switch retire {
 			case "closed":
 				root.supervisor.CloseSession("profile")
+			case "reopened":
+				root.supervisor.CloseSession("profile")
+				sess := session.New(session.WithID("profile"))
+				a := app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
+				_, err := root.supervisor.AddSession(t.Context(), a, sess, "", nil)
+				require.NoError(t, err)
 			case "replaced":
 				sess := session.New(session.WithID("replacement"))
 				a := app.New(t.Context(), nil, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))

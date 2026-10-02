@@ -41,6 +41,7 @@ type Agent struct {
 	team             *team.Team
 	providerRegistry *provider.Registry
 	mu               sync.Mutex
+	admissionClosed  bool
 	stopping         bool
 	stopped          bool
 	closedSessionIDs map[string]struct{}
@@ -61,10 +62,12 @@ type Session struct {
 
 	mu sync.Mutex
 
-	turns      chan struct{}
-	cancel     context.CancelFunc
-	generation uint64
-	closed     bool
+	turns            chan struct{}
+	cancel           context.CancelFunc
+	generation       uint64
+	closed           bool
+	shutdownDone     chan struct{}
+	shutdownComplete bool
 }
 
 var errSessionClosed = errors.New("ACP session closed")
@@ -85,6 +88,39 @@ func (s *Session) close() {
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+}
+
+// shutdown retains ownership on failure and serializes concurrent close/stop attempts.
+func (s *Session) shutdown(ctx context.Context) error {
+	s.close()
+	for {
+		s.mu.Lock()
+		if s.shutdownComplete {
+			s.mu.Unlock()
+			return nil
+		}
+		if done := s.shutdownDone; done != nil {
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		s.shutdownDone = make(chan struct{})
+		s.mu.Unlock()
+		var err error
+		if s.supervisor != nil {
+			err = s.supervisor.Shutdown(ctx)
+		}
+		s.mu.Lock()
+		s.shutdownComplete = err == nil
+		close(s.shutdownDone)
+		s.shutdownDone = nil
+		s.mu.Unlock()
+		return err
 	}
 }
 
@@ -179,51 +215,62 @@ func NewAgent(agentSource config.Source, runConfig *config.RuntimeConfig, sessio
 }
 
 // Stop drains all per-session supervisors before stopping shared toolsets.
+// Failed runtime drains retain ownership for a later Stop. Toolset stop errors
+// are terminal and logged, matching the lifecycle owner cleanup policy.
 func (a *Agent) Stop(ctx context.Context) {
-	a.mu.Lock()
-	if a.stopping || a.stopped {
-		done := a.stopDone
-		a.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
+	for {
+		a.mu.Lock()
+		if a.stopped {
+			a.mu.Unlock()
+			return
 		}
-		return
-	}
-	a.stopping = true
-	sessions := make([]*Session, 0, len(a.sessions))
-	for id, acpSess := range a.sessions {
-		acpSess.close()
-		sessions = append(sessions, acpSess)
-		delete(a.sessions, id)
-	}
-	t := a.team
-	a.mu.Unlock()
-	drained := true
-	for _, acpSess := range sessions {
-		if acpSess.supervisor != nil {
-			if err := acpSess.supervisor.Shutdown(ctx); err != nil {
-				drained = false
-				slog.ErrorContext(ctx, "Failed to stop ACP session supervisor", "session_id", acpSess.id, "error", err)
+		if a.stopping {
+			done := a.stopDone
+			a.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return
 			}
 		}
-	}
-	if drained && t != nil {
-		if err := t.StopToolSets(ctx); err != nil {
-			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
+		a.admissionClosed = true
+		a.stopping = true
+		a.stopDone = make(chan struct{})
+		sessions := make([]*Session, 0, len(a.sessions))
+		for _, acpSess := range a.sessions {
+			acpSess.close()
+			sessions = append(sessions, acpSess)
 		}
-	}
-	func() {
+		t := a.team
+		a.mu.Unlock()
+		drained := true
+		for _, acpSess := range sessions {
+			if err := acpSess.shutdown(ctx); err != nil {
+				drained = false
+				slog.ErrorContext(ctx, "Failed to stop ACP session supervisor", "session_id", acpSess.id, "error", err)
+			} else {
+				a.mu.Lock()
+				delete(a.sessions, acpSess.id)
+				a.mu.Unlock()
+			}
+		}
+		if drained && t != nil {
+			if err := t.StopToolSets(ctx); err != nil {
+				slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
+			}
+		}
 		a.mu.Lock()
-		defer a.mu.Unlock()
-		a.stopped = true
+		a.stopped = drained
 		a.stopping = false
 		close(a.stopDone)
-	}()
+		a.mu.Unlock()
+		return
+	}
 }
 
 func (a *Agent) admissionErrorLocked() error {
-	if a.stopping || a.stopped {
+	if a.admissionClosed || a.stopping || a.stopped {
 		return errors.New("ACP agent is stopping")
 	}
 	return nil
@@ -326,7 +373,7 @@ const (
 func (a *Agent) registerSessionIfAbsent(acpSess *Session) registrationOutcome {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.stopping || a.stopped {
+	if a.admissionClosed || a.stopping || a.stopped {
 		return registrationStopping
 	}
 	if _, closed := a.closedSessionIDs[acpSess.id]; closed {
@@ -445,20 +492,20 @@ func (a *Agent) CloseSession(ctx context.Context, params acp.CloseSessionRequest
 	slog.DebugContext(ctx, "ACP CloseSession called", "session_id", sid)
 
 	a.mu.Lock()
+	if a.closedSessionIDs == nil {
+		a.closedSessionIDs = make(map[string]struct{})
+	}
 	a.closedSessionIDs[sid] = struct{}{}
 	acpSess, ok := a.sessions[sid]
-	if ok {
-		delete(a.sessions, sid)
-	}
 	a.mu.Unlock()
 
 	if ok && acpSess != nil {
-		acpSess.close()
-		if acpSess.supervisor != nil {
-			if err := acpSess.supervisor.Shutdown(ctx); err != nil {
-				return acp.CloseSessionResponse{}, err
-			}
+		if err := acpSess.shutdown(ctx); err != nil {
+			return acp.CloseSessionResponse{}, err
 		}
+		a.mu.Lock()
+		delete(a.sessions, sid)
+		a.mu.Unlock()
 	}
 
 	return acp.CloseSessionResponse{}, nil
@@ -833,6 +880,8 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 			}
 
 		case *runtime.ToolCallConfirmationEvent:
+			// Rejected calls produce a response without an execution-start event.
+			toolCallArgs[e.ToolCall.ID] = e.ToolCall.Function.Arguments
 			if err := a.handleToolCallConfirmation(ctx, acpSess, envelope.InteractionID, e); err != nil {
 				return runtimeclient.TurnTerminate, err
 			}

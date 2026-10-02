@@ -44,8 +44,9 @@ type workspaceRuntimeEntry struct {
 }
 
 type workspaceBuild struct {
-	done chan struct{}
-	err  error
+	done    chan struct{}
+	err     error
+	waiters int
 }
 
 // workspaceSessionRuntimes routes sessions by workspace and source generation.
@@ -75,6 +76,7 @@ type workspaceSessionRuntimes struct {
 	shutdownDone  chan struct{}
 	shutdownErr   error
 	buildWG       sync.WaitGroup
+	retired       []runtime.SessionRuntimeSupervisor // failed drains retained for final shutdown retry
 }
 
 var _ interface {
@@ -206,66 +208,115 @@ func normalizeDir(dir string) string {
 // router lock while the potentially expensive factory runs. The returned
 // release must be called after the operation has either published ownership or
 // failed.
-func (w *workspaceSessionRuntimes) acquireRuntime(dir string) (runtime.SessionRuntime, workspaceKey, func(), error) {
+func (w *workspaceSessionRuntimes) acquireRuntime(ctx context.Context, dir string) (runtime.SessionRuntime, workspaceKey, func(), error) {
 	key := workspaceKey{dir: normalizeDir(dir), generation: w.currentGeneration()}
-	for {
-		w.mu.Lock()
-		if w.closed || w.ctx.Err() != nil {
-			w.mu.Unlock()
-			return nil, key, func() {}, &runtime.SessionError{Kind: runtime.SessionErrorClosed, Operation: "create_session"}
-		}
-		if entry := w.runtimes[key]; entry != nil {
-			entry.refs++
-			entry.lastUsed = w.now()
-			w.mu.Unlock()
-			return entry.runtime, key, func() { w.releaseRef(key) }, nil
-		}
-		if call := w.building[key]; call != nil {
-			done := call.done
-			w.mu.Unlock()
-			<-done
-			if call.err != nil {
-				return nil, key, func() {}, call.err
-			}
-			continue
-		}
-		call := &workspaceBuild{done: make(chan struct{})}
+	if err := ctx.Err(); err != nil {
+		return nil, key, func() {}, err
+	}
+	w.mu.Lock()
+	if w.closed || w.ctx.Err() != nil {
+		w.mu.Unlock()
+		return nil, key, func() {}, runtime.ErrSessionClosed
+	}
+	if entry := w.runtimes[key]; entry != nil {
+		entry.refs++
+		entry.lastUsed = w.now()
+		w.mu.Unlock()
+		return entry.runtime, key, func() { w.releaseRef(key) }, nil
+	}
+	call := w.building[key]
+	if call == nil {
+		call = &workspaceBuild{done: make(chan struct{})}
 		w.building[key] = call
 		w.buildWG.Add(1)
-		w.mu.Unlock()
-
-		supervisor, err := w.build(w.ctx, w.source, key.dir)
-		if err != nil {
-			err = fmt.Errorf("creating session runtime for %q in %q: %w", w.source.Name(), key.dir, err)
-		}
+		go w.buildRuntime(key, call)
+	}
+	call.waiters++
+	w.mu.Unlock()
+	defer func() {
 		w.mu.Lock()
-		delete(w.building, key)
-		if err == nil && !w.closed && w.ctx.Err() == nil {
-			startPruner := !w.prunerStarted
-			w.prunerStarted = true
-			entry := &workspaceRuntimeEntry{supervisor: supervisor, runtime: supervisor.Runtime(), lastUsed: w.now(), refs: 1}
-			w.runtimes[key] = entry
-			call.err = nil
-			close(call.done)
-			w.mu.Unlock()
-			if startPruner {
-				w.startPruner()
-			}
-			w.prune()
-			w.buildWG.Done()
-			return entry.runtime, key, func() { w.releaseRef(key) }, nil
+		call.waiters--
+		// Construction pins its result until the last original waiter has
+		// either acquired its own lease or canceled.
+		finished := false
+		select {
+		case <-call.done:
+			finished = true
+		default:
 		}
-		if err == nil {
-			err = &runtime.SessionError{Kind: runtime.SessionErrorClosed, Operation: "create_session"}
+		release := finished && call.err == nil && call.waiters == 0
+		w.mu.Unlock()
+		if release {
+			w.releaseRef(key)
 		}
-		call.err = err
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, key, func() {}, ctx.Err()
+	case <-w.ctx.Done():
+		return nil, key, func() {}, runtime.ErrSessionClosed
+	case <-call.done:
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, key, func() {}, err
+	}
+	if call.err != nil {
+		return nil, key, func() {}, call.err
+	}
+	entry := w.runtimes[key]
+	if w.closed || entry == nil {
+		return nil, key, func() {}, runtime.ErrSessionClosed
+	}
+	entry.refs++
+	entry.lastUsed = w.now()
+	return entry.runtime, key, func() { w.releaseRef(key) }, nil
+}
+
+func (w *workspaceSessionRuntimes) buildRuntime(key workspaceKey, call *workspaceBuild) {
+	defer w.buildWG.Done()
+	supervisor, err := w.build(w.ctx, w.source, key.dir)
+	if err != nil {
+		err = fmt.Errorf("creating session runtime for %q in %q: %w", w.source.Name(), key.dir, err)
+	}
+	w.mu.Lock()
+	delete(w.building, key)
+	if err == nil && !w.closed && w.ctx.Err() == nil {
+		startPruner := !w.prunerStarted
+		w.prunerStarted = true
+		refs := 0
+		if call.waiters != 0 {
+			refs = 1
+		}
+		w.runtimes[key] = &workspaceRuntimeEntry{supervisor: supervisor, runtime: supervisor.Runtime(), lastUsed: w.now(), refs: refs}
 		close(call.done)
 		w.mu.Unlock()
-		if supervisor != nil {
-			_ = supervisor.Shutdown(context.WithoutCancel(w.ctx))
+		if startPruner {
+			w.startPruner()
 		}
-		w.buildWG.Done()
-		return nil, key, func() {}, err
+		w.prune()
+		return
+	}
+	if err == nil {
+		err = runtime.ErrSessionClosed
+	}
+	call.err = err
+	close(call.done)
+	w.mu.Unlock()
+	if supervisor != nil {
+		w.retire(supervisor)
+	}
+}
+
+// retire retains ownership on drain failure. Final router shutdown retries it
+// once; no background retry loop can grow without bound or race a live owner.
+func (w *workspaceSessionRuntimes) retire(supervisor runtime.SessionRuntimeSupervisor) {
+	if err := supervisor.Shutdown(context.WithoutCancel(w.ctx)); err != nil {
+		slog.ErrorContext(w.ctx, "Failed to retire idle session runtime", "source", w.source.Name(), "error", err)
+		w.mu.Lock()
+		w.retired = append(w.retired, supervisor)
+		w.mu.Unlock()
 	}
 }
 
@@ -345,11 +396,17 @@ func (w *workspaceSessionRuntimes) prune() {
 		retired = append(retired, w.runtimes[key].supervisor)
 		delete(w.runtimes, key)
 	}
+	// Add under the same lock that fences shutdown so its Wait cannot miss
+	// a retirement whose failed owner has not yet reached the retained list.
+	if len(retired) != 0 {
+		w.buildWG.Add(1)
+	}
 	w.mu.Unlock()
+	if len(retired) != 0 {
+		defer w.buildWG.Done()
+	}
 	for _, supervisor := range retired {
-		if err := supervisor.Shutdown(context.WithoutCancel(w.ctx)); err != nil {
-			slog.ErrorContext(w.ctx, "Failed to retire idle session runtime", "source", w.source.Name(), "error", err)
-		}
+		w.retire(supervisor)
 	}
 	w.wakePruner()
 }
@@ -418,7 +475,7 @@ func (w *workspaceSessionRuntimes) CreateSession(ctx context.Context, sess *sess
 		}
 		return handle, err
 	}
-	rt, key, release, err := w.acquireRuntime(sess.WorkingDir)
+	rt, key, release, err := w.acquireRuntime(ctx, sess.WorkingDir)
 	if err != nil {
 		return nil, err
 	}
@@ -439,26 +496,49 @@ func (w *workspaceSessionRuntimes) SessionByID(sessionID string) (runtime.Sessio
 }
 
 func (w *workspaceSessionRuntimes) DeleteSession(ctx context.Context, sessionID string) error {
-	if rt, _, ok := w.owner(sessionID); ok {
-		if err := rt.DeleteSession(ctx, sessionID); err != nil {
-			return err
-		}
-		w.forget(sessionID)
-		return nil
+	var rt runtime.SessionRuntime
+	var release func()
+	var err error
+	if w.store != nil {
+		rt, _, release, err = w.acquireViewRuntime(ctx, sessionID)
+	} else if owner, _, ok := w.owner(sessionID); ok {
+		rt, release = owner, func() {}
+	} else {
+		rt, _, release, err = w.acquireRuntime(ctx, "")
 	}
-	rt, _, release, err := w.acquireRuntime("")
 	if err != nil {
 		return err
 	}
 	defer release()
-	return rt.DeleteSession(ctx, sessionID)
+	if err := rt.DeleteSession(ctx, sessionID); err != nil {
+		return err
+	}
+	w.forget(sessionID)
+	// The runtime owns the cascade. Only canonical absence in both runtime
+	// and durable storage proves a cached descendant was deleted; a released
+	// driver alone must never unpin other restored sessions in its workspace.
+	w.mu.Lock()
+	ids := make([]string, 0, len(w.owners))
+	for id, key := range w.owners {
+		if entry := w.runtimes[key]; entry != nil && entry.runtime == rt {
+			ids = append(ids, id)
+		}
+	}
+	w.mu.Unlock()
+	for _, id := range ids {
+		if canonicalSessionDeleted(context.WithoutCancel(ctx), rt, w.store, id) {
+			w.forget(id)
+		}
+	}
+	return nil
 }
 
 func (w *workspaceSessionRuntimes) InspectSessionTree(ctx context.Context, rootSessionID string) (*subagent.Snapshot, error) {
-	rt, _, ok := w.owner(rootSessionID)
-	if !ok {
-		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: rootSessionID, Operation: "inspect_tree"}
+	rt, _, release, err := w.acquireViewRuntime(ctx, rootSessionID)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 	inspector, ok := rt.(runtime.TreeInspector)
 	if !ok {
 		return nil, errors.New("runtime cannot inspect durable child tree")
@@ -474,7 +554,7 @@ func (w *workspaceSessionRuntimes) RestoreSessionTree(ctx context.Context, root 
 	var release func()
 	if !ok {
 		var err error
-		rt, key, release, err = w.acquireRuntime(root.WorkingDir)
+		rt, key, release, err = w.acquireRuntime(ctx, root.WorkingDir)
 		if err != nil {
 			return err
 		}
@@ -508,10 +588,14 @@ func (w *workspaceSessionRuntimes) SwitchAgent(ctx context.Context, sessionID, t
 }
 
 func (w *workspaceSessionRuntimes) AuthorSafetyDefault(sess *session.Session) session.SafetyPolicy {
+	return w.authorSafetyDefault(w.ctx, sess)
+}
+
+func (w *workspaceSessionRuntimes) authorSafetyDefault(ctx context.Context, sess *session.Session) session.SafetyPolicy {
 	if sess == nil {
 		return ""
 	}
-	rt, _, release, err := w.acquireRuntime(sess.WorkingDir)
+	rt, _, release, err := w.acquireRuntime(ctx, sess.WorkingDir)
 	if err != nil {
 		return ""
 	}
@@ -532,12 +616,13 @@ func (w *workspaceSessionRuntimes) runShutdown() {
 		<-w.pruneDone
 	}
 
-	// Every factory completion removes its building entry and disposes a late
-	// supervisor before calling Done, so this boundary covers all owned output.
+	// Factories and idle retirements retain any failed drains before calling
+	// Done, so this boundary covers all owned output.
 	w.buildWG.Wait()
 
 	w.mu.Lock()
-	supervisors := make([]runtime.SessionRuntimeSupervisor, 0, len(w.runtimes))
+	supervisors := w.retired
+	w.retired = nil
 	for _, entry := range w.runtimes {
 		supervisors = append(supervisors, entry.supervisor)
 	}
@@ -551,6 +636,9 @@ func (w *workspaceSessionRuntimes) runShutdown() {
 		if err := supervisor.Shutdown(shutdownCtx); err != nil {
 			slog.ErrorContext(shutdownCtx, "Failed to shut down session runtime", "source", w.source.Name(), "error", err)
 			errs = append(errs, err)
+			w.mu.Lock()
+			w.retired = append(w.retired, supervisor)
+			w.mu.Unlock()
 		}
 	}
 	w.shutdownErr = errors.Join(errs...)
@@ -570,4 +658,13 @@ func (w *workspaceSessionRuntimes) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Preserve the public context-free capability for embeddings, while HTTP
+// requests can abandon a shared factory build when their caller disconnects.
+func authorSafetyDefault(ctx context.Context, defaults runtime.SafetyDefaults, sess *session.Session) session.SafetyPolicy {
+	if router, ok := defaults.(*workspaceSessionRuntimes); ok {
+		return router.authorSafetyDefault(ctx, sess)
+	}
+	return defaults.AuthorSafetyDefault(sess)
 }

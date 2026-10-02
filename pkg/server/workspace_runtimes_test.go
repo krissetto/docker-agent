@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,7 +112,7 @@ func TestSessionRuntimeFactoryRoutesSessionsByWorkingDir(t *testing.T) {
 
 	stored, err := factory.store.GetSession(t.Context(), elsewhere.SessionID)
 	require.NoError(t, err)
-	assert.Equal(t, resolvedOther, stored.WorkingDir)
+	assert.Equal(t, otherDir, stored.WorkingDir, "retain the caller workspace provenance, not its canonical identity")
 
 	registry := sm.sessionRegistry
 	for _, id := range []string{first.SessionID, second.SessionID, elsewhere.SessionID} {
@@ -293,7 +295,7 @@ func TestWorkspaceRuntimeNegativeCapClampsToZero(t *testing.T) {
 	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, factory.build)
 	configureWorkspaceRuntimePool(router, time.Hour, -3)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.WithoutCancel(t.Context()))) })
-	rt, _, release, err := router.acquireRuntime(t.TempDir())
+	rt, _, release, err := router.acquireRuntime(t.Context(), t.TempDir())
 	require.NoError(t, err)
 	require.NotNil(t, rt)
 	release()
@@ -316,7 +318,7 @@ func TestWorkspaceRuntimeIdleTTLFiresWithoutRequest(t *testing.T) {
 	configureWorkspaceRuntimePool(router, 20*time.Millisecond, defaultWorkspaceRuntimeIdleCap)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.WithoutCancel(t.Context()))) })
 
-	rt, _, release, err := router.acquireRuntime(t.TempDir())
+	rt, _, release, err := router.acquireRuntime(t.Context(), t.TempDir())
 	require.NoError(t, err)
 	require.NotNil(t, rt)
 	release()
@@ -366,13 +368,13 @@ func TestWorkspaceRuntimeContextCancelRejectsAcquireAndShutsDownOnce(t *testing.
 		return recordingSupervisor{SessionRuntimeSupervisor: supervisor, shutdown: &shutdown}, nil
 	}
 	router := newWorkspaceSessionRuntimes(ctx, &memorySource{data: "agents: {}"}, build)
-	rt, _, release, err := router.acquireRuntime(t.TempDir())
+	rt, _, release, err := router.acquireRuntime(t.Context(), t.TempDir())
 	require.NoError(t, err)
 	require.NotNil(t, rt)
 	release()
 	cancel()
 	require.Eventually(t, func() bool { return shutdown.Load() == 1 }, time.Second, time.Millisecond)
-	rt, _, release, err = router.acquireRuntime(t.TempDir())
+	rt, _, release, err = router.acquireRuntime(t.Context(), t.TempDir())
 	release()
 	require.Error(t, err)
 	require.Nil(t, rt)
@@ -396,7 +398,7 @@ func TestWorkspaceRuntimeBuildCancelShutdownRace(t *testing.T) {
 	}
 	router := newWorkspaceSessionRuntimes(ctx, &memorySource{data: "agents: {}"}, build)
 	acquireDone := make(chan error)
-	go func() { _, _, _, err := router.acquireRuntime(t.TempDir()); acquireDone <- err }()
+	go func() { _, _, _, err := router.acquireRuntime(t.Context(), t.TempDir()); acquireDone <- err }()
 	<-started
 	cancel()
 	close(finish)
@@ -420,7 +422,7 @@ func TestWorkspaceRuntimeShutdownWaitsForFactoryAndLateDisposal(t *testing.T) {
 	}
 	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
 	acquireDone := make(chan error)
-	go func() { _, _, _, err := router.acquireRuntime(t.TempDir()); acquireDone <- err }()
+	go func() { _, _, _, err := router.acquireRuntime(t.Context(), t.TempDir()); acquireDone <- err }()
 	<-started
 	shutdownDone := make(chan error)
 	go func() { shutdownDone <- router.Shutdown(t.Context()) }()
@@ -444,7 +446,7 @@ func TestWorkspaceRuntimeCanceledShutdownWaiterDoesNotPoisonTeardown(t *testing.
 		return factory.build(ctx, source, dir)
 	}
 	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
-	go func() { _, _, _, _ = router.acquireRuntime(t.TempDir()) }()
+	go func() { _, _, _, _ = router.acquireRuntime(t.Context(), t.TempDir()) }()
 	<-started
 	waiterCtx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -549,4 +551,262 @@ func TestFactorySessionViewCapabilitiesColdWorkspaceAndLease(t *testing.T) {
 	// PATCH uses exactly the same composed capability through the manager.
 	response = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/archived-view", `{"kind":"open_view"}`, "")
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+}
+
+func TestWorkspaceRuntimeAliasIdentityPreservesHistoricalProvenance(t *testing.T) {
+	dir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workspace-alias")
+	require.NoError(t, os.Symlink(dir, alias))
+	store := session.NewInMemorySessionStore()
+	factory := &factoryRecorder{store: store}
+	srv, sm := newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+	for i, workspace := range []string{dir, alias} {
+		archived := session.New(session.WithID(fmt.Sprintf("historical-%d", i)), session.WithWorkingDir(workspace), session.WithAttributes(map[string]string{sessionAgentAttribute: "root", sessionSourceAttribute: "agent"}))
+		require.NoError(t, store.AddSession(t.Context(), archived))
+		prepared, err := sm.PrepareSessionView(t.Context(), archived.ID)
+		require.NoError(t, err)
+		committed, err := prepared.Commit(t.Context())
+		prepared.Abort()
+		require.NoError(t, err)
+		assert.Equal(t, workspace, committed.Info.WorkingDir)
+		stored, err := store.GetSession(t.Context(), archived.ID)
+		require.NoError(t, err)
+		assert.Equal(t, workspace, stored.WorkingDir)
+	}
+	created, code := createSessionVia(t, srv, `{"agent_name":"root","working_dir":"`+alias+`"}`)
+	require.Equal(t, http.StatusCreated, code)
+	stored, err := store.GetSession(t.Context(), created.SessionID)
+	require.NoError(t, err)
+	assert.Equal(t, alias, stored.WorkingDir)
+	assert.Equal(t, []string{normalizeDir(dir)}, factory.built(), "aliases share identity without rewriting provenance")
+}
+
+func TestWorkspaceRuntimeDeleteInvalidatesCachedDescendantsAndEvictsOwner(t *testing.T) {
+	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+	srv, sm := newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+	router := sm.sessionRegistry.(*workspaceSessionRuntimes)
+	configureWorkspaceRuntimePool(router, -1, 0)
+	parent, code := createSessionVia(t, srv, `{"agent_name":"root"}`)
+	require.Equal(t, http.StatusCreated, code)
+	child, code := createSessionVia(t, srv, `{"agent_name":"worker","parent_session_id":"`+parent.SessionID+`"}`)
+	require.Equal(t, http.StatusCreated, code)
+	_, err := sm.Handle(t.Context(), child.SessionID)
+	require.NoError(t, err)
+	_, err = router.SessionByID(child.SessionID)
+	require.NoError(t, err)
+	require.NoError(t, sm.DeleteSession(t.Context(), parent.SessionID))
+	assert.Zero(t, sm.runtimeSessions.Length())
+	router.mu.Lock()
+	assert.Empty(t, router.owners)
+	assert.Empty(t, router.runtimes, "deleted descendants must not pin their workspace's tools")
+	router.mu.Unlock()
+	for _, id := range []string{parent.SessionID, child.SessionID} {
+		_, err := sm.Handle(t.Context(), id)
+		require.Error(t, err)
+		rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/"+id+"/status", "", "")
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkspaceRuntimeCanceledWaitersDoNotCancelSharedBuild(t *testing.T) {
+	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+	started, finish := make(chan struct{}), make(chan struct{})
+	var builds atomic.Int32
+	build := func(ctx context.Context, source config.Source, dir string) (runtime.SessionRuntimeSupervisor, error) {
+		builds.Add(1)
+		close(started)
+		<-finish
+		return factory.build(ctx, source, dir)
+	}
+	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
+	configureWorkspaceRuntimePool(router, -1, 0)
+	unblock := sync.OnceFunc(func() { close(finish) })
+	t.Cleanup(func() { unblock(); require.NoError(t, router.Shutdown(context.WithoutCancel(t.Context()))) })
+	dir := t.TempDir()
+	firstCtx, cancelFirst := context.WithCancel(t.Context())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, release, err := router.acquireRuntime(firstCtx, dir)
+		release()
+		firstDone <- err
+	}()
+	<-started
+	secondCtx, cancelSecond := context.WithCancel(t.Context())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, _, release, err := router.acquireRuntime(secondCtx, dir)
+		release()
+		secondDone <- err
+	}()
+	healthyDone := make(chan error, 1)
+	go func() {
+		_, _, release, err := router.acquireRuntime(t.Context(), dir)
+		release()
+		healthyDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		router.mu.Lock()
+		defer router.mu.Unlock()
+		return router.building[workspaceKey{dir: normalizeDir(dir)}].waiters == 3
+	}, time.Second, time.Millisecond)
+	cancelFirst()
+	cancelSecond()
+	for _, done := range []<-chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("canceled waiter remained blocked on shared construction")
+		}
+	}
+	unblock()
+	require.NoError(t, <-healthyDone)
+	assert.Equal(t, int32(1), builds.Load())
+	router.mu.Lock()
+	assert.Empty(t, router.runtimes, "all construction and operation leases were released")
+	router.mu.Unlock()
+}
+
+func TestWorkspaceRuntimeAbandonedBuildRetiresOwnedResult(t *testing.T) {
+	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+	started, finish := make(chan struct{}), make(chan struct{})
+	var shutdown atomic.Int32
+	build := func(ctx context.Context, source config.Source, dir string) (runtime.SessionRuntimeSupervisor, error) {
+		close(started)
+		<-finish
+		supervisor, err := factory.build(ctx, source, dir)
+		if err != nil {
+			return nil, err
+		}
+		return recordingSupervisor{SessionRuntimeSupervisor: supervisor, shutdown: &shutdown}, nil
+	}
+	router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
+	configureWorkspaceRuntimePool(router, -1, 0)
+	unblock := sync.OnceFunc(func() { close(finish) })
+	t.Cleanup(func() { unblock(); require.NoError(t, router.Shutdown(context.WithoutCancel(t.Context()))) })
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, _, release, err := router.acquireRuntime(ctx, "")
+		release()
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("initial canceled waiter remained blocked on construction")
+	}
+	unblock()
+	require.Eventually(t, func() bool { return shutdown.Load() == 1 }, time.Second, time.Millisecond)
+	require.NoError(t, router.Shutdown(t.Context()))
+	assert.Equal(t, int32(1), shutdown.Load())
+}
+
+func TestWorkspaceRuntimeDeleteRetainsReleasedUnrelatedOwner(t *testing.T) {
+	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+	srv, sm := newFactoryServer(t, factory, &memorySource{data: "agents: {}"})
+	router := sm.sessionRegistry.(*workspaceSessionRuntimes)
+	configureWorkspaceRuntimePool(router, -1, 0)
+	deleted, code := createSessionVia(t, srv, `{"agent_name":"root"}`)
+	require.Equal(t, http.StatusCreated, code)
+	retained, code := createSessionVia(t, srv, `{"agent_name":"root"}`)
+	require.Equal(t, http.StatusCreated, code)
+	handle, err := sm.Handle(t.Context(), retained.SessionID)
+	require.NoError(t, err)
+	require.NoError(t, handle.Release(t.Context()))
+	require.NoError(t, sm.DeleteSession(t.Context(), deleted.SessionID))
+	_, err = factory.store.GetSession(t.Context(), retained.SessionID)
+	require.NoError(t, err)
+	router.mu.Lock()
+	assert.Contains(t, router.owners, retained.SessionID)
+	assert.Len(t, router.runtimes, 1, "released handles are not canonical deletion evidence")
+	router.mu.Unlock()
+	require.NoError(t, sm.DeleteSession(t.Context(), retained.SessionID))
+}
+
+func TestWorkspaceRuntimeCanceledHTTPCreateDoesNotWaitForSafetyBuild(t *testing.T) {
+	factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+	started, finish := make(chan struct{}), make(chan struct{})
+	build := func(ctx context.Context, source config.Source, dir string) (runtime.SessionRuntimeSupervisor, error) {
+		close(started)
+		<-finish
+		return factory.build(ctx, source, dir)
+	}
+	sm := NewSessionManager(t.Context(), config.Sources{"agent": &memorySource{data: "agents: {}"}}, factory.store, 0, &config.RuntimeConfig{}, WithSessionRuntimeFactory(build))
+	unblock := sync.OnceFunc(func() { close(finish) })
+	t.Cleanup(func() { unblock(); require.NoError(t, sm.Shutdown(context.WithoutCancel(t.Context()))) })
+	srv := NewWithManager(sm, "")
+	ctx, cancel := context.WithCancel(t.Context())
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v2/sessions", strings.NewReader(`{"agent_name":"root"}`))
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	go func() {
+		srv.e.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP create waited for its context-free safety capability to finish building")
+	}
+	assert.Zero(t, sm.runtimeSessions.Length())
+	unblock()
+}
+
+type retryRetirementSupervisor struct {
+	runtime.SessionRuntimeSupervisor
+	attempts atomic.Int32
+	failures int32
+}
+
+func (s *retryRetirementSupervisor) Shutdown(ctx context.Context) error {
+	if s.attempts.Add(1) <= s.failures {
+		return fmt.Errorf("injected retirement drain failure")
+	}
+	return s.SessionRuntimeSupervisor.Shutdown(ctx)
+}
+
+func TestWorkspaceRuntimeRetainsFailedRetirementUntilShutdown(t *testing.T) {
+	for _, failures := range []int32{1, 2} {
+		t.Run(fmt.Sprintf("failures=%d", failures), func(t *testing.T) {
+			factory := &factoryRecorder{store: session.NewInMemorySessionStore()}
+			var owner *retryRetirementSupervisor
+			build := func(ctx context.Context, source config.Source, dir string) (runtime.SessionRuntimeSupervisor, error) {
+				supervisor, err := factory.build(ctx, source, dir)
+				if err != nil {
+					return nil, err
+				}
+				owner = &retryRetirementSupervisor{SessionRuntimeSupervisor: supervisor, failures: failures}
+				return owner, nil
+			}
+			router := newWorkspaceSessionRuntimes(t.Context(), &memorySource{data: "agents: {}"}, build)
+			configureWorkspaceRuntimePool(router, -1, 0)
+			_, _, release, err := router.acquireRuntime(t.Context(), "")
+			require.NoError(t, err)
+			release()
+			router.mu.Lock()
+			assert.Empty(t, router.runtimes)
+			assert.Len(t, router.retired, 1, "failed retirement retains ownership")
+			router.mu.Unlock()
+			err = router.Shutdown(t.Context())
+			assert.Equal(t, int32(2), owner.attempts.Load())
+			router.mu.Lock()
+			if failures == 1 {
+				require.NoError(t, err)
+				assert.Empty(t, router.retired)
+			} else {
+				require.ErrorContains(t, err, "injected retirement drain failure")
+				assert.Len(t, router.retired, 1, "terminal shutdown error still retains failed ownership")
+			}
+			router.mu.Unlock()
+			// The public router contract caches final shutdown errors; tests
+			// explicitly drain the injected owner's underlying runtime.
+			require.NoError(t, owner.SessionRuntimeSupervisor.Shutdown(context.WithoutCancel(t.Context())))
+		})
+	}
 }

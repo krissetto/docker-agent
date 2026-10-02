@@ -86,6 +86,10 @@ type sessionDriver struct {
 
 	mu   sync.Mutex
 	sess *session.Session
+	// Stable admission topology; readable without waiting for per-session I/O.
+	identityID     string
+	identityParent string
+	identityAsync  bool
 
 	viewDormant bool
 	stoppedView bool
@@ -98,13 +102,15 @@ type sessionDriver struct {
 
 	startDone chan struct{}
 
-	reclaiming bool
+	reclaiming         bool
+	maintenanceRetired bool // protected by registry.mu; fences worker reservations on removal
 
 	retryRunning       bool
 	turnChanged        chan struct{}
 	completedTurns     []string
 	recentRetries      map[string]bool
 	pending            []QueuedMessage
+	adoptedInputs      map[string]bool
 	steering           []QueuedMessage
 	interruptRequested bool
 	steeringChanged    chan struct{}
@@ -202,6 +208,7 @@ func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	close(settled)
 	d := &sessionDriver{r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
+		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
 		for position, item := range sess.MessagesSnapshot() {
 			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted {
 				continue
@@ -217,18 +224,40 @@ func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	return d
 }
 
+// adopt transfers ownership only. Storage is deferred to the driver's admission
+// boundary, never performed while the registry publishes a driver or batch.
 func (d *sessionDriver) adopt(adopted []QueuedMessage) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, msg := range adopted {
+		if found, _, _ := d.existingInputLocked(msg); found {
+			continue
+		}
 		if msg.RequestID != "" {
-			if err := d.acceptInputLocked(&msg); err != nil {
-				d.lastError = err.Error()
-				continue
+			if d.adoptedInputs == nil {
+				d.adoptedInputs = map[string]bool{}
 			}
+			d.adoptedInputs[msg.RequestID] = true
 		}
 		d.pending = append(d.pending, msg)
 	}
+}
+
+// Persist in FIFO order, retaining the failed head and every unaccepted suffix.
+// New input cannot cross this boundary ahead of already acknowledged orphans.
+func (d *sessionDriver) acceptAdoptedLocked() error {
+	for i := range d.pending {
+		msg := &d.pending[i]
+		if !d.adoptedInputs[msg.RequestID] {
+			continue
+		}
+		if err := d.appendInputLocked(msg); err != nil {
+			d.lastError = err.Error()
+			return err
+		}
+		delete(d.adoptedInputs, msg.RequestID)
+	}
+	return nil
 }
 
 func (d *sessionDriver) Subscribe(buffer int) (seed []Event, events <-chan Event, cancel func()) {
@@ -265,6 +294,13 @@ func (d *sessionDriver) Wait() {
 }
 
 func (d *sessionDriver) acceptInputLocked(msg *QueuedMessage) error {
+	if err := d.acceptAdoptedLocked(); err != nil {
+		return err
+	}
+	return d.appendInputLocked(msg)
+}
+
+func (d *sessionDriver) appendInputLocked(msg *QueuedMessage) error {
 	if msg != nil && msg.Retry {
 		if d.recentRetries == nil {
 			d.recentRetries = map[string]bool{}
@@ -287,9 +323,17 @@ func (d *sessionDriver) acceptInputLocked(msg *QueuedMessage) error {
 	message.Pending = true
 	message.Accepted = true
 	message.TurnID = msg.RequestID
+	// Timestamp is observation metadata, not part of an immutable retry identity.
+	message.Message.CreatedAt = ""
 	if d.r.sessionStore != nil {
 		msg.AcceptedPersisted = true
-		if _, err := d.r.sessionStore.AddMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, message); err != nil {
+		var err error
+		if appender, ok := d.r.sessionStore.(session.ItemAppender); ok {
+			_, err = appender.AppendItem(context.WithoutCancel(d.r.ctx()), d.sess.ID, "input:"+msg.RequestID, session.NewMessageItem(message))
+		} else {
+			_, err = d.r.sessionStore.AddMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, message)
+		}
+		if err != nil {
 			if errors.Is(err, session.ErrNotFound) {
 				msg.AcceptedPersisted = false
 			} else {
@@ -323,6 +367,17 @@ func (d *sessionDriver) publishPromotionFailureLocked(turnID string, err error) 
 }
 
 func (d *sessionDriver) promoteInputLocked(msg QueuedMessage) error {
+	if d.adoptedInputs[msg.RequestID] {
+		if err := d.acceptAdoptedLocked(); err != nil {
+			return err
+		}
+		for _, accepted := range d.pending {
+			if accepted.RequestID == msg.RequestID {
+				msg = accepted
+				break
+			}
+		}
+	}
 	if msg.Retry {
 		return nil
 	}
@@ -546,6 +601,7 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 			// Durable append already committed. Losing a wake to the session's
 			// existing turn is success, not a promotion or mailbox-capacity failure.
 			if startErr, ok := errors.AsType[*SessionError](err); ok && startErr.Operation == SessionOperationStart && startErr.Reason == SessionErrorReasonBusy {
+				d.schedulePendingRetry()
 				return d.inputQueued(msg), nil
 			}
 			d.mu.Lock()
@@ -882,10 +938,6 @@ func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Pr
 }
 
 func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRef string, providers []provider.Provider) error {
-	if d.r.sessionDrivers != nil {
-		d.r.sessionDrivers.runMu.Lock()
-		defer d.r.sessionDrivers.runMu.Unlock()
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.stopped || d.sess == nil {
@@ -978,6 +1030,13 @@ type driverObservation struct {
 }
 
 func (d *sessionDriver) beginReclaimLocked() bool {
+	// Maintenance owns storage/report delivery even when no turn is executing.
+	select {
+	case <-d.wg.DoneChan():
+	default:
+		return false
+	}
+
 	if d.reclaiming || d.stopped || d.viewDormant || d.reportRetry != nil || d.running() || d.starting() || d.settling() || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
 		return false
 	}
@@ -1435,32 +1494,56 @@ func (d *sessionDriver) tryStart(ctx context.Context) (context.Context, uint64, 
 // a running generation. Promotion failure leaves the FIFO intact and no
 // provider call can begin.
 func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
-	if d.r.sessionDrivers != nil {
-		d.r.sessionDrivers.runMu.Lock()
-		defer d.r.sessionDrivers.runMu.Unlock()
-	}
 	return d.prepareStartAdmissionLocked(ctx, wake)
 }
 
 func (d *sessionDriver) prepareStartAdmissionLocked(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
-	d.mu.Lock()
-	dormant := d.viewDormant
-	d.mu.Unlock()
-	if dormant {
-		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), Operation: "view_dormant"}
-	}
 	if d.r.sessionDrivers != nil {
-		if err := d.r.sessionDrivers.admitRun(d); err != nil {
+		d.r.sessionDrivers.runMu.Lock()
+	}
+	admissionLocked := true
+	unlockAdmission := func() {
+		if admissionLocked && d.r.sessionDrivers != nil {
+			d.r.sessionDrivers.runMu.Unlock()
+		}
+		admissionLocked = false
+	}
+	defer unlockAdmission()
+
+	for {
+		if d.r.sessionDrivers != nil {
+			if err := d.r.sessionDrivers.admitRun(d); err != nil {
+				return nil, 0, nil, err
+			}
+		}
+		if d.mu.TryLock() {
+			break
+		}
+		// Same-session edits and appends linearize before start, rather than
+		// becoming spurious capacity failures. Wait without global admission
+		// ownership, then recheck capacity before reserving the starting phase.
+		unlockAdmission()
+		d.mu.Lock()
+		d.mu.Unlock()
+		if err := ctx.Err(); err != nil {
 			return nil, 0, nil, err
 		}
+		if d.r.sessionDrivers != nil {
+			d.r.sessionDrivers.runMu.Lock()
+		}
+		admissionLocked = true
 	}
-	d.mu.Lock()
-	if d.stopped || d.viewDormant || d.r.lifetime().Err() != nil {
+
+	if d.viewDormant {
+		d.mu.Unlock()
+		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "view_dormant"}
+	}
+	if d.stopped || d.r.lifetime().Err() != nil {
 		id := d.sessionIDLocked()
 		d.mu.Unlock()
 		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: id, Operation: SessionOperationStart}
 	}
-	if d.running() || d.starting() || d.settling() {
+	if d.running() || d.starting() || d.settling() || d.switchReserved || d.compactReserved {
 		id := d.sessionIDLocked()
 		d.mu.Unlock()
 		return nil, 0, nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: SessionOperationStart, Reason: SessionErrorReasonBusy}
@@ -1470,6 +1553,8 @@ func (d *sessionDriver) prepareStartAdmissionLocked(ctx context.Context, wake bo
 	gate := d.preStart
 	abort := d.abortStart
 	d.mu.Unlock()
+	// Starting is the capacity reservation. No storage or manager gate may hold runMu.
+	unlockAdmission()
 
 	// The manager gate may take the manager mutex. Invoke it without d.mu so
 	// manager stop/settle paths can never invert manager and driver locks.

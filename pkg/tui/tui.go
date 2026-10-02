@@ -855,9 +855,7 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 // this does not create a supervisor, execution owner, or additional observer.
 func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *session.Session) {
 	applySavedSubagentsPreference(a)
-	if old := m.chatPages[tabID]; old != nil {
-		chat.Cleanup(old)
-	}
+	m.disposeSessionComponents(tabID)
 	ss := service.NewSessionState(sess)
 	cp := chat.New(m.ar, m.ctx(), a, ss, m.chatPageOpts()...)
 	cp.SetRoutingID(tabID)
@@ -2898,16 +2896,8 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	nextActiveID := m.supervisor.CloseSessionAsync(sessionID)
 
 	// Clean up per-session state
-	if page, ok := m.chatPages[sessionID]; ok {
-		chat.Cleanup(page)
-	}
-	delete(m.chatPages, sessionID)
+	m.disposeSessionComponents(sessionID)
 	delete(m.panelData, sessionID)
-	if ed, ok := m.editors[sessionID]; ok {
-		ed.Cleanup()
-		delete(m.editors, sessionID)
-	}
-	delete(m.sessionStates, sessionID)
 	delete(m.pendingRestores, sessionID)
 	delete(m.pendingSidebarCollapsed, sessionID)
 	m.discardStashedDialog(sessionID)

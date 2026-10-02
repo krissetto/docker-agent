@@ -541,7 +541,7 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		if err := rs.registry.DeleteSession(ctx, sessionID); err != nil {
 			return err
 		}
-		sm.runtimeSessions.Delete(sessionID)
+		sm.forgetDeletedSessions(ctx, rs.registry, sessionID)
 		return nil
 	}
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
@@ -559,7 +559,7 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		if err := registry.DeleteSession(ctx, sessionID); err != nil {
 			return err
 		}
-		sm.runtimeSessions.Delete(sessionID)
+		sm.forgetDeletedSessions(ctx, registry, sessionID)
 		return nil
 	}
 	if sess.ParentID != "" || sess.AttributesSnapshot()[sessionAgentAttribute] != "" {
@@ -569,6 +569,34 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		return err
 	}
 	return nil
+}
+
+// canonicalSessionDeleted deliberately requires durable absence as well as a
+// missing driver: Release is retryable and must not be confused with Delete.
+func canonicalSessionDeleted(ctx context.Context, registry runtime.SessionRuntime, store session.Store, id string) bool {
+	if store == nil {
+		return false
+	}
+	_, err := registry.SessionByID(id)
+	var sessionErr *runtime.SessionError
+	if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound {
+		return false
+	}
+	_, err = store.GetSession(ctx, id)
+	return errors.Is(err, session.ErrNotFound)
+}
+
+func (sm *SessionManager) forgetDeletedSessions(ctx context.Context, registry runtime.SessionRuntime, id string) {
+	sm.runtimeSessions.Delete(id)
+	// Successful deletion is final even if the request was canceled just
+	// after the durable operation. Finish invalidating its cached descendants.
+	ctx = context.WithoutCancel(ctx)
+	sm.runtimeSessions.Range(func(id string, active *activeRuntimes) bool {
+		if active.registry == registry && canonicalSessionDeleted(ctx, registry, sm.sessionStore, id) {
+			sm.runtimeSessions.Delete(id)
+		}
+		return true
+	})
 }
 
 // ErrSessionBusy is returned when a session is already processing a request.

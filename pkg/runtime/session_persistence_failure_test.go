@@ -22,7 +22,7 @@ type schemaFailureStore struct {
 }
 
 func (s *schemaFailureStore) AppendItem(ctx context.Context, sessionID, writeID string, item session.Item) (int64, error) {
-	if s.fail.Load() {
+	if s.fail.Load() && item.Message != nil && !item.Message.Accepted {
 		return 0, errors.New("SQL logic error: no such column: write_hash (1)")
 	}
 	return s.ItemAppender.AppendItem(ctx, sessionID, writeID, item)

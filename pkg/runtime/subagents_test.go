@@ -48,6 +48,7 @@ func newTestSubagentManager(t *testing.T) *subagentManager {
 // registerChild wires a live child into the manager as Spawn would, without
 // running a real sub-session.
 func (m *subagentManager) registerChild(parent *session.Session, parentAgent string, id subagent.NodeID, name string, childSess *session.Session) {
+	childSess.ParentID = parent.ID
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.ensureSessionLocked(parent, parentAgent, "")

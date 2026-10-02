@@ -28,6 +28,7 @@ type sessionDriverRegistry struct {
 	workOnce           sync.Once
 	work               chan struct{}
 	workDone           chan struct{}
+	workStop           chan struct{}
 	runMu              sync.Mutex
 }
 
@@ -98,7 +99,9 @@ func (g *sessionDriverRegistry) pruneIdleLocked(now time.Time) {
 		if g.ancestorResidentLocked(id) {
 			continue
 		}
-		d.mu.Lock()
+		if !d.mu.TryLock() {
+			continue
+		}
 		expired := now.Sub(d.lastActive) >= retention && d.beginReclaimLocked()
 		d.mu.Unlock()
 		if expired {
@@ -113,18 +116,20 @@ func (g *sessionDriverRegistry) pruneIdleLocked(now time.Time) {
 
 func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 	ids := make([]string, 0, len(g.drivers))
-	for id := range g.drivers {
+	lastActive := make(map[string]time.Time, len(g.drivers))
+	busyTime := time.Now()
+	for id, d := range g.drivers {
 		ids = append(ids, id)
+		lastActive[id] = busyTime
+		if d.mu.TryLock() {
+			lastActive[id] = d.lastActive
+			d.mu.Unlock()
+		}
 	}
+	// The comparator observes one immutable snapshot, including one shared
+	// fallback timestamp for busy drivers; it never waits on session I/O.
 	slices.SortFunc(ids, func(a, b string) int {
-		da, db := g.drivers[a], g.drivers[b]
-		da.mu.Lock()
-		aTime := da.lastActive
-		da.mu.Unlock()
-		db.mu.Lock()
-		bTime := db.lastActive
-		db.mu.Unlock()
-		if cmp := aTime.Compare(bTime); cmp != 0 {
+		if cmp := lastActive[a].Compare(lastActive[b]); cmp != 0 {
 			return cmp
 		}
 		if a < b {
@@ -140,7 +145,9 @@ func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 			continue
 		}
 		d := g.drivers[id]
-		d.mu.Lock()
+		if !d.mu.TryLock() {
+			continue
+		}
 		eligible := d.beginReclaimLocked()
 		d.mu.Unlock()
 		if !eligible {
@@ -242,6 +249,9 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		g.drivers[sess.ID] = d
 		delete(g.orphans, sess.ID)
 		g.mu.Unlock()
+		if g.r != nil && g.r.agents != nil && g.r.subagents != nil && d.identityParent == "" {
+			g.r.subagents.bindPublishedRootDriver(d)
+		}
 		// Accepted pending inputs are durable work, not a UI wake hint. A fresh
 		// fully initialized runtime session resumes them automatically after
 		// publication; small test/service stubs may not have an execution router.
@@ -264,6 +274,9 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 	d.adopt(adopted)
 	delete(g.orphans, sess.ID)
 	g.mu.Unlock()
+	if g.r != nil && g.r.agents != nil && g.r.subagents != nil && d.identityParent == "" {
+		g.r.subagents.bindPublishedRootDriver(d)
+	}
 	return d, nil
 }
 
@@ -527,6 +540,9 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		g.mu.Unlock()
 		return nil
 	}
+	if d != nil {
+		d.maintenanceRetired = true
+	}
 	if final {
 		g.deleted[sessionID] = struct{}{}
 		if d != nil {
@@ -593,9 +609,21 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 	return nil
 }
 
+// stopSchedulerLocked fences worker reservations before any drain snapshots.
+func (g *sessionDriverRegistry) stopSchedulerLocked() {
+	if g.workStop != nil {
+		select {
+		case <-g.workStop:
+		default:
+			close(g.workStop)
+		}
+	}
+}
+
 func (g *sessionDriverRegistry) closeAdmission() {
 	g.mu.Lock()
 	g.closed = true
+	g.stopSchedulerLocked()
 	drivers := make([]*sessionDriver, 0, len(g.drivers))
 	for _, d := range g.drivers {
 		drivers = append(drivers, d)
@@ -611,14 +639,24 @@ func (g *sessionDriverRegistry) closeAdmission() {
 func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	g.mu.Lock()
 	g.closed = true
+	g.stopSchedulerLocked()
 	drivers := make([]*sessionDriver, 0, len(g.drivers))
 	for _, d := range g.drivers {
 		drivers = append(drivers, d)
 	}
+	workDone := g.workDone
 	g.mu.Unlock()
 	for _, d := range drivers {
 		d.StopAll()
 	}
+	if workDone != nil {
+		select {
+		case <-workDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	for _, d := range drivers {
 		select {
 		case <-d.Done():
@@ -664,18 +702,18 @@ func (g *sessionDriverRegistry) ancestorResidentLocked(id string) bool {
 		if otherID == id {
 			continue
 		}
-		sess := d.session()
+		parentID := d.identityParent
 		seen := map[string]bool{}
-		for sess != nil && sess.ParentID != "" && !seen[sess.ParentID] {
-			if sess.ParentID == id {
+		for parentID != "" && !seen[parentID] {
+			if parentID == id {
 				return true
 			}
-			seen[sess.ParentID] = true
-			parent := g.drivers[sess.ParentID]
+			seen[parentID] = true
+			parent := g.drivers[parentID]
 			if parent == nil {
 				break
 			}
-			sess = parent.session()
+			parentID = parent.identityParent
 		}
 	}
 	return false

@@ -180,3 +180,60 @@ func TestSubagentPersistenceCoalescesLatestTree(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, subagent.NodeID(string(rune(100))), got.Root)
 }
+
+func TestSubagentPersistenceCloseFailureCanRetryAfterRecovery(t *testing.T) {
+	store := &retryingDurableSubagentStore{permanent: errors.New("disk offline")}
+	p := newSubagentPersistence(store, nil)
+	p.enqueueTree("root", subagent.Snapshot{Root: "root:root"})
+	require.Error(t, p.close())
+	require.Error(t, p.close(), "closed admission must not masquerade as successful drain")
+	p.enqueueTree("rejected", subagent.Snapshot{Root: "root:rejected"})
+	store.mu.Lock()
+	store.permanent = nil
+	store.mu.Unlock()
+	require.NoError(t, p.close())
+	require.NoError(t, p.close())
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	require.Len(t, store.saved, 1)
+	require.Equal(t, subagent.NodeID("root:root"), store.saved["root"].Root)
+}
+
+func TestSubagentPersistenceCloseSharesCallerDeadlineAcrossRoots(t *testing.T) {
+	p := newSubagentPersistence(&blockingSubagentStore{}, nil)
+	// Stop the consumer so all roots are covered by the final drain itself.
+	p.cancel()
+	<-p.done
+	for _, id := range []string{"one", "two", "three"} {
+		p.enqueueTree(id, subagent.Snapshot{Root: subagent.SessionRootID(id)})
+	}
+	r := &LocalRuntime{ctx: func() context.Context { return t.Context() }}
+	m := newSubagentManager(r)
+	m.persist = p
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	require.ErrorIs(t, m.CloseContext(ctx), context.DeadlineExceeded)
+	require.Less(t, time.Since(start), 500*time.Millisecond)
+	p.mu.Lock()
+	require.Len(t, p.trees, 3, "all unpersisted roots remain retryable")
+	require.False(t, p.drained)
+	p.mu.Unlock()
+	p.treeStore = subagent.NewInMemoryStore()
+	require.NoError(t, m.CloseContext(t.Context()))
+}
+
+func TestSubagentPersistenceCloseDeadlineWhileFlushInFlight(t *testing.T) {
+	p := newSubagentPersistence(&blockingSubagentStore{}, nil)
+	p.cancel()
+	<-p.done
+	p.enqueueTree("root", subagent.Snapshot{Root: "root:root"})
+	// Exercise context-aware serialization, not just a store's timeout.
+	p.flushMu <- struct{}{}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, p.closeContext(ctx), context.DeadlineExceeded)
+	<-p.flushMu
+	p.treeStore = subagent.NewInMemoryStore()
+	require.NoError(t, p.close())
+}

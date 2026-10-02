@@ -202,6 +202,21 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 	return p, nil
 }
 
+// sameWorkspace compares physical workspace identity without rewriting stored
+// provenance (which may intentionally use a relative path or symlink).
+func sameWorkspace(a, b string) bool {
+	normalize := func(path string) string {
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		return filepath.Clean(path)
+	}
+	return normalize(a) == normalize(b)
+}
+
 func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id string) (PreparedSessionView, error) {
 	p, err := v.readSessionView(ctx, id)
 	if err != nil {
@@ -211,7 +226,7 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 	p.ctx, p.cancel = func() context.Context { return preparationCtx }, cancel
 	if _, live := p.r.sessionDrivers.Lookup(id); !live {
 		for _, cwd := range []string{p.root.WorkingDir, p.info.WorkingDir} {
-			if cwd != "" && filepath.Clean(cwd) != filepath.Clean(p.r.workingDir) {
+			if cwd != "" && !sameWorkspace(cwd, p.r.workingDir) {
 				p.cancel()
 				return nil, &SessionError{Kind: SessionErrorWrongSession, SessionID: id, Operation: "view_workspace", Detail: "session view requires its workspace-bound runtime"}
 			}
@@ -538,6 +553,9 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		g.drivers[reservation.id] = reservation.driver
 		delete(g.orphans, reservation.id)
 		delete(g.reservations, reservation.id)
+	}
+	if rootDriver := g.drivers[p.root.ID]; rootDriver != nil {
+		m.bindRootDriverLocked(p.root.ID, m.sessions[p.root.ID], rootDriver)
 	}
 	// Build the response directly while registry publication is locked: calling
 	// SessionByID here would reenter registry.mu.

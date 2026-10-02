@@ -2,9 +2,11 @@ package acp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,54 +302,95 @@ func TestACPConcurrentStopCallersWaitForSingleDrain(t *testing.T) {
 	}
 }
 
-// These tests exercise ACP's production permission handlers against real
-// LocalRuntime session waiters; no fake SessionHandle/envelope is involved.
+// Production ACP permission handlers resolve real driver-owned waiters.
 func TestACPRealToolConfirmationRoundTrip(t *testing.T) {
-	rt, sess := newACPRealRuntime(t)
-	handle, err := rt.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
-	require.NoError(t, err)
-	require.True(t, runtime.IsLocalSessionHandle(handle))
-	// The runtime package integration test drives tool dispatch; ACP pins that
-	// same public response contract here through the bound real handle.
-	assert.NotNil(t, handle)
+	for _, decision := range []string{"allow", "reject"} {
+		t.Run(decision, func(t *testing.T) { testACPRealInteraction(t, false, decision) })
+	}
 }
-
 func TestACPRealMaxIterationsRoundTrip(t *testing.T) {
-	rt, sess := newACPRealRuntime(t)
-	handle, err := rt.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
-	require.NoError(t, err)
-	obs, err := handle.Observe(t.Context(), runtime.ObserveOptions{})
-	require.NoError(t, err)
-	obs.Cancel()
+	for _, decision := range []string{"continue", "stop"} {
+		t.Run(decision, func(t *testing.T) { testACPRealInteraction(t, true, decision) })
+	}
 }
 
-func newACPRealRuntime(t *testing.T) (*runtime.LocalRuntime, *session.Session) {
-	t.Helper()
-	prov := &realACPProvider{}
-	agt := agent.New("root", "prompt", agent.WithModel(prov), agent.WithMaxIterations(1))
-	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agt)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
-	require.NoError(t, err)
-	return rt, session.New(session.WithAgentName("root"))
+type realACPTools struct{ executed atomic.Int32 }
+
+func (ts *realACPTools) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "probe", Parameters: map[string]any{"type": "object"}, Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+		ts.executed.Add(1)
+		return tools.ResultSuccess("executed"), nil
+	}}}, nil
 }
 
-type realACPProvider struct{}
+type realACPProvider struct{ calls atomic.Int32 }
 
 func (*realACPProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/acp-real") }
 func (*realACPProvider) BaseConfig() base.Config { return base.Config{} }
-func (*realACPProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
-	return &realACPStream{}, nil
-}
-
-type realACPStream struct{ done bool }
-
-func (s *realACPStream) Recv() (chat.MessageStreamResponse, error) {
-	if s.done {
-		return chat.MessageStreamResponse{}, io.EOF
+func (p *realACPProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	if p.calls.Add(1) == 1 {
+		return &mockStream{responses: []chat.MessageStreamResponse{{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{ID: "probe-call", Type: "function", Function: tools.FunctionCall{Name: "probe", Arguments: "{}"}}}}, FinishReason: chat.FinishReasonToolCalls}}}}}, nil
 	}
-	s.done = true
-	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{FinishReason: chat.FinishReasonStop}}}, nil
+	return &mockStream{responses: []chat.MessageStreamResponse{{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "finished"}, FinishReason: chat.FinishReasonStop}}}}}, nil
 }
-func (*realACPStream) Close() {}
+
+func testACPRealInteraction(t *testing.T, maxIterations bool, decision string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	prov, ts := &realACPProvider{}, &realACPTools{}
+	root := agent.New("root", "prompt", agent.WithModel(prov), agent.WithToolSets(ts))
+	rt, err := runtime.NewLocalRuntime(ctx, team.New(team.WithAgents(root)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.Background())) })
+	sess := session.New(session.WithAgentName("root"))
+	if maxIterations {
+		sess.MaxIterations = 1
+		sess.ToolsApproved = true
+	}
+	h, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	f := newRunAgentFixtureWithPermissions(t, &fakeRuntime{}, &captureWriter{}, func(acpsdk.RequestPermissionRequest) any { return permissionSelected(decision) })
+	f.sess = &Session{id: sess.ID, sess: sess, rt: rt, session: h, supervisor: owner}
+	require.NoError(t, f.agent.runAgent(ctx, f.sess, runtime.TurnInput{Content: "use probe"}))
+	requests := f.peer.recordedRequests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, acpsdk.SessionId(sess.ID), requests[0].SessionId)
+	expectedTool := "probe-call"
+	if maxIterations {
+		expectedTool = "max_iterations"
+	}
+	assert.Equal(t, acpsdk.ToolCallId(expectedTool), requests[0].ToolCall.ToolCallId)
+	var since uint64
+	obs, err := h.Observe(ctx, runtime.ObserveOptions{Since: &since})
+	require.NoError(t, err)
+	defer obs.Cancel()
+	var interaction string
+	for _, envelope := range obs.Replay {
+		if envelope.InteractionID != "" {
+			interaction = envelope.InteractionID
+			assert.NotEmpty(t, envelope.TurnID)
+			assert.Equal(t, sess.ID, envelope.SessionID)
+		}
+	}
+	require.NotEmpty(t, interaction, "runtime must generate the correlation token")
+	require.Error(t, h.Respond(ctx, runtime.InteractionResponse{InteractionID: interaction, Kind: runtime.InteractionConfirmation, Resume: runtime.ResumeApprove()}), "consumed tokens cannot be replayed")
+	if maxIterations {
+		assert.EqualValues(t, 1, ts.executed.Load())
+		wantCalls := int32(1)
+		if decision == "continue" {
+			wantCalls = 2
+		}
+		assert.Equal(t, wantCalls, prov.calls.Load())
+	} else {
+		wantExecuted := int32(0)
+		if decision == "allow" {
+			wantExecuted = 1
+		}
+		assert.Equal(t, wantExecuted, ts.executed.Load())
+	}
+}
 
 func TestACPStopRacingNewSessionRejectsLateRegistration(t *testing.T) {
 	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
@@ -392,4 +435,104 @@ func TestACPNewSessionRegistrationRejectionRollsBackPersistedRow(t *testing.T) {
 	sessions, e := a.sessionStore.GetSessions(t.Context())
 	require.NoError(t, e)
 	assert.Empty(t, sessions)
+}
+
+type stopCountingTools struct{ stops atomic.Int32 }
+
+func (*stopCountingTools) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (*stopCountingTools) Start(context.Context) error                 { return nil }
+func (s *stopCountingTools) Stop(context.Context) error                { s.stops.Add(1); return nil }
+
+type retrySupervisor struct{ calls int }
+
+func (*retrySupervisor) Runtime() runtime.SessionRuntime { return nil }
+func (s *retrySupervisor) Shutdown(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.calls++
+	return nil
+}
+
+func TestACPRetriesFailedShutdown(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		t.Run(fmt.Sprint("stop=", stop), func(t *testing.T) {
+			a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+			owner := &retrySupervisor{}
+			ts := &stopCountingTools{}
+			root := agent.New("root", "", agent.WithToolSets(ts))
+			require.NoError(t, root.ToolSets()[0].(*tools.StartableToolSet).Start(t.Context()))
+			a.team = team.New(team.WithAgents(root))
+			s := &Session{id: "s", supervisor: owner}
+			a.sessions[s.id] = s
+			expired, cancel := context.WithCancel(t.Context())
+			cancel()
+			if stop {
+				a.Stop(expired)
+			} else {
+				_, err := a.CloseSession(expired, acpsdk.CloseSessionRequest{SessionId: "s"})
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			require.Same(t, s, a.sessions[s.id], "failed drain must retain ownership")
+			require.Zero(t, ts.stops.Load(), "tools must remain live until runtime drain succeeds")
+			_, _, err := s.startTurn(t.Context())
+			require.ErrorIs(t, err, errSessionClosed)
+			if stop {
+				require.Error(t, a.admissionErrorLocked())
+				a.Stop(t.Context())
+			} else {
+				_, err := a.CloseSession(t.Context(), acpsdk.CloseSessionRequest{SessionId: "s"})
+				require.NoError(t, err)
+			}
+			require.Empty(t, a.sessions)
+			a.Stop(t.Context())
+			require.Equal(t, 1, owner.calls)
+			require.EqualValues(t, 1, ts.stops.Load())
+		})
+	}
+}
+
+type blockingShutdownSupervisor struct {
+	entered chan struct{}
+	proceed chan struct{}
+	calls   atomic.Int32
+}
+
+func (*blockingShutdownSupervisor) Runtime() runtime.SessionRuntime { return nil }
+func (s *blockingShutdownSupervisor) Shutdown(ctx context.Context) error {
+	s.calls.Add(1)
+	close(s.entered)
+	select {
+	case <-s.proceed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestACPCloseRacingStopDrainsOnceAndHonorsWaiterDeadline(t *testing.T) {
+	a := NewAgent(nil, nil, session.NewInMemorySessionStore())
+	owner := &blockingShutdownSupervisor{entered: make(chan struct{}), proceed: make(chan struct{})}
+	a.sessions["s"] = &Session{id: "s", supervisor: owner}
+	closed := make(chan error, 1)
+	go func() {
+		_, err := a.CloseSession(t.Context(), acpsdk.CloseSessionRequest{SessionId: "s"})
+		closed <- err
+	}()
+	<-owner.entered
+	expired, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() { a.Stop(expired); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop ignored deadline while waiting on CloseSession")
+	}
+	require.EqualValues(t, 1, owner.calls.Load())
+	close(owner.proceed)
+	require.NoError(t, <-closed)
+	a.Stop(t.Context())
+	require.True(t, a.stopped)
+	require.EqualValues(t, 1, owner.calls.Load())
 }

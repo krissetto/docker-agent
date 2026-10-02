@@ -89,7 +89,7 @@ func (sm *SessionManager) legacyRunHandle(ctx context.Context, id, sourceName, a
 	}
 	if sess.GetSafetyPolicy() == "" && !sess.ToolsApproved {
 		if defaults, ok := registry.(runtime.SafetyDefaults); ok {
-			if policy := defaults.AuthorSafetyDefault(sess); policy != "" {
+			if policy := authorSafetyDefault(ctx, defaults, sess); policy != "" {
 				sess.SetSafetyPolicy(policy)
 			}
 		}

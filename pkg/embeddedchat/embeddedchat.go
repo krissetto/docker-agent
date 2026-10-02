@@ -105,6 +105,9 @@ type ToolActivity struct {
 	// NeedsConfirmation is true when the runtime is blocked until Confirm is
 	// called with the user's decision.
 	NeedsConfirmation bool
+	// RequestID correlates a confirmation with Confirm's ResumeRequest.RequestID.
+	// Prefer passing this token explicitly, especially across Restart.
+	RequestID string
 }
 
 // Session owns one embedded runtime supervisor and one immutable conversation session.
@@ -119,11 +122,13 @@ type Session struct {
 	// workingDir captures the workspace provenance once at initialization.
 	workingDir string
 
-	mu           sync.Mutex
-	activeCancel context.CancelFunc
-	activeRun    int
-	drainErr     error
-	closed       bool
+	mu                  sync.Mutex
+	activeCancel        context.CancelFunc
+	activeRun           int
+	drainErr            error
+	closed              bool
+	pendingConfirmation string
+	pendingHandle       dagentruntime.SessionHandle
 }
 
 // New builds the runtime for the configured team (or loads AgentSource) and
@@ -273,6 +278,7 @@ func (s *Session) Restart() error {
 		}
 	}
 	s.drainErr = nil
+	s.pendingConfirmation, s.pendingHandle = "", nil
 	s.resetConversationLocked()
 	return s.bindConversationLocked(ctx)
 }
@@ -350,23 +356,39 @@ func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error)
 	return out, nil
 }
 
-// Confirm answers the pending tool confirmation, if any.
+// Confirm answers the pending tool confirmation, if any. Set req.RequestID to
+// ToolActivity.RequestID to reject stale replies. For compatibility, an omitted
+// ID answers the current pending confirmation; it cannot identify a stale UI reply.
 func (s *Session) Confirm(ctx context.Context, req dagentruntime.ResumeRequest) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return ErrClosed
 	}
-	rt := s.rt
+	handle := s.handle
+	if req.RequestID == "" {
+		req.RequestID = s.pendingConfirmation
+	}
+	if req.RequestID != "" && req.RequestID == s.pendingConfirmation {
+		handle = s.pendingHandle
+	}
 	s.mu.Unlock()
-	if rt == nil {
+	if handle == nil {
 		return ErrNotInitialized
 	}
-	return s.handle.Respond(ctx, dagentruntime.InteractionResponse{
+	err := handle.Respond(ctx, dagentruntime.InteractionResponse{
 		InteractionID: req.RequestID,
 		Kind:          dagentruntime.InteractionConfirmation,
 		Resume:        req,
 	})
+	if err == nil {
+		s.mu.Lock()
+		if s.pendingHandle == handle && s.pendingConfirmation == req.RequestID {
+			s.pendingConfirmation, s.pendingHandle = "", nil
+		}
+		s.mu.Unlock()
+	}
+	return err
 }
 
 func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessionHandle dagentruntime.SessionHandle, out chan<- Event, cancel context.CancelFunc, runID int) {
@@ -376,6 +398,9 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.activeRun == runID {
+			if s.pendingHandle == sessionHandle {
+				s.pendingConfirmation, s.pendingHandle = "", nil
+			}
 			s.activeCancel = nil
 		}
 	}()
@@ -398,7 +423,12 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
 				return true
 			}
-			if !emit(Event{RuntimeEvent: event, Tool: &ToolActivity{Call: e.ToolCall, Def: e.ToolDefinition, NeedsConfirmation: true}}) {
+			s.mu.Lock()
+			if s.handle == sessionHandle && !s.closed {
+				s.pendingConfirmation, s.pendingHandle = envelope.InteractionID, sessionHandle
+			}
+			s.mu.Unlock()
+			if !emit(Event{RuntimeEvent: event, Tool: &ToolActivity{Call: e.ToolCall, Def: e.ToolDefinition, NeedsConfirmation: true, RequestID: envelope.InteractionID}}) {
 				_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
 			}
 		case *dagentruntime.ElicitationRequestEvent:

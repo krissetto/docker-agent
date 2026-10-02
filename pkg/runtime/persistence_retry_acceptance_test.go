@@ -46,7 +46,7 @@ func (s *ambiguousAppendStore) AppendItem(ctx context.Context, sessionID, writeI
 		s.attempts = map[string]int{}
 	}
 	s.attempts[sessionID+":"+writeID]++
-	if !s.failed && sessionID == s.targetSession {
+	if !s.failed && sessionID == s.targetSession && !strings.HasPrefix(writeID, "input:") {
 		s.failed = true
 		return 0, s.failure
 	}
@@ -329,7 +329,7 @@ func (s *blockedAppendStore) AppendItem(ctx context.Context, sessionID, writeID 
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if sessionID == s.targetSession && s.blocked.Load() {
+	if sessionID == s.targetSession && s.blocked.Load() && !strings.HasPrefix(writeID, "input:") {
 		return 0, s.schemaErr
 	}
 	return s.ItemAppender.AppendItem(ctx, sessionID, writeID, item)

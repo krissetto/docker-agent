@@ -84,6 +84,7 @@ type Supervisor struct {
 	viewLeases           map[*hostedView]struct{}
 	ownerOperations      sync.WaitGroup
 	presentationClosures sync.WaitGroup
+	nextRouteGeneration  uint64 // Unique across tab closure, replacement, and retargeting.
 	activeID             string
 	spawner              SessionSpawner
 	program              *tea.Program
@@ -92,12 +93,12 @@ type Supervisor struct {
 	// snapshots can fan the same invalidation out through several attached Apps;
 	// retaining only the newest pending view avoids goroutine growth while the
 	// single sender preserves running → terminal delivery order.
-	tabSender        func(messages.TabsUpdatedMsg)
-	pendingTabUpdate *messages.TabsUpdatedMsg
-	tabNotify        chan struct{}
-	tabNotifyDone    chan struct{}
-	tabNotifyOnce    sync.Once
-	tabNotifyStop    sync.Once
+	tabSender     func(messages.TabsUpdatedMsg)
+	tabsDirty     bool
+	tabNotify     chan struct{}
+	tabNotifyDone chan struct{}
+	tabNotifyOnce sync.Once
+	tabNotifyStop sync.Once
 
 	// programReady is closed when SetProgram is called. Subscription goroutines
 	// wait on this before consuming events so that startup events (welcome message,
@@ -182,6 +183,7 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		s.ownerOperations.Add(1)
 	}
 
+	runner.routeGeneration = s.newRouteGenerationLocked()
 	s.runners[sess.ID] = runner
 	s.order = append(s.order, sess.ID)
 
@@ -191,7 +193,6 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 
 	// Start the subscription goroutine with routing
 	if a != nil {
-		runner.routeGeneration++
 		generation := runner.routeGeneration
 		routeCtx, routeCancel := context.WithCancel(sessionCtx)
 		runner.routeCancel = routeCancel
@@ -253,13 +254,16 @@ func ownSessionActivity(state runtime.SessionState) messages.TabActivity {
 
 // applyPresentation consumes the App's shared head; it never observes or reduces
 // the canonical session independently.
-func (s *Supervisor) applyPresentation(tabID string, head *app.PresentationState, event runtime.Event) {
+func (s *Supervisor) applyPresentation(tabID string, expectedApp *app.App, generation uint64, head *app.PresentationState, event runtime.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	runner := s.runners[tabID]
-	if runner == nil {
-		return
+	if runner := s.runners[tabID]; runner != nil && runner.App == expectedApp && runner.routeGeneration == generation {
+		s.applyPresentationLocked(runner, head, event)
 	}
+}
+
+func (s *Supervisor) applyPresentationLocked(runner *SessionTab, head *app.PresentationState, event runtime.Event) {
+	tabID := runner.ID
 	if head == runner.projection {
 		switch event.(type) {
 		case *app.SessionResetEvent, *app.SessionViewEvent, *runtime.SessionTitleEvent, *runtime.ErrorEvent:
@@ -347,20 +351,13 @@ func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessi
 		}
 	}()
 	send := func(msg tea.Msg) {
-		s.mu.RLock()
-		runner := s.runners[sessionID]
-		valid := runner != nil && runner.routeGeneration == generation
-		s.mu.RUnlock()
-		if !valid || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		inner := msg
-		if bridged, ok := msg.(app.SessionEventMsg); ok {
-			s.applyPresentation(sessionID, bridged.Projection, bridged.Event)
-			msg = bridged.Event
-			inner = messages.SessionRuntimeEventMsg{Event: bridged.Event, Seed: bridged.Seed, Projection: bridged.Projection, OriginSessionID: bridged.OriginSessionID, TurnID: bridged.TurnID, Epoch: bridged.Epoch, Sequence: bridged.Sequence}
+		inner, valid := s.projectRoutedEvent(sessionID, a, generation, msg)
+		if !valid {
+			return
 		}
-		s.handleRuntimeEvent(sessionID, msg)
 		select {
 		case routed <- messages.RoutedMsg{SessionID: sessionID, RouteGeneration: generation, Inner: inner}:
 		case <-ctx.Done():
@@ -381,24 +378,28 @@ func (s *Supervisor) subscribeWithRouting(ctx context.Context, a *app.App, sessi
 	workers.Wait()
 }
 
-// handleRuntimeEvent updates runner state based on runtime events.
-func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
+// projectRoutedEvent fences every supervisor mutation at the same lock boundary
+// as route replacement. A subscriber may outlive cancellation, but not its route.
+func (s *Supervisor) projectRoutedEvent(sessionID string, expectedApp *app.App, generation uint64, msg tea.Msg) (tea.Msg, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	runner, ok := s.runners[sessionID]
-	if !ok {
-		return
+	runner := s.runners[sessionID]
+	if runner == nil || runner.App != expectedApp || runner.routeGeneration != generation {
+		return nil, false
 	}
-
+	inner := msg
+	if bridged, ok := msg.(app.SessionEventMsg); ok {
+		s.applyPresentationLocked(runner, bridged.Projection, bridged.Event)
+		msg = bridged.Event
+		inner = messages.SessionRuntimeEventMsg{Event: bridged.Event, Seed: bridged.Seed, Projection: bridged.Projection, OriginSessionID: bridged.OriginSessionID, TurnID: bridged.TurnID, Epoch: bridged.Epoch, Sequence: bridged.Sequence}
+	}
 	if _, ok := msg.(*runtime.SubagentTreeEvent); ok {
-		// Topology invalidates descendant presentation only. Session lifecycle is
-		// projected exclusively from the canonical session observation below.
-		if runner.App != nil && s.runtimeTreeInvalidationOwnerLocked(runner.App.Runtime()) != runner.ID {
-			return
+		// Topology invalidates descendant presentation only, never lifecycle.
+		if runner.App == nil || s.runtimeTreeInvalidationOwnerLocked(runner.App.Runtime()) == runner.ID {
+			s.notifyTabsUpdated()
 		}
-		s.notifyTabsUpdated()
 	}
+	return inner, true
 }
 
 // notifyTabsUpdated coalesces tab snapshots for one serialized sender (must
@@ -413,11 +414,7 @@ func (s *Supervisor) notifyTabsUpdated() {
 		return
 	}
 	s.startTabNotifierLocked()
-	update := messages.TabsUpdatedMsg{
-		Tabs:      s.buildTabInfoLocked(),
-		ActiveIdx: s.activeIndexLocked(),
-	}
-	s.pendingTabUpdate = &update
+	s.tabsDirty = true
 	select {
 	case s.tabNotify <- struct{}{}:
 	default:
@@ -442,9 +439,12 @@ func (s *Supervisor) runTabNotifier() {
 		case <-s.tabNotify:
 			for {
 				s.mu.Lock()
-				pending := s.pendingTabUpdate
-				s.pendingTabUpdate = nil
+				var pending *messages.TabsUpdatedMsg
 				sender := s.tabSender
+				if s.tabsDirty && sender != nil {
+					pending = &messages.TabsUpdatedMsg{Tabs: s.buildTabInfoLocked(), ActiveIdx: s.activeIndexLocked()}
+				}
+				s.tabsDirty = false
 				s.mu.Unlock()
 				if pending == nil || sender == nil {
 					break
@@ -475,7 +475,7 @@ func (s *Supervisor) runtimeTreeInvalidationOwnerLocked(services app.Services) s
 // tabActivity derives presentation state from the runtime's current tree.
 // The snapshot is synchronous and authoritative, which also seeds tabs opened
 // after a tree event and naturally clears state after replacement or teardown.
-func tabActivity(runner *SessionTab) (messages.TabActivity, bool) {
+func tabActivity(runner *SessionTab, snapshots map[*subagent.Tree]subagent.Snapshot) (messages.TabActivity, bool) {
 	if runner.App == nil {
 		return ownSessionActivity(runner.sessionState), false
 	}
@@ -497,7 +497,12 @@ func tabActivity(runner *SessionTab) (messages.TabActivity, bool) {
 		return messages.TabActivityNone, isAttached
 	}
 
-	snapshot := provider.SubagentTree().Snapshot()
+	tree := provider.SubagentTree()
+	snapshot, cached := snapshots[tree]
+	if !cached {
+		snapshot = tree.Snapshot()
+		snapshots[tree] = snapshot
+	}
 	return deriveTabActivity(snapshot, nodeID, ownSessionActivity(runner.sessionState)), isAttached
 }
 
@@ -548,6 +553,7 @@ func strictDescendantState(node subagent.NodeSnapshot) messages.TabActivity {
 // buildTabInfoLocked builds tab info (must be called with lock held).
 func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 	tabs := make([]messages.TabInfo, 0, len(s.order))
+	snapshots := make(map[*subagent.Tree]subagent.Snapshot)
 	for _, id := range s.order {
 		runner := s.runners[id]
 		if runner == nil {
@@ -559,7 +565,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			title = filepath.Base(runner.WorkingDir)
 		}
 
-		activity, attached := tabActivity(runner)
+		activity, attached := tabActivity(runner, snapshots)
 		tabs = append(tabs, messages.TabInfo{
 			SessionID:      id,
 			Title:          title,
@@ -709,6 +715,12 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	// Replace app and working directory. Borrowed replacement explicitly
 	// transfers the existing runner ownership; an owned replacement installs
 	// its cleanup and retires the prior owner.
+	runner.routeGeneration = s.newRouteGenerationLocked()
+	generation := runner.routeGeneration
+	runner.projection = nil
+	runner.PendingEvents = nil
+	runner.NeedsAttn = false
+	runner.title = ""
 	runner.App = spawned.App
 	if spawned.App != nil {
 		s.applySubagentsPolicyLocked(spawned.App.Runtime())
@@ -749,6 +761,10 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	sessionCtx, cancel := context.WithCancel(ctx)
 	runner.cancel = cancel
 	runner.lifetimeCtx = sessionCtx
+	routeCtx, routeCancel := context.WithCancel(sessionCtx)
+	runner.routeCancel = routeCancel
+	routeDone := make(chan struct{})
+	runner.routeDone = routeDone
 	if spawned.App != nil {
 		s.ownerOperations.Add(1)
 	}
@@ -768,24 +784,11 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 		go oldCleanup()
 	}
 
-	// Start routing events from the new app.
+	// The identity and cancellation handle were installed with the app above.
 	if spawned.App != nil {
-		s.mu.Lock()
-		generation := uint64(0)
-		if current := s.runners[sessionID]; current == runner {
-			current.routeGeneration++
-			generation = current.routeGeneration
-		}
-		s.mu.Unlock()
-		routeCtx, routeCancel := context.WithCancel(sessionCtx)
-		s.mu.Lock()
-		if current := s.runners[sessionID]; current == runner {
-			current.routeCancel = routeCancel
-		} else {
-			routeCancel()
-		}
-		s.mu.Unlock()
-		go s.subscribeWithRouting(routeCtx, spawned.App, sessionID, generation, nil, nil)
+		go s.subscribeWithRouting(routeCtx, spawned.App, sessionID, generation, nil, routeDone)
+	} else {
+		close(routeDone)
 	}
 }
 
@@ -793,9 +796,14 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 func (s *Supervisor) RefreshProjection(_ context.Context, sessionID string) {
 	s.mu.RLock()
 	runner := s.runners[sessionID]
+	var application *app.App
+	var generation uint64
+	if runner != nil {
+		application, generation = runner.App, runner.routeGeneration
+	}
 	s.mu.RUnlock()
-	if runner != nil && runner.App != nil {
-		s.applyPresentation(sessionID, runner.App.Presentation(), nil)
+	if application != nil {
+		s.applyPresentation(sessionID, application, generation, application.Presentation(), nil)
 	}
 }
 
@@ -809,7 +817,7 @@ func (s *Supervisor) RetargetRunner(ctx context.Context, oldID, newID, workingDi
 	if runner.routeCancel != nil {
 		runner.routeCancel()
 	}
-	runner.routeGeneration++
+	runner.routeGeneration = s.newRouteGenerationLocked()
 	generation := runner.routeGeneration
 	routeCtx, routeCancel := context.WithCancel(runner.lifetimeCtx)
 	runner.routeCancel = routeCancel
@@ -842,6 +850,11 @@ func (s *Supervisor) RetargetRunner(ctx context.Context, oldID, newID, workingDi
 		}
 	}
 	return true
+}
+
+func (s *Supervisor) newRouteGenerationLocked() uint64 {
+	s.nextRouteGeneration++
+	return s.nextRouteGeneration
 }
 
 func (s *Supervisor) RouteGeneration(sessionID string) (uint64, bool) {

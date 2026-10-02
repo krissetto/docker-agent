@@ -59,7 +59,7 @@ func (w *workspaceSessionRuntimes) acquireViewRuntime(ctx context.Context, id st
 		w.mu.Unlock()
 		return rt, key, func() { w.releaseRef(key) }, nil
 	}
-	return w.acquireRuntime(root.WorkingDir)
+	return w.acquireRuntime(ctx, root.WorkingDir)
 }
 
 func (w *workspaceSessionRuntimes) ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error) {
