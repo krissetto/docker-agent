@@ -57,12 +57,17 @@ func NewSessionTransport(client *Client, opts ...SessionTransportOption) (*Sessi
 }
 
 func (r *SessionTransport) CreateSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
+	return r.createSession(ctx, sess, binding, "")
+}
+
+func (r *SessionTransport) createSession(ctx context.Context, sess *session.Session, binding SessionBinding, desiredID string) (SessionHandle, error) {
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
 	template := sess.Clone()
 	request := api.SessionCreateRequest{
-		Source: r.source, AgentName: binding.AgentName, Model: binding.Model,
+		SessionID: desiredID,
+		Source:    r.source, AgentName: binding.AgentName, Model: binding.Model,
 		Title: template.Title, ParentSessionID: binding.ParentSessionID,
 		WorkingDir: template.WorkingDir, SafetyPolicy: template.SafetyPolicy,
 		ToolsApproved: template.ToolsApproved, Permissions: template.Permissions,
@@ -73,6 +78,9 @@ func (r *SessionTransport) CreateSession(ctx context.Context, sess *session.Sess
 	}
 	if metadata.SessionID == "" {
 		return nil, errors.New("session create response has empty session_id")
+	}
+	if desiredID != "" && metadata.SessionID != desiredID {
+		return nil, errors.New("session create response differs from requested session_id")
 	}
 	return &remoteSession{runtime: r, sessionID: metadata.SessionID, metadata: metadata.runtime()}, nil
 }
@@ -573,12 +581,20 @@ func (s *remoteSession) RemoveAttachment(ctx context.Context, attachmentPath str
 	}{attachmentPath}, nil)
 }
 
-func (s *remoteSession) SetTodoStatus(context.Context, string, string) ([]session.Todo, error) {
-	return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoStatus)
+func (s *remoteSession) SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error) {
+	if !s.Metadata().Capabilities.TodoEditing {
+		return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoStatus)
+	}
+	return s.editTodo(ctx, id, api.SessionTodoPatch{Status: &status})
 }
 
-func (s *remoteSession) RemoveTodo(context.Context, string) ([]session.Todo, error) {
-	return nil, sessionUnsupported(s.ID(), SessionOperationRemoveTodo)
+func (s *remoteSession) RemoveTodo(ctx context.Context, id string) ([]session.Todo, error) {
+	if !s.Metadata().Capabilities.TodoEditing {
+		return nil, sessionUnsupported(s.ID(), SessionOperationRemoveTodo)
+	}
+	var out []session.Todo
+	err := s.runtime.client.sessionJSON(ctx, http.MethodDelete, s.endpoint("todos/"+url.PathEscape(id)), nil, &out)
+	return out, err
 }
 
 func (s *remoteSession) Todos(ctx context.Context) ([]session.Todo, error) {
@@ -592,8 +608,6 @@ func (s *remoteSession) Todos(ctx context.Context) ([]session.Todo, error) {
 	return out, nil
 }
 
-func (s *remoteSession) EmitPinnedAgentInfo(context.Context, EventSink) {}
-
 func (s *remoteSession) endpoint(operation string) string {
 	return api.SessionAPIPath + "/" + url.PathEscape(s.ID()) + "/" + operation
 }
@@ -603,6 +617,7 @@ type remoteSessionMetadata api.SessionMetadata
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
 	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
+		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: slices.Clone(capabilities.AvailableModels), Durability: subagent.Durability(capabilities.Durability),
 		Compaction: capabilities.Compaction, TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching,
 		ContextInspection: capabilities.ContextInspection, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
@@ -618,6 +633,17 @@ type (
 )
 
 func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body, result any) error {
+	// Even an injected client with no global timeout retains bounded CRUD.
+	timeout := c.httpClient.Timeout
+	if timeout <= 0 {
+		timeout = defaultSessionRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return c.sessionJSONWithClient(ctx, c.httpClient, method, endpoint, body, result)
+}
+
+func (c *Client) sessionJSONWithClient(ctx context.Context, client *http.Client, method, endpoint string, body, result any) error {
 	var data []byte
 	var err error
 	if body != nil {
@@ -642,7 +668,7 @@ func (c *Client) sessionJSON(ctx context.Context, method, endpoint string, body,
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("session request: %w", err)
 	}
@@ -700,7 +726,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 			kind = SessionErrorStopped
 		}
 	}
-	return &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}
+	return &sessionHTTPError{status: resp.StatusCode, err: &SessionError{Kind: kind, SessionID: payload.SessionID, Operation: SessionOperation(payload.Operation), Reason: payload.Reason, Detail: payload.Detail}}
 }
 
 func (c *Client) attachSession(ctx context.Context, id string, options ObserveOptions) (Observation, error) {
@@ -716,7 +742,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		q.Set("since", strconv.FormatUint(*options.Since, 10))
 		u.RawQuery = q.Encode()
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	watchdog := newSessionStreamWatchdog(cancelStream, defaultSessionRequestTimeout, sessionStreamIdleTimeout)
+	cancel := func() { watchdog.stop(); cancelStream() }
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		cancel()
@@ -729,34 +757,41 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
-	resp, err := c.httpClient.Do(req) //nolint:bodyclose // ownership transfers to the observation goroutine on success
+	resp, err := c.longLivedHTTPClient().Do(req) //nolint:bodyclose // ownership transfers to the observation goroutine on success
 	if err != nil {
 		cancel()
 		return Observation{}, err
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
+		err := decodeSessionHTTPError(resp)
 		cancel()
-		return Observation{}, decodeSessionHTTPError(resp)
+		return Observation{}, err
 	}
-	scanner := bufio.NewScanner(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		cancel()
+		return Observation{}, protocolError(fmt.Errorf("unexpected session stream HTTP status %d", resp.StatusCode))
+	}
+	scanner := bufio.NewScanner(sessionStreamReader{Reader: resp.Body, watchdog: watchdog})
+	scanner.Split(scanSessionLines)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxSSELineBytes)
 	first, err := scanSessionMessage(scanner)
 	if err != nil {
 		resp.Body.Close()
 		cancel()
-		return Observation{}, err
+		return Observation{}, sessionStreamReadError(err)
 	}
 	if first.Version != sessionWireVersion || first.Type != "snapshot" || first.Snapshot == nil {
 		resp.Body.Close()
 		cancel()
-		return Observation{}, errors.New("session stream did not begin with a versioned snapshot")
+		return Observation{}, protocolError(errors.New("session stream did not begin with a versioned snapshot"))
 	}
 	snapshot, err := c.decodeSessionSnapshot(*first.Snapshot)
 	if err != nil {
 		resp.Body.Close()
 		cancel()
-		return Observation{}, err
+		return Observation{}, protocolError(err)
 	}
 	snapshots := []SessionSnapshot{snapshot}
 	var replay []SessionEvent
@@ -772,19 +807,19 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		if scanErr != nil {
 			resp.Body.Close()
 			cancel()
-			return Observation{}, scanErr
+			return Observation{}, sessionStreamReadError(scanErr)
 		}
 		if message.Version != sessionWireVersion {
 			resp.Body.Close()
 			cancel()
-			return Observation{}, fmt.Errorf("unsupported session wire version %d", message.Version)
+			return Observation{}, protocolError(fmt.Errorf("unsupported session wire version %d", message.Version))
 		}
 		if options.Tree && message.Type == "snapshot" && message.Snapshot != nil {
 			additional, decodeErr := c.decodeSessionSnapshot(*message.Snapshot)
 			if decodeErr != nil {
 				resp.Body.Close()
 				cancel()
-				return Observation{}, decodeErr
+				return Observation{}, protocolError(decodeErr)
 			}
 			snapshots = append(snapshots, additional)
 			replaySequences[additional.Status.SessionID] = additional.Cursor
@@ -794,33 +829,34 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			if !options.Tree && message.Cursor != snapshot.Cursor {
 				resp.Body.Close()
 				cancel()
-				return Observation{}, errors.New("session ready cursor does not match snapshot")
+				return Observation{}, protocolError(errors.New("session ready cursor does not match snapshot"))
 			}
 			break
 		}
 		if message.Type != "event" || message.Envelope == nil {
 			resp.Body.Close()
 			cancel()
-			return Observation{}, fmt.Errorf("unexpected session stream message %q", message.Type)
+			return Observation{}, protocolError(fmt.Errorf("unexpected session stream message %q", message.Type))
 		}
 		envelope, decodeErr := c.decodeSessionEnvelope(*message.Envelope)
 		if decodeErr != nil {
 			resp.Body.Close()
 			cancel()
-			return Observation{}, decodeErr
+			return Observation{}, protocolError(decodeErr)
 		}
 		previous, known := replaySequences[envelope.SessionID]
 		zeroSeed := options.Since == nil && known && envelope.IsLiveSeed()
 		if (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
 			resp.Body.Close()
 			cancel()
-			return Observation{}, errors.New("invalid session replay sequence or session")
+			return Observation{}, protocolError(errors.New("invalid session replay sequence or session"))
 		}
 		if envelope.Sequence != 0 {
 			replaySequences[envelope.SessionID] = envelope.Sequence
 		}
 		replay = append(replay, envelope)
 	}
+	watchdog.touch(true)
 	buffer := options.Buffer
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
@@ -852,15 +888,17 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		for {
 			m, e := scanSessionMessage(scanner)
 			if e != nil {
-				if streamCtx.Err() == nil {
-					errorsCh <- fmt.Errorf("session observation terminated at cursor %d: %w", lastSequence, e)
+				if watchdog.timedOut() {
+					errorsCh <- fmt.Errorf("session observation idle timeout: %w", context.DeadlineExceeded)
+				} else if streamCtx.Err() == nil {
+					errorsCh <- fmt.Errorf("session observation terminated at cursor %d: %w", lastSequence, sessionStreamReadError(e))
 				}
 				return
 			}
 			if options.Tree && m.Type == "snapshot" && m.Snapshot != nil {
 				additional, decodeErr := c.decodeSessionSnapshot(*m.Snapshot)
 				if decodeErr != nil {
-					errorsCh <- decodeErr
+					errorsCh <- protocolError(decodeErr)
 					return
 				}
 				lastSequences[additional.Status.SessionID] = additional.Cursor
@@ -872,17 +910,17 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				continue
 			}
 			if m.Version != sessionWireVersion || m.Type != "event" || m.Envelope == nil {
-				errorsCh <- fmt.Errorf("invalid session observation message at cursor %d", lastSequence)
+				errorsCh <- protocolError(fmt.Errorf("invalid session observation message at cursor %d", lastSequence))
 				return
 			}
 			env, e := c.decodeSessionEnvelope(*m.Envelope)
 			if e != nil {
-				errorsCh <- fmt.Errorf("decode session observation at cursor %d: %w", lastSequence, e)
+				errorsCh <- protocolError(fmt.Errorf("decode session observation at cursor %d: %w", lastSequence, e))
 				return
 			}
 			previous := lastSequences[env.SessionID]
 			if (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
-				errorsCh <- fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous)
+				errorsCh <- protocolError(fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous))
 				return
 			}
 			if env.Sequence != 0 {
@@ -917,6 +955,9 @@ func scanSessionMessage(scanner *bufio.Scanner) (remoteSessionStreamMessage, err
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err != nil {
+			return message, fmt.Errorf("decode chunked snapshot ending: %w", err)
+		}
 		return message, errors.New("chunked snapshot has invalid ending")
 	}
 	if snapshot.Cursor != message.Cursor {
@@ -1079,7 +1120,7 @@ var (
 )
 
 func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {
-	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
+	return s.runtime.client.sessionWaitJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
 }
 
 // PrepareSessionView holds only confirmed information on the client. The server
@@ -1174,6 +1215,9 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 	return CommittedSessionView{SessionHandle: handle, Info: cloneSessionViewInfo(info)}, nil
 }
 
-func (s *remoteSession) SetTodoDescription(context.Context, string, string, string) ([]session.Todo, error) {
-	return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoDescription)
+func (s *remoteSession) SetTodoDescription(ctx context.Context, id, expectedDescription, description string) ([]session.Todo, error) {
+	if !s.Metadata().Capabilities.TodoEditing {
+		return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoDescription)
+	}
+	return s.editTodo(ctx, id, api.SessionTodoPatch{Description: &description, ExpectedDescription: &expectedDescription})
 }

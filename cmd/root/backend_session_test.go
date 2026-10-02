@@ -16,6 +16,11 @@ import (
 func TestRemoteBackendPassesAgentFileAsSessionSource(t *testing.T) {
 	var source, agent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v2/sessions/remote/snapshot" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"session":{"id":"remote","agent_name":"worker","title":"canonical"},"status":{"session_id":"remote","agent_name":"worker"}}`)
+			return
+		}
 		assert.Equal(t, "/api/v2/sessions", r.URL.Path)
 		var request struct {
 			Source    string `json:"source"`
@@ -39,6 +44,7 @@ func TestRemoteBackendPassesAgentFileAsSessionSource(t *testing.T) {
 	assert.NotNil(t, rt)
 	assert.NotNil(t, sessions)
 	assert.Equal(t, "remote", sess.ID)
+	assert.Equal(t, "canonical", sess.Title)
 	assert.Equal(t, "second.yaml", source)
 	assert.Equal(t, "worker", agent)
 }

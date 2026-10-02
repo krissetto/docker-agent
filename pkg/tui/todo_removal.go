@@ -36,7 +36,7 @@ func (m *appModel) openTodoRemoval(msg messages.EditTodoMsg) tea.Cmd {
 		return notification.InfoCmd("Todo no longer exists")
 	}
 	handle := data.application.SessionHandle()
-	if handle == nil || handle.ID() != msg.Scope.SessionID {
+	if handle == nil || !handle.Metadata().Capabilities.TodoEditing || handle.ID() != msg.Scope.SessionID {
 		return notification.ErrorCmd("Todo editing is unavailable")
 	}
 	request := todoRemovalConfirmedMsg{data: data, scope: msg.Scope, item: data.todos[index], handle: handle, revision: data.revision, selection: m.panelSelectionGeneration, routeGeneration: m.pendingRemovalGeneration}

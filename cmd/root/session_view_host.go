@@ -69,6 +69,16 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 		}
 	} else {
 		resolve = remoteViewOwnerResolver(f.sessionViewScope, f.sessionViewSource, sessions)
+		factory = func(_ context.Context, identity viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error) {
+			if identity.Scope != f.sessionViewScope || identity.Source != f.sessionViewSource {
+				return viewhost.ViewOwnerResources{}, viewOwnerError(identity.RootSessionID, "view_source", "source lifetime does not match this host")
+			}
+			opts := []app.Opt{app.WithRuntimeServices(services)}
+			if f.sessionReadOnly {
+				opts = append(opts, app.WithReadOnly())
+			}
+			return viewhost.ViewOwnerResources{Services: services, Sessions: sessions, NewApp: resolvedViewBuilder(sessions, opts)}, nil
+		}
 	}
 	if err := f.sessionViewHost.ConfigureSessionViews(ctx, viewhost.HostViewConfig{
 		Resolve:               resolve,

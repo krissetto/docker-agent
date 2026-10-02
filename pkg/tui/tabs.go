@@ -77,7 +77,7 @@ func (m *appModel) restoreTabs(
 
 	sessionStore := initialApp.SessionStore()
 	var summaries map[string]session.Summary
-	if sessionStore != nil {
+	if sessionStore != nil && m.sessionRestorer == nil {
 		if rows, err := sessionStore.GetSessionSummaries(ctx); err == nil {
 			summaries = make(map[string]session.Summary, len(rows))
 			for _, row := range rows {
@@ -95,6 +95,49 @@ func (m *appModel) restoreTabs(
 				_ = ts.RemoveTab(ctx, saved.SessionID)
 				continue
 			}
+		}
+
+		// Remote restorers attach saved identities directly. Never allocate a
+		// placeholder server session just to replace it on first focus.
+		if m.sessionRestorer != nil {
+			runtimeID := initialTabID
+			if saved.SessionID != initialApp.Session().ID {
+				spawned, err := m.sessionRestorer(ctx, saved.SessionID, saved.WorkingDir)
+				if err != nil {
+					slog.WarnContext(ctx, "Failed to restore remote tab", "session_id", saved.SessionID, "error", err)
+					continue
+				}
+				if spawned.App == nil || spawned.Session == nil || spawned.Session.ID != saved.SessionID || spawned.App.Session() == nil || spawned.App.Session().ID != saved.SessionID {
+					if spawned.App != nil {
+						spawned.App.Close()
+					}
+					if spawned.Ownership == RuntimeOwned && spawned.Cleanup != nil {
+						spawned.Cleanup()
+					}
+					slog.WarnContext(ctx, "Invalid restored session identity", "session_id", saved.SessionID)
+					continue
+				}
+				cleanup := spawned.Cleanup
+				if spawned.Ownership == RuntimeBorrowed {
+					cleanup = nil
+				}
+				runtimeID, err = sv.AddSession(ctx, spawned.App, spawned.Session, spawned.Session.WorkingDir, cleanup)
+				if err != nil {
+					spawned.App.Close()
+					if cleanup != nil {
+						cleanup()
+					}
+					continue
+				}
+			}
+			restoredFirst = true
+			if saved.SidebarCollapsed {
+				m.pendingSidebarCollapsed[runtimeID] = true
+			}
+			if saved.SessionID == savedActiveID {
+				m.pendingActiveTab = runtimeID
+			}
+			continue
 		}
 
 		// Determine the runtime tab ID to use.

@@ -36,74 +36,26 @@ import (
 // --- Session management ---
 
 func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Model, tea.Cmd) {
-	store := m.application.SessionStore()
-	if store == nil {
-		return m, notification.ErrorCmd("No session store configured")
+	if m.application.SessionRuntime() == nil && m.application.SessionHandle() == nil {
+		return m.handleLegacyBranchFromEdit(msg)
 	}
-	if msg.ParentSessionID == "" {
-		return m, notification.ErrorCmd("No parent session for branch")
+	if m.application.Session() == nil || msg.ParentSessionID != m.application.Session().ID {
+		return m, notification.ErrorCmd("Session changed; reopen the message before editing")
 	}
-	ctx := m.ctx()
-
-	parent, err := store.GetSession(ctx, msg.ParentSessionID)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load parent session: %v", err))
+	if msg.ExpectedSnapshot == "" {
+		return m, notification.ErrorCmd("Conversation changed; reopen the message before editing")
 	}
-
-	newSess, err := session.BranchSession(parent, msg.BranchAtPosition)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to branch session: %v", err))
-	}
-
-	// Apply live-session state before the store write so mid-session
-	// changes the store copy lacks (e.g. a mode downgrade) are persisted
-	// with the branch, not just patched in memory.
-	if current := m.application.Session(); current != nil {
-		newSess.AgentName = current.AgentName
-		newSess.HideToolResults = current.HideToolResults
-		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
-		// SetSafetyPolicy clears the toggle memory; restore the live one
-		// so a branch taken while escalated keeps its toggle-back
-		// destination. newSess is not yet shared — direct write is safe.
-		newSess.PriorSafetyPolicy = current.GetPriorSafetyPolicy()
-	}
-
-	if err := store.AddSession(ctx, newSess); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
-	}
-
-	cmd := m.beginHostedLoad(newSess.ID, m.paneFocus(), &messages.SendMsg{Content: msg.Content, Attachments: msg.Attachments})
-	return m, cmd
+	return m, m.beginBranch(runtime.BranchOptions{Position: &msg.BranchAtPosition, ExpectedSnapshot: msg.ExpectedSnapshot}, m.paneFocus(), &messages.SendMsg{Content: msg.Content, Attachments: msg.Attachments})
 }
 
 func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
-	currentSession := m.application.Session()
-	if currentSession == nil {
+	if m.application.SessionRuntime() == nil && m.application.SessionHandle() == nil {
+		return m.handleLegacyForkSession()
+	}
+	if m.application.Session() == nil {
 		return m, notification.ErrorCmd("No active session to fork")
 	}
-
-	store := m.application.SessionStore()
-	if store == nil {
-		return m, notification.ErrorCmd("No session store configured")
-	}
-
-	ctx := m.ctx()
-
-	// Fork the session and clone all messages.
-	forkedSession, err := session.BranchSession(currentSession, len(currentSession.Messages))
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to fork session: %v", err))
-	}
-
-	// BranchSession intentionally omits transient agent delegation. A private
-	// user fork retains the selected canonical destination before persistence.
-	forkedSession.AgentName = currentSession.AgentName
-	if err := store.AddSession(ctx, forkedSession); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save forked session: %v", err))
-	}
-
-	cmd := m.beginHostedLoad(forkedSession.ID, "", nil)
-	return m, cmd
+	return m, m.beginBranch(runtime.BranchOptions{}, "", nil)
 }
 
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
@@ -561,35 +513,32 @@ func (m *appModel) handleDropAttachedFile(path string) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleShowPermissionsDialog() (tea.Model, tea.Cmd) {
-	perms := m.application.PermissionsInfo()
-	sess := m.application.Session()
-	yoloEnabled := sess != nil && sess.IsToolsApproved()
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewPermissionsDialog(perms, yoloEnabled),
+	return m, m.capabilityCommand(func(ctx context.Context, a *app.App) tea.Msg {
+		info, err := a.EffectivePermissions(ctx)
+		if err != nil {
+			return notification.ShowMsg{Text: "Failed to load permissions: " + err.Error(), Type: notification.TypeError}
+		}
+		return dialog.OpenDialogMsg{Model: dialog.NewPermissionsDialog(app.CombinedPermissions(info), info.ToolsApproved)}
 	})
 }
 
 func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
-	agentTools, err := m.application.CurrentAgentTools(m.ctx())
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load tools: %v", err))
-	}
-	// Read toolset statuses *after* CurrentAgentTools so the snapshot
-	// reflects the same Started state the user just observed (Tools()
-	// drives lazy startup of any not-yet-started toolset).
-	statuses := m.application.CurrentAgentToolsetStatuses()
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewToolsDialog(statuses, agentTools),
+	return m, m.capabilityCommand(func(ctx context.Context, a *app.App) tea.Msg {
+		info, err := a.InspectTools(ctx)
+		if err != nil {
+			return notification.ShowMsg{Text: "Failed to load tools: " + err.Error(), Type: notification.TypeError}
+		}
+		return dialog.OpenDialogMsg{Model: dialog.NewToolsDialog(app.ToolsetStatuses(info), info.Tools)}
 	})
 }
 
 func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
-	skills, err := m.application.CurrentAgentSkillsContext(m.ctx())
-	if err != nil {
-		return m, notification.ErrorCmd("Failed to discover skills: " + err.Error())
-	}
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSkillsDialog(skills),
+	return m, m.capabilityCommand(func(ctx context.Context, a *app.App) tea.Msg {
+		list, err := a.CurrentAgentSkillsContext(ctx)
+		if err != nil {
+			return notification.ShowMsg{Text: "Failed to discover skills: " + err.Error(), Type: notification.TypeError}
+		}
+		return dialog.OpenDialogMsg{Model: dialog.NewSkillsDialog(list)}
 	})
 }
 
@@ -601,22 +550,12 @@ func (m *appModel) handleRestartToolset(name string) (tea.Model, tea.Cmd) {
 	if name == "" {
 		return m, notification.ErrorCmd("usage: /toolset-restart <name>")
 	}
-	appRef := m.application
-	return m, tea.Batch(
-		notification.InfoCmd(fmt.Sprintf("Restarting toolset %q…", name)),
-		func() tea.Msg {
-			if err := appRef.RestartToolset(m.ctx(), name); err != nil {
-				return notification.ShowMsg{
-					Text: fmt.Sprintf("Failed to restart %q: %v", name, err),
-					Type: notification.TypeError,
-				}
-			}
-			return notification.ShowMsg{
-				Text: fmt.Sprintf("Toolset %q restarted", name),
-				Type: notification.TypeSuccess,
-			}
-		},
-	)
+	return m, m.capabilityCommand(func(ctx context.Context, a *app.App) tea.Msg {
+		if err := a.RestartToolset(ctx, name); err != nil {
+			return notification.ShowMsg{Text: "Failed to restart toolset: " + err.Error(), Type: notification.TypeError}
+		}
+		return notification.ShowMsg{Text: fmt.Sprintf("Toolset %q restarted", name), Type: notification.TypeSuccess}
+	})
 }
 
 // --- MCP prompts ---
@@ -632,11 +571,14 @@ func (m *appModel) handleShowMCPPromptInput(promptName string, promptInfo any) (
 }
 
 func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]string) (tea.Model, tea.Cmd) {
-	promptContent, err := m.application.ExecuteMCPPrompt(m.ctx(), promptName, arguments)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Error executing MCP prompt '%s': %v", promptName, err))
-	}
-	return m, core.CmdHandler(messages.SendMsg{Content: promptContent})
+	return m, m.capabilityCommand(func(ctx context.Context, a *app.App) tea.Msg {
+		content, err := a.ExecuteMCPPrompt(ctx, promptName, arguments)
+		if err != nil {
+			return notification.ShowMsg{Text: "Failed to execute MCP prompt: " + err.Error(), Type: notification.TypeError}
+		}
+		// Prompt retrieval returns text only; the user chooses whether to submit it.
+		return messages.RestorePendingMessagesMsg{Content: content}
+	})
 }
 
 // --- Model picker ---
@@ -1400,4 +1342,77 @@ func (m *appModel) handleRoutedResume(origin string, msg messages.ResumeSessionM
 		return m, notification.ErrorCmd("Cannot resume session: " + err.Error())
 	}
 	return m, nil
+}
+
+// Legacy presentation-only embedders retain their local store workflow. Bound
+// sessions never enter this path, even if a peer lacks branching capability.
+func (m *appModel) handleLegacyBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Model, tea.Cmd) {
+	store := m.application.SessionStore()
+	if store == nil {
+		return m, notification.ErrorCmd("No session store configured")
+	}
+	if msg.ParentSessionID == "" {
+		return m, notification.ErrorCmd("No parent session for branch")
+	}
+	ctx := m.ctx()
+
+	parent, err := store.GetSession(ctx, msg.ParentSessionID)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load parent session: %v", err))
+	}
+
+	newSess, err := session.BranchSession(parent, msg.BranchAtPosition)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to branch session: %v", err))
+	}
+
+	// Apply live-session state before the store write so mid-session
+	// changes the store copy lacks (e.g. a mode downgrade) are persisted
+	// with the branch, not just patched in memory.
+	if current := m.application.Session(); current != nil {
+		newSess.AgentName = current.AgentName
+		newSess.HideToolResults = current.HideToolResults
+		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
+		// SetSafetyPolicy clears the toggle memory; restore the live one
+		// so a branch taken while escalated keeps its toggle-back
+		// destination. newSess is not yet shared — direct write is safe.
+		newSess.PriorSafetyPolicy = current.GetPriorSafetyPolicy()
+	}
+
+	if err := store.AddSession(ctx, newSess); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
+	}
+
+	cmd := m.beginHostedLoad(newSess.ID, m.paneFocus(), &messages.SendMsg{Content: msg.Content, Attachments: msg.Attachments})
+	return m, cmd
+}
+
+func (m *appModel) handleLegacyForkSession() (tea.Model, tea.Cmd) {
+	currentSession := m.application.Session()
+	if currentSession == nil {
+		return m, notification.ErrorCmd("No active session to fork")
+	}
+
+	store := m.application.SessionStore()
+	if store == nil {
+		return m, notification.ErrorCmd("No session store configured")
+	}
+
+	ctx := m.ctx()
+
+	// Fork the session and clone all messages.
+	forkedSession, err := session.BranchSession(currentSession, len(currentSession.Messages))
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to fork session: %v", err))
+	}
+
+	// BranchSession intentionally omits transient agent delegation. A private
+	// user fork retains the selected canonical destination before persistence.
+	forkedSession.AgentName = currentSession.AgentName
+	if err := store.AddSession(ctx, forkedSession); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save forked session: %v", err))
+	}
+
+	cmd := m.beginHostedLoad(forkedSession.ID, "", nil)
+	return m, cmd
 }

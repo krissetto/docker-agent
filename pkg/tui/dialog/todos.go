@@ -17,7 +17,8 @@ import (
 )
 
 type todosDialog struct {
-	lines *groupedList
+	readOnly bool
+	lines    *groupedList
 	pickerCore
 	scope                           messages.TodoScope
 	todos                           []session.Todo
@@ -38,8 +39,11 @@ type todosDialog struct {
 	pointerKnown                    bool
 }
 
-func NewTodosDialog(scope messages.TodoScope, todos []session.Todo, selected string) Dialog {
+func NewTodosDialog(scope messages.TodoScope, todos []session.Todo, selected string, readOnly ...bool) Dialog {
 	d := &todosDialog{pickerCore: newPickerCore(pickerLayout{WidthPercent: 85, MinWidth: 36, MaxWidth: 120, HeightPercent: 85, MaxHeight: 40, ListOverhead: 8}, ""), scope: scope, todos: slices.Clone(todos)}
+	if len(readOnly) > 0 {
+		d.readOnly = readOnly[0]
+	}
 	d.textInput.Blur()
 	for i, todo := range todos {
 		if todo.ID == selected {
@@ -50,7 +54,7 @@ func NewTodosDialog(scope messages.TodoScope, todos []session.Todo, selected str
 }
 func (d *todosDialog) Init() tea.Cmd { return nil }
 func (d *todosDialog) edit(status string, remove bool) tea.Cmd {
-	if d.busy || d.selected < 0 || d.selected >= len(d.todos) {
+	if d.readOnly || d.busy || d.selected < 0 || d.selected >= len(d.todos) {
 		return nil
 	}
 	id := d.todos[d.selected].ID
@@ -207,6 +211,9 @@ func (d *todosDialog) renderBody(prepare bool) string {
 	if inner < 20 && !d.busy && d.errorText == "" {
 		hint = "↑↓ · Space · d"
 	}
+	if d.readOnly {
+		hint = "Read only · ↑↓ choose · Esc close"
+	}
 	footer := styles.MutedStyle.Render(ansi.Wrap(hint, inner, ""))
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, d.preparedBody, footer)
@@ -247,7 +254,7 @@ func (d *todosDialog) selectedLine() int {
 }
 
 func (d *todosDialog) openEditor() tea.Cmd {
-	if d.busy || d.selected < 0 || d.selected >= len(d.todos) {
+	if d.readOnly || d.busy || d.selected < 0 || d.selected >= len(d.todos) {
 		return nil
 	}
 	return core.CmdHandler(messages.OpenTodoEditMsg{Scope: d.scope, ID: d.todos[d.selected].ID})

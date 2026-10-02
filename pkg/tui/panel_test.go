@@ -167,7 +167,7 @@ type panelTodoHandle struct {
 }
 
 func (h *panelTodoHandle) Metadata() runtime.SessionMetadata {
-	return runtime.SessionMetadata{SessionID: h.ID(), AgentName: "root", Capabilities: runtime.SessionCapabilities{Todos: h.capable}}
+	return runtime.SessionMetadata{SessionID: h.ID(), AgentName: "root", Capabilities: runtime.SessionCapabilities{Todos: h.capable, TodoEditing: h.capable}}
 }
 func (h *panelTodoHandle) Todos(context.Context) ([]session.Todo, error) {
 	h.calls++

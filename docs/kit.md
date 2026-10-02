@@ -4,22 +4,25 @@
 launcher, [seven-agent team](../kit/hackerspace.yaml) and initial user settings.
 Offline regression tests live in `tests/kit/`.
 
-## Build
+## Build and push
 
-From the repository root, with Docker Buildx and an OCI-export-capable builder
-(for example the `docker-container` driver):
+From the repository root, with Docker Buildx, a multi-platform-capable builder
+(for example the `docker-container` driver), and registry push access:
 
 ```sh
-task kit                                      # kagent:local-v3
-task kit -- namespace/kagent:trial
-KIT_PLATFORM=linux/amd64,linux/arm64 task kit -- namespace/kagent:trial
+task kit                       # docker.io/christopherpetito053/kagent
+task kit -- namespace/kagent    # override the repository, not a tag
 ```
 
-This **build-only** task exports a unique archive under ignored
-`dist/kit/v3.*/kit.oci.tar`: no load, prompt or push. Pass at most one image
-reference after `--`; it is not evaluated as shell input. `KIT_PLATFORM`
-overrides `DOCKER_DEFAULT_PLATFORM`; the default is `linux/amd64`.
-Task is optional; use direct Buildx for other options:
+This task **builds and pushes** `linux/amd64` and `linux/arm64` in one Buildx
+invocation, tagging both `:latest` and `:$GIT_COMMIT`. `GIT_COMMIT` defaults to the
+full current Git commit SHA and must be 40 lowercase hexadecimal characters.
+Pass only a repository after `--`, without a tag or digest; it is quoted, not
+evaluated as shell input. The task builds the working tree, including allowed
+untracked sources: a SHA tag alone does not establish a clean-commit build.
+**A successful push still requires the Kit metadata checks below before use.**
+
+For a build-only local archive instead, invoke Buildx directly:
 
 ```sh
 docker buildx build . -f kit/async-agent.yaml --platform linux/amd64 \
@@ -48,12 +51,14 @@ metadata: do not publish that image with `docker push` as a Kit. Use a repositor
 ending in **`kagent`**, not `docker-agent`: v3 registration uses the final repository
 component and otherwise collides with built-in `docker-agent`.
 
-Publishing is a separate maintainer action. The pinned frontend emits Kit
-annotations on platform manifests; consumers also need descriptor, schema-version
-and capabilities annotations on the top-level index. Plain `buildx --push` is not
-proof of a usable Kit. Use matching frontend/spec metadata with expanded build
-arguments, preserve platforms and provenance, and verify the remote index and
-referenced blobs before sharing an immutable reference. The local task contains
+The pinned frontend emits Kit annotations on platform manifests; consumers also
+need descriptor, schema-version and capabilities annotations on the top-level
+index. **`task kit` performs the push, not this top-level metadata promotion.**
+Plain `buildx --push` is not proof of a usable Kit. Before declaring a release,
+the maintainer must promote matching frontend/spec metadata with expanded build
+arguments to the index, preserve both platforms and provenance, and point both
+`:latest` and the full-SHA tag at the final index. Verify the remote index and
+referenced blobs before sharing its immutable digest reference. The task contains
 no annotation-repair or publisher framework.
 
 The descriptor pins the frontend matching spec
@@ -93,6 +98,80 @@ sbx run "$KIT_REF" /path/project -- --team './my team.yaml' \
 `--team=PATH` also works. Paths resolve inside the sandbox, not arbitrary host
 files. Missing, unreadable or non-file paths fail. Remaining arguments pass
 unchanged, including `--exec`, `--session ID`, `--session=-1` and prompts after `--`.
+
+### Persistent API and recovery
+
+The launcher runs the foreground TUI (or `--exec` client) with `--managed-api`.
+The Go helper starts or reuses one authenticated API server per sandbox workspace;
+concurrent launches serialize startup and verify server identity and readiness.
+The daemon has its own process group and private logs, with no terminal stdio.
+**Exiting or killing the TUI detaches the client, not accepted server work.** Use
+an explicit cancellation action to stop work. Reattach with `--session ID` or
+`--session=-1`; omitting these creates a new session.
+
+The optional long-running integration allows background sandbox lifetime when the
+host grants it. It is not a supervisor or a guarantee the sandbox stays running.
+After a server or sandbox restart, launch again with the same team, models and
+startup options to recover durable session state on the retained sandbox disk.
+This does **not** promise uninterrupted tools, surviving in-memory execution, or
+automatic replay of interrupted side effects. Deleting the sandbox deletes its
+local state.
+
+Team instructions, models and referenced team configuration are frozen in a
+committed startup snapshot. Different team contents, models or startup options
+fail clearly rather than silently reconfiguring or killing existing work; this
+also applies after a restart. Use the original inputs or a separate private
+`--managed-api-state-dir /home/agent/.cagent/managed-api-other` for a deliberately
+separate server and session history. Workspace context files and skill contents
+remain live inputs, not frozen instructions: their configured loaders read them
+at the usual runtime discovery points. Changing files is not a guarantee that
+already-assembled prompts or running tools reload immediately.
+
+Managed mode currently rejects `--fake`, `--fake-stream-delay` and `--record`;
+it does not proxy a foreground fake/record provider. For deterministic provider
+fixtures, use a separately configured `serve api` daemon and an explicit remote
+client outside the kit launcher.
+
+### API access and troubleshooting
+
+The managed listener binds guest **loopback only**, uses a private bearer token,
+and grants authenticated clients API-wide tool-execution authority. Clients are
+trusted peers, not isolated users or sessions. No port publication or browser
+CORS grant is added by this kit. For access outside the guest, use an explicit
+trusted tunnel; beyond loopback use TLS or a trusted tunnel and approve any
+browser origins explicitly. Direct SBX port publication targets the guest network
+address and cannot reach this loopback listener. A separately configured,
+authenticated non-loopback listener requires separate review; keep any host port
+binding loopback unless deliberately exposing it.
+
+Default managed state is under
+`/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/`. A custom
+`--managed-api-state-dir BASE` changes the base, not the workspace hash suffix.
+The directory is agent-owned `0700`; private `0600` files include `token`,
+`manifest.json`, `server.json`, `server.log` and `session.db`. The manifest contains
+frozen configuration; logs and the database can contain sensitive session data.
+Keep them out of the mounted workspace, transcripts and bug reports. Never print
+or share the token. The daemon alone owns its database and locking; do not start
+a second local client against that database or remove locks/state to bypass an
+incompatibility error.
+
+For readiness failures inspect the reported `server.log` locally, confirm state
+ownership/modes and free disk space, and check that the original workspace and
+startup inputs are still available. Stale server metadata is recovered under
+locks; a mismatched identity or occupied endpoint fails without killing another
+process. A settings/custom database path is not a substitute for the managed
+state base. Session listing from the SBX workspace uses:
+
+```sh
+/opt/async-agent/docker-agent sessions list --managed-api --quiet
+```
+
+Outside that directory supply `--working-dir /path/to/guest/workspace`; when using
+a custom state base supply the same `--managed-api-state-dir BASE`. Listing uses
+the active/committed server's source, not a newly selected default team. It may
+restart the committed server, but creates no sessions and opens no second local
+database. The descriptor uses the default state base; custom bases require the
+explicit list command.
 
 ## Credentials and network
 
@@ -153,20 +232,23 @@ provide filesystem isolation.
   SSH-agent signing (`unrestricted: false`, `sign: [git]`, no authentication).
   Configure an approved public signing key separately; never import private keys
   or host Git config.
-- **State:** sessions/data use the default `/home/agent/.cagent` on the sandbox's
+- **State:** managed sessions/data use
+  `/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/` on the sandbox's
   own disk, not a host mount, workspace directory or separate volume. The image
-  precreates it agent-owned `0700`; settings and custom database paths are separate.
+  precreates `/home/agent/.cagent` agent-owned `0700`; settings are separate.
   State persists while that sandbox's disk is retained, not after its deletion or
   in a fresh sandbox. Runtime controls retention and capacity. There is no live
   migration or automatic repair of existing mounts; an older sandbox with a state
   mount may need to be replaced with a fresh sandbox. Keep SQLite WAL/FULL
   durability on sandbox-local Linux storage, not shared or network filesystems.
   Reusing old custom-branch databases is not guaranteed.
-- **Detached lifetime:** background processes may survive client disconnect; this
-  does not keep the TUI attached, restart the app or resume idle subagents.
+- **Detached lifetime:** the API server survives TUI exit; optional host support
+  permits background sandbox lifetime, not process supervision or uninterrupted
+  execution across server/sandbox restarts.
 - **Sessions:** prompt `--exec -- PROMPT`, resume `--session ID`, continue
-  `--session=-1`. `/opt/async-agent/docker-agent sessions list --quiet` lists root
-  IDs newest first, without model startup, using the same data/config as resume.
+  `--session=-1`. `/opt/async-agent/docker-agent sessions list --managed-api --quiet`
+  lists root IDs newest first from the same server-owned history used by resume,
+  without creating sessions or opening a second local database.
 - **Diagnostics:** off by default; `--kit-arg diagnostics=on` permits local markers
   under `/home/agent/.local/state/async-agent-kit/probe`. Hooks run as agent without
   network or credentials; install appends per invocation, startup replaces `ready`.
@@ -182,6 +264,7 @@ the workspace. Do not combine this workload with built-in Docker Agent.
 ## Offline checks
 
 ```sh
+sh -n kit/launch.sh
 go test -count=1 ./tests/kit
 go vet ./tests/kit
 ```

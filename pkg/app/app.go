@@ -63,7 +63,8 @@ type sessionState struct {
 }
 
 type App struct {
-	ctx func() context.Context
+	commandMetadata commandMetadata
+	ctx             func() context.Context
 
 	stateMu                sync.RWMutex // guards currentState, published as one coherent immutable tuple
 	currentState           sessionState
@@ -455,7 +456,15 @@ func (a *App) InitialEventCommands() []EventCommand {
 
 // CurrentAgentTools returns the tools available to the current agent.
 func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
-	return a.runtime.CurrentAgentTools(ctx)
+	if h := a.SessionHandle(); h != nil && runtime.IsLocalSessionHandle(h) {
+		if provider, ok := a.runtime.(interface {
+			AgentTools(context.Context, string) ([]tools.Tool, error)
+		}); ok {
+			return provider.AgentTools(ctx, h.AgentName())
+		}
+	}
+	info, err := a.InspectTools(ctx)
+	return info.Tools, err
 }
 
 // agentConfigProvider is an optional runtime capability: exposing an agent's
@@ -481,11 +490,25 @@ func (a *App) AgentConfigInfo(ctx context.Context, agentName string) runtime.Age
 // CurrentAgentToolsetStatuses returns lifecycle status for each toolset of
 // the active agent.
 func (a *App) CurrentAgentToolsetStatuses() []tools.ToolsetStatus {
+	if a.SessionHandle() != nil {
+		a.commandMetadata.mu.RLock()
+		defer a.commandMetadata.mu.RUnlock()
+		if a.commandMetadata.handle != a.SessionHandle() {
+			return nil
+		}
+		return slices.Clone(a.commandMetadata.statuses)
+	}
 	return a.runtime.CurrentAgentToolsetStatuses()
 }
 
 // RestartToolset triggers a supervisor-driven restart of the named toolset.
 func (a *App) RestartToolset(ctx context.Context, name string) error {
+	if h := a.SessionHandle(); h != nil {
+		if p, ok := h.(runtime.SessionToolsetController); ok && h.Metadata().Capabilities.ToolsetRestart {
+			return p.RestartToolset(ctx, name)
+		}
+		return runtime.UnsupportedSessionOperation(h.ID(), "restart_toolset")
+	}
 	return a.runtime.RestartToolset(ctx, name)
 }
 
@@ -675,6 +698,14 @@ func (a *App) refreshAgentInfo(ctx context.Context) {
 
 // CurrentAgentCommands returns the commands for the active agent
 func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
+	if a.SessionHandle() != nil {
+		a.commandMetadata.mu.RLock()
+		defer a.commandMetadata.mu.RUnlock()
+		if a.commandMetadata.handle != a.SessionHandle() {
+			return nil
+		}
+		return a.commandMetadata.commands
+	}
 	return a.runtime.CurrentAgentInfo(ctx).Commands
 }
 
@@ -852,11 +883,21 @@ func (a *App) TrackCurrentAgentModel(model string) {
 
 // CurrentMCPPrompts returns the available MCP prompts for the active agent
 func (a *App) CurrentMCPPrompts(ctx context.Context) map[string]mcptools.PromptInfo {
+	if a.SessionHandle() != nil {
+		prompts, _ := a.CachedMCPPrompts()
+		return prompts
+	}
 	return a.runtime.CurrentMCPPrompts(ctx)
 }
 
 // ExecuteMCPPrompt executes an MCP prompt with provided arguments and returns the content
 func (a *App) ExecuteMCPPrompt(ctx context.Context, promptName string, arguments map[string]string) (string, error) {
+	if h := a.SessionHandle(); h != nil {
+		if p, ok := h.(runtime.SessionMCPPrompts); ok && h.Metadata().Capabilities.MCPPrompts {
+			return p.ExecuteMCPPrompt(ctx, promptName, arguments)
+		}
+		return "", runtime.UnsupportedSessionOperation(h.ID(), "mcp_prompt")
+	}
 	return a.runtime.ExecuteMCPPrompt(ctx, promptName, arguments)
 }
 
@@ -891,7 +932,7 @@ func (a *App) LookupCommand(ctx context.Context, userInput string) (types.Comman
 		return types.Command{}, "", false
 	}
 	head, rest, _ := strings.Cut(userInput, " ")
-	command, ok := a.runtime.CurrentAgentInfo(ctx).Commands[strings.TrimPrefix(head, "/")]
+	command, ok := a.CurrentAgentCommands(ctx)[strings.TrimPrefix(head, "/")]
 	return command, rest, ok
 }
 

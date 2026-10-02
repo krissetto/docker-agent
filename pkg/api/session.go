@@ -58,6 +58,7 @@ type SessionResource[State ~string] struct {
 }
 
 type SessionCreateRequest struct {
+	SessionID       string `json:"session_id,omitempty"`
 	Source          string `json:"source,omitempty"`
 	AgentName       string `json:"agent_name"`
 	Model           string `json:"model,omitempty"`
@@ -83,19 +84,25 @@ type SessionMetadata struct {
 }
 
 type SessionCapabilities struct {
-	AvailableModels     []string `json:"available_models,omitempty"`
-	Durability          string   `json:"durability,omitempty"`
-	Compaction          bool     `json:"compaction,omitempty"`
-	TargetCompaction    bool     `json:"target_compaction,omitempty"`
-	ModelSwitching      bool     `json:"model_switching,omitempty"`
-	ContextInspection   bool     `json:"context_inspection,omitempty"`
-	LiveSessions        bool     `json:"live_sessions,omitempty"`
-	SessionEditing      bool     `json:"session_editing,omitempty"`
-	ForkSkills          bool     `json:"fork_skills,omitempty"`
-	Pause               bool     `json:"pause,omitempty"`
-	ModelCatalogRefresh bool     `json:"model_catalog_refresh,omitempty"`
-	ThinkingLevels      bool     `json:"thinking_levels,omitempty"`
-	Todos               bool     `json:"todos,omitempty"`
+	ToolInspection        bool     `json:"tool_inspection,omitempty"`
+	ToolsetRestart        bool     `json:"toolset_restart,omitempty"`
+	PermissionsInspection bool     `json:"permissions_inspection,omitempty"`
+	MCPPrompts            bool     `json:"mcp_prompts,omitempty"`
+	TodoEditing           bool     `json:"todo_editing,omitempty"`
+	Branching             bool     `json:"branching,omitempty"`
+	AvailableModels       []string `json:"available_models,omitempty"`
+	Durability            string   `json:"durability,omitempty"`
+	Compaction            bool     `json:"compaction,omitempty"`
+	TargetCompaction      bool     `json:"target_compaction,omitempty"`
+	ModelSwitching        bool     `json:"model_switching,omitempty"`
+	ContextInspection     bool     `json:"context_inspection,omitempty"`
+	LiveSessions          bool     `json:"live_sessions,omitempty"`
+	SessionEditing        bool     `json:"session_editing,omitempty"`
+	ForkSkills            bool     `json:"fork_skills,omitempty"`
+	Pause                 bool     `json:"pause,omitempty"`
+	ModelCatalogRefresh   bool     `json:"model_catalog_refresh,omitempty"`
+	ThinkingLevels        bool     `json:"thinking_levels,omitempty"`
+	Todos                 bool     `json:"todos,omitempty"`
 }
 
 type SessionThinkingLevel struct {

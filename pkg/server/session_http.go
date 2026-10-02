@@ -66,6 +66,15 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.PATCH("/:id/title", s.updateCanonicalSessionTitle)
 	group.GET("/:id/tree", s.sessionTree)
 	group.GET("/:id/todos", s.sessionTodos)
+	group.PATCH("/:id/todos/:todoID", s.canonicalEditTodo)
+	group.DELETE("/:id/todos/:todoID", s.canonicalRemoveTodo)
+	group.GET("/:id/tools", s.canonicalSessionTools)
+	group.GET("/:id/agent-info", s.canonicalSessionAgentInfo)
+	group.POST("/:id/toolsets/restart", s.canonicalRestartToolset)
+	group.GET("/:id/permissions", s.canonicalSessionPermissions)
+	group.GET("/:id/mcp/prompts", s.canonicalSessionPrompts)
+	group.POST("/:id/mcp/prompts/execute", s.canonicalExecutePrompt)
+	group.POST("/:id/branches", s.canonicalBranchSession)
 	group.POST("/:id/compact", s.compactCanonicalSession)
 	group.POST("/:id/compact/:target", s.compactCanonicalTarget)
 	group.GET("/:id/context", s.canonicalSessionContext)
@@ -708,6 +717,7 @@ func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamM
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 	capabilities := meta.Capabilities
 	return sessionMetadataDTO{SessionID: meta.SessionID, AgentName: meta.AgentName, Model: meta.Model, ThinkingLevels: meta.ThinkingLevels, ThinkingLevel: meta.ThinkingLevel, Capabilities: sessionCapabilitiesDTO{
+		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: capabilities.AvailableModels, Durability: string(capabilities.Durability), Compaction: capabilities.Compaction,
 		TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching, ContextInspection: capabilities.ContextInspection,
 		LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,

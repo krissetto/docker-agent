@@ -78,33 +78,37 @@ type runExecFlags struct {
 	// resume handling mutate runConfig.WorkingDir; only an explicit flag
 	// makes generic new-session actions in the TUI reuse the initial
 	// session's directory instead of opening the picker.
-	workingDirChanged bool
-	attachmentPath    string
-	remoteAddress     string
-	modelOverrides    []string
-	promptFiles       []string
-	dryRun            bool
-	runConfig         config.RuntimeConfig
-	sessionDB         string
-	sessionID         string
-	recordPath        string
-	fakeResponses     string
-	fakeStreamDelay   int
-	exitAfterResponse bool
-	cpuProfile        string
-	memProfile        string
-	forceTUI          bool
-	tour              bool
-	sandbox           bool
-	sandboxTemplate   string
-	sbx               bool
-	noKit             bool
-	agentPickerSpec   string
-	worktree          bool
-	worktreeName      string
-	worktreePR        string
-	worktreeBase      string
-	sessionReadOnly   bool
+	workingDirChanged   bool
+	attachmentPath      string
+	remoteAddress       string
+	remoteAuthTokenFile string
+	remoteWorkingDir    string
+	managedAPI          bool
+	managedAPIStateDir  string
+	modelOverrides      []string
+	promptFiles         []string
+	dryRun              bool
+	runConfig           config.RuntimeConfig
+	sessionDB           string
+	sessionID           string
+	recordPath          string
+	fakeResponses       string
+	fakeStreamDelay     int
+	exitAfterResponse   bool
+	cpuProfile          string
+	memProfile          string
+	forceTUI            bool
+	tour                bool
+	sandbox             bool
+	sandboxTemplate     string
+	sbx                 bool
+	noKit               bool
+	agentPickerSpec     string
+	worktree            bool
+	worktreeName        string
+	worktreePR          string
+	worktreeBase        string
+	sessionReadOnly     bool
 
 	// Exec only
 	exec          bool
@@ -196,6 +200,12 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringArrayVar(&flags.modelOverrides, "model", nil, "Override agent model: [agent=]provider/model (repeatable)")
 	cmd.PersistentFlags().BoolVar(&flags.dryRun, "dry-run", false, "Initialize the agent without executing anything")
 	cmd.PersistentFlags().StringVar(&flags.remoteAddress, "remote", "", "Use remote runtime with specified address")
+	cmd.PersistentFlags().StringVar(&flags.remoteAuthTokenFile, "remote-auth-token-file", "", "Read remote API bearer token from a private file")
+	cmd.PersistentFlags().StringVar(&flags.remoteWorkingDir, "remote-working-dir", "", "Select a working directory on the remote server (not a local path)")
+	cmd.PersistentFlags().BoolVar(&flags.managedAPI, "managed-api", false, "Start or reuse a private managed API server")
+	cmd.PersistentFlags().StringVar(&flags.managedAPIStateDir, "managed-api-state-dir", "", "Private managed API state directory")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api-state-dir")
 	cmd.PersistentFlags().StringVarP(&flags.sessionDB, "session-db", "s", "", "Path to the session database (default: <data-dir>/session.db)")
 	cmd.PersistentFlags().StringVar(&flags.sessionID, "session", "", "Continue from a previous session by ID or relative offset (e.g., -1 for last session). An explicit ID that does not exist yet is created with that ID.")
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
@@ -238,7 +248,12 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "sandbox")
 	cmd.MarkFlagsMutuallyExclusive("remote", "session-db")
-	cmd.MarkFlagsMutuallyExclusive("remote", "session")
+	cmd.MarkFlagsMutuallyExclusive("remote", "managed-api")
+	cmd.MarkFlagsMutuallyExclusive("managed-api", "sandbox")
+	cmd.MarkFlagsMutuallyExclusive("managed-api", "session-db")
+	cmd.MarkFlagsMutuallyExclusive("managed-api", "worktree")
+	cmd.MarkFlagsMutuallyExclusive("managed-api", "worktree-pr")
+	cmd.MarkFlagsMutuallyExclusive("managed-api", "worktree-base")
 	cmd.MarkFlagsMutuallyExclusive("remote", "record")
 	cmd.MarkFlagsMutuallyExclusive("remote", "fake")
 	// A worktree is a local directory: it has no meaning for a remote runtime
@@ -287,6 +302,12 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 
 	if err := validateSafetyFlag(f.safety); err != nil {
 		return err
+	}
+	if f.remoteAddress == "" && !f.managedAPI && (f.remoteAuthTokenFile != "" || f.remoteWorkingDir != "") {
+		return errors.New("--remote-auth-token-file and --remote-working-dir require --remote")
+	}
+	if !f.managedAPI && f.managedAPIStateDir != "" {
+		return errors.New("--managed-api-state-dir requires --managed-api")
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
@@ -350,7 +371,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	// An explicit --sandbox=<bool> on the CLI always wins, so we only
 	// consult the lower-priority sources when the flag wasn't set.
 	var agentCfg *latestcfg.Config
-	if !cmd.Flags().Changed("sandbox") {
+	if !cmd.Flags().Changed("sandbox") && f.remoteAddress == "" && !f.managedAPI {
 		var agentRef string
 		if len(args) > 0 {
 			agentRef = args[0]
@@ -427,6 +448,13 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// Build global permissions checker from user config settings.
 	if userSettings.Permissions != nil {
 		f.globalPermissions = permissions.NewChecker(userSettings.Permissions)
+	}
+
+	if f.managedAPI {
+		agentFileName, err = f.bootstrapManagedAPI(ctx, agentFileName)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Start fake proxy if --fake is specified
@@ -559,6 +587,14 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 
 	var rec *recorder.Recorder
 	tuiOptions := append(f.tuiOpts(args), tui.WithSupervisor(f.sessionViewHost))
+	if restorer, ok := b.(interface {
+		Restorer(app.Services, runtime.SessionRuntime) tui.SessionRestorer
+	}); ok {
+		tuiOptions = append(tuiOptions, tui.WithSessionRestorer(restorer.Restorer(rt, sessions)))
+	}
+	if f.remoteAddress != "" {
+		tuiOptions = append(tuiOptions, tui.WithRemoteWorkspace(sess.WorkingDir))
+	}
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
 		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
 	}
@@ -1120,6 +1156,9 @@ func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
 // working dir, then process CWD) so new tabs open exactly where the initial
 // session did — the worktree or resume directory, not the raw flag value.
 func (f *runExecFlags) explicitDefaultWorkingDir(sess *session.Session) string {
+	if f.remoteAddress != "" {
+		return sess.WorkingDir
+	}
 	if !f.workingDirChanged {
 		return ""
 	}

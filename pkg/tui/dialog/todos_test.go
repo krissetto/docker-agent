@@ -266,3 +266,12 @@ func TestTodosKeyboardStatusCycleAndSnapshotError(t *testing.T) {
 	require.Equal(t, "pending", d.todos[0].Status)
 	require.Contains(t, ansi.Strip(d.View()), "save failed")
 }
+
+func TestTodosReadOnlyCapabilityRejectsEditing(t *testing.T) {
+	d := NewTodosDialog(messages.TodoScope{}, []session.Todo{{ID: "one", Description: "inspect only", Status: "pending"}}, "one", true).(*todosDialog)
+	d.SetSize(80, 25)
+	require.Nil(t, d.edit("completed", false))
+	require.Nil(t, d.edit("", true))
+	require.Nil(t, d.openEditor())
+	require.Contains(t, ansi.Strip(d.View()), "Read only")
+}

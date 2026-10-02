@@ -212,7 +212,7 @@ func TestNativeKit(t *testing.T) {
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--session", "{{.SessionID}}"},
 		"continue": []any{"--session=-1"},
-		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--quiet"},
+		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"},
 	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
 	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
 	assert.True(t, lifecycle.Optional)
@@ -332,7 +332,7 @@ func TestLauncher(t *testing.T) {
 		}
 		expected := []string{
 			"0", "run", filepath.Join(configDir, "hackerspace.yaml"),
-			"--working-dir", workspace,
+			"--managed-api", "--working-dir", workspace,
 			"--model", "openai/example", "--dry-run",
 		}
 		assert.Equal(t, expected, strings.Split(strings.TrimSpace(string(out)), "\n"))

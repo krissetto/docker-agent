@@ -531,6 +531,7 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 		forkSkills = slices.ContainsFunc(st.Skills(), func(skill skills.Skill) bool { return skill.IsFork() })
 	}
 	return SessionMetadata{SessionID: h.sessionID, AgentName: h.AgentName(), Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
+		ToolInspection: true, ToolsetRestart: true, PermissionsInspection: true, MCPPrompts: true, TodoEditing: true, Branching: true,
 		AvailableModels: available, Durability: durability,
 		Compaction: true, TargetCompaction: true, ModelSwitching: modelSwitching, ContextInspection: true, LiveSessions: true, SessionEditing: true,
 		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: modelSwitching && len(levels) > 1, Todos: true,

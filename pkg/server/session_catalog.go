@@ -274,6 +274,26 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	if strings.TrimSpace(req.AgentName) == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "agent_name is required")
 	}
+	if req.SessionID != "" {
+		if !validSessionCreateID(req.SessionID) {
+			return sessionRequestError("invalid session_id")
+		}
+		if req.ParentSessionID != "" {
+			return sessionRequestError("session_id is supported only for root sessions")
+		}
+		// Share the restore lock so a caller cannot race cold attachment or another
+		// create into replacing a durable identity. POST create is never attach.
+		unlock := s.sm.sessionRestoreLocks.lock(req.SessionID)
+		defer unlock()
+		if _, err := s.sm.sessionStore.GetSession(c.Request().Context(), req.SessionID); err == nil {
+			return sessionHTTPError(&runtime.SessionError{Kind: runtime.SessionErrorConflict, SessionID: req.SessionID, Operation: "create_session"})
+		} else if !errors.Is(err, session.ErrNotFound) {
+			return sessionHTTPError(err)
+		}
+		if _, loaded := s.sm.runtimeSessions.Load(req.SessionID); loaded {
+			return sessionHTTPError(&runtime.SessionError{Kind: runtime.SessionErrorConflict, SessionID: req.SessionID, Operation: "create_session"})
+		}
+	}
 	registry, source, err := s.sm.sessionRegistryForCreate(req.Source)
 	if err != nil {
 		return sessionHTTPError(err)
@@ -292,6 +312,9 @@ func (s *Server) createCanonicalSession(c echo.Context) error {
 	sess, err := s.sm.prepareSession(template)
 	if err != nil {
 		return sessionHTTPError(err)
+	}
+	if req.SessionID != "" {
+		sess.ID = req.SessionID
 	}
 	sess.AgentName = req.AgentName
 	if sess.GetSafetyPolicy() == "" && !sess.ToolsApproved {
@@ -476,4 +499,19 @@ func (sm *SessionManager) sessionRestoreRoot(ctx context.Context, sess *session.
 		root = parent
 	}
 	return root, nil
+}
+
+// Explicit IDs are URL path segments and durable storage keys. Keep the public
+// alphabet portable; never accept encoded separators or control characters.
+func validSessionCreateID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for _, c := range id {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }

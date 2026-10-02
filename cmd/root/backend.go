@@ -192,6 +192,7 @@ func (b *localBackend) Close() error {
 type remoteBackend struct {
 	flags         *runExecFlags
 	agentFileName string
+	model         string
 }
 
 func (b *remoteBackend) LoadTeamRequest() runtime.LoadTeamRequest {
@@ -207,66 +208,52 @@ func (b *remoteBackend) LoadTeam(context.Context, runtime.LoadTeamRequest) (*tea
 	return nil, nil
 }
 
-func (b *remoteBackend) CreateSessionRequest(workingDir string) runtime.CreateSessionRequest {
-	return b.flags.createSessionRequest(workingDir)
+func (b *remoteBackend) CreateSessionRequest(string) runtime.CreateSessionRequest {
+	// A client's checkout is never a server workspace. Only the explicitly
+	// remote flag (or managed bootstrap mapping) crosses this boundary.
+	return b.flags.createSessionRequest(b.flags.remoteWorkingDir)
 }
 
 func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadResult, req runtime.CreateSessionRequest) (app.Services, runtime.SessionRuntime, *session.Session, func(), error) {
-	client, err := runtime.NewClient(b.flags.remoteAddress)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create remote client: %w", err)
-	}
-
-	sessionRuntime, err := runtime.NewSessionTransport(client, runtime.WithSessionTransportSource(b.agentFileName))
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create remote session transport: %w", err)
-	}
-	sessTemplate := session.New(
-		session.WithToolsApproved(req.ToolsApproved),
-		session.WithSafetyPolicy(req.SafetyPolicy),
-		// WorkingDir is intentionally not sent: the client checkout is not the
-		// remote server's workspace. The server establishes its own workspace
-		// provenance for the session it creates (see server.SessionManager).
-	)
-	handle, err := sessionRuntime.CreateSession(ctx, sessTemplate, runtime.SessionBinding{AgentName: req.AgentName})
+	client, err := newRemoteClient(b.flags.remoteAddress, b.flags.remoteAuthTokenFile)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	sess := session.New(
-		session.WithID(handle.ID()),
-		session.WithAgentName(handle.AgentName()),
-		session.WithToolsApproved(req.ToolsApproved),
-		session.WithSafetyPolicy(req.SafetyPolicy),
-	)
-
+	if b.agentFileName == "" {
+		sources, err := client.GetAgents(ctx)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if len(sources) != 1 {
+			return nil, nil, nil, nil, fmt.Errorf("remote server has %d sources; specify the exact server source", len(sources))
+		}
+		b.agentFileName = sources[0].Name
+	}
+	transport, err := runtime.NewSessionTransport(client, runtime.WithSessionTransportSource(b.agentFileName))
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	handle, sess, err := b.openSession(ctx, client, transport, req)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	b.model = handle.Metadata().Model
 	services, err := runtime.NewRemoteServices(client,
-		runtime.WithRemoteCurrentAgent(req.AgentName),
+		runtime.WithRemoteCurrentAgent(handle.AgentName()),
 		runtime.WithRemoteAgentFilename(b.agentFileName),
 	)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to create remote runtime: %w", err)
+		return nil, nil, nil, nil, err
 	}
-
-	slog.DebugContext(ctx, "Using remote runtime", "address", b.flags.remoteAddress, "agent", req.AgentName)
-
-	cleanup := func() {
-		if err := services.Close(); err != nil {
-			slog.ErrorContext(ctx, "Failed to close remote runtime", "error", err)
-		}
-	}
-	return services, sessionRuntime, sess, cleanup, nil
+	// Both resources are borrowed. Disconnecting never releases the server's
+	// execution owner, cancels work, or shuts down the server.
+	return services, transport, sess, func() {}, nil
 }
 
-func (b *remoteBackend) Spawner(app.Services, runtime.SessionRuntime) tui.SessionSpawner {
-	return nil
+func (b *remoteBackend) Spawner(services app.Services, sessions runtime.SessionRuntime) tui.SessionSpawner {
+	return b.remoteSpawner(services, sessions)
 }
 
-// ResumeWorkingDir never resolves remotely: --remote is mutually exclusive
-// with --session (and with --worktree), so there is no local session to peek.
-func (b *remoteBackend) ResumeWorkingDir(context.Context) (string, bool) {
-	return "", false
-}
-
-func (b *remoteBackend) Close() error {
-	return nil
-}
+// ResumeWorkingDir never touches the client's filesystem for a server path.
+func (b *remoteBackend) ResumeWorkingDir(context.Context) (string, bool) { return "", false }
+func (b *remoteBackend) Close() error                                    { return nil }

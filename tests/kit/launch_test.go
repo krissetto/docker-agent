@@ -55,6 +55,7 @@ func TestLauncherTeamSelection(t *testing.T) {
 		{name: "headless prompt", args: []string{"--exec", "--", "--team"}, forwarded: []string{"--exec", "--", "--team"}},
 		{name: "resume", args: []string{"--session", "--team"}, forwarded: []string{"--session", "--team"}},
 		{name: "continue", args: []string{"--session=-1"}, forwarded: []string{"--session=-1"}},
+		{name: "managed state", args: []string{"--managed-api-state-dir", "private state\n$(touch INJECTED)"}, forwarded: []string{"--managed-api-state-dir", "private state\n$(touch INJECTED)"}},
 		{name: "model value", args: []string{"--model", "--team", "--dry-run"}, forwarded: []string{"--model", "--team", "--dry-run"}},
 		{name: "prompt string", args: []string{"discuss --team team.yaml"}, forwarded: []string{"discuss --team team.yaml"}},
 		{name: "empty argument", args: []string{"", "--team", "team.yaml"}, forwarded: []string{"", "--team", "team.yaml"}},
@@ -84,9 +85,34 @@ func TestLauncherTeamSelection(t *testing.T) {
 			if team == "" {
 				team = filepath.Join(workspace, "hackerspace.yaml")
 			}
-			expected := append([]string{"run", team, "--working-dir", workspace}, tc.forwarded...)
+			expected := append([]string{"run", team, "--managed-api", "--working-dir", workspace}, tc.forwarded...)
 			assert.Equal(t, expected, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
 			assert.NoFileExists(t, filepath.Join(workspace, "INJECTED"))
 		})
 	}
+}
+
+func TestLauncherManagedEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runtime launcher")
+	}
+	script, err := os.ReadFile(kitPath(t, "launch.sh"))
+	require.NoError(t, err)
+	home := t.TempDir()
+	launcher := filepath.Join(home, "launch.sh")
+	script = []byte(strings.ReplaceAll(string(script), "/opt/async-agent", home))
+	require.NoError(t, os.WriteFile(launcher, script, 0o700))
+	stub := "#!/bin/sh\nprintf '%s\\0' \"$DOCKER_AGENT_AUTO_UPDATE\" \"$DOCKER_AGENT_NO_TOUR\" \"$DOCKER_AGENT_HIDE_TELEMETRY_BANNER\" \"$TELEMETRY_ENABLED\"\nexit 23\n"
+	require.NoError(t, os.WriteFile(filepath.Join(home, "docker-agent"), []byte(stub), 0o700))
+	t.Setenv("DOCKER_AGENT_AUTO_UPDATE", "1")
+	t.Setenv("DOCKER_AGENT_NO_TOUR", "0")
+	t.Setenv("DOCKER_AGENT_HIDE_TELEMETRY_BANNER", "0")
+	t.Setenv("TELEMETRY_ENABLED", "true")
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", launcher)
+	cmd.Dir = home
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, string(out))
+	assert.Equal(t, 23, exitErr.ExitCode(), "foreground client exit status is preserved")
+	assert.Equal(t, "0\x001\x001\x00false\x00", string(out))
 }

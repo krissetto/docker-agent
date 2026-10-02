@@ -210,6 +210,30 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 				return err
 			}},
 		},
+
+		"ToolInspection": {{"inspect_tools", func() error { _, err := handle.(SessionToolInspector).InspectTools(t.Context()); return err }}},
+		"ToolsetRestart": {{"restart_toolset", func() error { return handle.(SessionToolsetController).RestartToolset(t.Context(), "missing") }}},
+		"PermissionsInspection": {{"permissions", func() error {
+			_, err := handle.(SessionPermissionsInspector).EffectivePermissions(t.Context())
+			return err
+		}}},
+		"MCPPrompts": {
+			{"mcp_prompts", func() error { _, err := handle.(SessionMCPPrompts).MCPPrompts(t.Context()); return err }},
+			{"mcp_prompt", func() error {
+				_, err := handle.(SessionMCPPrompts).ExecuteMCPPrompt(t.Context(), "missing", nil)
+				return err
+			}},
+		},
+		"Branching": {{"branch", func() error {
+			remote := handle.(*remoteSession)
+			_, _, err := remote.runtime.BranchSession(t.Context(), handle.ID(), BranchOptions{})
+			return err
+		}}},
+		"TodoEditing": {
+			{SessionOperationSetTodoStatus, func() error { _, err := handle.SetTodoStatus(t.Context(), "missing", "completed"); return err }},
+			{SessionOperationSetTodoDescription, func() error { _, err := handle.SetTodoDescription(t.Context(), "missing", "old", "new"); return err }},
+			{SessionOperationRemoveTodo, func() error { _, err := handle.RemoveTodo(t.Context(), "missing"); return err }},
+		},
 		"Todos": {
 			{SessionOperationTodos, func() error { _, err := handle.Todos(t.Context()); return err }},
 			{SessionOperationSetTodoStatus, func() error { _, err := handle.SetTodoStatus(t.Context(), "missing", "completed"); return err }},

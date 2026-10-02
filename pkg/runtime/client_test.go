@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +80,26 @@ func TestClientCanonicalObservationStopsWhenContextCancelled(t *testing.T) {
 		assert.False(t, ok)
 	case <-time.After(time.Second):
 		t.Fatal("observation did not close after cancellation")
+	}
+}
+
+func TestClientGetAgentPreservesFullSourceIdentityAsPathSegment(t *testing.T) {
+	for _, source := range []string{"/workspace/team.yaml", "/workspace/team with space%#.yaml"} {
+		t.Run(source, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/prefix/api/agents/"+url.PathEscape(source), r.URL.EscapedPath())
+				encoded := strings.TrimPrefix(r.URL.EscapedPath(), "/prefix/api/agents/")
+				decoded, err := url.PathUnescape(encoded)
+				assert.NoError(t, err)
+				assert.Equal(t, source, decoded)
+				assert.Empty(t, r.URL.RawQuery)
+				fmt.Fprint(w, `{}`)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL + "/prefix")
+			require.NoError(t, err)
+			_, err = client.GetAgent(t.Context(), source)
+			require.NoError(t, err)
+		})
 	}
 }

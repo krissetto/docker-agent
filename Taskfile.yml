@@ -13,19 +13,24 @@ env:
 
 tasks:
   kit:
-    desc: Export a local Kit v3 OCI archive (no load or push; see docs/kit.md)
+    desc: Build and push Kit v3 for amd64/arm64 with latest and full Git SHA tags
     env:
-      KIT_REFERENCE: "{{.CLI_ARGS}}"
+      KIT_REPOSITORY: "{{.CLI_ARGS}}"
+      BUILDX_GIT_CHECK_DIRTY: "1"
     cmds:
       - |
         set -eu
-        mkdir -p dist/kit
-        output=$(mktemp -d dist/kit/v3.XXXXXX)
+        case "$GIT_COMMIT" in
+          ''|*[!0-9a-f]*) echo 'kit requires a full Git commit SHA' >&2; exit 1 ;;
+        esac
+        [ "${#GIT_COMMIT}" -eq 40 ] || { echo 'kit requires a full Git commit SHA' >&2; exit 1; }
+        repository="${KIT_REPOSITORY:-docker.io/christopherpetito053/kagent}"
+        # The pinned frontend needs top-level Kit metadata promotion after push for SBX; see docs/kit.md.
         docker buildx build . -f kit/async-agent.yaml \
-          --platform "${KIT_PLATFORM:-${DOCKER_DEFAULT_PLATFORM:-linux/amd64}}" \
-          --tag "${KIT_REFERENCE:-kagent:local-v3}" \
-          --output "type=oci,dest=$output/kit.oci.tar"
-        printf 'Local OCI archive (not published or imported into SBX): %s/kit.oci.tar\n' "$output"
+          --platform linux/amd64,linux/arm64 \
+          --tag "$repository:latest" \
+          --tag "$repository:$GIT_COMMIT" \
+          --push
 
   default:
     desc: Run lint, test, and build

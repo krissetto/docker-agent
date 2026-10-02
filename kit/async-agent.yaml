@@ -86,7 +86,7 @@ capabilities:
       prompt: ["--exec", "--", "{{.Prompt}}"]
       resume: ["--session", "{{.SessionID}}"]
       continue: ["--session=-1"]
-      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--quiet"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"]
   - type: com.docker.sandbox/agent-context@1
     optional: true
     config:

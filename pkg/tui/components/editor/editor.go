@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/internal/widget"
@@ -578,6 +579,13 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
+	case commands.CategoriesUpdatedMsg:
+		for i, c := range e.completions {
+			if c.Trigger() == "/" {
+				e.completions[i] = completions.NewCommandCompletion(msg.Categories)
+			}
+		}
+		return e, nil
 	case recordingDotsTickMsg:
 		if !e.recording {
 			return e, nil

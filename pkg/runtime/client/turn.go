@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -158,7 +159,7 @@ func RunTurnWithHandler(ctx context.Context, session runtime.SessionHandle, inpu
 	if session == nil || handler == nil {
 		return runtime.Submission{}, TurnTermination{}, errors.New("session and handler are required")
 	}
-	observation, err := session.Observe(ctx, runtime.ObserveOptions{})
+	observation, err := observeTurnStartup(ctx, session, observationRetryPolicy{wait: waitRetry, now: time.Now})
 	if err != nil {
 		return runtime.Submission{}, TurnTermination{}, fmt.Errorf("observe turn: %w", err)
 	}
@@ -175,7 +176,7 @@ func RunTurnWithHandler(ctx context.Context, session runtime.SessionHandle, inpu
 		}
 		return runtime.Submission{}, TurnTermination{}, fmt.Errorf("submit turn: %w", err)
 	}
-	termination := ConsumeTurn(ctx, observation, submission.TurnID, handler.HandleTurn)
+	termination := consumeAcceptedTurn(ctx, session, observation, submission.TurnID, handler.HandleTurn, observationRetryPolicy{wait: waitRetry, now: time.Now})
 	return submission, termination, nil
 }
 
@@ -186,6 +187,10 @@ func RunTurnWithHandler(ctx context.Context, session runtime.SessionHandle, inpu
 // before termination. Context cancellation terminates consumption. The
 // observation is canceled exactly once on return.
 func ConsumeTurn(ctx context.Context, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error)) TurnTermination {
+	return consumeTurn(ctx, observation, turnID, handler, nil, nil)
+}
+
+func consumeTurn(ctx context.Context, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), cursor *uint64, progress func()) TurnTermination {
 	if observation.Cancel != nil {
 		defer observation.Cancel()
 	}
@@ -199,6 +204,15 @@ func ConsumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 	consume := func(envelope runtime.SessionEvent) (bool, TurnTermination) {
 		if envelope.Gap {
 			return false, TurnTermination{ObservationError: true, Err: &ObservationGapError{FirstAvailable: envelope.FirstAvailable}}
+		}
+		if cursor != nil && envelope.Sequence != 0 {
+			if envelope.Sequence <= *cursor {
+				return true, TurnTermination{}
+			}
+			*cursor = envelope.Sequence
+			if progress != nil {
+				progress()
+			}
 		}
 		if envelope.TurnID != turnID {
 			return true, TurnTermination{}
@@ -244,7 +258,22 @@ func ConsumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 				continue
 			}
 			if err != nil {
-				return TurnTermination{ObservationError: true, Err: err}
+				// A remote reader can enqueue its final event and terminal error
+				// together. Drain the bounded queued tail before reconnecting;
+				// otherwise select could discard a completed turn or interaction.
+				for {
+					select {
+					case envelope, open := <-events:
+						if !open {
+							return TurnTermination{ObservationError: true, Err: err}
+						}
+						if more, termination := consume(envelope); !more {
+							return termination
+						}
+					default:
+						return TurnTermination{ObservationError: true, Err: err}
+					}
+				}
 			}
 		case envelope, ok := <-events:
 			if !ok {
@@ -268,4 +297,79 @@ func observationEnded(errs <-chan error) TurnTermination {
 		}
 	}
 	return TurnTermination{ObservationError: true, Err: ErrTurnObservationEnded}
+}
+
+// observeTurnStartup retries only observation establishment, never submission.
+func observeTurnStartup(ctx context.Context, session Observer, policy observationRetryPolicy) (runtime.Observation, error) {
+	startup, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(30*time.Second, cancel)
+	started := policy.now()
+	attempt := 0
+	for {
+		observation, err := session.Observe(startup, runtime.ObserveOptions{})
+		if err == nil {
+			timer.Stop()
+			original := observation.Cancel
+			observation.Cancel = func() {
+				cancel()
+				if original != nil {
+					original()
+				}
+			}
+			return observation, nil
+		}
+		if startup.Err() != nil || !retryObservation(err) || policy.now().Sub(started) >= 30*time.Second || !policy.wait(startup, attempt) {
+			timer.Stop()
+			cancel()
+			return runtime.Observation{}, err
+		}
+		attempt = min(attempt+1, 8)
+	}
+}
+
+// Once accepted, only observation is retried. Neither reconnect nor context
+// cancellation resubmits or cancels the server-owned turn. Gaps are explicit:
+// a headless output handler cannot roll back already rendered deltas safely.
+func consumeAcceptedTurn(ctx context.Context, session Observer, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), policy observationRetryPolicy) TurnTermination {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	startup := time.AfterFunc(30*time.Second, cancel)
+	defer startup.Stop()
+	cursor := observation.Primary().Cursor
+	attempt := 0
+	for {
+		before := cursor
+		started := policy.now()
+		reconnectable := observation.Errors != nil
+		sustained := time.AfterFunc(5*time.Second, func() { startup.Stop() })
+		termination := consumeTurn(ctx, observation, turnID, handler, &cursor, func() { startup.Stop() })
+		sustained.Stop()
+		if !termination.ObservationError || !reconnectable || ctx.Err() != nil {
+			return termination
+		}
+		var gap *ObservationGapError
+		if errors.As(termination.Err, &gap) || !retryObservation(termination.Err) {
+			return termination
+		}
+		if cursor > before || policy.now().Sub(started) >= 5*time.Second {
+			attempt = 0
+		}
+		for {
+			if !policy.wait(ctx, attempt) {
+				return TurnTermination{Terminated: true, Err: ctx.Err()}
+			}
+			attempt = min(attempt+1, 8)
+			next, err := session.Observe(ctx, runtime.ObserveOptions{Since: &cursor})
+			if err == nil {
+				observation = next
+				break
+			}
+			if ctx.Err() != nil {
+				return TurnTermination{Terminated: true, Err: ctx.Err()}
+			}
+			if !retryObservation(err) {
+				return TurnTermination{ObservationError: true, Err: err}
+			}
+		}
+	}
 }

@@ -10,6 +10,7 @@ type EditUserMessageMsg struct {
 // BranchFromEditMsg requests branching from a session position with new content.
 type BranchFromEditMsg struct {
 	ParentSessionID  string
+	ExpectedSnapshot string
 	BranchAtPosition int
 	Content          string
 	Attachments      []Attachment

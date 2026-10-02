@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,9 +32,10 @@ import (
 )
 
 type Server struct {
-	e         *echo.Echo
-	sm        *SessionManager
-	authToken string
+	serverInfo api.ServerInfo
+	e          *echo.Echo
+	sm         *SessionManager
+	authToken  string
 	// heartbeatInterval is how often an idle /events stream emits an SSE
 	// comment (": ping") so clients can tell a quiet session from a dead
 	// transport. SSE comments are invisible to EventSource clients and carry
@@ -60,6 +62,7 @@ const defaultMaxRequestBytes int64 = 1 << 20 // 1 MiB
 type Option func(*serverOptions)
 
 type serverOptions struct {
+	serverInfo      api.ServerInfo
 	maxRequestBytes int64
 	corsOrigin      string
 }
@@ -118,7 +121,7 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 			return next(c)
 		}
 	})
-	s := &Server{e: e, sm: sm, authToken: authToken, heartbeatInterval: defaultEventsHeartbeatInterval}
+	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, heartbeatInterval: defaultEventsHeartbeatInterval}
 	s.registerRoutes()
 	return s
 }
@@ -129,6 +132,7 @@ func (s *Server) registerRoutes() {
 	s.e.GET("/ready", s.ready)
 
 	group := s.e.Group("/api")
+	group.GET("/v2/server", s.serverIdentity)
 
 	group.GET("/agents", s.getAgents)
 	group.GET("/agents/:id", s.getAgentConfig)
@@ -275,11 +279,30 @@ func agentsAPIEntry(name string, cfg *latest.Config) (api.Agent, bool) {
 }
 
 func (s *Server) getAgentConfig(c echo.Context) error {
-	cfg, err := s.sm.LoadAgentConfig(c.Request().Context(), c.Param("id"))
+	source, err := sourceRouteParam(c, "id")
+	if err != nil {
+		return err
+	}
+	cfg, err := s.sm.LoadAgentConfig(c.Request().Context(), source)
 	if err != nil {
 		return agentSourceHTTPError("failed to load agent source", err)
 	}
 	return c.JSON(http.StatusOK, cfg)
+}
+
+// Echo routes RawPath when present, otherwise the already-decoded Path.
+// Decode only RawPath captures, once, to preserve literal percent names and
+// encoded slashes as exact configured source keys. Never clean filesystem paths.
+func sourceRouteParam(c echo.Context, name string) (string, error) {
+	value := c.Param(name)
+	if c.Request().URL.RawPath == "" {
+		return value, nil
+	}
+	decoded, err := url.PathUnescape(value)
+	if err != nil {
+		return "", echo.NewHTTPError(http.StatusBadRequest, "invalid encoded route identity")
+	}
+	return decoded, nil
 }
 
 func agentSourceHTTPError(operation string, err error) error {
@@ -346,7 +369,15 @@ func (s *Server) updateSessionSafetyPolicy(c echo.Context) error {
 }
 
 func (s *Server) getAgentToolCount(c echo.Context) error {
-	count, err := s.sm.GetAgentToolCount(c.Request().Context(), c.Param("id"), c.Param("agent_name"))
+	source, err := sourceRouteParam(c, "id")
+	if err != nil {
+		return err
+	}
+	agentName, err := sourceRouteParam(c, "agent_name")
+	if err != nil {
+		return err
+	}
+	count, err := s.sm.GetAgentToolCount(c.Request().Context(), source, agentName)
 	if err != nil {
 		return agentSourceHTTPError("failed to get agent tool count", err)
 	}

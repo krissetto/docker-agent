@@ -273,7 +273,7 @@ func (h *sessionEventHub) appendReplayLocked(sessionID string, event retainedSes
 func (h *sessionEventHub) replayLocked(sessionID string, since uint64) []SequencedSessionEvent {
 	replay := h.replay[sessionID]
 	if len(replay) == 0 {
-		if since < h.nextSeq[sessionID] {
+		if since != h.nextSeq[sessionID] {
 			return []SequencedSessionEvent{{Gap: true, FirstAvailable: h.nextSeq[sessionID] + 1}}
 		}
 		return nil

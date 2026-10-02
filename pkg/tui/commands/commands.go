@@ -831,6 +831,9 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 	}
 
 	mcpPrompts := application.CurrentMCPPrompts(ctx)
+	if _, err := application.CachedMCPPrompts(); err != nil {
+		categories = append(categories, Category{Name: "MCP Prompts", Commands: []Item{{ID: "mcp.error", Label: "MCP prompts unavailable", Description: err.Error(), Category: "MCP Prompts"}}})
+	}
 	if len(mcpPrompts) > 0 {
 		mcpCommands := make([]Item, 0, len(mcpPrompts))
 		for promptName, promptInfo := range mcpPrompts {
@@ -845,7 +848,7 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 
 	// Add skill commands if skills are enabled for the current agent.
 	// Discovery failures remain visible instead of silently removing skills.
-	skillsList, skillsErr := application.CurrentAgentSkillsContext(ctx)
+	skillsList, skillsErr := application.CommandSkills(ctx)
 	if skillsErr != nil {
 		categories = append(categories, Category{Name: "Skills", Commands: []Item{{ID: "skills.error", Label: "Skills unavailable", Description: skillsErr.Error(), Category: "Skills", Hidden: false}}})
 	} else if len(skillsList) > 0 {
@@ -930,3 +933,6 @@ func (p *Parser) Parse(input string) tea.Cmd {
 
 	return nil
 }
+
+// CategoriesUpdatedMsg refreshes cached completion/parser metadata without I/O.
+type CategoriesUpdatedMsg struct{ Categories []Category }

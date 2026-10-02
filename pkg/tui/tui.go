@@ -85,6 +85,12 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
+	metadataGeneration uint64
+	metadataApp        *app.App
+	metadataSessionID  string
+	sessionRestorer    SessionRestorer
+	remoteWorkspace    bool
+
 	pendingEditorGeneration  uint64
 	pendingRemovalGeneration uint64
 	initialTabCmd            tea.Cmd
@@ -437,6 +443,19 @@ type Transcriber interface {
 // Option configures the TUI.
 type Option func(*appModel)
 
+// SessionRestorer attaches an existing server-owned session without creating a blank one.
+type SessionRestorer func(ctx context.Context, sessionID, workingDir string) (SpawnedSession, error)
+
+func WithSessionRestorer(restorer SessionRestorer) Option {
+	return func(m *appModel) { m.sessionRestorer = restorer }
+}
+
+// WithRemoteWorkspace binds new-session paths to the server workspace, including
+// an explicitly workspace-less server. Client filesystem checks never apply.
+func WithRemoteWorkspace(dir string) Option {
+	return func(m *appModel) { m.remoteWorkspace = true; m.defaultNewSessionDir = dir }
+}
+
 // WithLeanMode enables a simplified TUI with minimal chrome:
 // no sidebar, no tab bar, no overlays, no resize handle.
 func WithLeanMode() Option {
@@ -633,8 +652,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m := &appModel{
 		ar:           ar,
 		shutdownDone: ctx.Done(),
-		buildCommandCategories: func(ctx context.Context, _ tea.Model) []commands.Category {
-			return commands.BuildCommandCategories(ctx, initialApp)
+		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
+			return commands.BuildCommandCategories(ctx, model.(*appModel).application)
 		},
 		tabBar:                        tb,
 		tuiStore:                      ts,
@@ -955,6 +974,7 @@ func (m *appModel) init() tea.Cmd {
 
 	return tea.Batch(
 		shutdownCmd,
+		m.prepareCommandMetadata(),
 		m.dialogMgr.Init(),
 		m.chatPage.Init(),
 		chat.WatchGitBranch(m.chatPage),
@@ -971,7 +991,7 @@ func (m *appModel) init() tea.Cmd {
 // even on pointer-wrapper and other early returns.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	model, cmd := m.updateWithLifecycle(msg)
-	cmd = tea.Batch(cmd, m.preparePanel())
+	cmd = tea.Batch(cmd, m.preparePanel(), m.prepareCommandMetadata())
 	m.syncNotificationAvoidance()
 	if m.ar != nil && !m.tickPaused {
 		cmd = tea.Batch(cmd, m.ar.Continue())
@@ -1106,6 +1126,33 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	switch msg := msg.(type) {
+	case capabilityResult:
+		// Command metadata belongs to the App/route, not model-picker dialog
+		// generation. Opening a picker must not strand completion hydration.
+		if msg.refresh {
+			if msg.metadataGeneration != m.metadataGeneration {
+				return m, nil
+			}
+			msg.scope.epoch = m.modelPickerGeneration
+		}
+		if !m.capabilityScopeCurrent(msg.scope) {
+			return m, nil
+		}
+		if msg.branch != nil {
+			return m, m.beginHostedLoad(msg.branch.ID, msg.target, msg.send)
+		}
+		if msg.refresh {
+			var warning tea.Cmd
+			if msg.metadataErr != nil {
+				warning = notification.ErrorCmd("Command metadata unavailable; reopen command palette to retry: " + msg.metadataErr.Error())
+			}
+			categories := m.commandCategories()
+			return m, tea.Batch(warning, m.updateEditorCmd(commands.CategoriesUpdatedMsg{Categories: categories}), m.updateChatCmd(commands.CategoriesUpdatedMsg{Categories: categories}))
+		}
+		if msg.message != nil {
+			return m, m.processCapabilityMessage(msg.message)
+		}
+		return m, nil
 	case messages.PreviewPanelMsg:
 		if m.panelPreviewOriginal == nil {
 			original := messages.NormalizePanelSettings(m.panelSettings)
@@ -1982,6 +2029,8 @@ func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 		m.sessionState.SetYoloMode(event.Session.IsToolsApproved())
 		m.sessionState.SetSessionTitle(event.Session.TitleSnapshot())
 	case *app.SessionResetEvent:
+		m.modelPickerGeneration++
+		m.metadataApp = nil
 		if event.Snapshot.Status.AgentName != "" {
 			m.sessionState.SetCurrentAgentName(event.Snapshot.Status.AgentName)
 		}
@@ -2293,6 +2342,12 @@ func (m *appModel) handleNewSession(msg messages.NewSessionMsg) (tea.Model, tea.
 // path resolves against the active session's working directory rather than
 // the process CWD.
 func (m *appModel) resolveNewSessionDir(requested string) (string, error) {
+	if m.remoteWorkspace {
+		if requested == "" || requested == "." || requested == m.defaultNewSessionDir {
+			return m.defaultNewSessionDir, nil
+		}
+		return "", fmt.Errorf("remote sessions use server workspace %q", m.defaultNewSessionDir)
+	}
 	dir := path.ExpandPath(requested)
 	if dir == "" {
 		return "", fmt.Errorf("%q expands to an empty path", requested)
@@ -2327,7 +2382,7 @@ func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
 	if workingDir == "" {
 		workingDir = m.defaultNewSessionDir
 	}
-	if workingDir == "" {
+	if workingDir == "" && !m.remoteWorkspace {
 		return m.openWorkingDirPicker()
 	}
 
@@ -3330,6 +3385,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m, tea.Suspend
 
 	case key.Matches(msg, keys.Commands):
+		m.metadataApp = nil
 		categories := m.commandCategories()
 		return m, core.CmdHandler(dialog.OpenDialogMsg{
 			Model: dialog.NewCommandPaletteDialog(categories),

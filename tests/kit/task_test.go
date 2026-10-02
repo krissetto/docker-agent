@@ -2,12 +2,74 @@ package kit_test
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// This checks command construction only, not registry publication or SBX validity.
+func TestKitTaskPublicationCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX build task")
+	}
+	raw, err := os.ReadFile(repositoryPath(t, "Taskfile.yml"))
+	require.NoError(t, err)
+	var taskfile struct {
+		Tasks struct {
+			Kit struct {
+				Env  map[string]string `yaml:"env"`
+				Cmds []string          `yaml:"cmds"`
+			} `yaml:"kit"`
+		} `yaml:"tasks"`
+	}
+	require.NoError(t, yaml.Unmarshal(raw, &taskfile))
+	kit := taskfile.Tasks.Kit
+	require.Len(t, kit.Cmds, 1)
+	assert.Equal(t, "{{.CLI_ARGS}}", kit.Env["KIT_REPOSITORY"])
+	assert.Equal(t, "1", kit.Env["BUILDX_GIT_CHECK_DIRTY"])
+	assert.Contains(t, kit.Cmds[0], "top-level Kit metadata promotion after push")
+
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	for _, tc := range []struct {
+		name, repository, commit string
+		invalid                  bool
+	}{
+		{name: "default", commit: sha},
+		{name: "repository override", repository: "registry.example:5000/team/kagent", commit: sha},
+		{name: "shell text is not evaluated", repository: "team/$(touch INJECTED); kagent", commit: sha},
+		{name: "missing SHA", invalid: true},
+		{name: "short SHA", commit: "0123456", invalid: true},
+		{name: "nonhex SHA", commit: strings.Repeat("z", 40), invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// A PATH-local Docker stub captures argv; these tests never contact Docker.
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nprintf '%s\\0' \"$@\"\n"), 0o700))
+			cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", kit.Cmds[0])
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "KIT_REPOSITORY="+tc.repository, "GIT_COMMIT="+tc.commit)
+			out, err := cmd.CombinedOutput()
+			if tc.invalid {
+				require.Error(t, err)
+				assert.Equal(t, "kit requires a full Git commit SHA\n", string(out))
+				return
+			}
+			require.NoError(t, err, string(out))
+			repository := tc.repository
+			if repository == "" {
+				repository = "docker.io/christopherpetito053/kagent"
+			}
+			assert.Equal(t, []string{"buildx", "build", ".", "-f", "kit/async-agent.yaml", "--platform", "linux/amd64,linux/arm64", "--tag", repository + ":latest", "--tag", repository + ":" + sha, "--push"}, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
+			assert.NoFileExists(t, filepath.Join(dir, "INJECTED"))
+		})
+	}
+}
 
 func TestKitTaskPackaging(t *testing.T) {
 	recipe, err := os.ReadFile(kitPath(t, "async-agent.dockerfile"))

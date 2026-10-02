@@ -84,7 +84,8 @@ func (m *appModel) openTodos(msg messages.OpenTodosMsg) tea.Cmd {
 	if msg.Scope.SessionID != "" && msg.Scope != todoScope(owner, data) {
 		return nil
 	}
-	d := dialog.NewTodosDialog(todoScope(owner, data), data.todos, msg.ID)
+	h := data.application.SessionHandle()
+	d := dialog.NewTodosDialog(todoScope(owner, data), data.todos, msg.ID, h == nil || !h.Metadata().Capabilities.TodoEditing)
 	data.todoDialog = d
 	return core.CmdHandler(dialog.OpenDialogMsg{Model: d})
 }
@@ -110,7 +111,7 @@ func (m *appModel) editTodo(msg messages.EditTodoMsg) tea.Cmd {
 		return nil
 	}
 	handle := runner.App.SessionHandle()
-	if handle == nil {
+	if handle == nil || !handle.Metadata().Capabilities.TodoEditing {
 		return notification.ErrorCmd("Todo editing is unavailable")
 	}
 	result := todoMutationMsg{data: data, scope: msg.Scope, revision: data.revision}
@@ -174,6 +175,9 @@ func (m *appModel) openTodoEditor(msg messages.OpenTodoEditMsg) tea.Cmd {
 	if data == nil || msg.Scope.Owner != m.paneFocus() || todoScope(msg.Scope.Owner, data) != msg.Scope {
 		return nil
 	}
+	if h := data.application.SessionHandle(); h == nil || !h.Metadata().Capabilities.TodoEditing {
+		return notification.ErrorCmd("Todo editing is unavailable")
+	}
 	for _, item := range data.todos {
 		if item.ID != msg.ID {
 			continue
@@ -203,7 +207,7 @@ func (m *appModel) saveTodoDescription(msg messages.SaveTodoDescriptionMsg) tea.
 		return nil
 	}
 	handle := runner.App.SessionHandle()
-	if handle == nil {
+	if handle == nil || !handle.Metadata().Capabilities.TodoEditing {
 		return nil
 	}
 	result := todoDescriptionResult{mutation: todoMutationMsg{data: data, scope: msg.Scope, revision: data.revision}, request: msg}

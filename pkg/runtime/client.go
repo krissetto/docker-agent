@@ -157,7 +157,14 @@ func (c *Client) doRequestWithTimeout(ctx context.Context, method, endpoint stri
 	}
 
 	u := *c.baseURL
-	u.Path = path.Join(u.Path, endpoint)
+	// Endpoints escape individual identities; retain that boundary in RawPath
+	// rather than escaping percent signs again through URL.String.
+	u.RawPath = path.Join(u.EscapedPath(), endpoint)
+	var err error
+	u.Path, err = url.PathUnescape(u.RawPath)
+	if err != nil {
+		return fmt.Errorf("invalid request path: %w", err)
+	}
 
 	// Apply per-request timeout based on category
 	timeout := c.timeoutFor(timeoutCategory)
@@ -215,7 +222,7 @@ func (c *Client) GetAgents(ctx context.Context) ([]api.Agent, error) {
 // GetAgent retrieves an agent by ID
 func (c *Client) GetAgent(ctx context.Context, id string) (*latest.Config, error) {
 	var config latest.Config
-	err := c.doRequest(ctx, http.MethodGet, "/api/agents/"+id, nil, &config)
+	err := c.doRequest(ctx, http.MethodGet, "/api/agents/"+url.PathEscape(id), nil, &config)
 	return &config, err
 }
 

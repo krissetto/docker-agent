@@ -273,9 +273,10 @@ type chatPage struct {
 	messageQueue []queuedMessage
 
 	// Editing state for branching sessions
-	editing          bool
-	branchAtPosition int
-	editAttachments  []msgtypes.Attachment // Preserved attachments from original message
+	editing             bool
+	branchAtPosition    int
+	branchSnapshotProof string
+	editAttachments     []msgtypes.Attachment // Preserved attachments from original message
 
 	// Key map
 	keyMap KeyMap
@@ -719,6 +720,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 	}
 	switch msg := msg.(type) {
+	case commands.CategoriesUpdatedMsg:
+		p.commandParser = commands.NewParser(msg.Categories...)
+		return p, nil
 	case tea.WindowSizeMsg:
 		cmd := p.SetSize(msg.Width, msg.Height)
 		return p, cmd
@@ -1258,6 +1262,7 @@ func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layou
 
 	p.editing = true
 	p.branchAtPosition = msg.SessionPosition
+	p.branchSnapshotProof = runtime.SnapshotProof(p.app.Session())
 
 	// Extract any attachments from the original session message
 	p.editAttachments = p.extractAttachmentsFromSession(msg.SessionPosition)
@@ -1294,6 +1299,7 @@ func (p *chatPage) handleInlineEditCommitted(msg messages.InlineEditCommittedMsg
 
 	branchCmd := core.CmdHandler(msgtypes.BranchFromEditMsg{
 		ParentSessionID:  parentID,
+		ExpectedSnapshot: p.branchSnapshotProof,
 		BranchAtPosition: branchPosition,
 		Content:          msg.Content,
 		Attachments:      attachments,

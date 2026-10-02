@@ -3,7 +3,10 @@ package client
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,33 +179,27 @@ func TestGapResetsFreshAndBoundsRetry(t *testing.T) {
 	assert.Equal(t, []uint64{3}, s.applied)
 }
 
-func TestObservationTerminalErrorsReconnectWithCursorAndExhaust(t *testing.T) {
-	a := &sessionStub{observations: make(chan runtime.Observation, 4)}
-	for i := range 4 {
+func TestObservationDisconnectsReconnectBeyondFourWithCursor(t *testing.T) {
+	a := &sessionStub{observations: make(chan runtime.Observation, 8)}
+	for i := range 8 {
 		events := make(chan runtime.SessionEvent)
-		errs := make(chan error, 1)
-		errs <- errors.New("dropped")
-		close(errs)
 		close(events)
-		var replay []runtime.SessionEvent
-		if i > 0 {
-			replay = []runtime.SessionEvent{{Sequence: uint64(i + 1)}}
-		}
-		a.observations <- runtime.Observation{Initial: []runtime.SessionSnapshot{{Cursor: uint64(i + 1)}}, Replay: replay, Events: events, Errors: errs, Cancel: func() {}}
+		a.observations <- obs(uint64(i+1), []runtime.SessionEvent{{Sequence: uint64(i + 2)}}, events)
 	}
 	sink := &recordingSink{}
 	attachment, err := Attach(t.Context(), a, sink)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { sink.mu.Lock(); defer sink.mu.Unlock(); return len(sink.errors) == 1 }, 2*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { sink.mu.Lock(); defer sink.mu.Unlock(); return len(sink.applied) == 8 }, 2*time.Second, time.Millisecond)
 	attachment.Detach()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	require.Len(t, a.since, 4)
+	require.GreaterOrEqual(t, len(a.since), 8)
 	assert.Nil(t, a.since[0])
-	for i := 1; i < 4; i++ {
+	for i := 1; i < 8; i++ {
 		require.NotNil(t, a.since[i])
-		assert.Equal(t, uint64(i), *a.since[i])
+		assert.Equal(t, uint64(i+1), *a.since[i])
 	}
+	assert.Empty(t, sink.errors)
 }
 
 func TestObservationReconnectRetainsZeroCursor(t *testing.T) {
@@ -215,35 +212,45 @@ func TestObservationReconnectRetainsZeroCursor(t *testing.T) {
 	sink := &recordingSink{}
 	attachment, err := Attach(t.Context(), a, sink)
 	require.NoError(t, err)
-	defer attachment.Detach()
-	select {
-	case <-attachment.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("observation retries did not finish")
-	}
-	require.Len(t, a.since, 4)
+	require.Eventually(t, func() bool { a.mu.Lock(); defer a.mu.Unlock(); return len(a.since) >= 5 }, 2*time.Second, time.Millisecond)
+	attachment.Detach()
+	require.Len(t, a.since, 5)
 	assert.Nil(t, a.since[0])
 	for _, since := range a.since[1:] {
 		require.NotNil(t, since)
 		assert.Zero(t, *since)
 	}
 	assert.Equal(t, []uint64{0}, sink.resets)
-	require.Len(t, sink.errors, 1)
+	assert.Empty(t, sink.errors)
 }
 
-func TestObservationRepeatedGapExhaustionCallsOnError(t *testing.T) {
-	a := &sessionStub{observations: make(chan runtime.Observation, 4)}
-	for range 4 {
-		events := make(chan runtime.SessionEvent, 1)
-		events <- runtime.SessionEvent{Gap: true}
-		close(events)
-		a.observations <- obs(1, nil, events)
-	}
+func TestObservationRepeatedGapsTerminateAfterBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		return obs(1, []runtime.SessionEvent{{Gap: true}}, nil), nil
+	})
 	sink := &recordingSink{}
-	attachment, err := Attach(t.Context(), a, sink)
-	require.NoError(t, err)
-	require.Eventually(t, func() bool { sink.mu.Lock(); defer sink.mu.Unlock(); return len(sink.errors) == 1 }, time.Second, time.Millisecond)
-	attachment.Detach()
+	attachment := &Attachment{done: make(chan struct{})}
+	var attempts []int
+	attachment.runWithRetry(ctx, observer, sink, observationRetryPolicy{
+		now: time.Now,
+		wait: func(_ context.Context, attempt int) bool {
+			attempts = append(attempts, attempt)
+			if len(attempts) == 12 {
+				cancel()
+				return false
+			}
+			return true
+		},
+	})
+	assert.Equal(t, 4, calls)
+	assert.Equal(t, []int{0, 1, 2}, attempts)
+	require.Len(t, sink.errors, 1)
+	var gap *RepeatedObservationGapError
+	require.ErrorAs(t, sink.errors[0], &gap)
 }
 
 func TestDetachSynchronouslyFencesCallback(t *testing.T) {
@@ -441,4 +448,206 @@ func TestCanonicalEventsRespectSnapshotReplayAndReattachBarriers(t *testing.T) {
 	projectObservation(t.Context(), sink, obs(11, []runtime.SessionEvent{settled(11)}, fresh), nil)
 	assert.Equal(t, []uint64{6, 11}, sink.resets)
 	assert.Equal(t, []uint64{7, 8, 9, 10, 12}, sink.applied, "gap baseline is not recounted")
+}
+
+type observerFunc func(context.Context, runtime.ObserveOptions) (runtime.Observation, error)
+
+func (f observerFunc) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	return f(ctx, options)
+}
+
+type classifiedError bool
+
+func (e classifiedError) Error() string   { return "classified observation failure" }
+func (e classifiedError) Retryable() bool { return bool(e) }
+
+func TestObservationOutageRecoveryResetsBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	clock := time.Now()
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		if calls <= 12 {
+			return runtime.Observation{}, errors.New("offline")
+		}
+		events := make(chan runtime.SessionEvent)
+		close(events)
+		if calls == 13 {
+			// A healthy idle connection resets too, without replay progress.
+			return obs(0, nil, events), nil
+		}
+		return obs(0, []runtime.SessionEvent{{Sequence: 1}}, events), nil
+	})
+	var attempts []int
+	sink := &recordingSink{}
+	a := &Attachment{done: make(chan struct{})}
+	a.runWithRetry(ctx, observer, sink, observationRetryPolicy{
+		now: func() time.Time {
+			now := clock
+			if calls == 13 {
+				clock = clock.Add(10 * time.Second)
+			}
+			return now
+		},
+		wait: func(_ context.Context, attempt int) bool {
+			attempts = append(attempts, attempt)
+			return len(attempts) < 14
+		},
+	})
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 8, 0, 0}, attempts)
+	assert.Equal(t, []uint64{1}, sink.applied)
+	assert.Empty(t, sink.errors)
+}
+
+func TestObservationTerminalFailureDoesNotRetry(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(map[bool]string{false: "attach", true: "live"}[live], func(t *testing.T) {
+			observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+				if !live {
+					return runtime.Observation{}, classifiedError(false)
+				}
+				events := make(chan runtime.SessionEvent)
+				errs := make(chan error, 1)
+				errs <- classifiedError(false)
+				close(events)
+				close(errs)
+				observation := obs(0, nil, events)
+				observation.Errors = errs
+				return observation, nil
+			})
+			sink := &recordingSink{}
+			a := &Attachment{done: make(chan struct{})}
+			a.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{
+				now:  time.Now,
+				wait: func(context.Context, int) bool { t.Fatal("terminal failure retried"); return false },
+			})
+			require.Len(t, sink.errors, 1)
+		})
+	}
+}
+
+func TestObservationBackoffAndErrorDrainCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.False(t, waitRetry(ctx, 100000))
+	ctx, cancel = context.WithCancel(t.Context())
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	observation := obs(0, nil, events)
+	observation.Errors = make(chan error) // Broken provider must not trap Detach.
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) { return observation, nil })
+	attachment, err := Attach(ctx, observer, &recordingSink{})
+	require.NoError(t, err)
+	cancel()
+	done := make(chan struct{})
+	go func() { attachment.Detach(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("detach blocked on error drain")
+	}
+}
+
+type approvalSink struct {
+	recordingSink
+	interactions []string
+}
+
+func (s *approvalSink) Reset(snapshot runtime.SessionSnapshot) {
+	s.recordingSink.Reset(snapshot)
+	s.interactions = nil
+	for _, interaction := range snapshot.Interactions {
+		s.interactions = append(s.interactions, interaction.InteractionID)
+	}
+}
+
+func TestObservationGapResnapshotReplacesOutstandingApprovals(t *testing.T) {
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	sink := &approvalSink{}
+	first := obs(1, nil, events)
+	first.Initial[0].Interactions = []runtime.InteractionSnapshot{{InteractionID: "old-approval"}}
+	result := projectObservation(t.Context(), sink, first, nil)
+	gap := obs(5, []runtime.SessionEvent{{Gap: true}}, events)
+	result = projectObservation(t.Context(), sink, gap, &result.cursor)
+	require.True(t, result.gap)
+	fresh := obs(5, nil, events)
+	fresh.Initial[0].Interactions = []runtime.InteractionSnapshot{{InteractionID: "new-approval"}}
+	projectObservation(t.Context(), sink, fresh, nil)
+	assert.Equal(t, []string{"new-approval"}, sink.interactions)
+	assert.Equal(t, []uint64{1, 5}, sink.resets)
+}
+
+func TestAttachRemoteAuthorizationFailureIsTerminal(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	remote, err := runtime.NewClient(server.URL)
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(remote)
+	require.NoError(t, err)
+	handle, err := transport.SessionByID("s")
+	require.NoError(t, err)
+	sink := &recordingSink{}
+	attachment, err := Attach(t.Context(), handle, sink)
+	require.NoError(t, err)
+	select {
+	case <-attachment.done:
+	case <-time.After(time.Second):
+		attachment.Detach()
+		t.Fatal("unauthorized attachment retried")
+	}
+	attachment.Detach()
+	assert.Equal(t, int32(1), requests.Load())
+	require.Len(t, sink.errors, 1)
+	assert.ErrorContains(t, sink.errors[0], "401")
+}
+
+func TestObservationStartupIsFiniteWithoutProgress(t *testing.T) {
+	clock := time.Now()
+	calls := 0
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		return runtime.Observation{}, errors.New("offline")
+	})
+	sink := &recordingSink{}
+	a := &Attachment{done: make(chan struct{})}
+	a.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{
+		now:  func() time.Time { return clock },
+		wait: func(context.Context, int) bool { clock = clock.Add(10 * time.Second); return true },
+	})
+	assert.Equal(t, 4, calls)
+	require.Len(t, sink.errors, 1)
+	assert.ErrorContains(t, sink.errors[0], "startup timed out")
+}
+
+func TestObservationHealthyProgressAllowsProlongedOutage(t *testing.T) {
+	clock := time.Now()
+	calls := 0
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		if calls == 1 {
+			return obs(0, []runtime.SessionEvent{{Sequence: 1}}, events), nil
+		}
+		if calls == 14 {
+			return runtime.Observation{}, classifiedError(false)
+		}
+		return runtime.Observation{}, errors.New("temporary outage")
+	})
+	sink := &recordingSink{}
+	a := &Attachment{done: make(chan struct{})}
+	a.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{
+		now:  func() time.Time { return clock },
+		wait: func(context.Context, int) bool { clock = clock.Add(time.Minute); return true },
+	})
+	assert.Equal(t, 14, calls)
+	assert.Equal(t, []uint64{1}, sink.applied)
+	require.Len(t, sink.errors, 1)
+	assert.NotContains(t, sink.errors[0].Error(), "startup")
 }

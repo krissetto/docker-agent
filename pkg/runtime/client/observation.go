@@ -46,51 +46,122 @@ func (a *Attachment) Detach() {
 }
 
 func (a *Attachment) run(ctx context.Context, session Observer, sink Sink) {
+	a.runWithRetry(ctx, session, sink, observationRetryPolicy{wait: waitRetry, now: time.Now})
+}
+
+// The timing seam keeps outage/backoff tests deterministic without exposing
+// transport tuning knobs to ordinary clients.
+type observationRetryPolicy struct {
+	wait func(context.Context, int) bool
+	now  func() time.Time
+}
+
+func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Sink, policy observationRetryPolicy) {
 	defer close(a.done)
+	originalCtx := ctx
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	startup := time.AfterFunc(30*time.Second, cancel)
+	defer startup.Stop()
+	healthy := false
+	initial := policy.now()
+	gaps := 0
 	var cursor *uint64
-	const attempts = 4
-	for attempt := 0; attempt < attempts && ctx.Err() == nil; attempt++ {
+	attempt := 0
+	for ctx.Err() == nil {
 		observation, err := session.Observe(ctx, runtime.ObserveOptions{Since: cursor})
-		if err != nil {
-			if attempt == attempts-1 || !waitRetry(ctx, attempt) {
-				if ctx.Err() == nil {
-					sink.OnError(fmt.Errorf("attach failed after %d attempts: %w", attempt+1, err))
+		if err == nil {
+			started := policy.now()
+			sustained := time.AfterFunc(5*time.Second, func() { startup.Stop() })
+			result := projectObservationWithProgress(ctx, sink, observation, cursor, func() { startup.Stop() })
+			sustained.Stop()
+			if observation.Cancel != nil {
+				observation.Cancel()
+			}
+			if ctx.Err() != nil {
+				if originalCtx.Err() == nil {
+					sink.OnError(errors.New("session observation startup timed out"))
 				}
 				return
 			}
-			continue
-		}
-		result := projectObservation(ctx, sink, observation, cursor)
-		observation.Cancel()
-		var treeErr *TreeObservationError
-		if errors.As(result.err, &treeErr) {
-			sink.OnError(result.err)
-			return
-		}
-		if result.gap {
-			if attempt == attempts-1 {
-				sink.OnError(errors.New("session observation gap after retry exhaustion"))
-				return
+			if result.progress || policy.now().Sub(started) >= 5*time.Second {
+				healthy = true
+				startup.Stop()
 			}
-			cursor = nil
-			continue
+			if result.progress {
+				gaps = 0
+			}
+			if result.gap {
+				// A gap needs a fresh baseline, including outstanding interactions. Apply
+				// backoff even here: a persistently overflowing observer must not spin.
+				cursor = nil
+				gaps++
+				if gaps >= 4 {
+					sink.OnError(&RepeatedObservationGapError{})
+					return
+				}
+			} else {
+				value := result.cursor
+				cursor = &value
+				if result.err == nil {
+					return
+				}
+				if result.progress || policy.now().Sub(started) >= 5*time.Second {
+					attempt = 0
+				}
+			}
+			err = result.err
 		}
-		value := result.cursor
-		cursor = &value
-		if result.err == nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			if originalCtx.Err() == nil {
+				sink.OnError(errors.New("session observation startup timed out"))
+			}
 			return
 		}
-		if attempt == attempts-1 || !waitRetry(ctx, attempt) {
-			sink.OnError(fmt.Errorf("observation failed after %d attempts at cursor %d: %w", attempt+1, result.cursor, result.err))
+		if !healthy && policy.now().Sub(initial) >= 30*time.Second {
+			sink.OnError(errors.New("session observation startup timed out"))
 			return
+		}
+		if err != nil && !retryObservation(err) {
+			sink.OnError(fmt.Errorf("session observation failed: %w", err))
+			return
+		}
+		if !policy.wait(ctx, attempt) {
+			if ctx.Err() != nil && originalCtx.Err() == nil {
+				sink.OnError(errors.New("session observation startup timed out"))
+			}
+			return
+		}
+		// Saturate before shifting; outages can outlast any fixed attempt budget.
+		if attempt < 8 {
+			attempt++
 		}
 	}
 }
 
+func retryObservation(err error) bool {
+	var treeErr *TreeObservationError
+	if errors.As(err, &treeErr) {
+		return false
+	}
+	var classified interface{ Retryable() bool }
+	if errors.As(err, &classified) {
+		return classified.Retryable()
+	}
+	var sessionErr *runtime.SessionError
+	if errors.As(err, &sessionErr) {
+		return sessionErr.Kind == runtime.SessionErrorPersistence || sessionErr.Kind == runtime.SessionErrorCapacity
+	}
+	// Provider/network disconnects without a classification retain the historic
+	// retry behavior, but now remain recoverable until the attachment is detached.
+	return true
+}
+
 type projectionResult struct {
-	cursor uint64
-	gap    bool
-	err    error
+	cursor   uint64
+	gap      bool
+	progress bool
+	err      error
 }
 
 // TreeObservationError reports that an ordinary-client helper was given a
@@ -113,7 +184,8 @@ func rejectTreeObservation(observation runtime.Observation) error {
 }
 
 func waitRetry(ctx context.Context, attempt int) bool {
-	timer := time.NewTimer(time.Duration(1<<attempt) * 25 * time.Millisecond)
+	delay := min(time.Duration(1<<min(max(attempt, 0), 8))*25*time.Millisecond, 5*time.Second)
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -123,7 +195,19 @@ func waitRetry(ctx context.Context, attempt int) bool {
 	}
 }
 
+// RepeatedObservationGapError stops an observer which cannot establish a
+// usable baseline. Retrying forever would hide a protocol or buffer mismatch.
+type RepeatedObservationGapError struct{}
+
+func (*RepeatedObservationGapError) Error() string {
+	return "session observation repeated gaps without progress"
+}
+func (*RepeatedObservationGapError) Retryable() bool { return false }
+
 func projectObservation(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64) projectionResult {
+	return projectObservationWithProgress(ctx, sink, observation, since, func() {})
+}
+func projectObservationWithProgress(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64, onProgress func()) projectionResult {
 	if ctx.Err() != nil {
 		return projectionResult{}
 	}
@@ -132,6 +216,7 @@ func projectObservation(ctx context.Context, sink Sink, observation runtime.Obse
 	}
 	primary := observation.Primary()
 	cursor := primary.Cursor
+	progress := false
 	if since == nil {
 		sink.Reset(primary)
 	} else {
@@ -150,28 +235,35 @@ func projectObservation(ctx context.Context, sink Sink, observation runtime.Obse
 			cursor = envelope.Sequence
 		}
 		sink.Apply(envelope)
+		progress = true
+		onProgress()
 		return true
 	}
 	for _, envelope := range observation.Replay {
 		if !apply(envelope) {
-			return projectionResult{cursor: cursor, gap: true}
+			return projectionResult{cursor: cursor, progress: progress, gap: true}
 		}
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return projectionResult{cursor: cursor}
+			return projectionResult{cursor: cursor, progress: progress}
 		case envelope, ok := <-observation.Events:
 			if !ok {
 				if observation.Errors != nil {
-					if err, open := <-observation.Errors; open && err != nil {
-						return projectionResult{cursor: cursor, err: err}
+					select {
+					case err, open := <-observation.Errors:
+						if open && err != nil {
+							return projectionResult{cursor: cursor, progress: progress, err: err}
+						}
+					case <-ctx.Done():
+						return projectionResult{cursor: cursor, progress: progress}
 					}
 				}
-				return projectionResult{cursor: cursor, err: errors.New("observation stream closed")}
+				return projectionResult{cursor: cursor, progress: progress, err: errors.New("observation stream closed")}
 			}
 			if !apply(envelope) {
-				return projectionResult{cursor: cursor, gap: true}
+				return projectionResult{cursor: cursor, progress: progress, gap: true}
 			}
 		}
 	}

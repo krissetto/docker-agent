@@ -406,19 +406,25 @@ type SessionBinding struct {
 // SessionCapabilities are read-only facts; false capabilities must return a
 // typed unsupported error rather than silently mutating shared runtime state.
 type SessionCapabilities struct {
-	AvailableModels     []string
-	Durability          subagent.Durability
-	Compaction          bool
-	TargetCompaction    bool
-	ModelSwitching      bool
-	ContextInspection   bool
-	LiveSessions        bool
-	SessionEditing      bool
-	ForkSkills          bool
-	Pause               bool
-	ModelCatalogRefresh bool
-	ThinkingLevels      bool
-	Todos               bool
+	ToolInspection        bool
+	ToolsetRestart        bool
+	PermissionsInspection bool
+	MCPPrompts            bool
+	TodoEditing           bool
+	Branching             bool
+	AvailableModels       []string
+	Durability            subagent.Durability
+	Compaction            bool
+	TargetCompaction      bool
+	ModelSwitching        bool
+	ContextInspection     bool
+	LiveSessions          bool
+	SessionEditing        bool
+	ForkSkills            bool
+	Pause                 bool
+	ModelCatalogRefresh   bool
+	ThinkingLevels        bool
+	Todos                 bool
 }
 
 // TurnInput describes one requested turn.
