@@ -58,7 +58,7 @@ func TestActualProgramTodoRemovalConfirmation(t *testing.T) {
 				}
 				require.Eventually(t, func() bool {
 					s := sidebarProgramSnapshot(t, program)
-					return s.open && s.active == 0 && strings.Contains(ansi.Strip(s.content), "Remove this todo?")
+					return s.open && s.active == 0 && strings.Contains(ansi.Strip(s.content), "Remove todo") && strings.Contains(ansi.Strip(s.content), "Duplicate todo")
 				}, time.Second, time.Millisecond)
 				stored, err := handle.Todos(t.Context())
 				require.NoError(t, err)
@@ -83,7 +83,7 @@ func TestActualProgramTodoRemovalConfirmation(t *testing.T) {
 				}
 				require.Eventually(t, func() bool {
 					s := sidebarProgramSnapshot(t, program)
-					return s.active == 0 && !strings.Contains(ansi.Strip(s.content), "Remove this todo?")
+					return s.active == 0 && !strings.Contains(ansi.Strip(s.content), "Remove todo")
 				}, time.Second, time.Millisecond)
 				stored, err = handle.Todos(t.Context())
 				require.NoError(t, err)

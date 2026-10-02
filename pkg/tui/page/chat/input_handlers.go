@@ -205,7 +205,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 		if msg.Button == tea.MouseLeft {
 			for _, queued := range p.messageQueue {
 				if queued.turnID == hit.QueueTurnID {
-					return p, core.CmdHandler(msgtypes.OpenPendingRemovalMsg{SessionID: sessionID, TurnID: queued.turnID})
+					return p, core.CmdHandler(msgtypes.OpenPendingRemovalMsg{SessionID: sessionID, TurnID: queued.turnID, Content: queued.content})
 				}
 			}
 			return p, nil

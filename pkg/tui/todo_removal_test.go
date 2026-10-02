@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
@@ -144,4 +145,31 @@ func TestTodoRemovalFailureIsPublishedWithoutOptimisticDeletion(t *testing.T) {
 	}
 	require.True(t, found)
 	require.Len(t, data.todos, 2, "failed mutation does not optimistically remove a row")
+}
+
+func TestTodoRemovalDisplaysSelectedSnapshot(t *testing.T) {
+	root, _ := todoRemovalRoot(t)
+	owner := root.paneFocus()
+	data := root.panelData[owner]
+	data.todos[1].Description = "Chosen todo λ界\nsecond line"
+	item := data.todos[1]
+	cmd := root.editTodo(messages.EditTodoMsg{Scope: todoScope(owner, data), ID: item.ID, Remove: true})
+	require.NotNil(t, cmd)
+	opened := cmd().(dialog.OpenDialogMsg)
+	data.todos[1].Description = "Changed later"
+	opened.Model.SetSize(120, 40)
+	view := ansi.Strip(opened.Model.View())
+	require.Contains(t, view, "Chosen todo λ界")
+	require.Contains(t, view, "second line")
+	require.NotContains(t, view, "Duplicate todo")
+	require.NotContains(t, view, "Changed later")
+	_, cmd = opened.Model.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	var request todoRemovalConfirmedMsg
+	for _, msg := range collectMsgs(cmd) {
+		if confirmed, ok := msg.(todoRemovalConfirmedMsg); ok {
+			request = confirmed
+		}
+	}
+	require.Equal(t, item, request.item, "display and confirmation use the same captured todo")
+	require.Contains(t, root.confirmTodoRemoval(request)().(notification.ShowMsg).Text, "Todos changed")
 }

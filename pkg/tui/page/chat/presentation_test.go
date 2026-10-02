@@ -259,8 +259,8 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 	p := newLayoutTestPage(t, msgtypes.SidebarLeft)
 	p.app = newTestChatPage(t).app
 	p.ctx = t.Context
-	p.messageQueue = []queuedMessage{{turnID: "exact-turn", content: "editable content"}}
-	p.sidebar.SetQueuedMessages([]sidebar.QueuedMessage{{ID: "exact-turn", Text: "editable content"}})
+	p.messageQueue = []queuedMessage{{turnID: "exact-turn", content: "editable content\nsecond line λ界"}}
+	p.sidebar.SetQueuedMessages([]sidebar.QueuedMessage{{ID: "exact-turn", Text: "shortened preview"}})
 	p.SetSize(160, 40)
 	g := SplitPresentationGeometry{Transcript: PresentationRect{70, 12, 50, 20}, Shell: screenShell(p.MeasureSplitShell(160, 40), 17, 8), ShowSidebar: true}
 	p.SetSplitPresentation(&g)
@@ -279,7 +279,7 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 	}
 	remove := point(TargetSidebarRemoveQueuedMessage)
 	_, cmd := p.handleMouseClick(remove)
-	require.Equal(t, msgtypes.OpenPendingRemovalMsg{SessionID: p.app.Session().ID, TurnID: "exact-turn"}, cmd(), "single click requests confirmation")
+	require.Equal(t, msgtypes.OpenPendingRemovalMsg{SessionID: p.app.Session().ID, TurnID: "exact-turn", Content: "editable content\nsecond line λ界"}, cmd(), "single click requests confirmation")
 	edit := point(TargetSidebarEditQueuedMessage)
 	_, cmd = p.handleMouseClick(edit)
 	require.NotNil(t, cmd, "edit glyph opens on single click")
@@ -299,7 +299,7 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 		}
 	}
 	collect(cmd)
-	require.Equal(t, []msgtypes.OpenPendingEditMsg{{SessionID: p.app.Session().ID, TurnID: "exact-turn", Content: "editable content"}}, opened)
+	require.Equal(t, []msgtypes.OpenPendingEditMsg{{SessionID: p.app.Session().ID, TurnID: "exact-turn", Content: "editable content\nsecond line λ界"}}, opened)
 	_, cmd = p.handleMouseClick(remove)
 	require.IsType(t, msgtypes.OpenPendingRemovalMsg{}, cmd())
 	_, cmd = p.handleMouseClick(remove)

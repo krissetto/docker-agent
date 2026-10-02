@@ -23,7 +23,7 @@ func (m *appModel) openPendingMessageRemoval(msg messages.OpenPendingRemovalMsg)
 		return m, nil
 	}
 	request := pendingRemovalConfirmedMsg{origin: m.application, handle: m.application.SessionHandle(), sessionID: msg.SessionID, turnID: msg.TurnID, generation: m.pendingRemovalGeneration}
-	return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewPendingMessageRemovalDialog(core.CmdHandler(request))})
+	return m.forwardDialog(dialog.OpenDialogMsg{Model: dialog.NewPendingMessageRemovalDialog(msg.Content, core.CmdHandler(request))})
 }
 
 func (m *appModel) confirmPendingMessageRemoval(msg pendingRemovalConfirmedMsg) (tea.Model, tea.Cmd) {

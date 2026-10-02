@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
@@ -115,4 +116,25 @@ func TestPendingRemovalActualSessionRoundTripInvalidatesConfirmation(t *testing.
 	require.Greater(t, root.pendingRemovalGeneration, confirmed.generation)
 	_, cmd := root.Update(confirmed)
 	require.Contains(t, cmd().(notification.ShowMsg).Text, "session changed")
+}
+
+func TestPendingRemovalDisplaysRequestedSnapshot(t *testing.T) {
+	root, handle := pendingRemovalRoot(t)
+	request := messages.OpenPendingRemovalMsg{SessionID: handle.ID(), TurnID: "exact-turn", Content: "Chosen queued text λ界\nsecond line"}
+	_, _ = root.Update(request)
+	require.True(t, root.dialogMgr.Open())
+	request.Content = "Changed later"
+	d := root.dialogMgr.TopDialog()
+	d.SetSize(120, 40)
+	view := ansi.Strip(d.View())
+	require.Contains(t, view, "Chosen queued text λ界")
+	require.Contains(t, view, "second line")
+	require.NotContains(t, view, request.Content)
+	require.NotContains(t, view, "Remove this queued message?")
+}
+
+func TestPendingRemovalRejectsWrongSnapshotOwner(t *testing.T) {
+	root, _ := pendingRemovalRoot(t)
+	_, _ = root.Update(messages.OpenPendingRemovalMsg{SessionID: "stale-owner", TurnID: "exact-turn", Content: "Wrong session text"})
+	require.False(t, root.dialogMgr.Open())
 }

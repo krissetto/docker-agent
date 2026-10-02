@@ -39,8 +39,8 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 		new  func() Dialog
 	}{
 		{"commands", func() Dialog { return NewCommandPaletteDialog(concretePaletteCommands(3, 8)) }},
-		{"pending-removal", func() Dialog { return NewPendingMessageRemovalDialog(nil) }},
-		{"todo-removal", func() Dialog { return NewTodoRemovalDialog(nil) }},
+		{"pending-removal", func() Dialog { return NewPendingMessageRemovalDialog("Selected queued message", nil) }},
+		{"todo-removal", func() Dialog { return NewTodoRemovalDialog("Selected todo description", nil) }},
 		{"settings", func() Dialog { return NewSettingsDialog(messages.Preferences{}, true) }},
 	}
 	for _, fixture := range fixtures {

@@ -13,4 +13,4 @@ type ShowInteractionHintMsg struct {
 type OpenPendingEditMsg struct{ SessionID, TurnID, Content string }
 
 // OpenPendingRemovalMsg requests confirmation for one canonical pending turn.
-type OpenPendingRemovalMsg struct{ SessionID, TurnID string }
+type OpenPendingRemovalMsg struct{ SessionID, TurnID, Content string }

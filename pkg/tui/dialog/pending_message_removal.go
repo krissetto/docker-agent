@@ -1,6 +1,8 @@
 package dialog
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -11,22 +13,25 @@ import (
 
 type removalConfirmationDialog struct {
 	BaseDialog
-	confirm         tea.Cmd
-	title, question string
+	confirm     tea.Cmd
+	title, text string
 }
 
 // NewPendingMessageRemovalDialog requires an explicit affirmative action before withdrawal.
-func NewPendingMessageRemovalDialog(confirm tea.Cmd) Dialog {
-	return newRemovalConfirmationDialog("Remove queued message", "Remove this queued message?", confirm)
+func NewPendingMessageRemovalDialog(content string, confirm tea.Cmd) Dialog {
+	if strings.TrimSpace(content) == "" {
+		content = "(no text)"
+	}
+	return newRemovalConfirmationDialog("Remove queued message", content, confirm)
 }
 
 // NewTodoRemovalDialog requires explicit confirmation before removing a todo.
-func NewTodoRemovalDialog(confirm tea.Cmd) Dialog {
-	return newRemovalConfirmationDialog("Remove todo", "Remove this todo?", confirm)
+func NewTodoRemovalDialog(description string, confirm tea.Cmd) Dialog {
+	return newRemovalConfirmationDialog("Remove todo", description, confirm)
 }
 
-func newRemovalConfirmationDialog(title, question string, confirm tea.Cmd) Dialog {
-	return &removalConfirmationDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, title: title, question: question, confirm: confirm}
+func newRemovalConfirmationDialog(title, text string, confirm tea.Cmd) Dialog {
+	return &removalConfirmationDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, title: title, text: safeAttachmentText(strings.ReplaceAll(text, "\r\n", "\n")), confirm: confirm}
 }
 
 func (d *removalConfirmationDialog) Init() tea.Cmd { return nil }
@@ -101,7 +106,7 @@ func (d *removalConfirmationDialog) content() (width int, header, body, footer s
 	width = d.ComputeDialogWidth(50, 36, 60)
 	contentWidth := d.ContentWidth(width, 2)
 	header = RenderDialogHeader(d.title, contentWidth, styles.DialogTitleStyle)
-	body = styles.DialogQuestionStyle.Width(d.BodyContentWidth(width)).Render(d.question)
+	body = styles.DialogQuestionStyle.Align(lipgloss.Left).Width(d.BodyContentWidth(width)).Render(d.text)
 	padding := min(2, max(0, (contentWidth-3)/2))
 	footer = d.renderActions(contentWidth, lipgloss.Right, 2, padding,
 		Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: true, HideShortcut: true},

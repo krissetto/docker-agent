@@ -40,7 +40,7 @@ func (m *appModel) openTodoRemoval(msg messages.EditTodoMsg) tea.Cmd {
 		return notification.ErrorCmd("Todo editing is unavailable")
 	}
 	request := todoRemovalConfirmedMsg{data: data, scope: msg.Scope, item: data.todos[index], handle: handle, revision: data.revision, selection: m.panelSelectionGeneration, routeGeneration: m.pendingRemovalGeneration}
-	d := dialog.NewTodoRemovalDialog(core.CmdHandler(request))
+	d := dialog.NewTodoRemovalDialog(request.item.Description, core.CmdHandler(request))
 	data.todoRemoval = d
 	return core.CmdHandler(dialog.OpenDialogMsg{Model: d})
 }

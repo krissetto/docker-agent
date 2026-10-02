@@ -138,7 +138,7 @@ func TestActualProgramQueueRemoveUsesExactCanonicalIDAndEvent(t *testing.T) {
 			}
 			require.Eventually(t, func() bool {
 				s := sidebarProgramSnapshot(t, program)
-				return s.open && strings.Contains(ansi.Strip(s.content), "Remove this queued message?") && s.active == 0
+				return s.open && strings.Contains(ansi.Strip(s.content), "Remove queued message") && strings.Contains(ansi.Strip(s.content), "Second queued body") && s.active == 0
 			}, time.Second, time.Millisecond)
 			// Click the measured affirmative pill, not the sidebar glyph again.
 			frame = sidebarProgramSnapshot(t, program)
