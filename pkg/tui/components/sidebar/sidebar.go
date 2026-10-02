@@ -107,7 +107,6 @@ type Model interface {
 	SetSkillsInfo(availableSkills int)
 	SetSessionStarred(starred bool)
 	SetQueuedMessages(messages []QueuedMessage) tea.Cmd
-	ConfirmQueuedRemoval(id string) bool
 	ResetTodoClick()
 	ReconcileLayout() tea.Cmd
 	SetPresentationActive(active bool) tea.Cmd
@@ -493,7 +492,6 @@ type model struct {
 	modelEnd             int
 	queueStart, queueEnd int
 	queueRows            []queueRow
-	queueRemoveArmed     string
 	placement            *placementState
 	presentationSub      animation.Subscription
 	reconcileDirty       bool
@@ -907,7 +905,6 @@ func (m *model) SetQueuedMessages(queuedMessages []QueuedMessage) tea.Cmd {
 	if slices.Equal(m.queuedMessages, queuedMessages) {
 		return nil
 	}
-	m.queueRemoveArmed = ""
 	m.queuedMessages = slices.Clone(queuedMessages)
 	m.invalidateCache()
 	return m.ReconcileLayout()
@@ -1592,10 +1589,6 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
 				return m, cmd
 			}
-			if m.queueRemoveArmed != "" {
-				m.queueRemoveArmed = ""
-				m.invalidateHover()
-			}
 			if m.todoRemoveArmed != "" {
 				m.todoRemoveArmed = ""
 				m.invalidateCache()
@@ -2187,7 +2180,7 @@ func (m *model) renderFromCache() string {
 	lines := slices.Clone(m.cachedLines)
 	for i, meta := range m.queueRows {
 		if y := m.queueStart + i; meta.turnID != "" && y < len(lines) {
-			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false, m.queueRemoveArmed == meta.turnID)
+			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false, false)
 		}
 	}
 	for y := m.todoSummaryLine + 2; m.todoSummaryLine >= 0 && y < m.todoEnd; y++ {
@@ -3015,10 +3008,6 @@ func (m *model) updateSubagentHover(y int) {
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
 	m.ResetTodoClick()
-	if m.queueRemoveArmed != "" {
-		m.queueRemoveArmed = ""
-		m.invalidateHover()
-	}
 	if m.todoRemoveArmed != "" {
 		m.todoRemoveArmed = ""
 		m.invalidateCache()

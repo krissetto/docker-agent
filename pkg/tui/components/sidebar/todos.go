@@ -58,10 +58,6 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 	if !ok {
 		return nil, false
 	}
-	if m.queueRemoveArmed != "" {
-		m.queueRemoveArmed = ""
-		m.invalidateHover()
-	}
 	part := actions.PartAt(localX, controls)
 	if (part == "edit" || part == "remove") && m.hoverValues["todo:"+item.ID+":row"].value <= 0 {
 		part = "text"

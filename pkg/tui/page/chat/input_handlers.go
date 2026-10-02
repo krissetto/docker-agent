@@ -191,7 +191,6 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 
 	case TargetSidebarQueuedMessage, TargetSidebarEditQueuedMessage:
 		if msg.Button == tea.MouseLeft {
-			p.sidebar.ConfirmQueuedRemoval("")
 			if doubleClick || target == TargetSidebarEditQueuedMessage {
 				for _, queued := range p.messageQueue {
 					if queued.turnID == hit.QueueTurnID {
@@ -204,20 +203,12 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 		}
 	case TargetSidebarRemoveQueuedMessage:
 		if msg.Button == tea.MouseLeft {
-			if !p.sidebar.ConfirmQueuedRemoval(hit.QueueTurnID) {
-				return p, nil
-			}
-			application, turnID, ctx := p.app, hit.QueueTurnID, p.ctx()
-			return p, func() tea.Msg {
-				removed, err := application.CancelPendingMessage(ctx, turnID)
-				if err != nil {
-					return notification.ShowMsg{Text: "Failed to remove queued message: " + err.Error(), Type: notification.TypeError}
+			for _, queued := range p.messageQueue {
+				if queued.turnID == hit.QueueTurnID {
+					return p, core.CmdHandler(msgtypes.OpenPendingRemovalMsg{SessionID: sessionID, TurnID: queued.turnID})
 				}
-				if !removed {
-					return notification.ShowMsg{Text: "Queued message is no longer pending", Type: notification.TypeInfo}
-				}
-				return nil
 			}
+			return p, nil
 		}
 
 	case TargetSidebarAgent:

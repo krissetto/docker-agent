@@ -279,7 +279,7 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 	}
 	remove := point(TargetSidebarRemoveQueuedMessage)
 	_, cmd := p.handleMouseClick(remove)
-	require.Nil(t, cmd, "first click only arms removal")
+	require.Equal(t, msgtypes.OpenPendingRemovalMsg{SessionID: p.app.Session().ID, TurnID: "exact-turn"}, cmd(), "single click requests confirmation")
 	edit := point(TargetSidebarEditQueuedMessage)
 	_, cmd = p.handleMouseClick(edit)
 	require.NotNil(t, cmd, "edit glyph opens on single click")
@@ -301,7 +301,7 @@ func TestQueuedActionAdapterEditAndConfirmRemoval(t *testing.T) {
 	collect(cmd)
 	require.Equal(t, []msgtypes.OpenPendingEditMsg{{SessionID: p.app.Session().ID, TurnID: "exact-turn", Content: "editable content"}}, opened)
 	_, cmd = p.handleMouseClick(remove)
-	require.Nil(t, cmd, "edit click disarms earlier removal")
+	require.IsType(t, msgtypes.OpenPendingRemovalMsg{}, cmd())
 	_, cmd = p.handleMouseClick(remove)
-	require.NotNil(t, cmd, "second removal click alone dispatches cancel")
+	require.IsType(t, msgtypes.OpenPendingRemovalMsg{}, cmd(), "repeated clicks still only request a dialog")
 }

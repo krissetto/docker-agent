@@ -47,10 +47,6 @@ func TestQueuedPreviewTwoLinesCanonicalIdentityAndRemoveCell(t *testing.T) {
 	after := strings.Split(m.View(), "\n")[bodyY]
 	assert.Contains(t, ansi.Strip(after), "✎ ×")
 	assert.NotEqual(t, strings.Split(before, "\n")[bodyY], after)
-	assert.False(t, m.ConfirmQueuedRemoval("canonical-turn"))
-	assert.Equal(t, "canonical-turn", m.queueRemoveArmed)
-	assert.True(t, m.ConfirmQueuedRemoval("canonical-turn"))
-	assert.Empty(t, m.queueRemoveArmed)
 	result, payload = m.HandleClickType(right, bodyY)
 	assert.Equal(t, ClickRemoveQueuedMessage, result)
 	assert.Equal(t, "canonical-turn", payload)
@@ -179,7 +175,7 @@ func TestDirectoryGroupedRowHoverAndIndependentIconEmphasis(t *testing.T) {
 	}
 }
 
-func TestQueueActionsNarrowGeometryAndConfirmationLifetime(t *testing.T) {
+func TestQueueActionsNarrowGeometryAndHoverLifetime(t *testing.T) {
 	for _, width := range []int{1, 2, 3, 5, 7, 8, 10, 20, 80} {
 		m := newHoverSidebar(t)
 		m.SetSize(width, 50)
@@ -208,17 +204,9 @@ func TestQueueActionsNarrowGeometryAndConfirmationLifetime(t *testing.T) {
 				}
 			}
 		}
-		require.False(t, m.ConfirmQueuedRemoval("missing"))
-		require.Empty(t, m.queueRemoveArmed)
-		require.False(t, m.ConfirmQueuedRemoval("queued"))
 		settleSidebarHover(t, m, m.ClearSubagentHover())
-		require.Empty(t, m.queueRemoveArmed)
-		require.False(t, m.ConfirmQueuedRemoval("queued"))
 		m.SetQueuedMessages([]QueuedMessage{{ID: "queued", Text: "replacement"}})
-		require.Empty(t, m.queueRemoveArmed)
-		require.False(t, m.ConfirmQueuedRemoval("queued"))
 		m.SetPresentationActive(false)
-		require.Empty(t, m.queueRemoveArmed)
 		require.Zero(t, m.ar.ActiveCount())
 	}
 }
@@ -298,7 +286,6 @@ func TestQueueItemHoverKeepsTextHighlightedAcrossControls(t *testing.T) {
 				require.Nil(t, m.ar.Continue())
 			}
 			require.Equal(t, items, m.queuedMessages)
-			require.False(t, m.ConfirmQueuedRemoval("first"))
 			if cleanup == "leave" {
 				settlePlacement(t, m, m.ClearSubagentHover())
 			} else {
@@ -309,7 +296,6 @@ func TestQueueItemHoverKeepsTextHighlightedAcrossControls(t *testing.T) {
 			}
 			require.Empty(t, m.hoverValues)
 			require.Empty(t, m.hoverTarget)
-			require.Empty(t, m.queueRemoveArmed)
 			require.Zero(t, m.ar.ActiveCount())
 			require.Nil(t, m.ar.Continue())
 			require.Equal(t, idle, m.View())

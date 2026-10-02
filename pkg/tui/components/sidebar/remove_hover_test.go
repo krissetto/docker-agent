@@ -42,9 +42,9 @@ func TestRemoveHoverUsesErrorColorWithoutChangingItemText(t *testing.T) {
 					baseline := sidebarCells(m.placementText(first, width))
 					continuation := m.placementText(next, width)
 					for _, armed := range []bool{false, true} {
-						m.todoRemoveArmed, m.queueRemoveArmed = "", ""
-						if armed {
-							m.todoRemoveArmed, m.queueRemoveArmed = "item", "item"
+						m.todoRemoveArmed = ""
+						if armed && todo {
+							m.todoRemoveArmed = "item"
 						}
 						for _, progress := range []float64{0, .5, 1, .5, 0} {
 							m.hoverValues[base+"remove"] = hoverValue{value: progress, target: progress}
@@ -58,19 +58,19 @@ func TestRemoveHoverUsesErrorColorWithoutChangingItemText(t *testing.T) {
 							r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
 							er, eg, eb := styles.ColorToRGB(styles.Error)
 							emphasis := progress
-							if armed {
+							if armed && todo {
 								emphasis = 1
 							}
 							want := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
 							require.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cells[width-1].fg), "armed=%v progress=%v reveal=%v", armed, progress, reveal)
-							if armed || progress == 1 {
+							if (armed && todo) || progress == 1 {
 								require.Equal(t, color.NRGBAModel.Convert(styles.Error), color.NRGBAModel.Convert(cells[width-1].fg), "remove stays exactly theme error red, without extra brightening")
 							}
 							require.Equal(t, first, requirePlaced(t, m, first.id), "canonical text stays intact")
 							require.Zero(t, m.ar.ActiveCount(), "painting does not schedule ticks")
 						}
 					}
-					m.todoRemoveArmed, m.queueRemoveArmed = "", ""
+					m.todoRemoveArmed = ""
 				}
 				m.hoverValues = nil
 				require.Equal(t, idle, m.placementText(first, width))

@@ -68,12 +68,14 @@ func TestActualProgramSessionTitleSingleHintDoubleRenameScopedClicks(t *testing.
 type queueRemovalHandle struct {
 	*lifecycleHandle
 
-	removed chan string
+	removed    chan string
+	failure    error
+	notPending bool
 }
 
 func (h *queueRemovalHandle) CancelPendingMessage(_ context.Context, turnID string) (bool, error) {
 	h.removed <- turnID
-	return true, nil
+	return !h.notPending, h.failure
 }
 
 type queueRemovalSessions struct {
@@ -131,10 +133,25 @@ func TestActualProgramQueueRemoveUsesExactCanonicalIDAndEvent(t *testing.T) {
 			_ = sidebarProgramSnapshot(t, program) // Drain the first click before checking backend effects.
 			select {
 			case <-handle.removed:
-				t.Fatal("arming removal must not withdraw the pending message")
+				t.Fatal("opening confirmation must not withdraw the pending message")
 			default:
 			}
-			program.Send(tea.MouseClickMsg{X: removeX, Y: y, Button: tea.MouseLeft})
+			require.Eventually(t, func() bool {
+				s := sidebarProgramSnapshot(t, program)
+				return s.open && strings.Contains(ansi.Strip(s.content), "Remove this queued message?") && s.active == 0
+			}, time.Second, time.Millisecond)
+			// Click the measured affirmative pill, not the sidebar glyph again.
+			frame = sidebarProgramSnapshot(t, program)
+			confirmX, confirmY := -1, -1
+			for row, line := range strings.Split(ansi.Strip(frame.content), "\n") {
+				if strings.Contains(line, "Cancel") {
+					if prefix, _, found := strings.Cut(line, "Remove"); found {
+						confirmX, confirmY = ansi.StringWidth(prefix), row
+					}
+				}
+			}
+			require.NotEqual(t, -1, confirmX)
+			program.Send(tea.MouseClickMsg{X: confirmX, Y: confirmY, Button: tea.MouseLeft})
 			select {
 			case removed := <-handle.removed:
 				require.Equal(t, "turn-second-full-ID", removed)

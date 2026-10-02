@@ -92,8 +92,6 @@ func TestActionHoverClearsOnScrollResizeAndModal(t *testing.T) {
 				require.Equal(t, 1.0, m.hoverValues[base+"row"].value)
 				if todo {
 					m.todoRemoveArmed = "opaque"
-				} else {
-					require.False(t, m.ConfirmQueuedRemoval("opaque"))
 				}
 				switch clear {
 				case "scroll":
@@ -109,7 +107,6 @@ func TestActionHoverClearsOnScrollResizeAndModal(t *testing.T) {
 				}
 				require.Zero(t, m.hoverValues[base+"row"].value)
 				require.Empty(t, m.todoRemoveArmed)
-				require.Empty(t, m.queueRemoveArmed)
 				require.Zero(t, m.ar.ActiveCount())
 				if clear == "scroll" {
 					next := requirePlaced(t, m, base+"1")

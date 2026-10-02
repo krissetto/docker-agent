@@ -85,10 +85,11 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
-	pendingEditorGeneration uint64
-	initialTabCmd           tea.Cmd
-	modelPickerGeneration   uint64
-	modelPickerApp          *app.App
+	pendingEditorGeneration  uint64
+	pendingRemovalGeneration uint64
+	initialTabCmd            tea.Cmd
+	modelPickerGeneration    uint64
+	modelPickerApp           *app.App
 
 	responsePrompt        responseCancelPrompt
 	responseRunGeneration uint64
@@ -1891,6 +1892,10 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// --- URL opening ---
 
+	case messages.OpenPendingRemovalMsg:
+		return m.openPendingMessageRemoval(msg)
+	case pendingRemovalConfirmedMsg:
+		return m.confirmPendingMessageRemoval(msg)
 	case messages.OpenPendingEditMsg:
 		return m.openPendingMessageEdit(msg)
 	case pendingEditResult:
@@ -2231,6 +2236,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 	m.dialogMgr.Cleanup()
 	m.dialogMgr = dialog.New(m.ar)
 	m.modelPickerGeneration++
+	m.pendingRemovalGeneration++
 	m.supervisor.SeedTitle(activeID, "")
 	m.sessionState.SetSessionTitle("")
 	m.sessionState.SetPreviousMessage(nil)
@@ -2500,6 +2506,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 
 	// Now that the switch is committed, finalize the dialog hand-off.
 	m.modelPickerGeneration++
+	m.pendingRemovalGeneration++
 	var closeBackgroundDialogCmd tea.Cmd
 	if backgroundEvent != nil && outgoingTabID != "" && outgoingTabID != sessionID {
 		m.supervisor.SetPendingEvent(outgoingTabID, backgroundEvent)
@@ -4329,6 +4336,7 @@ func (m *appModel) cleanupAll() {
 			animation.StopView(m.messageBar)
 		}
 		m.modelPickerGeneration++
+		m.pendingRemovalGeneration++
 		m.rollbackSettings()
 		m.dialogMgr.Cleanup()
 		m.editorHeightMotion.Cancel()

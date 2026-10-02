@@ -41,22 +41,3 @@ func (m *model) queueSection(width int) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
-// ConfirmQueuedRemoval arms the visible control before allowing a destructive action.
-func (m *model) ConfirmQueuedRemoval(id string) bool {
-	found := false
-	for _, msg := range m.queuedMessages {
-		if msg.ID == id {
-			found = true
-			break
-		}
-	}
-	confirmed := found && m.queueRemoveArmed == id
-	m.queueRemoveArmed = ""
-	if found && !confirmed {
-		m.queueRemoveArmed = id
-	}
-	m.todoRemoveArmed = ""
-	m.invalidateHover()
-	return confirmed
-}
