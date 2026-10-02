@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // backend exposes the two-step protocol a future RPC server will mirror:
@@ -52,6 +53,9 @@ type backend interface {
 // selectBackend picks the backend implied by the current flags.
 func (f *runExecFlags) selectBackend(agentFileName string) (backend, error) {
 	if f.remoteAddress != "" {
+		if !userconfig.Get().GetUseSubagents() {
+			return nil, fmt.Errorf("--remote does not support disabling subagents; use a local runtime or enable settings.use_subagents before connecting")
+		}
 		return &remoteBackend{flags: f, agentFileName: agentFileName}, nil
 	}
 	agentSource, err := sources.Resolve(agentFileName, f.runConfig.EnvProvider())

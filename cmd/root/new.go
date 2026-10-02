@@ -80,6 +80,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 	rt, err := runtime.NewLocalRuntime(ctx, t,
 		runtime.WithWorkingDir(workingDir),
+		runtime.WithUseSubagents(userconfig.Get().GetUseSubagents()),
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)

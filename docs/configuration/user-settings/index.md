@@ -36,6 +36,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
+| `use_subagents` | boolean | `true` | Allow delegation to subagents in local CLI runtimes. Managed with `/subagents on`, `/subagents off`, or the subagent-tree toggle, not the `/settings` dialog. See [Subagent Preference](#subagent-preference). |
 | `hide_tool_results` | boolean | `false` | Hide tool call results in the TUI by default. Mirrors the `--hide-tool-results` flag and the <kbd>Ctrl</kbd>+<kbd>O</kbd> toggle. |
 | `expand_thinking` | boolean | `false` | Start new sessions with thinking/tool blocks expanded instead of collapsed. |
 | `split_diff_view` | boolean | `true` | Render file-edit diffs side-by-side instead of unified. |
@@ -60,6 +61,21 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `hooks` | object | _unset_ | Global lifecycle hooks applied to every agent, additive with agent-config and CLI hooks. See [Global (user-level) hooks](../hooks/index.md#global-user-level-hooks). |
 | `keybindings` | array | _unset_ | Remap TUI keyboard shortcuts. See [Custom Keybindings](../../features/tui/index.md#custom-keybindings) for the full list of actions and syntax. |
 | `layout` | object | _unset_ | Sidebar position and section visibility. See [Layout Settings](#layout-settings) below. |
+
+## Subagent Preference
+
+Subagents are **on by default**, including when `settings:` or `use_subagents` is absent. Save `false` to disable delegation:
+
+```yaml
+settings:
+  use_subagents: false
+```
+
+Use `/subagents off` or `/subagents on` in the TUI to save this preference and update local runtimes in the current UI. The full TUI also provides a toggle in the subagent tree. This control is separate from `/settings`.
+
+The saved value is applied to local `run`, `exec`, and `new` runtimes, including new and restored local tabs. It controls whether delegation is permitted, not whether an agent has any configured subagents. Turning it back on permits subsequent delegation again; it does not restart completed work.
+
+Remote servers do **not** support this client-side control. A `--remote` launch with `use_subagents: false` fails before connecting rather than silently allowing remote delegation. Use a local runtime, or explicitly enable the preference before connecting remotely. The preference is not automatically applied to standalone servers or library embedders.
 
 ## Layout Settings
 
@@ -93,6 +109,7 @@ settings:
   theme_dark: dracula
   theme_light: default-light
   lean: false
+  use_subagents: true
   expand_thinking: false
   split_diff_view: true
   render_images: true
@@ -133,4 +150,5 @@ User settings are a **low-priority** source: they establish defaults, and anythi
 - **Aliases sit between CLI flags and user settings.** An [alias](../../features/cli/index.md#docker-agent-alias) (`docker agent alias add ...`) can bundle its own `yolo`, `safety`, `model`, `hide_tool_results`, and `sandbox` defaults; those apply when the corresponding flag was not explicitly passed, the same way user settings do, but are resolved after user settings so an alias's own choices take priority over your global defaults.
 - **Permissions are merged, not overridden.** Global `settings.permissions` and an agent's own `permissions:` are combined into a single set of `deny` → `allow` → `ask` patterns before evaluation — a global deny always blocks, regardless of what the agent config allows. See [Merging Behavior](../permissions/index.md#merging-behavior).
 - **Hooks are additive, not overridden.** For a given lifecycle event, hooks from the agent config, `settings.hooks`, `hooks.d/` drop-ins, and `--hook-*` CLI flags **all** run, in that order. Global hooks cannot be suppressed by an individual agent.
+- **Subagent delegation is a user-owned local runtime preference.** `use_subagents` defaults to `true` and has no agent-YAML or CLI-flag override. `/subagents on` and `/subagents off` save the preference; new and restored local runtimes read it. Remote and standalone service boundaries are described [above](#subagent-preference).
 - **Everything else is a plain default.** Fields with no CLI or agent-config equivalent (`sound`, `sound_threshold`, `restore_tabs`, `tab_title_max_length`, `split_diff_view`, `render_images`, `show_banner`, `cache_stable_prompts`, `warn_on_cache_miss`, `busy_send_mode`, `keybindings`, `layout`) only ever come from `settings:` (or the `/settings` dialog that writes it) — there is nothing to override them per run.

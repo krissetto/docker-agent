@@ -63,6 +63,8 @@ func (a *Alias) GetSafety() latest.SafetyMode {
 
 // Settings represents global user settings
 type Settings struct {
+	// UseSubagents allows delegation to subagents. Defaults to true when not set.
+	UseSubagents *bool `yaml:"use_subagents,omitempty"`
 	// HideToolResults hides tool call results in the TUI by default
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.
@@ -277,6 +279,14 @@ func (s *Settings) GetRenderImages() bool {
 		return true
 	}
 	return *s.RenderImages
+}
+
+// GetUseSubagents returns whether subagent delegation is enabled, defaulting to true.
+func (s *Settings) GetUseSubagents() bool {
+	if s == nil || s.UseSubagents == nil {
+		return true
+	}
+	return *s.UseSubagents
 }
 
 // GetShowBanner returns whether the startup banner is displayed, defaulting to true.
@@ -652,6 +662,17 @@ func Update(mutate func(*Config) error) error {
 		return err
 	}
 	return cfg.Save()
+}
+
+// SetUseSubagents saves only the subagent preference against the freshest config.
+func SetUseSubagents(enabled bool) error {
+	return Update(func(cfg *Config) error {
+		if cfg.Settings == nil {
+			cfg.Settings = &Settings{}
+		}
+		cfg.Settings.UseSubagents = new(enabled)
+		return nil
+	})
 }
 
 // GetAlias retrieves the alias configuration for a given name.

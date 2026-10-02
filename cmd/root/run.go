@@ -918,6 +918,8 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 	opts := []runtime.Opt{
 		runtime.WithSessionStore(sessStore),
 		runtime.WithCurrentAgent(agentName),
+		// Read the saved preference for every owner, including new and restored tabs.
+		runtime.WithUseSubagents(userconfig.Get().GetUseSubagents()),
 		runtime.WithWorkingDir(runConfig.WorkingDir),
 		runtime.WithTracer(otel.Tracer(AppName)),
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
