@@ -226,6 +226,10 @@ type LocalRuntime struct {
 
 	subagents *subagentManager
 
+	// Admission is serialized with policy changes, not with child execution.
+	subagentAdmissionMu sync.RWMutex
+	subagentsDisabled   atomic.Bool // inverted so the zero value is enabled
+
 	policy                   SessionResourcePolicy
 	maxActiveDescendants     int
 	maxActiveDescendantsRoot int
@@ -718,6 +722,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	r.startupToolsCtx, r.startupToolsCancel = context.WithCancel(context.WithoutCancel(ctx))
 	r.bgAgents = agenttool.NewHandler(r)
 	r.fallback.prepareMessages = r.prepareMessagesForModel
+	r.fallback.prepareTools = r.filterDelegationTools
 
 	// stripUnsupportedModalitiesTransform captures the runtime closure to
 	// resolve the agent from Input.AgentName, so it lives here rather

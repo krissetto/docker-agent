@@ -100,7 +100,7 @@ func (r *LocalRuntime) prepareMessagesForModel(
 	if catalogModel == nil && cfg.CapsOverride() == nil {
 		caps = providerFallbackCaps(ctx, cfg.ModelConfig, modelID)
 	}
-	return r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), &caps, msgs)
+	return r.filterDelegationMessages(a, sess, r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), &caps, msgs))
 }
 
 func providerFallbackCaps(ctx context.Context, cfg latest.ModelConfig, id modelsdev.ID) modelinfo.ModelCapabilities {

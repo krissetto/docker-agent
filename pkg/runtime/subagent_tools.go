@@ -16,6 +16,9 @@ import (
 // its subtree is quiet; the agent uses read_subagent to inspect details on
 // demand.
 func (r *LocalRuntime) handleSpawnSubagent(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+	if !r.UseSubagents() {
+		return tools.ResultError(errSubagentsDisabled.Error()), nil
+	}
 	var args subagent.SpawnArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)

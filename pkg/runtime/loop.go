@@ -58,6 +58,9 @@ func (r *LocalRuntime) registerDefaultTools() {
 
 	r.bgAgents.RegisterHandlers(func(name string, fn func(context.Context, *session.Session, tools.ToolCall) (*tools.ToolCallResult, error)) {
 		r.toolMap[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			if name == bgagent.ToolNameRunBackgroundAgent {
+				return r.admitBackgroundDelegation(ctx, sess, tc, fn)
+			}
 			return fn(ctx, sess, tc)
 		}
 	})
@@ -501,7 +504,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools, sink)
-	agentTools = a.FilterTools(addAsyncChildTools(sess, agentTools))
+	agentTools = r.filterDelegationTools(a.FilterTools(addAsyncChildTools(sess, agentTools)))
 
 	// Record the catalogue size on the session span — answers "how
 	// many tools could this turn actually use?" without having to
@@ -586,7 +589,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools, sink)
-		agentTools = a.FilterTools(addAsyncChildTools(sess, agentTools))
+		agentTools = r.filterDelegationTools(a.FilterTools(addAsyncChildTools(sess, agentTools)))
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -907,6 +910,7 @@ func (r *LocalRuntime) runTurn(
 	// uses the capabilities of the provider that will receive it.
 
 	// Try primary model with fallback chain if configured
+	agentTools = r.filterDelegationTools(agentTools)
 	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)
 	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
 		streamCtx = d.steeringContext(streamCtx)
@@ -1736,7 +1740,7 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 	}
 
 	slog.DebugContext(ctx, "Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
-	return a.FilterTools(agentTools), nil
+	return r.filterDelegationTools(a.FilterTools(agentTools)), nil
 }
 
 // configureToolsetHandlers sets up elicitation and OAuth handlers for all toolsets of an agent.

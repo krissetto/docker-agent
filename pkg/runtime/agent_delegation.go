@@ -661,6 +661,11 @@ func (r *LocalRuntime) CurrentAgentSubAgentNames() []string {
 // session-scoped permissions. They still run non-interactively, so any tool
 // that remains Ask after those inherited rules is denied rather than blocking.
 func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams) *agenttool.RunResult {
+	if !r.acceptLegacyDelegation(ctx) {
+		return &agenttool.RunResult{ErrMsg: errSubagentsDisabled.Error()}
+	}
+	// Do not carry an admission grant into the child's future delegations.
+	ctx = context.WithValue(ctx, legacyDelegationKey{}, (*legacyDelegationGrant)(nil))
 	// Caller identity must come from the parent session, not the shared
 	// current agent: nested background delegation runs on pinned sessions.
 	caller := r.resolveSessionAgent(params.ParentSession)
@@ -687,6 +692,9 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 }
 
 func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+	if !r.acceptLegacyDelegation(ctx) {
+		return tools.ResultError(errSubagentsDisabled.Error()), nil
+	}
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`

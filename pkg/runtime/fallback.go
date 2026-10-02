@@ -44,6 +44,8 @@ type fallbackExecutor struct {
 	// prepareMessages applies runtime message transforms for the provider
 	// selected for each attempt. It is set by [NewLocalRuntime].
 	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) []chat.Message
+	// prepareTools reapplies live runtime policy after retry backoff.
+	prepareTools func([]tools.Tool) []tools.Tool
 
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit)
 	// errors when no fallback models are configured. When false (default),
@@ -334,7 +336,11 @@ func (e *fallbackExecutor) execute(
 				case <-streamCtx.Done():
 				}
 			}()
-			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, agentTools)
+			attemptTools := agentTools
+			if e.prepareTools != nil {
+				attemptTools = e.prepareTools(agentTools)
+			}
+			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, attemptTools)
 			close(creating)
 			<-creationWatcherDone
 			if errors.Is(context.Cause(streamCtx), errSteeringBoundary) {

@@ -268,11 +268,14 @@ func (m *subagentManager) updateRootLifecycle(sessionID string, state subagent.N
 }
 
 func (m *subagentManager) registerIdleChild(parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent) error {
-	_, err := m.admitChild(parent, parentAgent, child, target, ref, "")
+	_, err := m.admitChild(parent, parentAgent, child, target, ref, "", false)
 	return err
 }
 
 func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
+	if !m.r.UseSubagents() {
+		return "", errSubagentsDisabled
+	}
 	m.mu.Lock()
 	err := m.spawnAdmissionErrorLocked(parent)
 	m.mu.Unlock()
@@ -294,7 +297,7 @@ func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref
 	input.Pending, input.Accepted, input.TurnID = true, true, turnID
 	input.InputOrigin, input.SenderID, input.SenderName, input.InputMode = session.InputOriginAgent, parent.ID, parentAgent, "turn"
 	child.AddMessage(input)
-	id, err := m.admitChild(parent, parentAgent, child, target, ref, task)
+	id, err := m.admitChild(parent, parentAgent, child, target, ref, task, true)
 	if err != nil {
 		return "", err
 	}
@@ -304,7 +307,23 @@ func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref
 	return id, nil
 }
 
-func (m *subagentManager) admitChild(parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
+func (m *subagentManager) admitChild(parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool) (subagent.NodeID, error) {
+	// Only autonomous admission is policy-gated. Manual creation and restored
+	// or already accepted input must retain their normal lifecycle.
+	if autonomous {
+		m.r.subagentAdmissionMu.RLock()
+		if !m.r.UseSubagents() {
+			m.r.subagentAdmissionMu.RUnlock()
+			return "", errSubagentsDisabled
+		}
+	}
+	unlockPolicy := func() {
+		if autonomous {
+			m.r.subagentAdmissionMu.RUnlock()
+			autonomous = false
+		}
+	}
+	defer unlockPolicy()
 	m.restoreMu.Lock()
 	defer m.restoreMu.Unlock()
 	if m.r.sessionStore != nil {
@@ -369,6 +388,7 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 		m.wg.Go(func() { m.startChildTitle(child, task) })
 	}
 	m.mu.Unlock()
+	unlockPolicy()
 	if err != nil {
 		rec.unwatch()
 		return "", err
@@ -847,6 +867,11 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 // respond: any non-stopped child accepts input (an idle one is re-run). It
 // errors when the id is unknown, not a child of the caller, or stopped.
 func (m *subagentManager) sendToChild(parentID string, id subagent.NodeID, body string) (string, error) {
+	m.r.subagentAdmissionMu.RLock()
+	defer m.r.subagentAdmissionMu.RUnlock()
+	if !m.r.UseSubagents() {
+		return "", errSubagentsDisabled
+	}
 	m.mu.Lock()
 	rec := m.children[id]
 	if rec == nil {
