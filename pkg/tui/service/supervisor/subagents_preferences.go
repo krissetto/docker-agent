@@ -13,13 +13,13 @@ import (
 func (s *Supervisor) SaveUseSubagents(enabled bool, current app.Services, save func(bool) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	runtimes := make(map[*runtime.LocalRuntime]struct{})
+	var runtimes []runtime.SubagentPolicy
 	add := func(services app.Services) error {
-		rt, ok := services.(*runtime.LocalRuntime)
+		rt, ok := services.(runtime.SubagentPolicy)
 		if !ok {
-			return fmt.Errorf("Use subagents is unavailable on a non-local runtime; preference not saved")
+			return fmt.Errorf("Use subagents is unavailable on a runtime without policy support; preference not saved")
 		}
-		runtimes[rt] = struct{}{}
+		runtimes = append(runtimes, rt)
 		return nil
 	}
 	if err := add(current); err != nil {
@@ -43,7 +43,7 @@ func (s *Supervisor) SaveUseSubagents(enabled bool, current app.Services, save f
 		return fmt.Errorf("failed to save Use subagents: %w", err)
 	}
 	s.useSubagents = new(enabled)
-	for rt := range runtimes {
+	for _, rt := range runtimes {
 		rt.SetUseSubagents(enabled)
 	}
 	return nil
@@ -53,7 +53,7 @@ func (s *Supervisor) SaveUseSubagents(enabled bool, current app.Services, save f
 // publish their resources after it. It never alters execution or topology.
 func (s *Supervisor) applySubagentsPolicyLocked(services app.Services) {
 	if s.useSubagents != nil {
-		if rt, ok := services.(*runtime.LocalRuntime); ok {
+		if rt, ok := services.(runtime.SubagentPolicy); ok {
 			rt.SetUseSubagents(*s.useSubagents)
 		}
 	}

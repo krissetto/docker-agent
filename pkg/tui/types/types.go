@@ -87,6 +87,7 @@ type Message struct {
 	InputMode      string
 	SenderID       string
 	SenderName     string
+	ReportOutcome  session.ReportOutcome
 	InputReference lifecycle.InputReference
 	// ReceivedBody retains the delivered payload, not a fetched subagent transcript.
 	ReceivedBody   string
@@ -159,6 +160,7 @@ func Input(input *session.Message) *Message {
 	}
 	msg.InputOrigin, msg.InputMode = input.InputOrigin, input.InputMode
 	msg.SenderID, msg.SenderName = input.SenderID, input.SenderName
+	msg.ReportOutcome = input.ReportOutcome
 	msg.InputReference = lifecycle.ResolveInputReference(nil, "", input.SenderID, input.SenderName)
 	switch input.InputOrigin {
 	case session.InputOriginAgent:

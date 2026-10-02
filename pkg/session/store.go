@@ -994,6 +994,7 @@ type sessionItemRow struct {
 	inputOrigin    InputOrigin
 	senderID       string
 	senderName     string
+	reportOutcome  ReportOutcome
 	subsessionID   sql.NullString
 	summaryText    sql.NullString
 	firstKeptEntry int
@@ -1007,7 +1008,7 @@ type sessionItemRow struct {
 // loadSession when resolving sub-sessions inside a transaction.
 func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, sessionID string) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
+		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
 	if err != nil {
 		return nil, classifySQLiteContextError(ctx, err)
@@ -1019,7 +1020,7 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	var rawRows []sessionItemRow
 	for rows.Next() {
 		var row sessionItemRow
-		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
+		if err := rows.Scan(&row.id, &row.position, &row.itemType, &row.agentName, &row.messageJSON, &row.implicit, &row.actorPending, &row.actorAccepted, &row.actorTurnID, &row.actorInputMode, &row.inputOrigin, &row.senderID, &row.senderName, &row.reportOutcome, &row.subsessionID, &row.summaryText, &row.firstKeptEntry, &row.cost, &row.model, &row.usageJSON); err != nil {
 			return nil, classifySQLiteContextError(ctx, err)
 		}
 		rawRows = append(rawRows, row)
@@ -1043,17 +1044,18 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 			}
 			items = append(items, Item{
 				Message: &Message{
-					ID:          row.id,
-					AgentName:   row.agentName.String,
-					Message:     chatMsg,
-					Implicit:    row.implicit,
-					Pending:     row.actorPending,
-					Accepted:    row.actorAccepted,
-					TurnID:      row.actorTurnID,
-					InputMode:   row.actorInputMode,
-					InputOrigin: row.inputOrigin,
-					SenderID:    row.senderID,
-					SenderName:  row.senderName,
+					ID:            row.id,
+					AgentName:     row.agentName.String,
+					Message:       chatMsg,
+					Implicit:      row.implicit,
+					Pending:       row.actorPending,
+					Accepted:      row.actorAccepted,
+					TurnID:        row.actorTurnID,
+					InputMode:     row.actorInputMode,
+					InputOrigin:   row.inputOrigin,
+					SenderID:      row.senderID,
+					SenderName:    row.senderName,
+					ReportOutcome: row.reportOutcome,
 				},
 			})
 
@@ -1445,9 +1447,9 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 
 	// Insert a new message at the next position
 	result, err := execSQLiteWrite(ctx, s.db,
-		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name)
-		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName)
+		`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name, report_outcome)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, sessionID, msg.AgentName, string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, msg.ReportOutcome)
 	if err != nil {
 		return 0, fmt.Errorf("inserting message: %w", classifySQLiteContextError(ctx, err))
 	}
@@ -1510,8 +1512,8 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	}
 
 	result, err := execSQLiteWrite(ctx, s.db,
-		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ? WHERE session_id = ? AND id = ?`,
-		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, sessionID, messageID)
+		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ?, report_outcome = ? WHERE session_id = ? AND id = ?`,
+		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, msg.ReportOutcome, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))
 	}
@@ -1650,9 +1652,9 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 			return fmt.Errorf("marshaling message: %w", classifySQLiteContextError(ctx, err))
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name)
-			 VALUES (?, ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			sessionID, position, item.Message.AgentName, string(msgJSON), item.Message.Implicit, item.Message.Pending, item.Message.Accepted, item.Message.TurnID, item.Message.InputMode, item.Message.InputOrigin, item.Message.SenderID, item.Message.SenderName)
+			`INSERT INTO session_items (session_id, position, item_type, agent_name, message_json, implicit, actor_pending, actor_accepted, actor_turn_id, actor_input_mode, input_origin, sender_id, sender_name, report_outcome)
+			 VALUES (?, ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, position, item.Message.AgentName, string(msgJSON), item.Message.Implicit, item.Message.Pending, item.Message.Accepted, item.Message.TurnID, item.Message.InputMode, item.Message.InputOrigin, item.Message.SenderID, item.Message.SenderName, item.Message.ReportOutcome)
 		return classifySQLiteContextError(ctx, err)
 
 	case item.SubSession != nil:

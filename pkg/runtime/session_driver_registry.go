@@ -196,6 +196,7 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "register"}
 	}
 	d := g.drivers[sess.ID]
+	replacing := 0
 	adopted := g.orphans[sess.ID]
 	if d != nil && d.isStopped() {
 		if !d.stoppedAndSettled() {
@@ -207,24 +208,26 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		// reopen the stable ID with a fresh session object. Stale handles retain
 		// the old stopped driver. Delete is still final because deleted IDs are
 		// rejected above before generation replacement.
-		if g.r != nil {
+		replacing = 1
+		d = nil
+	}
+	if d == nil {
+		maxSessions := g.maxSessionsLocked()
+		if maxSessions > 0 && !limitAllows(len(g.drivers)-replacing, maxSessions) {
+			g.evictSettledForCapacityLocked()
+		}
+		if !limitAllows(len(g.drivers)+len(g.reservations)-replacing, maxSessions) {
+			g.mu.Unlock()
+			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: sess.ID, Operation: SessionOperationCreateSession, Reason: SessionErrorReasonLimit, Limit: maxSessions}
+		}
+		// Preserve the stopped generation's observation state if admission fails.
+		if replacing != 0 && g.r != nil {
 			if g.r.interactions != nil {
 				g.r.interactions.deleteSession(sess.ID)
 			}
 			if g.r.sessionEvents != nil {
 				g.r.sessionEvents.Delete(sess.ID)
 			}
-		}
-		d = nil
-	}
-	if d == nil {
-		maxSessions := g.maxSessionsLocked()
-		if maxSessions > 0 && !limitAllows(len(g.drivers), maxSessions) {
-			g.evictSettledForCapacityLocked()
-		}
-		if !limitAllows(len(g.drivers)+len(g.reservations), maxSessions) {
-			g.mu.Unlock()
-			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: sess.ID, Operation: SessionOperationCreateSession, Reason: SessionErrorReasonLimit, Limit: maxSessions}
 		}
 		if bind {
 			sess.AgentName = agentName

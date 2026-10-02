@@ -1,15 +1,18 @@
 // Package subagenttool renders the async subagent tools (spawn_subagent,
 // send_message, read_subagent) as compact one-liners — "Spawned <agent> (id)",
 // "Messaged <agent> (id)", "Inspecting <agent> (id)" — with the agent name in
-// its accent color. Tool results are intentionally never rendered: they are
-// context for the model, not for the user.
+// its accent color. Successful results stay compact; failures expose a bounded
+// actionable explanation.
 package subagenttool
 
 import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
@@ -50,7 +53,7 @@ func renderer(render renderFunc, lookup NameLookup, references ...ReferenceLooku
 		if id, ok := NodeIDFor(msg); ok && len(references) > 0 && references[0] != nil {
 			projected.InputReference = references[0](id)
 		}
-		return render(&projected, s, state, width, height, lookup)
+		return withError(render(&projected, s, state, width, height, lookup), &projected, width)
 	}
 }
 
@@ -171,9 +174,22 @@ func line(msg *types.Message, s spinner.Spinner, verb, name, id string, width in
 	return agentidentity.Wrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(verb)+" ", ref, "", width)
 }
 
-// RenderInput trusts only the resolved typed sender, never the runtime envelope.
+// CompletionPresentation uses only the immutable report outcome. Missing legacy
+// provenance is neutral; current tree state is deliberately not consulted.
+func CompletionPresentation(outcome session.ReportOutcome) (icon, label string) {
+	switch outcome {
+	case session.ReportOutcomeFinished:
+		return styles.ToolCompletedIcon.Render("✓"), "turn finished"
+	case session.ReportOutcomeFailed:
+		return styles.ToolErrorIcon.Render("✗"), "turn failed"
+	default:
+		return styles.MutedStyle.Render("·"), "report received"
+	}
+}
+
+// RenderInput trusts only the resolved typed sender and historical outcome.
 func RenderInput(msg *types.Message, width int) string {
-	icon := styles.ToolCompletedIcon.Render("✓")
+	icon, label := CompletionPresentation(msg.ReportOutcome)
 	ref := msg.InputReference
 	if ref.Name == "" && ref.DisplayID == "" {
 		return icon + " " + styles.MutedStyle.Render("Runtime update received")
@@ -181,7 +197,24 @@ func RenderInput(msg *types.Message, width int) string {
 	if ref.Name == "" {
 		ref.Name = "subagent"
 	}
-	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" has finished their work"), width)
+	return agentidentity.Wrap(icon+" ", ref, styles.MutedStyle.Render(" · "+label), width)
+}
+
+func withError(header string, msg *types.Message, width int) string {
+	if msg.ToolStatus != types.ToolStatusError {
+		return header
+	}
+	detail := msg.Content
+	if msg.ToolResult != nil && msg.ToolResult.Output != "" {
+		detail = msg.ToolResult.Output
+	}
+	detail = strings.Join(strings.Fields(ansi.Strip(detail)), " ")
+	if detail == "" {
+		detail = "Subagent operation failed; inspect the request and try again."
+	}
+	// At most three terminal rows, regardless of result size or embedded controls.
+	detail = ansi.Truncate(detail, max(1, width)*3, "…")
+	return header + "\n" + styles.MutedStyle.Render(ansi.Hardwrap(detail, max(1, width), true))
 }
 
 // verb picks the wording from the tool status: the in-progress form while

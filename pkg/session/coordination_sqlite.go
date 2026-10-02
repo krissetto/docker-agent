@@ -182,7 +182,7 @@ func (s *SQLiteSessionStore) commitChildTx(ctx context.Context, tx *sql.Tx, c Ch
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO child_reports(id, parent_session_id, child_session_id, turn_id, revision, content) VALUES (?, ?, ?, ?, ?, ?)`, report.ID, report.ParentSessionID, report.ChildSessionID, report.TurnID, record.Revision, report.Content); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO child_reports(id, parent_session_id, child_session_id, turn_id, revision, content, report_outcome) VALUES (?, ?, ?, ?, ?, ?, ?)`, report.ID, report.ParentSessionID, report.ChildSessionID, report.TurnID, record.Revision, report.Content, report.ReportOutcome); err != nil {
 			return err
 		}
 	}
@@ -211,7 +211,7 @@ func (s *SQLiteSessionStore) LoadChildren(ctx context.Context, root string) ([]C
 }
 
 func (s *SQLiteSessionStore) PendingReports(ctx context.Context, parent string) ([]ChildReport, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, parent_session_id, child_session_id, turn_id, revision, content FROM child_reports WHERE parent_session_id = ? AND message_id IS NULL ORDER BY rowid`, parent)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, parent_session_id, child_session_id, turn_id, revision, content, report_outcome FROM child_reports WHERE parent_session_id = ? AND message_id IS NULL ORDER BY rowid`, parent)
 	if err != nil {
 		return nil, classifySQLiteContextError(ctx, err)
 	}
@@ -219,7 +219,7 @@ func (s *SQLiteSessionStore) PendingReports(ctx context.Context, parent string) 
 	var reports []ChildReport
 	for rows.Next() {
 		var report ChildReport
-		if err := rows.Scan(&report.ID, &report.ParentSessionID, &report.ChildSessionID, &report.TurnID, &report.Revision, &report.Content); err != nil {
+		if err := rows.Scan(&report.ID, &report.ParentSessionID, &report.ChildSessionID, &report.TurnID, &report.Revision, &report.Content, &report.ReportOutcome); err != nil {
 			return nil, classifySQLiteContextError(ctx, err)
 		}
 		reports = append(reports, report)
@@ -246,9 +246,9 @@ func (s *SQLiteSessionStore) AcceptReport(ctx context.Context, parent, id string
 		result := ReportAcceptance{MessageID: accepted.Int64}
 		var stored Message
 		var data string
-		err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(agent_name, ''), message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name
+		err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(agent_name, ''), message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome
 			FROM session_items WHERE session_id = ? AND id = ? AND item_type = 'message'`, parent, accepted.Int64).Scan(
-			&stored.ID, &stored.AgentName, &data, &stored.Implicit, &stored.Pending, &stored.Accepted, &stored.TurnID, &stored.InputMode, &stored.InputOrigin, &stored.SenderID, &stored.SenderName)
+			&stored.ID, &stored.AgentName, &data, &stored.Implicit, &stored.Pending, &stored.Accepted, &stored.TurnID, &stored.InputMode, &stored.InputOrigin, &stored.SenderID, &stored.SenderName, &stored.ReportOutcome)
 		if errors.Is(err, sql.ErrNoRows) {
 			return result, nil
 		}

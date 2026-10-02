@@ -12,16 +12,28 @@ import (
 // are skipped; empty messages are omitted.
 func renderTranscript(sess *session.Session, limit int) string {
 	msgs := sess.GetAllMessages()
-	rendered := make([]string, 0, len(msgs))
-	for i := range msgs {
+	start := 0
+	if limit > 0 {
+		remaining := limit
+		start = len(msgs)
+		for start > 0 && remaining > 0 {
+			start--
+			if strings.TrimSpace(msgs[start].Message.Content) != "" {
+				remaining--
+			}
+		}
+	}
+	capacity := len(msgs) - start
+	if limit > 0 {
+		capacity = min(capacity, limit)
+	}
+	rendered := make([]string, 0, capacity)
+	for i := start; i < len(msgs); i++ {
 		content := strings.TrimSpace(msgs[i].Message.Content)
 		if content == "" {
 			continue
 		}
 		rendered = append(rendered, fmt.Sprintf("%s: %s", msgs[i].Message.Role, content))
-	}
-	if limit > 0 && len(rendered) > limit {
-		rendered = rendered[len(rendered)-limit:]
 	}
 	return strings.Join(rendered, "\n\n")
 }

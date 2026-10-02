@@ -12,10 +12,11 @@ import (
 type PendingUserMessageCanceledEvent struct {
 	AgentContext
 
-	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string              `json:"sender_id,omitempty"`
-	SenderName  string              `json:"sender_name,omitempty"`
-	InputMode   string              `json:"input_mode,omitempty"`
+	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string                `json:"sender_id,omitempty"`
+	SenderName    string                `json:"sender_name,omitempty"`
+	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode     string                `json:"input_mode,omitempty"`
 
 	Type            string `json:"type"`
 	SessionID       string `json:"session_id"`

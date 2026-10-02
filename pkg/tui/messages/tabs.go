@@ -105,3 +105,6 @@ type BellMsg struct{}
 
 // SetUseSubagentsMsg saves and applies the delegation preference without changing existing work.
 type SetUseSubagentsMsg struct{ Enabled bool }
+
+// StopSubagentSubtreeMsg is emitted only after explicit human confirmation.
+type StopSubagentSubtreeMsg struct{ NodeID string }

@@ -532,6 +532,14 @@ const (
 	InputOriginRuntime InputOrigin = "runtime"
 )
 
+// ReportOutcome records the historical outcome of a child turn, not its current state.
+type ReportOutcome string
+
+const (
+	ReportOutcomeFinished ReportOutcome = "finished"
+	ReportOutcomeFailed   ReportOutcome = "failed"
+)
+
 // Message is a message from an agent
 type Message struct {
 	// ID is the database ID of the message (used for persistence tracking)
@@ -544,13 +552,14 @@ type Message struct {
 	Implicit bool `json:"implicit,omitempty"`
 	// Pending keeps an accepted user message visible and durable while excluding
 	// it from model input until its session turn is promoted.
-	Pending     bool        `json:"pending,omitempty"`
-	Accepted    bool        `json:"actor_accepted,omitempty"`
-	TurnID      string      `json:"actor_turn_id,omitempty"`
-	InputMode   string      `json:"actor_input_mode,omitempty"`
-	InputOrigin InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string      `json:"sender_id,omitempty"`
-	SenderName  string      `json:"sender_name,omitempty"`
+	Pending       bool          `json:"pending,omitempty"`
+	Accepted      bool          `json:"actor_accepted,omitempty"`
+	TurnID        string        `json:"actor_turn_id,omitempty"`
+	InputMode     string        `json:"actor_input_mode,omitempty"`
+	InputOrigin   InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string        `json:"sender_id,omitempty"`
+	SenderName    string        `json:"sender_name,omitempty"`
+	ReportOutcome ReportOutcome `json:"report_outcome,omitempty"`
 }
 
 // UnmarshalJSON accepts both the current "agent_name" key and the legacy

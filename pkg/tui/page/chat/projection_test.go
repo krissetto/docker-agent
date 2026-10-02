@@ -115,7 +115,7 @@ func TestTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() {
 		out := ansi.Strip(p.messages.View())
-		assert.Equal(t, 1, strings.Count(out, "worker (12345) has finished their work"))
+		assert.Equal(t, 1, strings.Count(out, "worker (12345) · report received"))
 		assert.Contains(t, out, "worker (12345)")
 		assert.Equal(t, 1, strings.Count(out, "original parent delegation"))
 		assert.NotContains(t, out, "private runtime payload")

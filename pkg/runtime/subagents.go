@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,10 +119,10 @@ func (m *subagentManager) updateSessionMetrics(sess *session.Session, toolCalls 
 		id = subagent.SessionRootID(sess.ID)
 	}
 	// Serialize the metric mutation with snapshot capture/enqueue. Otherwise an
-	// older concurrent full-tree snapshot can be persisted after a newer one.
+	// older concurrent root snapshot can be persisted after a newer one.
 	m.metricsMu.Lock()
 	defer m.metricsMu.Unlock()
-	_ = m.tree.Update(id, func(node *subagent.Node) {
+	_, _ = m.tree.UpdateIfChanged(id, func(node *subagent.Node) {
 		// Concurrent turns can finish metric snapshots out of order. Cumulative
 		// counters never regress; toolCalls is the delta for this completion.
 		node.Cost = max(node.Cost, cost)
@@ -178,7 +179,7 @@ func (m *subagentManager) ensureSessionLocked(sess *session.Session, agentName s
 	return st
 }
 
-// persistSnapshot mirrors each root's subtree onto its owning top-level
+// persistSnapshot mirrors each dirty root's subtree onto its owning top-level
 // session and store row. A runtime can serve multiple root sessions, so each
 // owner must receive only its own swarm.
 func (m *subagentManager) persistSnapshot() {
@@ -190,9 +191,6 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 		m.metricsMu.Lock()
 		defer m.metricsMu.Unlock()
 	}
-	full := m.tree.Snapshot()
-	full.Durability = m.r.sessionDurability()
-
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -204,13 +202,17 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 		snap subagent.Snapshot
 	}
 	var projections []projection
-	for id, tracked := range m.sessions {
-		if !tracked.topLevel {
+	for _, snap := range m.tree.TakeDirtySnapshots() {
+		id, ok := strings.CutPrefix(string(snap.Root), "root:")
+		if !ok {
 			continue
 		}
-		if snap, ok := snapshotForRoot(full, subagent.SessionRootID(id)); ok {
-			projections = append(projections, projection{id, tracked.sess, snap})
+		tracked := m.sessions[id]
+		if tracked == nil || !tracked.topLevel {
+			continue
 		}
+		snap.Durability = m.r.sessionDurability()
+		projections = append(projections, projection{id, tracked.sess, snap})
 	}
 	m.mu.Unlock()
 	for _, item := range projections {

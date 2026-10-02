@@ -42,12 +42,17 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 	root := New(t.Context(), spawner, application, dir, func() {}).(*appModel)
 	t.Cleanup(root.cleanupManagedResources)
 	driver := tuitest.New(t, root, 120, 40)
-	driver.WaitFor(tuitest.Contains("worker (a1b2c) has finished their work >"))
+	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 	click := func(label string) {
 		t.Helper()
 		frame := driver.Frame()
 		for y, line := range strings.Split(frame, "\n") {
 			before, _, found := strings.Cut(ansi.Strip(line), label)
+			if label == "v" {
+				if i := strings.LastIndex(ansi.Strip(line), " v"); i >= 0 {
+					before, found = ansi.Strip(line)[:i+1], true
+				}
+			}
 			if !found {
 				continue
 			}
@@ -66,12 +71,12 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 	click(">")
 	driver.WaitFor(tuitest.Contains("private runtime payload"))
 	click("v")
-	driver.WaitFor(tuitest.Contains("worker (a1b2c) has finished their work >"))
+	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
 	click("worker (a1b2c)")
 	driver.WaitFor(tuitest.Contains("CHILD-DELEGATION-BODY"))
 	driver.WaitFor(tuitest.Contains("↳"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
 	click("director (paren)")
-	driver.WaitFor(tuitest.Contains("worker (a1b2c) has finished their work >"))
+	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 }

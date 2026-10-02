@@ -38,6 +38,40 @@ func TestFindAllowed(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestFindAllowedDisplayNamePrecedesUnderlyingName(t *testing.T) {
+	t.Parallel()
+
+	aliased := AllowedSubagent{Agent: "worker", Name: "research", Description: "Research role"}
+	exact := AllowedSubagent{Agent: "writer", Name: "worker", Description: "Writing role"}
+	for _, allowed := range [][]AllowedSubagent{{aliased, exact}, {exact, aliased}} {
+		got, ok := FindAllowed(allowed, "worker")
+		require.True(t, ok)
+		assert.Equal(t, exact, got, "advertised alias wins regardless of declaration order")
+	}
+}
+
+func TestFindAllowedRejectsAmbiguousUnderlyingName(t *testing.T) {
+	t.Parallel()
+
+	first := AllowedSubagent{Agent: "worker", Name: "research", Description: "Research role"}
+	second := AllowedSubagent{Agent: "worker", Name: "review", Description: "Review role"}
+	for _, allowed := range [][]AllowedSubagent{{first, second}, {second, first}} {
+		got, ok := FindAllowed(allowed, "worker")
+		assert.False(t, ok, "underlying name must not arbitrarily select an alias")
+		assert.Zero(t, got)
+		for _, want := range allowed {
+			got, ok := FindAllowed(allowed, want.Name)
+			require.True(t, ok)
+			assert.Equal(t, want, got)
+		}
+		// A separately advertised bare name still has exact-match priority.
+		bare := AllowedSubagent{Agent: "worker", Description: "Default role"}
+		got, ok = FindAllowed(append(allowed, bare), "worker")
+		require.True(t, ok)
+		assert.Equal(t, bare, got)
+	}
+}
+
 func TestInstructionsExplainDelegationAndLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +177,8 @@ func TestDefinitionsExplainAddressingAndReports(t *testing.T) {
 			}
 			assert.Contains(t, properties[idField].(map[string]any)["description"], "your own direct children")
 			if definition.Name == ToolReadSubagent {
+				assert.Contains(t, definition.Description, "latest response without tool calls")
+				assert.Contains(t, definition.Description, "only if none exists, return the newest tool-call response")
 				assert.Contains(t, definition.Description, "retrieve the full result before relying on a truncated report")
 				assert.Contains(t, definition.Description, "not polling or waiting")
 			}

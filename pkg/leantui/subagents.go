@@ -26,10 +26,25 @@ func (m *model) openSubagentPicker() {
 	m.screen.Autocomplete.Dismiss()
 	m.screen.Subagents = ui.NewSubagentPicker(*snapshot, m.app.Session().ID, attached)
 	m.screen.Subagents.UseSubagents = subagentsPreference(m.app)
+	_, policyAvailable := m.app.Runtime().(runtime.SubagentPolicy)
+	_, stopAvailable := m.app.Runtime().(runtime.SubagentControl)
+	m.screen.Subagents.PolicyUnavailable, m.screen.Subagents.StopUnavailable = !policyAvailable, !stopAvailable
 }
 
 func (m *model) handleSubagentPickerKey(ctx context.Context, key ui.Key) {
 	picker := m.screen.Subagents
+	if target, handled := picker.HandleStopKey(key); handled {
+		if target != "" {
+			if control, ok := m.app.Runtime().(runtime.SubagentControl); ok {
+				m.capabilityJob(ctx, func(context.Context) (any, error) {
+					return "Subtree stopped permanently; transcript remains available", control.StopSubtree(target)
+				})
+			} else {
+				m.reportCapability("Stop subtree is unavailable on this runtime", nil)
+			}
+		}
+		return
+	}
 	if picker.HandleActionKey(key) {
 		m.setUseSubagents(!picker.UseSubagents)
 		return
@@ -40,6 +55,9 @@ func (m *model) handleSubagentPickerKey(ctx context.Context, key ui.Key) {
 	case ui.KeyUp, ui.KeyDown, ui.KeyLeft, ui.KeyRight, ui.KeyHome, ui.KeyEnd:
 		m.screen.Subagents.Navigate(key.Typ)
 	case ui.KeyEnter:
+		if picker.PolicyActionFocused() {
+			return
+		}
 		node, ok := m.screen.Subagents.Current()
 		if !ok {
 			return
@@ -64,14 +82,14 @@ func (m *model) handleSubagentPickerKey(ctx context.Context, key ui.Key) {
 
 func applySavedSubagentsPreference(a *app.App) {
 	if a != nil {
-		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+		if rt, ok := a.Runtime().(runtime.SubagentPolicy); ok {
 			rt.SetUseSubagents(userconfig.Get().GetUseSubagents())
 		}
 	}
 }
 func subagentsPreference(a *app.App) bool {
 	if a != nil {
-		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+		if rt, ok := a.Runtime().(runtime.SubagentPolicy); ok {
 			return rt.UseSubagents()
 		}
 	}
@@ -90,14 +108,14 @@ func (m *model) handleSubagentsCommand(arg string) {
 	}
 }
 func (m *model) setUseSubagents(enabled bool) {
-	runtimes := make(map[*runtime.LocalRuntime]struct{})
+	var runtimes []runtime.SubagentPolicy
 	add := func(a *app.App) bool {
 		if a == nil {
 			return false
 		}
-		rt, ok := a.Runtime().(*runtime.LocalRuntime)
+		rt, ok := a.Runtime().(runtime.SubagentPolicy)
 		if ok {
-			runtimes[rt] = struct{}{}
+			runtimes = append(runtimes, rt)
 		}
 		return ok
 	}
@@ -108,7 +126,7 @@ func (m *model) setUseSubagents(enabled bool) {
 	if m.viewers != nil {
 		for a := range m.viewers.views {
 			if !add(a) {
-				m.reportCapability("Use subagents cannot be applied to a non-local viewer; preference not saved", nil)
+				m.reportCapability("Use subagents cannot be applied to a viewer without policy support; preference not saved", nil)
 				return
 			}
 		}
@@ -125,7 +143,7 @@ func (m *model) setUseSubagents(enabled bool) {
 		m.reportCapability("Failed to save Use subagents: "+err.Error(), nil)
 		return
 	}
-	for rt := range runtimes {
+	for _, rt := range runtimes {
 		rt.SetUseSubagents(enabled)
 	}
 	if m.screen.Subagents != nil {
@@ -142,7 +160,7 @@ func (m *model) setUseSubagents(enabled bool) {
 	if enabled {
 		label = "ON"
 	}
-	m.reportCapability("Use subagents: "+label, nil)
+	m.reportCapability("Use subagents: "+label+" (saved globally for local sessions; new delegation only, existing work continues)", nil)
 }
 
 func (m *model) syncSubagentsCompletion() {

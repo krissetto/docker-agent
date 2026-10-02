@@ -167,6 +167,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 		input := session.UserMessage(msg.Message, msg.MultiContent...)
 		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
+		input.ReportOutcome = msg.ReportOutcome
 		if lifecycle.VisibleTranscriptMessage(input) {
 			p.showStartupBanner = false
 		}
@@ -183,6 +184,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 		input := session.UserMessage(msg.Message, msg.MultiContent...)
 		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
+		input.ReportOutcome = msg.ReportOutcome
 		if lifecycle.VisibleTranscriptMessage(input) {
 			p.showStartupBanner = false
 		}

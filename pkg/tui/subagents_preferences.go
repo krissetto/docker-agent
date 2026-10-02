@@ -5,6 +5,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -12,7 +13,7 @@ import (
 
 func applySavedSubagentsPreference(a *app.App) {
 	if a != nil {
-		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+		if rt, ok := a.Runtime().(runtime.SubagentPolicy); ok {
 			rt.SetUseSubagents(userconfig.Get().GetUseSubagents())
 		}
 	}
@@ -20,7 +21,7 @@ func applySavedSubagentsPreference(a *app.App) {
 
 func subagentsPreference(a *app.App) bool {
 	if a != nil {
-		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+		if rt, ok := a.Runtime().(runtime.SubagentPolicy); ok {
 			return rt.UseSubagents()
 		}
 	}
@@ -36,7 +37,7 @@ func (m *appModel) setUseSubagents(enabled bool) tea.Cmd {
 			return notification.ErrorCmd(err.Error())
 		}
 	} else {
-		rt, ok := m.application.Runtime().(*runtime.LocalRuntime)
+		rt, ok := m.application.Runtime().(runtime.SubagentPolicy)
 		if !ok {
 			return notification.ErrorCmd("Use subagents is unavailable on this runtime; preference not saved")
 		}
@@ -61,5 +62,21 @@ func (m *appModel) setUseSubagents(enabled bool) tea.Cmd {
 	if enabled {
 		label = "ON"
 	}
-	return tea.Batch(refresh, notification.SuccessCmd("Use subagents: "+label))
+	return tea.Batch(refresh, notification.SuccessCmd("Use subagents: "+label+" (saved globally for local sessions; new delegation only, existing work continues)"))
+}
+
+func (m *appModel) stopSubagentSubtree(id string) tea.Cmd {
+	if m.application == nil {
+		return notification.ErrorCmd("No active runtime")
+	}
+	control, ok := m.application.Runtime().(runtime.SubagentControl)
+	if !ok {
+		return notification.ErrorCmd("Stop subtree is unavailable on this runtime")
+	}
+	return func() tea.Msg {
+		if err := control.StopSubtree(subagent.NodeID(id)); err != nil {
+			return notification.ErrorCmd("Stop subtree: " + err.Error())()
+		}
+		return notification.SuccessCmd("Subtree stopped permanently; transcript remains available")()
+	}
 }

@@ -19,6 +19,9 @@ import (
 // SubagentsPolicyMsg updates only the saved policy, never the tree or selection.
 type SubagentsPolicyMsg struct{ Enabled bool }
 
+// SubagentsCapabilitiesMsg marks optional controls without affecting browsing.
+type SubagentsCapabilitiesMsg struct{ Policy, Stop bool }
+
 type SubagentsRefreshMsg struct {
 	Dialog Dialog
 	Nodes  []subagent.NodeSnapshot
@@ -28,23 +31,26 @@ type SubagentsRefreshMsg struct {
 // subagentsDialog keeps presentation state locally; node IDs alone are routing keys.
 type subagentsDialog struct {
 	pickerCore
-	useSubagents       bool
-	nodes              []subagent.NodeSnapshot
-	titles             map[string]string
-	cancel             func()
-	collapsed          map[subagent.NodeID]bool
-	rows               []subagentview.Row
-	prepared           []subagentRowGeometry
-	lineRows           []int
-	hover              map[subagent.NodeID]subagentHover
-	hovered            subagent.NodeID
-	pointerX, pointerY int
-	pointerKnown       bool
-	hoverAnimation     animation.Subscription
-	animationBound     bool
-	spinnerAnimation   animation.Subscription
-	runtime            *animation.Runtime
-	spinnerFrame       string
+	useSubagents                       bool
+	stopTarget                         subagent.NodeID
+	stopIdentity                       string
+	policyUnavailable, stopUnavailable bool
+	nodes                              []subagent.NodeSnapshot
+	titles                             map[string]string
+	cancel                             func()
+	collapsed                          map[subagent.NodeID]bool
+	rows                               []subagentview.Row
+	prepared                           []subagentRowGeometry
+	lineRows                           []int
+	hover                              map[subagent.NodeID]subagentHover
+	hovered                            subagent.NodeID
+	pointerX, pointerY                 int
+	pointerKnown                       bool
+	hoverAnimation                     animation.Subscription
+	animationBound                     bool
+	spinnerAnimation                   animation.Subscription
+	runtime                            *animation.Runtime
+	spinnerFrame                       string
 }
 
 func NewSubagentsDialog(nodes []subagent.NodeSnapshot, titles map[string]string, selected ...subagent.NodeID) Dialog {
@@ -138,6 +144,24 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			d.syncSpinner()
 		}
 	}()
+	if _, click := msg.(tea.MouseClickMsg); click && d.stopTarget != "" {
+		return d, nil
+	}
+	if k, ok := msg.(tea.KeyPressMsg); ok && d.stopTarget != "" {
+		target := d.stopTarget
+		switch k.String() {
+		case "y":
+			d.stopTarget = ""
+			// A refresh may remove the original target; never retarget confirmation.
+			if _, ok := subagentview.Find(d.nodes, target); ok {
+				return d, core.CmdHandler(messages.StopSubagentSubtreeMsg{NodeID: string(target)})
+			}
+		case "n", "esc", "q", "ctrl+c":
+			d.stopTarget = ""
+		}
+		d.renderBody(true)
+		return d, nil
+	}
 	if k, ok := msg.(tea.KeyPressMsg); ok {
 		if action, handled := d.HandleActionKey(k); handled {
 			if action.Code == 0 {
@@ -147,6 +171,12 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 		}
 	}
 	switch msg := msg.(type) {
+	case SubagentsCapabilitiesMsg:
+		d.policyUnavailable, d.stopUnavailable = !msg.Policy, !msg.Stop
+		if d.stopUnavailable {
+			d.stopTarget = ""
+		}
+		d.renderBody(true)
 	case SubagentsPolicyMsg:
 		d.useSubagents = msg.Enabled
 		d.renderBody(true)
@@ -207,7 +237,15 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			if len(d.rows) > 0 && d.rows[d.selected].Branch {
 				d.branch(d.collapsed[d.selectedID()])
 			}
+		case "s":
+			if d.canStop() {
+				d.stopTarget = d.selectedID()
+				d.stopIdentity = cleanDetail(d.rows[d.selected].Node.DisplayName()) + " (" + cleanDetail(string(d.stopTarget)) + ")"
+			}
 		case "u":
+			if d.policyUnavailable {
+				return d, nil
+			}
 			return d, core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: !d.useSubagents})
 		case "enter":
 			return d, d.attach()
@@ -262,15 +300,30 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No subagents in this session.")}
 	}
-	label := "Use subagents: ON"
+	label := "Use subagents: ON (global)"
 	if !d.useSubagents {
-		label = "Use subagents: OFF"
+		label = "Use subagents: OFF (global)"
 	}
-	actions := actionsForKeys("u", label, "enter", "Attach")
-	actions[1].Disabled = d.selectedID() == ""
+	stopLabel := "Stop subtree"
+	if d.policyUnavailable {
+		label = "Use subagents: unavailable"
+	}
+	if d.stopUnavailable {
+		stopLabel = "Stop subtree: unavailable"
+	}
+	actions := actionsForKeys("u", label, "enter", "Attach", "s", stopLabel)
+	actions[0].Disabled = d.policyUnavailable
+	actions[2].Disabled = !d.canStop()
+	if d.stopTarget != "" {
+		lines = append([]string{styles.MutedStyle.Render(ansi.Hardwrap("Permanently stop subtree "+d.stopIdentity+"? Children stop too. History remains. [y] Confirm [n/esc] Cancel", inner, true))}, lines...)
+		actions = nil
+	}
+	if len(actions) > 1 {
+		actions[1].Disabled = d.selectedID() == ""
+	}
 	for i := range actions {
 		actions[i].HideFocusHint = true
-		actions[i].HideShortcut = true
+		actions[i].HideShortcut = i != 2
 	}
 	footer := d.RenderActions(inner, actions...)
 	if prepare {
@@ -278,6 +331,13 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 		return ""
 	}
 	return d.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
+}
+func (d *subagentsDialog) canStop() bool {
+	if d.stopUnavailable || d.selected < 0 || d.selected >= len(d.rows) {
+		return false
+	}
+	row := d.rows[d.selected]
+	return (row.Parent != "" || row.Node.Parent != "") && row.Node.State != subagent.NodeStopped
 }
 func cleanDetail(text string) string { return strings.Join(strings.Fields(ansi.Strip(text)), " ") }
 

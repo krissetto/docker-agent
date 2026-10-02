@@ -432,11 +432,14 @@ func (mv *messageModel) replyHeader(width int) string {
 	if mv.expanded {
 		chevron = "v"
 	}
+	icon := styles.ToolCompletedIcon.Render("✓")
 	action := " has replied "
 	if mv.message.Type == types.MessageTypeRuntimeNotice {
-		action = " has finished their work "
+		var label string
+		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
+		action = " · " + label + " "
 	}
-	return agentidentity.Wrap(styles.ToolCompletedIcon.Render("✓")+" ", mv.message.InputReference,
+	return agentidentity.Wrap(icon+" ", mv.message.InputReference,
 		styles.MutedStyle.Render(action+chevron), width)
 }
 

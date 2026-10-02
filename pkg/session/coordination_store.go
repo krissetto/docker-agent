@@ -37,6 +37,7 @@ type ChildAdmissionBatchStore interface {
 }
 
 type ChildReport struct {
+	ReportOutcome   ReportOutcome
 	ID              string
 	ParentSessionID string
 	ChildSessionID  string

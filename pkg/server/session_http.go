@@ -728,7 +728,7 @@ func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 		out.Interactions[i] = sessionInteractionDTO{SessionID: interaction.SessionID, InteractionID: interaction.InteractionID, Kind: interaction.Kind, ElicitationID: interaction.ElicitationID, Event: interaction.Event}
 	}
 	for i, input := range snapshot.PendingInputs {
-		out.PendingInputs[i] = sessionPendingInputDTO{TurnID: input.TurnID, Content: input.Content, MultiContent: input.MultiContent, SessionPosition: input.SessionPosition, InputOrigin: input.InputOrigin, SenderID: input.SenderID, SenderName: input.SenderName, InputMode: input.InputMode}
+		out.PendingInputs[i] = sessionPendingInputDTO{TurnID: input.TurnID, Content: input.Content, MultiContent: input.MultiContent, SessionPosition: input.SessionPosition, InputOrigin: input.InputOrigin, SenderID: input.SenderID, SenderName: input.SenderName, ReportOutcome: input.ReportOutcome, InputMode: input.InputMode}
 	}
 	return out
 }

@@ -19,6 +19,7 @@ type Tree struct {
 	mu          sync.RWMutex
 	nodes       map[NodeID]*nodeRecord
 	children    map[NodeID][]NodeID
+	dirtyRoots  map[NodeID]struct{}
 	subscribers map[chan Snapshot]struct{}
 	now         func() time.Time
 }
@@ -35,6 +36,7 @@ func (t *Tree) Remove(id NodeID) error {
 		t.mu.Unlock()
 		return errors.New("node still has children")
 	}
+	t.markDirtyLocked(id)
 	delete(t.nodes, id)
 	delete(t.children, id)
 	if rec.node.Parent != "" {
@@ -46,8 +48,7 @@ func (t *Tree) Remove(id NodeID) error {
 			}
 		}
 	}
-	snap := t.snapshotLocked()
-	publishSnapshot(t.subscribersLocked(), snap)
+	t.publishLocked()
 	t.mu.Unlock()
 	return nil
 }
@@ -57,6 +58,7 @@ func NewTree() *Tree {
 	return &Tree{
 		nodes:       map[NodeID]*nodeRecord{},
 		children:    map[NodeID][]NodeID{},
+		dirtyRoots:  map[NodeID]struct{}{},
 		subscribers: map[chan Snapshot]struct{}{},
 		now:         time.Now,
 	}
@@ -125,7 +127,10 @@ func (t *Tree) AddSubtree(nodes []Node) error {
 			t.children[n.Parent] = append(t.children[n.Parent], n.ID)
 		}
 	}
-	publishSnapshot(t.subscribersLocked(), t.snapshotLocked())
+	for _, n := range nodes {
+		t.markDirtyLocked(n.ID)
+	}
+	t.publishLocked()
 	return nil
 }
 
@@ -161,28 +166,91 @@ func (t *Tree) Add(n Node) error {
 	if n.Parent != "" {
 		t.children[n.Parent] = append(t.children[n.Parent], n.ID)
 	}
-	snap := t.snapshotLocked()
-	publishSnapshot(t.subscribersLocked(), snap)
+	t.markDirtyLocked(n.ID)
+	t.publishLocked()
 	t.mu.Unlock()
 
 	return nil
 }
 
-// Update mutates a node and publishes a new snapshot.
+// Update mutates a node and publishes a new snapshot. The callback must not
+// alter the node ID or Parent; topology changes use Add and Remove.
 func (t *Tree) Update(id NodeID, fn func(*Node)) error {
+	_, err := t.update(id, fn, false)
+	return err
+}
+
+// UpdateIfChanged is Update without timestamp changes or publication when fn
+// leaves the node unchanged. As with Update, fn must not alter tree topology.
+func (t *Tree) UpdateIfChanged(id NodeID, fn func(*Node)) (bool, error) {
+	return t.update(id, fn, true)
+}
+
+func (t *Tree) update(id NodeID, fn func(*Node), onlyIfChanged bool) (bool, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	rec, ok := t.nodes[id]
 	if !ok {
-		t.mu.Unlock()
-		return ErrNodeNotFound
+		return false, ErrNodeNotFound
 	}
+	before := rec.node
 	fn(&rec.node)
+	if onlyIfChanged && rec.node == before {
+		return false, nil
+	}
 	rec.node.UpdatedAt = t.now()
-	snap := t.snapshotLocked()
-	publishSnapshot(t.subscribersLocked(), snap)
-	t.mu.Unlock()
+	t.markDirtyLocked(id)
+	t.publishLocked()
+	return true, nil
+}
 
-	return nil
+// TakeDirtySnapshots captures each changed root's subtree and clears its dirty
+// flag atomically. It is intended for a single persistence consumer, which must
+// serialize capture with enqueue and retain failed writes for retry. Updates
+// after capture mark their root dirty again. Removed roots have no snapshot;
+// their owning session/store row is deleted separately by the caller.
+func (t *Tree) TakeDirtySnapshots() []Snapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var snapshots []Snapshot
+	for id := range t.dirtyRoots {
+		if _, exists := t.nodes[id]; exists {
+			snapshots = append(snapshots, Snapshot{
+				Version: SnapshotVersion, Root: id,
+				Nodes: []NodeSnapshot{t.snapshotNodeLocked(id)},
+			})
+		}
+	}
+	if len(t.dirtyRoots) > 1 {
+		// Release historical map capacity so a single dirty root does not scan
+		// buckets retained from a much larger initial batch.
+		t.dirtyRoots = make(map[NodeID]struct{})
+	} else {
+		clear(t.dirtyRoots)
+	}
+	return snapshots
+}
+
+func (t *Tree) markDirtyLocked(id NodeID) {
+	for {
+		rec, exists := t.nodes[id]
+		if !exists {
+			return
+		}
+		if rec.node.Parent == "" {
+			t.dirtyRoots[id] = struct{}{}
+			return
+		}
+		id = rec.node.Parent
+	}
+}
+
+// Avoid constructing a forest snapshot when nobody is observing it. Durable
+// projections use TakeDirtySnapshots and only copy roots that actually changed.
+func (t *Tree) publishLocked() {
+	if len(t.subscribers) != 0 {
+		publishSnapshot(t.subscribersLocked(), t.snapshotLocked())
+	}
 }
 
 // Node returns a copy of the requested node.

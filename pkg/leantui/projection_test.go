@@ -120,7 +120,7 @@ func TestLeanTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 	}
 	check := func() string {
 		out := ansi.Strip(strings.Join(m.screen.Transcript.Lines(100, 0, false, m.sessionState, nil), "\n"))
-		assert.Equal(t, 1, strings.Count(out, "worker (12345) has finished their work"))
+		assert.Equal(t, 1, strings.Count(out, "worker (12345) · report received"))
 		assert.Contains(t, out, "worker (12345)")
 		assert.Contains(t, out, "clean steering **literal** body")
 		assert.Contains(t, out, strings.TrimSpace(ui.PromptText)+" original parent delegation", "delegation must reuse the user prompt presentation")

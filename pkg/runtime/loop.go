@@ -83,7 +83,7 @@ func initialUserPrompt(sess *session.Session) (QueuedMessage, int, bool) {
 		return QueuedMessage{}, -1, false
 	}
 	msg := item.Message.Message
-	return QueuedMessage{Content: msg.Content, MultiContent: msg.MultiContent, RequestID: item.Message.TurnID, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, InputMode: item.Message.InputMode, AcceptedPosition: func() int {
+	return QueuedMessage{Content: msg.Content, MultiContent: msg.MultiContent, RequestID: item.Message.TurnID, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, ReportOutcome: item.Message.ReportOutcome, InputMode: item.Message.InputMode, AcceptedPosition: func() int {
 		if item.Message.Accepted {
 			return len(items) - 1
 		}
@@ -1032,7 +1032,9 @@ func (r *LocalRuntime) runTurn(
 
 	// Tool calls become observable before dispatch and may then pause for user
 	// confirmation, so increment their live metric before entering dispatch.
-	r.subagents.updateSessionMetrics(sess, int64(len(dispatchCalls)))
+	if len(dispatchCalls) != 0 {
+		r.subagents.updateSessionMetrics(sess, int64(len(dispatchCalls)))
+	}
 	stopRun, stopMsg := r.processToolCalls(ctx, sess, dispatchCalls, agentTools, events)
 
 	// post_tool_use hook signalled run termination via a deny

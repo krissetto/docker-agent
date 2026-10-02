@@ -18,7 +18,7 @@ func TestReportAcceptanceReturnsPersistedState(t *testing.T) {
 			require.NoError(t, store.AddSession(t.Context(), root))
 			admission := coordinationAdmission(root.ID)
 			require.NoError(t, cs.AdmitChild(t.Context(), admission))
-			report := ChildReport{ID: "opaque-legacy-revision-7", ParentSessionID: root.ID, ChildSessionID: admission.Child.ID, TurnID: "child-turn", Content: "original report"}
+			report := ChildReport{ID: "opaque-legacy-revision-7", ParentSessionID: root.ID, ChildSessionID: admission.Child.ID, TurnID: "child-turn", Content: "original report", ReportOutcome: ReportOutcomeFailed}
 			require.NoError(t, cs.CommitChild(t.Context(), ChildCommit{ExpectedRevision: 1, Record: admission.Record, Reports: []ChildReport{report}}))
 			probe, err := cs.AcceptReport(t.Context(), root.ID, report.ID, nil)
 			require.NoError(t, err)
@@ -27,6 +27,7 @@ func TestReportAcceptanceReturnsPersistedState(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, pending, 1)
 			assert.Equal(t, report.Content, pending[0].Content)
+			assert.Equal(t, report.ReportOutcome, pending[0].ReportOutcome)
 			_, err = cs.AcceptReport(t.Context(), "wrong-parent", report.ID, nil)
 			require.ErrorIs(t, err, ErrNotFound)
 			_, err = cs.AcceptReport(t.Context(), root.ID, "missing", nil)
@@ -34,6 +35,7 @@ func TestReportAcceptanceReturnsPersistedState(t *testing.T) {
 			_, err = cs.AcceptReport(t.Context(), root.ID, report.ID, UserMessage("missing turn"))
 			require.Error(t, err)
 			input := ImplicitUserMessage("<system_info>original report</system_info>")
+			input.ReportOutcome = report.ReportOutcome
 			input.InputOrigin, input.InputMode, input.TurnID = InputOriginRuntime, "steer", "report:"+report.ID
 			input.SenderID, input.SenderName = admission.Child.ID, "maker"
 			accepted, err := cs.AcceptReport(t.Context(), root.ID, report.ID, input)
@@ -49,6 +51,7 @@ func TestReportAcceptanceReturnsPersistedState(t *testing.T) {
 			assert.Equal(t, InputOriginRuntime, accepted.Message.InputOrigin)
 			assert.Equal(t, input.SenderID, accepted.Message.SenderID)
 			assert.Equal(t, input.SenderName, accepted.Message.SenderName)
+			assert.Equal(t, input.ReportOutcome, accepted.Message.ReportOutcome)
 			accepted.Message.Message.Content = "caller mutation"
 			retry, err := cs.AcceptReport(t.Context(), root.ID, report.ID, UserMessage("retry must not replace original"))
 			require.NoError(t, err)
@@ -168,12 +171,13 @@ func TestSQLiteReportAcceptanceAtomicFailureAndRecovery(t *testing.T) {
 	cs := store.(CoordinationStore)
 	admission := coordinationAdmission(root.ID)
 	require.NoError(t, cs.AdmitChild(t.Context(), admission))
-	report := ChildReport{ID: "old-opaque-report", ParentSessionID: root.ID, ChildSessionID: admission.Child.ID, TurnID: "turn", Content: "retained until accepted"}
+	report := ChildReport{ID: "old-opaque-report", ParentSessionID: root.ID, ChildSessionID: admission.Child.ID, TurnID: "turn", Content: "retained until accepted", ReportOutcome: ReportOutcomeFailed}
 	require.NoError(t, cs.CommitChild(t.Context(), ChildCommit{ExpectedRevision: 1, Record: admission.Record, Reports: []ChildReport{report}}))
 	db := store.(*SQLiteSessionStore).db
 	_, err = db.ExecContext(t.Context(), `CREATE TRIGGER reject_report_ack BEFORE UPDATE ON child_reports BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
 	require.NoError(t, err)
 	input := ImplicitUserMessage(report.Content)
+	input.ReportOutcome = report.ReportOutcome
 	input.InputOrigin, input.InputMode, input.TurnID = InputOriginRuntime, "steer", "report:"+report.ID
 	accepted, err := cs.AcceptReport(t.Context(), root.ID, report.ID, input)
 	require.ErrorContains(t, err, "injected failure")
@@ -185,6 +189,7 @@ func TestSQLiteReportAcceptanceAtomicFailureAndRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, report.Content, pending[0].Content)
+	assert.Equal(t, report.ReportOutcome, pending[0].ReportOutcome)
 	_, err = db.ExecContext(t.Context(), `DROP TRIGGER reject_report_ack`)
 	require.NoError(t, err)
 	accepted, err = cs.AcceptReport(t.Context(), root.ID, report.ID, input)

@@ -51,7 +51,7 @@ func (r *LocalRuntime) handleSpawnSubagent(_ context.Context, sess *session.Sess
 	)), nil
 }
 
-// handleReadSubagent returns a subagent's status, its latest result (default),
+// handleReadSubagent returns a subagent's status, its latest assistant response (default),
 // its last N messages (last_messages), or its full transcript (full).
 func (r *LocalRuntime) handleReadSubagent(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args subagent.ReadArgs
@@ -86,7 +86,8 @@ func (r *LocalRuntime) handleReadSubagent(_ context.Context, sess *session.Sessi
 		return tools.ResultSuccess(header + "\n\n" + transcript), nil
 	}
 
-	// Default: the latest result (the subagent's most recent finished turn).
+	// Default: the latest assistant response without tool calls, falling back to
+	// the newest tool-call assistant only when no such response exists.
 	switch {
 	case rec.state == subagent.NodeFailed && rec.errMsg != "":
 		return tools.ResultSuccess(fmt.Sprintf("%s:\n\n%s", header, rec.errMsg)), nil

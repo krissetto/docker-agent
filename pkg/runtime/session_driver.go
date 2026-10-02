@@ -1211,7 +1211,7 @@ func (d *sessionDriver) snapshotLocked() (*session.Session, SessionStatus, []Int
 			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted {
 				continue
 			}
-			pendingInputs = append(pendingInputs, PendingInput{TurnID: item.Message.TurnID, Content: item.Message.Message.Content, MultiContent: item.Message.Message.MultiContent, SessionPosition: index, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, InputMode: item.Message.InputMode})
+			pendingInputs = append(pendingInputs, PendingInput{TurnID: item.Message.TurnID, Content: item.Message.Message.Content, MultiContent: item.Message.Message.MultiContent, SessionPosition: index, InputOrigin: item.Message.InputOrigin, SenderID: item.Message.SenderID, SenderName: item.Message.SenderName, ReportOutcome: item.Message.ReportOutcome, InputMode: item.Message.InputMode})
 		}
 	}
 	interactions := make([]InteractionSnapshot, 0, len(d.interactions))
@@ -1666,6 +1666,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 	}
 
 	d.mu.Lock()
+	completedCancel := d.cancel
 	d.leave(sessionSettling)
 	d.completionInFlight = false
 	d.settledGeneration = generation
@@ -1718,6 +1719,9 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 				d.closeSettledLocked()
 				callbacks := d.settledCallbacksLocked()
 				d.mu.Unlock()
+				if completedCancel != nil {
+					completedCancel()
+				}
 				if failedRootActive {
 					d.r.activeRootStreams.Add(-1)
 				}
@@ -1742,6 +1746,9 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 
 		d.leave(sessionCancelling)
 		d.mu.Unlock()
+		if completedCancel != nil {
+			completedCancel()
+		}
 		return nextCtx, nextGeneration, true
 	}
 	pending := len(d.pending) > 0
@@ -1763,6 +1770,9 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 		callbacks = d.settledCallbacksLocked()
 	}
 	d.mu.Unlock()
+	if completedCancel != nil {
+		completedCancel()
+	}
 	if rootActive {
 		d.r.activeRootStreams.Add(-1)
 	}
@@ -1870,7 +1880,7 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 		if queued.RequestID != msg.RequestID {
 			continue
 		}
-		if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
+		if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || queued.ReportOutcome != msg.ReportOutcome || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
 			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
 		}
 		return true, true, nil
@@ -1895,7 +1905,7 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 		if storedMode != "" && storedMode != mode {
 			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
 		}
-		if normalizedInputOrigin(item.Message.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || item.Message.SenderID != msg.SenderID || item.Message.SenderName != msg.SenderName || item.Message.Message.Content != msg.Content || !reflect.DeepEqual(item.Message.Message.MultiContent, msg.MultiContent) || msg.Retry {
+		if normalizedInputOrigin(item.Message.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || item.Message.SenderID != msg.SenderID || item.Message.SenderName != msg.SenderName || item.Message.ReportOutcome != msg.ReportOutcome || item.Message.Message.Content != msg.Content || !reflect.DeepEqual(item.Message.Message.MultiContent, msg.MultiContent) || msg.Retry {
 			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
 		}
 		return true, item.Message.Pending, nil

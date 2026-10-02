@@ -40,7 +40,7 @@ func TestSubagentsPreferenceIncludesRetainedUniqueOwnersAndSaveFailure(t *testin
 	require.Equal(t, 1, saves)
 	require.False(t, first.UseSubagents())
 	require.False(t, idle.UseSubagents())
-	require.ErrorContains(t, s.SaveUseSubagents(true, nil, func(bool) error { t.Fatal("unsupported must not save"); return nil }), "non-local")
+	require.ErrorContains(t, s.SaveUseSubagents(true, nil, func(bool) error { t.Fatal("unsupported must not save"); return nil }), "without policy support")
 	require.False(t, first.UseSubagents())
 }
 
@@ -71,4 +71,21 @@ func (policyProvider) BaseConfig() base.Config { return base.Config{} }
 func (policyProvider) MaxTokens() int          { return 0 }
 func (policyProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
 	return nil, errors.New("no live provider")
+}
+
+// A decorator may expose the capability without exposing a concrete runtime.
+type policyDecorator struct {
+	app.Services
+	runtime.SubagentPolicy
+}
+
+func TestSubagentsPreferenceOptionalCapabilityDecorator(t *testing.T) {
+	s := New(nil)
+	rt := policyRuntime(t)
+	wrapped := policyDecorator{Services: rt, SubagentPolicy: rt}
+	require.NoError(t, s.SaveUseSubagents(false, wrapped, func(bool) error { return nil }))
+	require.False(t, rt.UseSubagents())
+	unsupported := struct{ app.Services }{Services: rt}
+	require.ErrorContains(t, s.SaveUseSubagents(true, unsupported, func(bool) error { t.Fatal("unsupported must not save"); return nil }), "without policy support")
+	require.False(t, rt.UseSubagents())
 }

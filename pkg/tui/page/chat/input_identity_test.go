@@ -69,7 +69,7 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				assert.Contains(t, ansi.Strip(frame), "literal body should not navigate")
 			} else {
 				if tc.origin == session.InputOriginRuntime {
-					assert.Contains(t, ansi.Strip(frame), "has finished their work >")
+					assert.Contains(t, ansi.Strip(frame), "· report received >")
 				} else {
 					assert.Contains(t, ansi.Strip(frame), "has replied >")
 				}

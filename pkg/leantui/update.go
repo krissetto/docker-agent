@@ -722,7 +722,7 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 		content := msg.Message.Content
 		switch msg.Message.Role {
 		case chat.MessageRoleUser:
-			m.addInputEcho(msg.InputOrigin, msg.InputMode, msg.SenderName, msg.SenderID, content)
+			m.addInputEcho(msg.InputOrigin, msg.InputMode, msg.SenderName, msg.SenderID, content, msg.ReportOutcome)
 		case chat.MessageRoleAssistant:
 			if msg.Message.ReasoningContent != "" {
 				reasoning := msg.Message.ReasoningContent
@@ -1110,8 +1110,11 @@ func (m *model) consumePendingUser(kind ui.PendingUserKind, turnID string) (ui.P
 	return ui.PendingUserMessage{}, false
 }
 
-func (m *model) addInputEcho(origin session.InputOrigin, mode, senderName, senderID, content string) {
+func (m *model) addInputEcho(origin session.InputOrigin, mode, senderName, senderID, content string, outcome ...session.ReportOutcome) {
 	input := session.UserMessage(content)
+	if len(outcome) > 0 {
+		input.ReportOutcome = outcome[0]
+	}
 	input.InputOrigin, input.InputMode = origin, mode
 	input.SenderName, input.SenderID = senderName, senderID
 	msg := tuitypes.Input(input)

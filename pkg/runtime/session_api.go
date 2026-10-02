@@ -585,10 +585,11 @@ type InteractionSnapshot struct {
 
 // PendingInput is one accepted, durable input awaiting FIFO promotion.
 type PendingInput struct {
-	InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID        string              `json:"sender_id,omitempty"`
-	SenderName      string              `json:"sender_name,omitempty"`
-	InputMode       string              `json:"input_mode,omitempty"`
+	InputOrigin     session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID        string                `json:"sender_id,omitempty"`
+	SenderName      string                `json:"sender_name,omitempty"`
+	ReportOutcome   session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode       string                `json:"input_mode,omitempty"`
 	TurnID          string
 	Content         string
 	MultiContent    []chat.MessagePart

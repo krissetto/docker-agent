@@ -157,7 +157,7 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		}
 	case *runtime.PendingUserMessageAcceptedEvent:
 		if !slices.ContainsFunc(next.PendingInputs, func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID }) {
-			next.PendingInputs = append(slices.Clone(next.PendingInputs), runtime.PendingInput{TurnID: e.TurnID, Content: e.Message, MultiContent: e.MultiContent, SessionPosition: e.SessionPosition, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, InputMode: e.InputMode})
+			next.PendingInputs = append(slices.Clone(next.PendingInputs), runtime.PendingInput{TurnID: e.TurnID, Content: e.Message, MultiContent: e.MultiContent, SessionPosition: e.SessionPosition, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode})
 		}
 	case *runtime.PendingUserMessagePromotedEvent:
 		next.PendingInputs = slices.DeleteFunc(slices.Clone(next.PendingInputs), func(p runtime.PendingInput) bool { return p.TurnID == e.TurnID })
@@ -203,6 +203,7 @@ func (a *App) projectTranscript(event runtime.Event) {
 		if e.SessionPosition < 0 || e.SessionPosition >= sess.ItemCount() {
 			msg := session.UserMessage(e.Message, e.MultiContent...)
 			msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode = e.InputOrigin, e.SenderID, e.SenderName, e.InputMode
+			msg.ReportOutcome = e.ReportOutcome
 			msg.TurnID = e.TurnID
 			msg.Implicit = e.InputOrigin == session.InputOriginRuntime
 			sess.AddMessage(msg)
@@ -212,6 +213,7 @@ func (a *App) projectTranscript(event runtime.Event) {
 			msg := session.UserMessage(e.Message, e.MultiContent...)
 			msg.TurnID, msg.Pending, msg.Accepted = e.TurnID, true, true
 			msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode = e.InputOrigin, e.SenderID, e.SenderName, e.InputMode
+			msg.ReportOutcome = e.ReportOutcome
 			msg.Implicit = e.InputOrigin == session.InputOriginRuntime
 			sess.AddMessage(msg)
 		}

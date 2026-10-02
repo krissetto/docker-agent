@@ -18,6 +18,7 @@ func TestInputOriginAndSenderRoundTrip(t *testing.T) {
 					message := UserMessage("<system_info>literal body</system_info>")
 					message.InputOrigin, message.SenderID, message.SenderName = origin, "source-session", "source-agent"
 					message.InputMode = "runtime_note"
+					message.ReportOutcome = ReportOutcomeFailed
 					data, err := json.Marshal(message)
 					require.NoError(t, err)
 					var decoded Message
@@ -41,6 +42,7 @@ func TestInputOriginAndSenderRoundTrip(t *testing.T) {
 					updated := cloneMessage(message)
 					updated.InputOrigin, updated.SenderID, updated.SenderName = InputOriginAgent, "other-session", "other-agent"
 					updated.Message.Content = "clean agent body"
+					updated.ReportOutcome = ReportOutcomeFinished
 					require.NoError(t, store.UpdateMessage(t.Context(), sess.ID, id, updated))
 					loaded, err = store.GetSession(t.Context(), sess.ID)
 					require.NoError(t, err)
@@ -65,6 +67,7 @@ func TestItemAppenderRejectsProvenanceReuse(t *testing.T) {
 			for _, change := range []func(*Message){
 				func(m *Message) { m.InputOrigin = InputOriginRuntime },
 				func(m *Message) { m.SenderID = "source-session" },
+				func(m *Message) { m.ReportOutcome = ReportOutcomeFailed },
 				func(m *Message) { m.SenderName = "source-agent" },
 			} {
 				changed := cloneMessage(original)

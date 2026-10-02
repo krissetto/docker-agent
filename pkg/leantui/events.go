@@ -185,7 +185,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if !shared {
 			m.lifecycle, _ = m.lifecycle.Apply(e)
 		}
-		m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, e.TurnID, e.SessionPosition)
+		m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, e.TurnID, e.SessionPosition, e.ReportOutcome)
 	case *runtime.PendingUserMessageCanceledEvent:
 		m.inputReplay.Withdraw(e.SessionPosition)
 		if !shared {
@@ -353,10 +353,10 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 }
 
 func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent, turnID string) {
-	m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, turnID, e.SessionPosition)
+	m.handleInputEcho(e.InputOrigin, e.InputMode, e.SenderName, e.SenderID, e.Message, turnID, e.SessionPosition, e.ReportOutcome)
 }
 
-func (m *model) handleInputEcho(origin session.InputOrigin, mode, senderName, senderID, content, turnID string, position int) {
+func (m *model) handleInputEcho(origin session.InputOrigin, mode, senderName, senderID, content, turnID string, position int, outcome ...session.ReportOutcome) {
 	display := content
 	for _, kind := range []ui.PendingUserKind{ui.PendingUserSteer, ui.PendingUserFollowUp} {
 		if pending, ok := m.consumePendingUser(kind, turnID); ok {
@@ -367,7 +367,7 @@ func (m *model) handleInputEcho(origin session.InputOrigin, mode, senderName, se
 		return
 	}
 	m.screen.Transcript.FlushPending()
-	m.addInputEcho(origin, mode, senderName, senderID, display)
+	m.addInputEcho(origin, mode, senderName, senderID, display, outcome...)
 }
 
 func (m *model) handleStreamStopped(ctx context.Context) {

@@ -81,10 +81,11 @@ func (e *SubagentCreatedEvent) GetSessionID() string { return e.SessionID }
 type PendingUserMessageAcceptedEvent struct {
 	AgentContext
 
-	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string              `json:"sender_id,omitempty"`
-	SenderName  string              `json:"sender_name,omitempty"`
-	InputMode   string              `json:"input_mode,omitempty"`
+	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string                `json:"sender_id,omitempty"`
+	SenderName    string                `json:"sender_name,omitempty"`
+	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode     string                `json:"input_mode,omitempty"`
 
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
@@ -104,10 +105,11 @@ func (e *PendingUserMessageAcceptedEvent) GetSessionID() string { return e.Sessi
 type PendingUserMessageEditedEvent struct {
 	AgentContext
 
-	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string              `json:"sender_id,omitempty"`
-	SenderName  string              `json:"sender_name,omitempty"`
-	InputMode   string              `json:"input_mode,omitempty"`
+	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string                `json:"sender_id,omitempty"`
+	SenderName    string                `json:"sender_name,omitempty"`
+	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode     string                `json:"input_mode,omitempty"`
 
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
@@ -128,10 +130,11 @@ func (e *PendingUserMessageEditedEvent) GetSessionID() string { return e.Session
 type PendingUserMessagePromotedEvent struct {
 	AgentContext
 
-	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string              `json:"sender_id,omitempty"`
-	SenderName  string              `json:"sender_name,omitempty"`
-	InputMode   string              `json:"input_mode,omitempty"`
+	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string                `json:"sender_id,omitempty"`
+	SenderName    string                `json:"sender_name,omitempty"`
+	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode     string                `json:"input_mode,omitempty"`
 
 	Type            string             `json:"type"`
 	SessionID       string             `json:"session_id"`
@@ -151,10 +154,11 @@ func (e *PendingUserMessagePromotedEvent) GetSessionID() string { return e.Sessi
 type UserMessageEvent struct {
 	AgentContext
 
-	InputOrigin session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID    string              `json:"sender_id,omitempty"`
-	SenderName  string              `json:"sender_name,omitempty"`
-	InputMode   string              `json:"input_mode,omitempty"`
+	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID      string                `json:"sender_id,omitempty"`
+	SenderName    string                `json:"sender_name,omitempty"`
+	ReportOutcome session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode     string                `json:"input_mode,omitempty"`
 
 	Type            string             `json:"type"`
 	Message         string             `json:"message"`

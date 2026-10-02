@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -10,16 +11,19 @@ import (
 
 // SubagentPicker keeps selection by canonical identity, never by display name or row index.
 type SubagentPicker struct {
-	UseSubagents bool
-	actionFocus  int // 0: tree, 1: toggle, 2: Attach
-	rows         []subagentview.Row
-	nodes        []subagent.NodeSnapshot
-	collapsed    map[subagent.NodeID]bool
-	selected     subagent.NodeID
-	current      subagent.NodeID
-	root         subagent.NodeID
-	sessionID    string
-	attached     subagent.NodeID
+	PolicyUnavailable, StopUnavailable bool
+	stopIdentity                       string
+	UseSubagents                       bool
+	StopTarget                         subagent.NodeID
+	actionFocus                        int // 0: tree, 1: toggle, 2: Attach, 3: stop subtree
+	rows                               []subagentview.Row
+	nodes                              []subagent.NodeSnapshot
+	collapsed                          map[subagent.NodeID]bool
+	selected                           subagent.NodeID
+	current                            subagent.NodeID
+	root                               subagent.NodeID
+	sessionID                          string
+	attached                           subagent.NodeID
 }
 
 func NewSubagentPicker(snapshot subagent.Snapshot, sessionID string, attached subagent.NodeID) *SubagentPicker {
@@ -127,6 +131,10 @@ func (p *SubagentPicker) Render(width, height int) []string {
 	if height >= 3 {
 		lines = append(lines, Truncate(StBold().Render("Subagents"), width))
 	}
+	if p.StopTarget != "" && height >= 4 {
+		identity := strings.Split(ansi.Hardwrap("Stop subtree "+p.stopIdentity+"?", width, true), "\n")
+		lines = append(lines, identity[:min(len(identity), height-2)]...)
+	}
 	budget := height - len(lines)
 	if height >= 3 {
 		budget--
@@ -181,18 +189,31 @@ func (p *SubagentPicker) Render(width, height int) []string {
 		lines = append(lines, Truncate(StMuted().Render("Selection no longer available."), width))
 	}
 	if height >= 3 {
-		label := "Use subagents: ON"
+		label := "Use subagents: ON (global)"
 		if !p.UseSubagents {
-			label = "Use subagents: OFF"
+			label = "Use subagents: OFF (global)"
 		}
-		toggle, attach := "[ "+label+" ]", "[ Attach ]"
+		if p.PolicyUnavailable {
+			label = "Use subagents: unavailable"
+		}
+		toggle, attach, stop := "[ "+label+" ]", "[ Attach ]", "[ s: Stop subtree ]"
+		if p.StopUnavailable {
+			stop = "[ Stop subtree: unavailable ]"
+		}
 		if p.actionFocus == 1 {
 			toggle = StBold().Render(toggle)
 		}
 		if p.actionFocus == 2 {
 			attach = StBold().Render(attach)
 		}
-		lines = append(lines, Truncate(toggle+"  "+attach, width))
+		if p.actionFocus == 3 {
+			stop = StBold().Render(stop)
+		}
+		footer := toggle + "  " + attach + "  " + stop
+		if p.StopTarget != "" {
+			footer = "Permanently stop subtree? [y] Confirm [esc] Cancel; history remains"
+		}
+		lines = append(lines, Truncate(footer, width))
 	}
 	return lines
 }
@@ -201,19 +222,58 @@ func (p *SubagentPicker) Render(width, height int) []string {
 // Attach retains the existing Enter route; tree navigation is otherwise unchanged.
 func (p *SubagentPicker) HandleActionKey(key Key) bool {
 	if key.Typ == KeyRune && string(key.Runes) == "u" {
-		return true
+		return !p.PolicyUnavailable
 	}
 	if key.Typ == KeyTab || key.Typ == KeyShiftTab {
 		delta := 1
 		if key.Typ == KeyShiftTab {
-			delta = 2
+			delta = 3
 		}
-		p.actionFocus = (p.actionFocus + delta) % 3
+		p.actionFocus = (p.actionFocus + delta) % 4
 		return false
 	}
 	if p.actionFocus > 0 && (key.Typ == KeyLeft || key.Typ == KeyRight) {
-		p.actionFocus = 3 - p.actionFocus
+		if key.Typ == KeyRight {
+			p.actionFocus = p.actionFocus%3 + 1
+		} else {
+			p.actionFocus = (p.actionFocus+1)%3 + 1
+		}
 		return false
 	}
-	return key.Typ == KeyEnter && p.actionFocus == 1
+	return !p.PolicyUnavailable && key.Typ == KeyEnter && p.actionFocus == 1
 }
+
+// HandleStopKey consumes a separate, explicit confirmation before any stop.
+// The returned canonical target is pinned when prompting, not on confirmation.
+func (p *SubagentPicker) HandleStopKey(key Key) (target subagent.NodeID, handled bool) {
+	if p.StopUnavailable {
+		return "", key.Typ == KeyRune && string(key.Runes) == "s" || key.Typ == KeyEnter && p.actionFocus == 3
+	}
+	if p.StopTarget != "" {
+		switch {
+		case key.Typ == KeyRune && string(key.Runes) == "y":
+			target, p.StopTarget = p.StopTarget, ""
+			if _, ok := subagentview.Find(p.nodes, target); !ok {
+				target = ""
+			}
+			return target, true
+		case key.Typ == KeyEsc || key.Typ == KeyRune && (string(key.Runes) == "n" || string(key.Runes) == "q"):
+			p.StopTarget = ""
+		}
+		return "", true
+	}
+	if key.Typ == KeyRune && string(key.Runes) == "s" || key.Typ == KeyEnter && p.actionFocus == 3 {
+		if i := p.index(); i >= 0 {
+			row := p.rows[i]
+			if (row.Parent != "" || row.Node.Parent != "") && row.Node.State != subagent.NodeStopped {
+				p.StopTarget = row.Node.ID
+				p.stopIdentity = strings.Join(strings.Fields(ansi.Strip(row.Node.DisplayName())), " ") + " (" + strings.Join(strings.Fields(ansi.Strip(string(row.Node.ID))), " ") + ")"
+			}
+		}
+		return "", true
+	}
+	return "", false
+}
+
+// PolicyActionFocused prevents a disabled policy button from falling through to Attach.
+func (p *SubagentPicker) PolicyActionFocused() bool { return p.actionFocus == 1 }

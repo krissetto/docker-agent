@@ -63,7 +63,7 @@ func TestCompletionReferenceRecoversOnlyExactRuntimeHeader(t *testing.T) {
 			}
 			require.Equal(t, "abcde", msg.InputReference.DisplayID)
 			out := ansi.Strip(m.View())
-			require.Contains(t, out, "duplicate name (abcde) has finished their work >")
+			require.Contains(t, out, "duplicate name (abcde) · report received >")
 			require.NotContains(t, out, "ref ")
 			require.Equal(t, tc.body, msg.ReceivedBody)
 			clickReplyChevron(t, m, ">")

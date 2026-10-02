@@ -53,7 +53,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				view.Finalize()
 				out := ansi.Strip(view.View())
 				if origin == session.InputOriginRuntime {
-					assert.Contains(t, out, "has finished their work v")
+					assert.Contains(t, out, "· report received v")
 				} else {
 					assert.Contains(t, out, "has replied v")
 				}

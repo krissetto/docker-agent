@@ -151,3 +151,71 @@ func TestTreeChildCountTracksDirectTopologyWithoutSnapshot(t *testing.T) {
 	require.True(t, found)
 	require.Zero(t, n)
 }
+
+func TestTreeDirtySnapshotsTrackOnlyChangedRoots(t *testing.T) {
+	tree := NewTree()
+	require.NoError(t, tree.AddSubtree([]Node{
+		{ID: "a", Agent: "root"}, {ID: "b", Agent: "root"},
+		{ID: "child", Agent: "worker", Parent: "a"},
+		{ID: "grandchild", Agent: "worker", Parent: "child"},
+	}))
+	require.Len(t, tree.TakeDirtySnapshots(), 2)
+	require.Empty(t, tree.TakeDirtySnapshots())
+
+	updates, cancel := tree.Subscribe(1)
+	defer cancel()
+	<-updates
+	require.NoError(t, tree.Update("grandchild", func(n *Node) { n.ToolCalls++ }))
+	dirty := tree.TakeDirtySnapshots()
+	require.Len(t, dirty, 1)
+	require.Equal(t, NodeID("a"), dirty[0].Root)
+	require.Equal(t, int64(1), dirty[0].Nodes[0].Children[0].Children[0].Node.ToolCalls)
+	require.Equal(t, tree.Snapshot(), <-updates, "observers still receive the full forest")
+
+	// Captured snapshots stay immutable and a later mutation is not lost.
+	require.NoError(t, tree.Update("child", func(n *Node) { n.InputTokens = 42 }))
+	next := tree.TakeDirtySnapshots()
+	require.Len(t, next, 1)
+	require.Equal(t, int64(42), next[0].Nodes[0].Children[0].Node.InputTokens)
+	require.Zero(t, dirty[0].Nodes[0].Children[0].Node.InputTokens)
+
+	require.NoError(t, tree.Remove("grandchild"))
+	next = tree.TakeDirtySnapshots()
+	require.Len(t, next, 1)
+	require.Empty(t, next[0].Nodes[0].Children[0].Children)
+	require.NoError(t, tree.Remove("child"))
+	next = tree.TakeDirtySnapshots()
+	require.Len(t, next, 1)
+	require.Empty(t, next[0].Nodes[0].Children)
+	require.NoError(t, tree.Remove("a"))
+	require.Empty(t, tree.TakeDirtySnapshots(), "removed roots are deleted by their owner")
+}
+
+func TestTreeUpdateIfChangedPreservesNoopTimestampAndObservers(t *testing.T) {
+	tree := NewTree()
+	require.NoError(t, tree.Add(Node{ID: "root", Agent: "root"}))
+	tree.TakeDirtySnapshots()
+	before, _ := tree.Node("root")
+	updates, cancel := tree.Subscribe(1)
+	defer cancel()
+	<-updates
+	changed, err := tree.UpdateIfChanged("root", func(n *Node) { n.ToolCalls = 0 })
+	require.NoError(t, err)
+	require.False(t, changed)
+	after, _ := tree.Node("root")
+	require.Equal(t, before, after)
+	require.Empty(t, tree.TakeDirtySnapshots())
+	select {
+	case <-updates:
+		t.Fatal("no-op update published a snapshot")
+	default:
+	}
+	changed, err = tree.UpdateIfChanged("root", func(n *Node) { n.ToolCalls++ })
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Len(t, tree.TakeDirtySnapshots(), 1)
+	require.Equal(t, int64(1), (<-updates).Nodes[0].Node.ToolCalls)
+	changed, err = tree.UpdateIfChanged("missing", func(*Node) { t.Fatal("missing node callback") })
+	require.ErrorIs(t, err, ErrNodeNotFound)
+	require.False(t, changed)
+}

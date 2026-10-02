@@ -147,14 +147,15 @@ type SessionStatus[State ~string] struct {
 }
 
 type SessionPendingInput struct {
-	InputOrigin     session.InputOrigin `json:"input_origin,omitempty"`
-	SenderID        string              `json:"sender_id,omitempty"`
-	SenderName      string              `json:"sender_name,omitempty"`
-	InputMode       string              `json:"input_mode,omitempty"`
-	TurnID          string              `json:"turn_id"`
-	Content         string              `json:"content"`
-	MultiContent    []chat.MessagePart  `json:"multi_content,omitempty"`
-	SessionPosition int                 `json:"session_position"`
+	InputOrigin     session.InputOrigin   `json:"input_origin,omitempty"`
+	SenderID        string                `json:"sender_id,omitempty"`
+	SenderName      string                `json:"sender_name,omitempty"`
+	ReportOutcome   session.ReportOutcome `json:"report_outcome,omitempty"`
+	InputMode       string                `json:"input_mode,omitempty"`
+	TurnID          string                `json:"turn_id"`
+	Content         string                `json:"content"`
+	MultiContent    []chat.MessagePart    `json:"multi_content,omitempty"`
+	SessionPosition int                   `json:"session_position"`
 }
 
 type SessionInteraction[Kind ~string, Event any] struct {

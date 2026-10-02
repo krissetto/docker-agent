@@ -53,8 +53,8 @@ type SendArgs struct {
 // ReadArgs are the arguments for read_subagent.
 type ReadArgs struct {
 	SubagentID   string `json:"subagent_id" jsonschema:"The id of one of your own direct children returned by spawn_subagent."`
-	LastMessages int    `json:"last_messages,omitempty" jsonschema:"Return the last N messages of the subagent's transcript instead of just its final result."`
-	Full         bool   `json:"full,omitempty" jsonschema:"Return the subagent's full transcript instead of just its final result."`
+	LastMessages int    `json:"last_messages,omitempty" jsonschema:"Return the last N messages of the subagent's transcript instead of just its latest assistant response."`
+	Full         bool   `json:"full,omitempty" jsonschema:"Return the subagent's full transcript instead of just its latest assistant response."`
 }
 
 // StopArgs are the arguments for stop_subagent.
@@ -86,7 +86,7 @@ func Definitions() []tools.Tool {
 		{
 			Name:        ToolReadSubagent,
 			Category:    "subagent",
-			Description: "Read one of your own direct children's latest full result, or its transcript for detail. Automatic reports often contain truncated previews; retrieve the full result before relying on a truncated report. Pass last_messages:N for recent messages or full:true for everything. Reports arrive on their own, so this is for detail, not polling or waiting.",
+			Description: "Read one of your own direct children's latest full assistant response, or its transcript for detail. Prefer the latest response without tool calls; only if none exists, return the newest tool-call response. Automatic reports often contain truncated previews; retrieve the full result before relying on a truncated report. Pass last_messages:N for recent messages or full:true for everything. Reports arrive on their own, so this is for detail, not polling or waiting.",
 			Parameters:  tools.MustSchemaFor[ReadArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Read Subagent", ReadOnlyHint: true},
 		},
@@ -206,15 +206,29 @@ func HarnessPrompt(allowed []AllowedSubagent) string {
 }
 
 // FindAllowed resolves a model-supplied subagent name against an agent's
-// allow-list, matching the display name (alias) or the underlying agent name.
+// allow-list. Advertised display names take precedence; an underlying agent
+// name is accepted only when it identifies exactly one allow-list entry.
 func FindAllowed(allowed []AllowedSubagent, name string) (AllowedSubagent, bool) {
 	idx := slices.IndexFunc(allowed, func(a AllowedSubagent) bool {
-		return a.DisplayName() == name || a.Agent == name
+		return a.DisplayName() == name
 	})
-	if idx < 0 {
+	if idx >= 0 {
+		return allowed[idx], true
+	}
+	match := -1
+	for i, a := range allowed {
+		if a.Agent != name {
+			continue
+		}
+		if match >= 0 {
+			return AllowedSubagent{}, false
+		}
+		match = i
+	}
+	if match < 0 {
 		return AllowedSubagent{}, false
 	}
-	return allowed[idx], true
+	return allowed[match], true
 }
 
 // ToolSet exposes the core subagent tools. It is injected automatically onto

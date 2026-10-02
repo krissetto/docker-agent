@@ -95,7 +95,7 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 		if runErr != "" {
 			detail = runErr
 		}
-		report = session.ChildReport{ID: childReportID(sess.ID, turnID), ParentSessionID: parentID, ChildSessionID: sess.ID, TurnID: turnID, Content: childTurnReport(rec.name, id, state, detail, truncated)}
+		report = session.ChildReport{ID: childReportID(sess.ID, turnID), ParentSessionID: parentID, ChildSessionID: sess.ID, TurnID: turnID, Content: childTurnReport(rec.name, id, state, detail, truncated), ReportOutcome: childReportOutcome(state)}
 	}
 	m.mu.Unlock()
 	if record.Revision != 0 {
@@ -215,6 +215,7 @@ func (d *sessionDriver) acceptReport(ctx context.Context, report session.ChildRe
 		message.Pending, message.Accepted, message.TurnID = true, true, "report:"+report.ID
 		message.InputOrigin, message.InputMode = session.InputOriginRuntime, "steer"
 		message.SenderID, message.SenderName = report.ChildSessionID, senderName
+		message.ReportOutcome = report.ReportOutcome
 		acceptance, err = store.AcceptReport(ctx, d.sessionIDLocked(), report.ID, message)
 		if err != nil {
 			d.mu.Unlock()
@@ -256,6 +257,13 @@ func (d *sessionDriver) acceptReport(ctx context.Context, report session.ChildRe
 	return nil
 }
 
+func childReportOutcome(state subagent.NodeState) session.ReportOutcome {
+	if state == subagent.NodeFailed {
+		return session.ReportOutcomeFailed
+	}
+	return session.ReportOutcomeFinished
+}
+
 func childTurnReport(name string, id subagent.NodeID, state subagent.NodeState, detail string, truncated bool) string {
 	verb, label := "finished its turn", "Full response"
 	if state == subagent.NodeFailed {
@@ -289,10 +297,19 @@ func (r *LocalRuntime) sessionDurability() subagent.Durability {
 
 func ownAssistantResult(sess *session.Session) string {
 	messages := sess.OwnMessages()
+	var fallback string
+	foundFallback := false
 	for _, message := range slices.Backward(messages) {
-		if message.Message.Role == chat.MessageRoleAssistant {
+		if message.Message.Role != chat.MessageRoleAssistant {
+			continue
+		}
+		if len(message.Message.ToolCalls) == 0 {
 			return message.Message.Content
 		}
+		if !foundFallback {
+			fallback = message.Message.Content
+			foundFallback = true
+		}
 	}
-	return ""
+	return fallback
 }

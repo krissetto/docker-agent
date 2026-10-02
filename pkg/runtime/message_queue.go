@@ -12,12 +12,13 @@ import (
 // either mid-turn (via the steer queue) or at end-of-turn (via the follow-up
 // queue).
 type QueuedMessage struct {
-	InputOrigin  session.InputOrigin
-	SenderID     string
-	SenderName   string
-	ID           string
-	Content      string
-	MultiContent []chat.MessagePart
+	InputOrigin   session.InputOrigin
+	SenderID      string
+	SenderName    string
+	ReportOutcome session.ReportOutcome
+	ID            string
+	Content       string
+	MultiContent  []chat.MessagePart
 	// RequestID correlates session-native submissions with the events produced
 	// while processing them. Legacy queue callers may leave it empty.
 	RequestID string

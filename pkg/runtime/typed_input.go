@@ -29,6 +29,7 @@ func inputMode(mode string) string {
 func (msg QueuedMessage) sessionMessage() *session.Message {
 	message := session.UserMessage(msg.Content, msg.MultiContent...)
 	message.InputOrigin, message.SenderID, message.SenderName = msg.InputOrigin, msg.SenderID, msg.SenderName
+	message.ReportOutcome = msg.ReportOutcome
 	message.InputMode = msg.InputMode
 	if message.InputMode == "" {
 		message.InputMode = "turn"
@@ -40,7 +41,7 @@ func queuedSessionInput(message *session.Message, position int, persisted bool) 
 	return QueuedMessage{
 		Content: message.Message.Content, MultiContent: message.Message.MultiContent,
 		RequestID: message.TurnID, AcceptedPosition: position, AcceptedPersisted: persisted,
-		InputOrigin: message.InputOrigin, SenderID: message.SenderID, SenderName: message.SenderName, InputMode: message.InputMode,
+		InputOrigin: message.InputOrigin, SenderID: message.SenderID, SenderName: message.SenderName, ReportOutcome: message.ReportOutcome, InputMode: message.InputMode,
 	}
 }
 
@@ -48,14 +49,19 @@ func inputEventMetadata(event Event, msg QueuedMessage) Event {
 	switch event := event.(type) {
 	case *PendingUserMessageAcceptedEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+		event.ReportOutcome = msg.ReportOutcome
 	case *PendingUserMessageEditedEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+		event.ReportOutcome = msg.ReportOutcome
 	case *PendingUserMessagePromotedEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+		event.ReportOutcome = msg.ReportOutcome
 	case *PendingUserMessageCanceledEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+		event.ReportOutcome = msg.ReportOutcome
 	case *UserMessageEvent:
 		event.InputOrigin, event.SenderID, event.SenderName, event.InputMode = msg.InputOrigin, msg.SenderID, msg.SenderName, msg.InputMode
+		event.ReportOutcome = msg.ReportOutcome
 		event.TurnID = msg.RequestID
 	}
 	return event

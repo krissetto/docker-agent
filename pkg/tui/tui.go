@@ -1279,6 +1279,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.CloseTabMsg:
 		return m.handleCloseTab(msg.SessionID)
 
+	case messages.StopSubagentSubtreeMsg:
+		return m, m.stopSubagentSubtree(msg.NodeID)
+
 	case messages.SetUseSubagentsMsg:
 		return m, m.setUseSubagents(msg.Enabled)
 

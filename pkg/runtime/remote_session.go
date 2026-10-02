@@ -1009,7 +1009,7 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 	}
 	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, TranscriptPosition: in.TranscriptPosition}
 	for _, pending := range in.PendingInputs {
-		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, InputMode: pending.InputMode})
+		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, ReportOutcome: pending.ReportOutcome, InputMode: pending.InputMode})
 	}
 	for _, v := range in.Interactions {
 		if v.SessionID != in.Session.ID {

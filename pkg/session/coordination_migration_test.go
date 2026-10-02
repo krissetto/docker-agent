@@ -76,6 +76,7 @@ func TestCoordinationSchemaUpgradesPreviouslyAppliedVersions(t *testing.T) {
 			assert.Empty(t, loaded.Messages[0].Message.InputOrigin)
 			assert.Empty(t, loaded.Messages[0].Message.SenderID)
 			assert.Empty(t, loaded.Messages[0].Message.SenderName)
+			assert.Empty(t, loaded.Messages[0].Message.ReportOutcome)
 			assert.False(t, loaded.Messages[0].Message.Implicit)
 			if version == "inputmode34" || version == "complete34" || version == "complete35" {
 				assert.Equal(t, "steer", loaded.Messages[0].Message.InputMode)
@@ -84,6 +85,10 @@ func TestCoordinationSchemaUpgradesPreviouslyAppliedVersions(t *testing.T) {
 				var content string
 				require.NoError(t, store.(*SQLiteSessionStore).db.QueryRowContext(t.Context(), `SELECT content FROM child_reports WHERE id = 'report'`).Scan(&content))
 				assert.Equal(t, "preserved report", content)
+				reports, err := store.(CoordinationStore).PendingReports(t.Context(), "preserved")
+				require.NoError(t, err)
+				require.Len(t, reports, 1)
+				assert.Empty(t, reports[0].ReportOutcome, "old reports must remain neutral")
 				var count int
 				require.NoError(t, store.(*SQLiteSessionStore).db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM child_records WHERE session_id = 'child'`).Scan(&count))
 				assert.Equal(t, 1, count)
@@ -98,7 +103,7 @@ func TestCoordinationSchemaUpgradesPreviouslyAppliedVersions(t *testing.T) {
 			assert.Equal(t, id, retryID)
 			var maxVersion int
 			require.NoError(t, store.(*SQLiteSessionStore).db.QueryRowContext(t.Context(), `SELECT MAX(id) FROM migrations`).Scan(&maxVersion))
-			assert.Equal(t, 37, maxVersion)
+			assert.Equal(t, 38, maxVersion)
 			require.NoError(t, NewMigrationManager(store.(*SQLiteSessionStore).db).InitializeMigrations(t.Context()))
 		})
 	}
