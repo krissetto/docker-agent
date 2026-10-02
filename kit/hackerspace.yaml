@@ -1,54 +1,14 @@
 models:
 
-  gpt-5.6-sol-low:
-    provider: openai
-    model: gpt-5.6-sol
-    thinking_budget: low
-
-  gpt-5.6-sol:
-    provider: openai
-    model: gpt-5.6-sol
-    thinking_budget: medium
-
-  gpt-5.6-sol-high:
-    provider: openai
-    model: gpt-5.6-sol
-    thinking_budget: high
-
-  gpt-5.6-sol-xhigh:
-    provider: openai
-    model: gpt-5.6-sol
-    thinking_budget: xhigh
-
-  gpt-5.6-terra:
-    provider: openai
-    model: gpt-5.6-terra
-    thinking_budget: medium
-
-  gpt-5.6-terra-high:
-    provider: openai
-    model: gpt-5.6-terra
-    thinking_budget: high
-
-  gpt-5.6-terra-xhigh:
-    provider: openai
-    model: gpt-5.6-terra
-    thinking_budget: xhigh
-
-  gpt-5.6-terra-max:
-    provider: openai
-    model: gpt-5.6-terra
-    thinking_budget: max
-
-  gpt-5.6-luna-xhigh:
-    provider: openai
-    model: gpt-5.6-luna
-    thinking_budget: xhigh
-
   gpt-6-astra-high:
     provider: openai
     model: gpt-6-astra
     thinking_budget: high
+
+  gpt-6-astra-xhigh:
+    provider: openai
+    model: gpt-6-astra
+    thinking_budget: xhigh
 
   gpt-6.1-sol-low:
     provider: openai
@@ -75,95 +35,38 @@ models:
     model: gpt-6.1-sol
     thinking_budget: max
 
+  gpt-6.1-luna:
+    provider: openai
+    model: gpt-6.1-luna
+    thinking_budget: medium
+
   ###
 
-  fable-5-medium:
+  fable-5.1-high:
     provider: anthropic
-    model: claude-fable-5
-    thinking_budget: adaptive/medium
-    provider_opts:
-      interleaved_thinking: true
-
-  fable-5-high:
-    provider: anthropic
-    model: claude-fable-5
+    model: claude-fable-5-1
     thinking_budget: adaptive/high
     provider_opts:
       interleaved_thinking: true
 
-  fable-5-xhigh:
+  fable-5.1-xhigh:
     provider: anthropic
-    model: claude-fable-5
+    model: claude-fable-5-1
     thinking_budget: adaptive/xhigh
     provider_opts:
       interleaved_thinking: true
 
-  claude-opus-5-5:
+  opus-5.5-high:
     provider: anthropic
     model: claude-opus-5-5
     thinking_budget: adaptive/high
     provider_opts:
       interleaved_thinking: true
 
-  opus-4.8-medium:
+  sonnet-5.5:
     provider: anthropic
-    model: claude-opus-4-8
+    model: claude-sonnet-5-5
     thinking_budget: adaptive/medium
-    provider_opts:
-      interleaved_thinking: true
-
-  opus-4.8-high:
-    provider: anthropic
-    model: claude-opus-4-8
-    thinking_budget: adaptive/high
-    provider_opts:
-      interleaved_thinking: true
-
-  opus-4.8-xhigh:
-    provider: anthropic
-    model: claude-opus-4-8
-    thinking_budget: adaptive/xhigh
-    provider_opts:
-      interleaved_thinking: true
-
-  sonnet-5:
-    provider: anthropic
-    model: claude-sonnet-5
-    provider_opts:
-      interleaved_thinking: true
-    thinking_budget: adaptive/medium
-
-  sonnet-5-high:
-    provider: anthropic
-    model: claude-sonnet-5
-    provider_opts:
-      interleaved_thinking: true
-    thinking_budget: adaptive/high
-
-  sonnet-5-xhigh:
-    provider: anthropic
-    model: claude-sonnet-5
-    provider_opts:
-      interleaved_thinking: true
-    thinking_budget: adaptive/xhigh
-
-  haiku-4.5:
-    provider: anthropic
-    model: claude-haiku-4-5
-    thinking_budget: 4096
-    provider_opts:
-      interleaved_thinking: true
-
-  haiku-4.5-low:
-    provider: anthropic
-    model: claude-haiku-4-5
-    provider_opts:
-      interleaved_thinking: true
-    thinking_budget: 1024
-
-  haiku-4.5-high:
-    provider: anthropic
-    model: claude-haiku-4-5
     provider_opts:
       interleaved_thinking: true
 
@@ -196,20 +99,6 @@ models:
         --spec-type draft-mtp
         --spec-draft-n-max 3
 
-  qwen3.6-27b:
-    provider: dmr
-    #base_url: http://192.168.50.205:12434/engines/v1
-    model: huggingface.co/unsloth/qwen3.6-27b-mtp-gguf:UD-Q4_K_XL
-    thinking_budget: high
-    temperature: 1.0
-    top_p: 0.95
-    provider_opts:
-      context_size: 262144
-      runtime_flags: |
-        --reasoning-preserve
-        --spec-type draft-mtp
-        --spec-draft-n-max 3
-
   qwen3.8-27b:
     provider: dmr
     model: huggingface.co/unsloth/qwen3.8-27b-gguf:UD-Q4_K_XL
@@ -232,35 +121,16 @@ models:
         - --image-min-tokens
         - '1024'
 
-  # qwen3.8-27b-instruct:
-  #   provider: dmr
-  #   model: huggingface.co/unsloth/qwen3.8-27b-gguf:UD-Q4_K_XL
-  #   thinking_budget: 0
-  #   temperature: 0.7
-  #   top_p: 0.80
-  #   presence_penalty: 1.5
-  #   provider_opts:
-  #     top_k: 20
-  #     min_p: 0.0
-  #     repetition_penalty: 1.0
-  #     runtime_flags:
-  #       - --ctx-size
-  #       - '1048576'
-  #       - --chat-template-kwargs
-  #       - '{"enable_thinking":false}'
-  #       - --image-min-tokens
-  #       - '1024'
-
   ###
 
   low:
-    model: gpt-5.6-terra,gpt-5.6-luna-xhigh,sonnet-5
+    model: gpt-6.1-luna,sonnet-5.5
   mid:
-    model: gpt-5.6-sol,gpt-5.6-terra-xhigh,sonnet-5-high
+    model: gpt-6.1-sol,opus-5.5-high
   high:
-    model: gpt-5.6-sol-high,fable-5-high
+    model: gpt-6.1-sol-high,fable-5.1-high
   xhigh:
-    model: gpt-5.6-sol-xhigh,fable-5-xhigh
+    model: gpt-6-astra-xhigh,fable-5.1-xhigh
 
 agents:
   root:
@@ -479,7 +349,7 @@ agents:
   designer:
     add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
     skills: true
-    model: claude-opus-5-5
+    model: opus-5.5-high
     description: Targeted design specialist for UX advice, web frontend code such as React, and tasteful interface craft
     instruction: |
       Designer works at the makerspace's sunlit drafting bench, with an eye for proportion and a hand on the code.

@@ -35,7 +35,7 @@ func TestTeam(t *testing.T) {
 		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
 		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"designer", "anthropic", "claude-opus-5-5", "claude-opus-5-5", "adaptive/high", nil, []string{"filesystem", "shell", "todo"}, false},
+		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"filesystem", "shell", "todo"}, false},
 		{"reviewer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
@@ -82,6 +82,21 @@ func TestTeam(t *testing.T) {
 	require.NoError(t, config.ApplyModelOverrides(cfg, []string{"openai/another-model"}))
 	for _, a := range cfg.Agents {
 		assert.Equal(t, "openai/another-model", a.Model)
+	}
+}
+
+func TestTeamModelPoolsResolve(t *testing.T) {
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
+	require.NoError(t, err)
+	for _, name := range []string{"low", "mid", "high", "xhigh"} {
+		pool, ok := cfg.Models[name]
+		require.True(t, ok, name)
+		for alias := range strings.SplitSeq(pool.Model, ",") {
+			model, ok := cfg.Models[strings.TrimSpace(alias)]
+			require.True(t, ok, "%s pool references missing model %q", name, alias)
+			assert.NotEmpty(t, model.Provider, alias)
+			assert.NotEmpty(t, model.Model, alias)
+		}
 	}
 }
 
