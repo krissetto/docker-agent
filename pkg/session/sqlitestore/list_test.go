@@ -104,3 +104,22 @@ func TestListSessionIDsCorruptPreserved(t *testing.T) {
 	assert.Equal(t, contents, after)
 	assert.NoFileExists(t, path+".bak")
 }
+
+func TestListSessionIDsReadsActiveWAL(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	store, err := New(t.Context(), path)
+	require.NoError(t, err)
+	defer store.Close()
+	older := session.New()
+	older.CreatedAt = time.Now().Add(-time.Hour)
+	require.NoError(t, store.AddSession(t.Context(), older))
+	newer := session.New()
+	require.NoError(t, store.AddSession(t.Context(), newer))
+	wal, err := os.Stat(path + "-wal")
+	require.NoError(t, err)
+	require.Positive(t, wal.Size())
+	ids, err := ListSessionIDs(t.Context(), path)
+	require.NoError(t, err)
+	assert.Equal(t, []string{newer.ID, older.ID}, ids)
+}
