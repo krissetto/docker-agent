@@ -153,11 +153,15 @@ provide filesystem isolation.
   SSH-agent signing (`unrestricted: false`, `sign: [git]`, no authentication).
   Configure an approved public signing key separately; never import private keys
   or host Git config.
-- **State:** optional `/home/agent/.cagent` covers sessions/data, not settings or
-  custom database paths. The image precreates it agent-owned `0700`; existing
-  volumes need reviewed ownership. Runtime controls retention and capacity.
-  Keep SQLite WAL/FULL durability on sandbox-local Linux storage, not shared or
-  network filesystems. Reusing old custom-branch databases is not guaranteed.
+- **State:** sessions/data use the default `/home/agent/.cagent` on the sandbox's
+  own disk, not a host mount, workspace directory or separate volume. The image
+  precreates it agent-owned `0700`; settings and custom database paths are separate.
+  State persists while that sandbox's disk is retained, not after its deletion or
+  in a fresh sandbox. Runtime controls retention and capacity. There is no live
+  migration or automatic repair of existing mounts; an older sandbox with a state
+  mount may need to be replaced with a fresh sandbox. Keep SQLite WAL/FULL
+  durability on sandbox-local Linux storage, not shared or network filesystems.
+  Reusing old custom-branch databases is not guaranteed.
 - **Detached lifetime:** background processes may survive client disconnect; this
   does not keep the TUI attached, restart the app or resume idle subagents.
 - **Sessions:** prompt `--exec -- PROMPT`, resume `--session ID`, continue

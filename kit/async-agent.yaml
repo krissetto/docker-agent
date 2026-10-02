@@ -104,11 +104,6 @@ capabilities:
       phase: runtime
       unrestricted: false
       sign: [git]
-  - type: com.docker.sandbox/volume@1
-    optional: true
-    config:
-      path: /home/agent/.cagent
-      mode: "0700"
   - type: com.docker.sandbox/long-running@1
     optional: true
   - type: com.docker.sandbox/lifecycle@1

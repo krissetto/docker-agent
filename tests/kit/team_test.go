@@ -183,10 +183,11 @@ func TestNativeKit(t *testing.T) {
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
 	}
-	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "volume", "long-running"} {
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "long-running"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
-	require.Len(t, kit.Capabilities, 14)
+	require.Len(t, kit.Capabilities, 13)
+	assert.NotContains(t, byType, "com.docker.sandbox/volume@1")
 	for _, capability := range kit.Capabilities {
 		switch capability.Type {
 		case "com.docker.sandbox/credential@1":
@@ -201,7 +202,6 @@ func TestNativeKit(t *testing.T) {
 		"agent-context": {"filename": "ASYNC_AGENT_KIT.md"},
 		"agent-skills":  {"path": "/home/agent/.agents/skills", "mode": "readonly"},
 		"ssh-agent":     {"phase": "runtime", "unrestricted": false, "sign": []any{"git"}},
-		"volume":        {"path": "/home/agent/.cagent", "mode": "0700"},
 		"git-identity":  nil,
 		"long-running":  nil,
 	} {
