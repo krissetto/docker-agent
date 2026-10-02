@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestRemoteLateAttachLiveSeeds(t *testing.T) {
@@ -58,7 +59,7 @@ func TestRemoteLateAttachLiveSeeds(t *testing.T) {
 				if tc.live {
 					write(ready)
 				}
-				for _, event := range []Event{StreamStarted("s", "root"), AgentChoiceReasoning("root", "s", "thinking"), AgentChoice("root", "s", "partial output")} {
+				for _, event := range []Event{StreamStarted("s", "root"), AgentChoiceReasoning("root", "s", "thinking"), AgentChoice("root", "s", "partial output"), PartialToolCall(tools.ToolCall{ID: "call"}, tools.Tool{}, "root"), ToolCall(tools.ToolCall{ID: "call"}, tools.Tool{}, "root"), ToolCallOutput("call", tools.Tool{}, "output", "root")} {
 					raw, err := json.Marshal(event)
 					if !assert.NoError(t, err) {
 						return
@@ -91,7 +92,7 @@ func TestRemoteLateAttachLiveSeeds(t *testing.T) {
 				require.ErrorContains(t, <-obs.Errors, "invalid session observation sequence")
 				return
 			}
-			require.Len(t, obs.Replay, 3)
+			require.Len(t, obs.Replay, 6)
 			for _, seed := range obs.Replay {
 				assert.Zero(t, seed.Sequence)
 			}

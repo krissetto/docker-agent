@@ -92,3 +92,16 @@ func TestAssistantBoundaryRestoredReasoningAndDeferredBytes(t *testing.T) {
 	m.AppendToLastMessage("root", "next")
 	assert.Equal(t, []string{"first.", "second.", "wordpart", "next"}, contents(m))
 }
+
+func TestRestoreUnfinishedToolWaitsForAuthoritativeState(t *testing.T) {
+	call := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "check", Arguments: "canonical"}}
+	item := session.NewMessageItem(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{call}}})
+	m := newAttachTestModel(t, item)
+	require.Len(t, m.messages, 1)
+	assert.Equal(t, types.ToolStatusPending, m.messages[0].ToolStatus)
+	m.AddOrUpdateToolCall("worker", call, tools.Tool{}, types.ToolStatusRunning)
+	assert.Equal(t, types.ToolStatusRunning, m.messages[0].ToolStatus)
+	assert.Equal(t, "canonical", m.messages[0].ToolCall.Function.Arguments)
+	m.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: "call", Response: "done", Result: &tools.ToolCallResult{Output: "done"}}, types.ToolStatusCompleted)
+	assert.Equal(t, types.ToolStatusCompleted, m.messages[0].ToolStatus)
+}

@@ -106,3 +106,26 @@ func TestProjectionKeepsTypedHiddenInputsInCanonicalAccounting(t *testing.T) {
 	assert.Equal(t, 2, a.Presentation().Status.Pending)
 	assert.Equal(t, 3, a.Session().ItemCount())
 }
+
+func TestProjectionPreservesLiveSeedIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		envelope runtime.SessionEvent
+		seed     bool
+	}{
+		{"live snapshot", runtime.SessionEvent{Version: 1, SessionID: "s", TranscriptPosition: -1}, true},
+		{"remote snapshot", runtime.SessionEvent{Version: 2, SessionID: "s", TranscriptPosition: -1}, true},
+		{"cursor replay", runtime.SessionEvent{Version: 1, SessionID: "s", Sequence: 9, TranscriptPosition: -1}, false},
+		{"compatibility start", runtime.SessionEvent{SessionID: "s"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newMetadataTestApp(t)
+			sink := &appProjectionSink{app: a, ctx: t.Context(), sessionID: "s"}
+			tc.envelope.Event = runtime.StreamStarted("s", "worker")
+			sink.Apply(tc.envelope)
+			message := (<-a.events).(SessionEventMsg)
+			assert.Equal(t, tc.seed, message.Seed)
+			assert.Equal(t, tc.envelope.Sequence, message.Sequence)
+		})
+	}
+}

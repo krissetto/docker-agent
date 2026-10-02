@@ -560,10 +560,12 @@ func (p *chatPage) handleToolCall(msg *runtime.ToolCallEvent) tea.Cmd {
 }
 
 func (p *chatPage) handleToolCallOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd {
+	p.setPendingResponse(false)
 	return tea.Batch(p.messages.AppendToolOutput(msg), p.messages.ScrollToBottom())
 }
 
 func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) tea.Cmd {
+	p.setPendingResponse(false)
 	spinnerCmd := p.setWorking(true)
 	sidebarCmd := p.forwardToSidebar(msg)
 

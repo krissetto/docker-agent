@@ -177,7 +177,8 @@ type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
 // SessionEnvelope carries ordered journal events. Before "ready", a stream
 // opened without a cursor may also carry sequence-zero live seeds supplementing
 // an already supplied session snapshot: stream_started, agent_choice_reasoning,
-// and agent_choice only. Seeds have matching envelope/event session identities,
+// agent_choice, partial_tool_call, tool_call, and tool_call_output. Seeds have
+// matching envelope/event session identities where the event carries one,
 // no turn/interaction identity, transcript_position -1, and no gap metadata.
 // They do not advance the replay cursor and are never live-tail journal events.
 type SessionEnvelope[Event any] struct {

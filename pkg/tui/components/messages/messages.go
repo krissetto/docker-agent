@@ -2080,9 +2080,10 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 
 	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
 	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
-		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
+		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusPending)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
+			toolMsg.ToolStatus = types.ToolStatusCompleted
 			toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
 		}
 		view := m.createToolCallView(toolMsg)
@@ -2169,7 +2170,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 					}
 
 					if attachToReasoning {
-						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusCompleted)
+						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusPending)
 						reasoningBlock.AddToolCall(toolMsg)
 						if result, ok := toolResults[tc.ID]; ok {
 							reasoningBlock.UpdateToolResult(tc.ID, result, types.ToolStatusCompleted, nil)

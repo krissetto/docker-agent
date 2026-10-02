@@ -623,6 +623,29 @@ type SessionEvent struct {
 	FirstAvailable     uint64
 }
 
+// IsLiveSeed identifies an authoritative nil-cursor snapshot supplement, not a journal event.
+func (envelope SessionEvent) IsLiveSeed() bool {
+	if envelope.Version == 0 || envelope.SessionID == "" || envelope.Sequence != 0 || envelope.Gap || envelope.FirstAvailable != 0 || envelope.TurnID != "" || envelope.InteractionID != "" || envelope.TranscriptPosition != -1 {
+		return false
+	}
+	switch event := envelope.Event.(type) {
+	case *StreamStartedEvent:
+		return event.SessionID == envelope.SessionID
+	case *AgentChoiceEvent:
+		return event.SessionID == envelope.SessionID && event.Content != ""
+	case *AgentChoiceReasoningEvent:
+		return event.SessionID == envelope.SessionID && event.Content != ""
+	case *PartialToolCallEvent:
+		return event.ToolCall.ID != ""
+	case *ToolCallEvent:
+		return event.ToolCall.ID != ""
+	case *ToolCallOutputEvent:
+		return event.ToolCallID != "" && event.Output != ""
+	default:
+		return false
+	}
+}
+
 // Observation contains an initial snapshot, ordered replay, and a live
 // tail. Cancel is idempotent and does not stop the session. A Gap envelope is a
 // resnapshot barrier: consumers must discard their projection and re-observe

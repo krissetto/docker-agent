@@ -81,7 +81,7 @@ func (s *appProjectionSink) Apply(envelope runtime.SessionEvent) {
 	if originSessionID == "" {
 		originSessionID = s.sessionID // compatibility observations may omit the envelope owner
 	}
-	s.app.sendSequencedBridgedEventFrom(s.ctx, envelope.TurnID, envelope.Event, false, originSessionID, s.epoch, envelope.Sequence)
+	s.app.sendSequencedBridgedEventFrom(s.ctx, envelope.TurnID, envelope.Event, envelope.IsLiveSeed(), originSessionID, s.epoch, envelope.Sequence)
 }
 
 func (a *App) Presentation() *PresentationState { return a.presentation.Load() }

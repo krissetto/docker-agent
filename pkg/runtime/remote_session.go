@@ -810,7 +810,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			return Observation{}, decodeErr
 		}
 		previous, known := replaySequences[envelope.SessionID]
-		zeroSeed := options.Since == nil && known && validRemoteLiveSeed(envelope)
+		zeroSeed := options.Since == nil && known && envelope.IsLiveSeed()
 		if (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
 			resp.Body.Close()
 			cancel()
@@ -897,24 +897,6 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	}()
 	var once sync.Once
 	return Observation{Initial: snapshots, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
-}
-
-// Live seeds are a nil-cursor snapshot supplement, not journal events. Only
-// the event hub's three current-output projections may bypass sequence checks.
-func validRemoteLiveSeed(envelope SessionEvent) bool {
-	if envelope.Sequence != 0 || envelope.Gap || envelope.FirstAvailable != 0 || envelope.TurnID != "" || envelope.InteractionID != "" || envelope.TranscriptPosition != -1 {
-		return false
-	}
-	switch event := envelope.Event.(type) {
-	case *StreamStartedEvent:
-		return event.SessionID == envelope.SessionID
-	case *AgentChoiceEvent:
-		return event.SessionID == envelope.SessionID && event.Content != ""
-	case *AgentChoiceReasoningEvent:
-		return event.SessionID == envelope.SessionID && event.Content != ""
-	default:
-		return false
-	}
 }
 
 const remoteSnapshotChunkBytes = 64 << 10

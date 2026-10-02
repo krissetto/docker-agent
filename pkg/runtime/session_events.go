@@ -2,8 +2,13 @@ package runtime
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
+
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 const defaultSessionEventReplayCapacity = 1024
@@ -29,22 +34,24 @@ type retainedSessionEvent struct {
 }
 
 type sessionEventHub struct {
-	mu         sync.Mutex
-	subs       map[string]map[*sessionEventSubscriber]struct{}
-	seqSubs    map[string]map[*sequencedSessionEventSubscriber]struct{}
-	inflight   map[string]*inflightAssistant
-	liveRuns   map[string]int
-	liveAgent  map[string]string
-	nextSeq    map[string]uint64
-	requestID  map[string]string
-	generation map[string]uint64
-	terminal   map[string]bool
-	deleting   map[string]bool
-	closed     map[string]bool
-	replay     map[string][]retainedSessionEvent
-	capacity   int
-	maxBytes   int
-	bytes      map[string]int
+	mu          sync.Mutex
+	subs        map[string]map[*sessionEventSubscriber]struct{}
+	seqSubs     map[string]map[*sequencedSessionEventSubscriber]struct{}
+	inflight    map[string]*inflightAssistant
+	activeTools map[string][]*inflightTool
+	outputBytes map[string]int
+	liveRuns    map[string]int
+	liveAgent   map[string]string
+	nextSeq     map[string]uint64
+	requestID   map[string]string
+	generation  map[string]uint64
+	terminal    map[string]bool
+	deleting    map[string]bool
+	closed      map[string]bool
+	replay      map[string][]retainedSessionEvent
+	capacity    int
+	maxBytes    int
+	bytes       map[string]int
 }
 
 type sessionEventSubscriber struct {
@@ -70,21 +77,23 @@ func newSessionEventHubWithLimits(capacity, maxBytes int) *sessionEventHub {
 		panic("session replay limits cannot be negative")
 	}
 	return &sessionEventHub{
-		subs:       map[string]map[*sessionEventSubscriber]struct{}{},
-		seqSubs:    map[string]map[*sequencedSessionEventSubscriber]struct{}{},
-		inflight:   map[string]*inflightAssistant{},
-		liveRuns:   map[string]int{},
-		liveAgent:  map[string]string{},
-		nextSeq:    map[string]uint64{},
-		requestID:  map[string]string{},
-		generation: map[string]uint64{},
-		terminal:   map[string]bool{},
-		deleting:   map[string]bool{},
-		closed:     map[string]bool{},
-		replay:     map[string][]retainedSessionEvent{},
-		capacity:   capacity,
-		maxBytes:   maxBytes,
-		bytes:      map[string]int{},
+		subs:        map[string]map[*sessionEventSubscriber]struct{}{},
+		seqSubs:     map[string]map[*sequencedSessionEventSubscriber]struct{}{},
+		inflight:    map[string]*inflightAssistant{},
+		activeTools: map[string][]*inflightTool{},
+		outputBytes: map[string]int{},
+		liveRuns:    map[string]int{},
+		liveAgent:   map[string]string{},
+		nextSeq:     map[string]uint64{},
+		requestID:   map[string]string{},
+		generation:  map[string]uint64{},
+		terminal:    map[string]bool{},
+		deleting:    map[string]bool{},
+		closed:      map[string]bool{},
+		replay:      map[string][]retainedSessionEvent{},
+		capacity:    capacity,
+		maxBytes:    maxBytes,
+		bytes:       map[string]int{},
 	}
 }
 
@@ -222,6 +231,23 @@ func (h *sessionEventHub) liveSeedLocked(sessionID string) []Event {
 			seed = append(seed, AgentChoice(st.agentName, sessionID, st.content.String()))
 		}
 	}
+	for _, tool := range h.activeTools[sessionID] {
+		call := tool.call
+		call.Function.Arguments = tool.arguments.String()
+		definition := cloneLiveToolDefinition(tool.definition)
+		if tool.running {
+			seed = append(seed, ToolCall(call, definition, tool.agentName))
+		} else {
+			seed = append(seed, PartialToolCall(call, definition, tool.agentName))
+		}
+		output := tool.output.String()
+		if tool.truncated {
+			output += "\n[Earlier tool output truncated at the session replay byte limit]\n"
+		}
+		if output != "" {
+			seed = append(seed, ToolCallOutput(call.ID, cloneLiveToolDefinition(tool.definition), output, tool.agentName))
+		}
+	}
 	return seed
 }
 
@@ -333,6 +359,8 @@ func (h *sessionEventHub) deleteLocked(sessionID string) {
 		h.removeSequencedSubscriberLocked(sessionID, sub)
 	}
 	delete(h.inflight, sessionID)
+	delete(h.activeTools, sessionID)
+	delete(h.outputBytes, sessionID)
 	delete(h.liveRuns, sessionID)
 	delete(h.liveAgent, sessionID)
 	delete(h.nextSeq, sessionID)
@@ -346,8 +374,11 @@ func (h *sessionEventHub) deleteLocked(sessionID string) {
 
 func (h *sessionEventHub) Close() {
 	h.mu.Lock()
-	ids := make(map[string]struct{}, len(h.subs)+len(h.seqSubs))
+	ids := make(map[string]struct{}, len(h.subs)+len(h.seqSubs)+len(h.nextSeq))
 	for id := range h.subs {
+		ids[id] = struct{}{}
+	}
+	for id := range h.nextSeq {
 		ids[id] = struct{}{}
 	}
 	for id := range h.seqSubs {
@@ -404,6 +435,7 @@ func (h *sessionEventHub) removeSequencedSubscriberLocked(sessionID string, sub 
 }
 
 func (h *sessionEventHub) trackInflightLocked(sessionID string, event Event) {
+	h.trackToolsLocked(sessionID, event)
 	switch e := event.(type) {
 	case *StreamStartedEvent:
 		h.terminal[sessionID] = false
@@ -441,4 +473,130 @@ func (h *sessionEventHub) inflightLocked(sessionID string) *inflightAssistant {
 		h.inflight[sessionID] = st
 	}
 	return st
+}
+
+// Tool arguments are authoritative state, not evictable journal deltas. Output
+// gets a separate per-session ReplayBytes budget shared by all active calls.
+type inflightTool struct {
+	agentName  string
+	call       tools.ToolCall
+	definition tools.Tool
+	arguments  strings.Builder
+	running    bool
+	output     strings.Builder
+	truncated  bool
+}
+
+func (h *sessionEventHub) activeToolLocked(sessionID, id string) *inflightTool {
+	for _, tool := range h.activeTools[sessionID] {
+		if tool.call.ID == id {
+			return tool
+		}
+	}
+	tool := &inflightTool{call: tools.ToolCall{ID: id}}
+	h.activeTools[sessionID] = append(h.activeTools[sessionID], tool)
+	return tool
+}
+
+func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
+	switch e := event.(type) {
+	case *PartialToolCallEvent:
+		tool := h.activeToolLocked(sessionID, e.ToolCall.ID)
+		tool.agentName = e.AgentName
+		if e.ToolCall.Type != "" {
+			tool.call.Type = e.ToolCall.Type
+		}
+		if e.ToolCall.Function.Name != "" {
+			tool.call.Function.Name = e.ToolCall.Function.Name
+		}
+		tool.arguments.WriteString(e.ToolCall.Function.Arguments)
+		if e.ToolDefinition != nil {
+			tool.definition = cloneLiveToolDefinition(*e.ToolDefinition)
+		}
+	case *ToolCallEvent:
+		tool := h.activeToolLocked(sessionID, e.ToolCall.ID)
+		tool.agentName, tool.call, tool.running = e.AgentName, e.ToolCall, true
+		tool.call.Function.Arguments = ""
+		tool.arguments.Reset()
+		tool.arguments.WriteString(e.ToolCall.Function.Arguments)
+		tool.definition = cloneLiveToolDefinition(e.ToolDefinition)
+	case *ToolCallOutputEvent:
+		for _, tool := range h.activeTools[sessionID] {
+			if tool.call.ID != e.ToolCallID {
+				continue
+			}
+			if tool.truncated {
+				return
+			}
+			output := chat.TruncateUTF8Bytes(e.Output, max(0, h.maxBytes-h.outputBytes[sessionID]))
+			tool.output.WriteString(output)
+			h.outputBytes[sessionID] += len(output)
+			tool.truncated = len(output) < len(e.Output)
+			return
+		}
+	case *MessageAddedEvent:
+		if e.Message == nil || e.Message.Message.Role != chat.MessageRoleAssistant {
+			return
+		}
+		// Committed calls already supply their complete arguments in the snapshot.
+		h.activeTools[sessionID] = slices.DeleteFunc(h.activeTools[sessionID], func(tool *inflightTool) bool {
+			if tool.running || tool.agentName != e.Message.AgentName {
+				return false
+			}
+			h.outputBytes[sessionID] -= tool.output.Len()
+			return true
+		})
+		if len(h.activeTools[sessionID]) == 0 {
+			delete(h.activeTools, sessionID)
+			delete(h.outputBytes, sessionID)
+		}
+	case *ToolCallResponseEvent:
+		h.activeTools[sessionID] = slices.DeleteFunc(h.activeTools[sessionID], func(tool *inflightTool) bool {
+			if tool.call.ID != e.ToolCallID {
+				return false
+			}
+			h.outputBytes[sessionID] -= tool.output.Len()
+			return true
+		})
+		if len(h.activeTools[sessionID]) == 0 {
+			delete(h.activeTools, sessionID)
+			delete(h.outputBytes, sessionID)
+		}
+	case *StreamStoppedEvent:
+		if h.liveRuns[sessionID] <= 1 {
+			delete(h.activeTools, sessionID)
+			delete(h.outputBytes, sessionID)
+		}
+	}
+}
+
+func cloneLiveToolDefinition(tool tools.Tool) tools.Tool {
+	tool.Parameters = cloneLiveSchema(tool.Parameters)
+	tool.OutputSchema = cloneLiveSchema(tool.OutputSchema)
+	tool.Metadata = maps.Clone(tool.Metadata)
+	if tool.Annotations.DestructiveHint != nil {
+		hint := *tool.Annotations.DestructiveHint
+		tool.Annotations.DestructiveHint = &hint
+	}
+	if tool.Annotations.OpenWorldHint != nil {
+		hint := *tool.Annotations.OpenWorldHint
+		tool.Annotations.OpenWorldHint = &hint
+	}
+	return tool
+}
+
+func cloneLiveSchema(value any) any {
+	if value == nil {
+		return nil
+	}
+	// Schemas may be typed pointers or JSON maps; observers own either representation.
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var cloned any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil
+	}
+	return cloned
 }
