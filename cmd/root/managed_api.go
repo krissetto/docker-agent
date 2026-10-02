@@ -328,6 +328,7 @@ func managedStartChild(dir, candidate, source string) error {
 	}
 	defer stdin.Close()
 	cmd := exec.Command(exe, "--config-dir", paths.GetConfigDir(), "--cache-dir", paths.GetCacheDir(), "--data-dir", paths.GetDataDir(), "serve", "api", "--managed-state", dir, "--managed-manifest", candidate, "--auth-token-file", filepath.Join(dir, "token"), "--", source)
+	cmd.Env = managedAPIEnv()
 	cmd.Stdin = stdin
 	cmd.Stdout = log
 	cmd.Stderr = log
@@ -338,6 +339,14 @@ func managedStartChild(dir, candidate, source string) error {
 	// No CommandContext: foreground cancellation must not signal the daemon.
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// managedAPIEnv keeps run's profiling endpoint in the foreground client;
+// inheriting it would make the daemon compete for the same port.
+func managedAPIEnv() []string {
+	return slices.DeleteFunc(os.Environ(), func(entry string) bool {
+		return strings.HasPrefix(entry, "CAGENT_PPROF_ADDR=")
+	})
 }
 
 func managedValidAddress(address string) bool {

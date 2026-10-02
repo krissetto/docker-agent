@@ -97,6 +97,7 @@ type runExecFlags struct {
 	exitAfterResponse   bool
 	cpuProfile          string
 	memProfile          string
+	pprofAddr           string
 	forceTUI            bool
 	tour                bool
 	sandbox             bool
@@ -224,6 +225,8 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	_ = cmd.PersistentFlags().MarkHidden("cpuprofile")
 	cmd.PersistentFlags().StringVar(&flags.memProfile, "memprofile", "", "Write memory profile to file")
 	_ = cmd.PersistentFlags().MarkHidden("memprofile")
+	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose this client's Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
+	_ = cmd.PersistentFlags().MarkHidden("pprof-addr")
 	cmd.PersistentFlags().BoolVar(&flags.forceTUI, "force-tui", false, "Force TUI mode even when not in a terminal")
 	_ = cmd.PersistentFlags().MarkHidden("force-tui")
 	cmd.PersistentFlags().BoolVar(&flags.tour, "tour", false, "Start the interactive getting-started tour in the TUI")
@@ -410,6 +413,17 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 
 func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []string, useTUI bool) error {
 	slog.DebugContext(ctx, "Starting agent", "agent", f.agentName)
+
+	// Profile this process, including when the runtime is remote or managed.
+	// Own the server's context so every return (including startup failures)
+	// closes its listener without waiting for the command context to end.
+	if pprofAddr := cmp.Or(f.pprofAddr, os.Getenv("CAGENT_PPROF_ADDR")); pprofAddr != "" {
+		pprofCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		if err := profiling.StartPprofServer(pprofCtx, pprofAddr); err != nil {
+			return err
+		}
+	}
 
 	// Start profiling if requested
 	stopProfiling, err := profiling.Start(f.cpuProfile, f.memProfile)
