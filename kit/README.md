@@ -360,7 +360,7 @@ The optional volume covers Docker Agent's default Linux **data** directory,
 `/home/agent/.local/share/cagent`. The image precreates it as agent-owned `0700`,
 so it is writable when the capability is omitted too. The separately seeded
 `/home/agent/.config/cagent` settings directory is not part of this volume.
-Custom `--data-dir` or `--db` locations are not covered by this mount.
+Custom `--data-dir` or `--session-db` locations are not covered by this mount.
 
 The inspected SBX maps this to a named persistent block volume, supplies its own
 default size (currently 512 MiB), and does not apply the descriptor's block-volume
@@ -529,9 +529,10 @@ shell, user and workspace contract. `agent-sessions@1` describes the existing
 CLI: a headless prompt is `--exec -- PROMPT`, resume is `--session ID`, and
 continue is `--session=-1`. It is optional. Its `list` is a **complete command**,
 not an entrypoint tail: `/opt/async-agent/docker-agent sessions list --quiet`.
-The command also accepts `-q`; it prints full resumable root-session IDs only,
-one per line, newest first, without a provider/model startup. Children and
-non-resumable rows are omitted; an empty store prints nothing. It honors the
+The command also accepts `-q`; it prints full root-session IDs only, one per
+line, newest first, without a provider/model startup. Delegated children are
+omitted; an empty store prints nothing. Listing does not validate complete stored
+history or team compatibility; resume still performs those checks. It honors the
 application config/data/database locations and must run in the same sandbox
 state context as resume. Prompt/resume/continue remain unchanged.
 Prompts stay single argv values, including a leading dash or shell metacharacter.
