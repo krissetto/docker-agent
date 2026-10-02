@@ -264,6 +264,8 @@ models:
 
 agents:
   root:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: true
     model: gpt-6.1-sol-high
     description: Front counter bot for an engineering-focused makerspace
     welcome_message: yo, shelly here.
@@ -323,6 +325,8 @@ agents:
       - type: todo
 
   director:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: false
     model: gpt-6-astra-high
     description: Shop lead who coordinates development specialists for substantial coding work and reports concise handoffs
     instruction: |
@@ -378,6 +382,8 @@ agents:
           - read_file
 
   greppy:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: false
     model: gpt-6.1-sol-low
     description: Codebase scout who explores repositories, traces behavior, gathers evidence, and brings back compact clues
     instruction: |
@@ -399,6 +405,8 @@ agents:
       - type: todo
 
   planner:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: false
     model: gpt-6.1-sol-high
     description: Workshop mapmaker who turns complex development questions into practical routes and validation plans
     instruction: |
@@ -430,6 +438,8 @@ agents:
       - type: todo
 
   engineer:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: true
     model: gpt-6.1-sol
     description: Versatile engineering doer for most implementation, debugging and general tasks, including clear UX/design direction
     instruction: |
@@ -467,6 +477,8 @@ agents:
       - type: todo
 
   designer:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: true
     model: claude-opus-5-5
     description: Targeted design specialist for UX advice, web frontend code such as React, and tasteful interface craft
     instruction: |
@@ -503,6 +515,8 @@ agents:
       - type: todo
 
   reviewer:
+    add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]
+    skills: false
     model: gpt-6.1-sol-high
     description: Careful proofreader who protects correctness, maintainability, validation quality, and user trust through quick or in-depth review
     instruction: |

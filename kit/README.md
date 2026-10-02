@@ -262,8 +262,9 @@ Use credential-free HTTPS remotes, for example
 `https://github.com/OWNER/REPO.git`. The native proxy rewrites GitHub credentials
 on bare `github.com` to Basic `x-access-token:<host secret>` for HTTPS Git;
 the API uses Bearer auth. No guest token or credential helper setup is required.
-SSH remotes (`git@github.com:...`), SSH keys/agent forwarding and SSH bypass are
-not provided by this HTTP proxy policy.
+SSH remotes (`git@github.com:...`) and SSH authentication are not provided by
+this HTTP proxy policy. Optional restricted SSH-agent signing below is a separate
+grant, not an SSH transport route or authentication grant.
 
 Only the two exact GitHub hosts above are allowed. Release uploads
 (`uploads.github.com`), archives (`codeload.github.com`), raw content, LFS or
@@ -275,6 +276,107 @@ Schema and offline policy tests verify the four services, requiredness, exact
 hosts and proxy-managed declarations. They do not establish live SBX startup,
 proxy authentication, provider entitlement, GitHub permissions or model behavior.
 No real provider/GitHub credentials were read or used during validation.
+
+## Optional Kit integrations (current source builds)
+
+These additions require a new source build, not the historical immutable m.5
+artifact above. `optional: true` lets a host omit an integration without breaking
+basic agent use; it does **not** mean automatically approved or enforced by every
+host. Permission-bearing features still require host review. Required
+`network-policy@1`, `sbx@1`, OpenAI and Anthropic credentials are unchanged;
+Google and GitHub remain optional.
+
+### Capability support review
+
+All 18 versioned types in the pinned frontend's spec are reviewed here. Types use
+the `com.docker.sandbox/` namespace. "Not requested" means a deliberate workload
+choice, not that the spec cannot describe the feature.
+
+| Capability | This workload | Reason / boundary |
+| --- | --- | --- |
+| `network-policy@1` | Required | Exact reviewed provider/GitHub HTTPS hosts; no added SSH route. |
+| `network-policy@2` | Not requested | No concrete method/path restriction to justify migrating the existing policy. |
+| `credential@1` | Required / optional | OpenAI and Anthropic required; Google and GitHub optional, runtime proxy-managed. |
+| `sbx@1` | Required | Existing shell, user and workspace platform contract. |
+| `agent-sessions@1` | Optional | Prompt, resume, continue and actual quiet root-session listing. |
+| `agent-context@1` | Optional | Staged `ASYNC_AGENT_KIT.md` guidance, with all seven bundled agents opting into discovery. |
+| `agent-skills@1` | Optional | Readonly shared `/home/agent/.agents/skills`; enabled for Shelly, Engineer and Designer only. |
+| `git-identity@1` | Optional | Runtime-provided attribution, no imported host Git config or secrets. |
+| `ssh-agent@1` | Optional | Runtime only, `unrestricted: false`, `sign: [git]`; no `authenticate` grant. |
+| `volume@1` | Optional | Private session/data path `/home/agent/.cagent`, mode `0700`, no arbitrary size request. |
+| `long-running@1` | Optional | Detached sandbox lifetime for background coding processes, not agent restart. |
+| `lifecycle@1` | Optional | Existing local diagnostics, off by default. |
+| `agent-skill@1` | Not requested | No useful bundled skill content; do not advertise an empty skill or rely on discovery symlinks. |
+| `kit-registry@1` | Not requested | No nested Kit builds or registry use in the workload. |
+| `resources@1` | Not requested | No measured resource constraint for this team. |
+| `port@1` | Not requested | No fixed listening service to publish. |
+| `usb-device@1` | Not requested | No hardware workload. |
+| `privileged@1` | Not requested | No concrete need for elevated privilege. |
+
+### Context and shared skills
+
+The frontend stages [`async-agent-context.md`](async-agent-context.md); a compatible
+runtime surfaces it as `ASYNC_AGENT_KIT.md` beside the mounted workspace. All seven
+bundled agents declare `add_prompt_files: [AGENTS.md, ASYNC_AGENT_KIT.md]`.
+The normal ancestor search discovers both project `AGENTS.md` and the separately
+named profile without the project file shadowing the profile. Missing optional
+profile content is harmless. No unsupported context `directory` field is used.
+
+Shared skills are mounted readonly at `/home/agent/.agents/skills`, the actual
+normal local discovery path. Only **root (Shelly), Engineer and Designer** enable
+`skills: true`. Skills add their own reading/fork tools and can contain executable
+shell commands; enabling them on Director would bypass its `read_file`-only base
+tool contract. Director, Greppy, Planner and Reviewer keep skills disabled to
+preserve their restricted or read-only roles. Their base toolsets and all models,
+personas and async delegation relationships are unchanged. The bundled YAML has
+no extra named toolsets for fork skills to request.
+
+Treat shared skills as untrusted executable input: review them before sharing,
+including commands and fork instructions. Readonly mounting prevents guest edits,
+not execution or prompt injection. Tool approval still follows application
+settings (this image initially enables YOLO); a skill is not authority to broaden
+the task. Neither the pinned base nor inspected native v3 runtime sets
+`DOCKER_AGENT_KIT_DIR`; if an operator sets it for another integration, it changes
+normal skill discovery to that kit's staged directory. The launcher does not
+silently clear legitimate environment overrides.
+
+A workspace `hackerspace.yaml` or leading `--team` selection **replaces** the bundled
+configuration; it does not inherit these loaders. Custom teams must explicitly
+opt into the prompt filenames and, for appropriate roles, local skills. Hosts
+omitting shared skills still allow normal agent use and project context.
+
+### Attribution, signing, state and detached lifetime
+
+Optional Git identity provides author/committer attribution only. Restricted
+SSH-agent signing is a separate permission: only the `git` signature namespace,
+runtime phase, no SSH authentication and no unrestricted socket use. Git must
+still select a public signing key (for example through an operator-reviewed local
+`user.signingkey` and `gpg.format=ssh`); identity does not configure signing or
+identify an approved key. Do not copy private keys or import the host's Git config.
+Signing availability and enforcement depend on the host's reviewed agent relay.
+
+The optional volume covers Docker Agent's default Linux **data** directory,
+`/home/agent/.cagent` (sessions/database and related app state), not
+`/home/agent/.local/share/cagent`. The image precreates it as agent-owned `0700`,
+so it is writable when the capability is omitted too. The separately seeded
+`/home/agent/.config/cagent` settings directory is not part of this volume.
+Custom `--data-dir` or `--db` locations are not covered by this mount.
+
+The inspected SBX maps this to a named persistent block volume, supplies its own
+default size (currently 512 MiB), and does not apply the descriptor's block-volume
+`mode`. A network-disabled Docker fixture proved empty named-volume population
+preserves the precreated directory's UID/GID 1000 and mode `0700`, and that the
+agent can write it; that is not proof of every SBX backend's mount ownership.
+Existing volumes need operator-reviewed ownership rather than recursive startup
+chown. Keep SQLite on reliable sandbox-local Linux storage. Retention, cleanup,
+recreate behavior and capacity belong to the runtime; this declaration is not a
+promise of state surviving sandbox deletion or being reused by a new sandbox.
+
+`long-running@1` maps to detached sandbox behavior in the inspected runtime,
+useful for background shell commands or development services after a client
+disconnects. It does **not** keep an interactive TUI permanently attached, restart
+the application, resume idle subagents, or guarantee autonomous continuation.
+If omitted, ordinary interactive/headless launch still works.
 
 ## Workspace and runtime boundaries
 
@@ -380,6 +482,8 @@ The `kit/async-agent.yaml` file is the v3 descriptor. Its ordinary companion
 `kit/async-agent.dockerfile` compiles Linux statically (`no_audio`, `xx-verify
 --static`) and installs the custom binary, `hackerspace.yaml`, `launch.sh`,
 initial `user-config.yaml`, and the checksum-pinned Task executable and license.
+The Kit frontend separately stages `async-agent-context.md`; no duplicate
+Dockerfile COPY of that profile is needed.
 
 ### Local source builds
 
@@ -389,6 +493,12 @@ Buildx's context and selecting `kit/async-agent.yaml` with `-f`, as shown in
 `kit/` as the context: the recipe needs the root Go module, `cmd/` and `pkg/`.
 The descriptor's `dockerfile: ./async-agent.dockerfile` is resolved relative to
 its own directory; Dockerfile `COPY` paths remain relative to the root context.
+Unlike the companion path, authored `contentFile: ./kit/async-agent-context.md`
+is relative to the **root build context**. The frontend stages and rewrites it to
+`/usr/share/sandbox/kit/async-agent/async-agent-context.md` in the published
+descriptor. Annotation regeneration must use the frontend-matching spec below,
+expand build arguments and preserve this in-image path, not publish the authored
+source path. Inspect that staged file in each platform image before publishing.
 
 The current SBX local-source loader **does not support this nested source layout**:
 it scans only the supplied directory for a descriptor and uses that same
@@ -417,9 +527,15 @@ that every inherited OS package has that license.
 The required, permission-free `sbx@1` capability states the image's existing
 shell, user and workspace contract. `agent-sessions@1` describes the existing
 CLI: a headless prompt is `--exec -- PROMPT`, resume is `--session ID`, and
-continue is `--session=-1`. No unsupported session-list command is advertised.
+continue is `--session=-1`. It is optional. Its `list` is a **complete command**,
+not an entrypoint tail: `/opt/async-agent/docker-agent sessions list --quiet`.
+The command also accepts `-q`; it prints full resumable root-session IDs only,
+one per line, newest first, without a provider/model startup. Children and
+non-resumable rows are omitted; an empty store prints nothing. It honors the
+application config/data/database locations and must run in the same sandbox
+state context as resume. Prompt/resume/continue remain unchanged.
 Prompts stay single argv values, including a leading dash or shell metacharacter.
-These declarations do not change the team or enable `--yolo`.
+These session declarations do not change the team or enable `--yolo`.
 
 Optional lifecycle diagnostics default to **off**. With a compatible SBX,
 `--kit-arg diagnostics=on` opts in to markers beneath
@@ -435,7 +551,8 @@ runs install exactly once per create or startup after every boot.
 ### Build inputs and validation
 
 - Companion-specific `.dockerignore` permits Go source, required embedded assets
-  and this kit's three runtime assets. Tests, fixtures, `.git`, dotenv files,
+  and this kit's deliberate runtime assets plus the staged context Markdown.
+  Tests, fixtures, `.git`, dotenv files,
   databases and unrelated artifacts are excluded. Source edits, including
   untracked matching Go files, are built. Review inputs: hardcoded secrets in
   legitimate source files cannot be automatically filtered out. These exclusions
@@ -465,24 +582,28 @@ OCI archive is a standard image export, **not automatically imported into SBX**.
 Publish and use the consumer reference workflow for SBX launch; direct
 local-source loading is not supported for this nested layout.
 
-The descriptor pins the latest released sandbox-kit spec frontend,
-`v3.0.0-m.5` (source `6ddbd62d5fcb3ef7db0eb73fdf34fb04dc4281f4`), as
-`docker/sandbox-kit:3@sha256:11bb68806aef6a68d45c10c0c3b3dc86c2f794a296b5a933661d9dadf760b753`.
-The published frontend binary reports that revision with a dirty build marker.
-Remote release/tag checks on 2026-09-21 found no newer v3 release; default-branch
-HEAD was `3d945d2d045fe59301f1b5429cf47763b01b6c94`, with no production spec or
-frontend changes beyond m.5. This frontend publishes
-`vnd.docker.sandbox.kit.descriptor` on each platform image manifest and uses
-`com.docker.sandbox/network-policy@1` and `com.docker.sandbox/credential@1`.
-The `docker/runtime-kit:3` frontend and `com.docker.runtime/*` capabilities
-are a different contract, not interchangeable names.
+The current source descriptor pins `docker/sandbox-kit:3` at
+`sha256:a8659fa579de7e8d8dc5b5712feba5efdabceb953279106e9c770d2cd8ca52f1`,
+frontend source revision `34df175ec8696ab0a1ad76116b358595552b6794` (reported
+with a dirty build marker). The matching spec module is exactly
+`v3.0.0-m.6.0.20260929191907-34df175ec869`, pinned in `spec-v3-tests`.
+It supports the bounded SSH, Git identity and detached-lifetime fields used here;
+these are not supported by the historical m.5 frontend. This revision is not the
+later m.7 tag, and still-newer default-branch schema fields such as context
+`directory` are deliberately not used. The runtime base digest is unchanged.
+This frontend publishes `vnd.docker.sandbox.kit.descriptor` on each platform image
+manifest. The `docker/runtime-kit:3` frontend and `com.docker.runtime/*`
+capabilities are a different contract, not interchangeable names.
 
-**Consumer version requirement:** use an SBX build that supports the full
-m.5 descriptor, including derived package-name grammar and the declared
-capabilities. An earlier local CLI embedding `sandbox-kit-spec/v3 v3.0.0-m.3`
+**Consumer version requirement:** historical references require full m.5
+support; new source builds require the pinned descriptor grammar and the
+requested integrations above (inspected sibling v3 runtime uses m.7). Optional
+features may be skipped, but must not be silently widened, especially restricted
+SSH signing. Successful schema validation does not prove runtime enforcement.
+An earlier local CLI embedding `sandbox-kit-spec/v3 v3.0.0-m.3`
 rejected `deb/containerd.io@2.3.3` among the automatically derived provides;
 updating the consumer is required for that separate compatibility issue.
-The current explicitly requested CLI,
+The CLI used for the historical identity investigation,
 `/Users/krissetto/dev/ai-dev/sandboxes/bin/sbx`, reports revision
 `6be7806b86922201e946911910e9990f467e61ca` (dirty source build). Its loader and
 registration pathway confirm the legacy v3 `docker-agent` name collision and
@@ -491,8 +612,8 @@ accept the unique `kagent` name in offline tests. A frontend update,
 No installed CLI or daemon was changed for this identity fix, and no package
 provides were stripped or older frontend substituted.
 
-The official m.5 artifact TCK passed all 15 checks with no warnings on both the
-exported workload and final published index, including actual image
+For the historical immutable artifact, the official m.5 artifact TCK passed all
+15 checks with no warnings on both the exported workload and final published index, including actual image
 user/shell/passwd checks and derived package inventory. The published amd64
 child is `sha256:1f1ea04dff583a977c40a5fd2d13333aceb8f85fd0e736a82bde8645fc7dc21d`;
 index annotation promotion leaves that child and provenance unchanged.
@@ -502,8 +623,13 @@ Network-disabled image checks confirmed UID/GID 1000, amd64, unchanged
 application/team/launcher hashes, and initialization without a model turn.
 The base digest supports linux/amd64 and linux/arm64.
 
-The offline fixtures cover all 14 m.5 capability types, alternative authoring
-forms, arguments and composition; the runnable workload uses four non-credential capabilities plus the required and optional credentials above.
+The offline fixtures cover all 18 versioned capability types in the pinned
+frontend spec, alternative authoring forms, arguments and composition. The current
+workload uses ten non-credential capabilities plus four credential declarations;
+all integrations except the essential network/SBX contract and two model
+credentials are optional. Loader fixtures exercise actual project context, the
+runtime-sibling profile and shared skill discovery with isolated HOME/config/data
+and no provider requests, including custom-team opt-in and restricted-role tools.
 Fixture validation is not runtime enforcement evidence. Run the separately
 pinned test module without adding the spec dependency to Docker Agent:
 

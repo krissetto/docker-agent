@@ -1,4 +1,4 @@
-# Only compilation inputs and the three runtime assets enter this kit's context.
+# Only compilation inputs and deliberately selected kit assets enter this context.
 **
 !go.mod
 !go.sum
@@ -23,6 +23,7 @@
 !kit/launch.sh
 !kit/hackerspace.yaml
 !kit/user-config.yaml
+!kit/async-agent-context.md
 **/*_test.go
 **/testdata/**
 **/fixtures/**

@@ -42,6 +42,8 @@ func TestTeam(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
 			require.True(t, ok)
 			assert.Empty(t, a.SubAgents)
+			assert.Equal(t, []string{"AGENTS.md", "ASYNC_AGENT_KIT.md"}, a.AddPromptFiles)
+			assert.Equal(t, expected.name == "root" || expected.name == "engineer" || expected.name == "designer", a.Skills.Enabled())
 			assert.Equal(t, expected.model, a.Model)
 			model, ok := cfg.Models[a.Model]
 			require.True(t, ok)
@@ -161,12 +163,12 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:3@sha256:11bb68806aef6a68d45c10c0c3b3dc86c2f794a296b5a933661d9dadf760b753\n"))
+	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:3@sha256:a8659fa579de7e8d8dc5b5712feba5efdabceb953279106e9c770d2cd8ca52f1\n"))
 	byType := make(map[string][]int)
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
 	}
-	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle"} {
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "volume", "long-running"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
 	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
@@ -174,6 +176,7 @@ func TestNativeKit(t *testing.T) {
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--session", "{{.SessionID}}"},
 		"continue": []any{"--session=-1"},
+		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--quiet"},
 	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
 	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
 	assert.True(t, lifecycle.Optional)
@@ -194,6 +197,8 @@ func TestNativeKit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(ignore), "!kit/hackerspace.yaml\n")
 	assert.Contains(t, string(ignore), "!kit/user-config.yaml\n")
+	assert.Contains(t, string(ignore), "!kit/async-agent-context.md\n")
+	assert.Contains(t, string(recipe), "/home/agent/.config/cagent /home/agent/.cagent")
 }
 
 func TestKitPublicationIdentity(t *testing.T) {

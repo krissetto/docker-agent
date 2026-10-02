@@ -134,6 +134,7 @@ func TestPermissionSurface(t *testing.T) {
 		{"network allow", "network-policy@1", "{runtime: {allow: [a.example.invalid]}}", "{runtime: {allow: [a.example.invalid, b.example.invalid]}}"},
 		{"deny removal", "network-policy@1", "{runtime: {allow: ['*'], deny: [a.example.invalid]}}", "{runtime: {allow: ['*']}}"},
 		{"http unbound", "network-policy@2", "{runtime: {allow: [{hosts: [api.example.invalid], methods: [GET], paths: ['/v1/**']}]}}", "{runtime: {allow: [api.example.invalid]}}"},
+		{"ssh unrestricted", "ssh-agent@1", "{phase: runtime, unrestricted: false, sign: [git]}", "{phase: runtime}"},
 		{"skills write", "agent-skills@1", "{path: /skills}", "{path: /skills, mode: readwrite}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,12 +144,12 @@ func TestPermissionSurface(t *testing.T) {
 			require.Empty(t, spec.DiffWidenings(wide, narrow))
 		})
 	}
-	for _, typ := range []string{"resources@1", "lifecycle@1", "agent-context@1", "agent-sessions@1", "sbx@1"} {
+	for _, typ := range []string{"resources@1", "lifecycle@1", "agent-context@1", "agent-sessions@1", "sbx@1", "long-running@1", "agent-skill@1"} {
 		t.Run("not grant "+typ, func(t *testing.T) {
 			require.Empty(t, spec.DiffWidenings(spec.Surface{}, spec.SurfaceOf(parse(t, capDocument(typ, capabilityConfigs[typ])))))
 		})
 	}
-	for _, typ := range []string{"credential@1", "volume@1", "port@1", "usb-device@1", "privileged@1", "kit-registry@1"} {
+	for _, typ := range []string{"credential@1", "volume@1", "port@1", "usb-device@1", "privileged@1", "kit-registry@1", "ssh-agent@1", "git-identity@1"} {
 		t.Run("grant "+typ, func(t *testing.T) {
 			require.NotEmpty(t, spec.DiffWidenings(spec.Surface{}, spec.SurfaceOf(parse(t, capDocument(typ, capabilityConfigs[typ])))))
 		})

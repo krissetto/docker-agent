@@ -196,7 +196,7 @@ func TestPublishedWorkload(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, spec.RequireAuthoredProvides(d))
 	require.True(t, spec.HasCapability(pd.Capabilities, spec.CapabilitySbx))
-	require.False(t, spec.HasCapability(pd.Capabilities, spec.CapabilityAgentContext))
+	require.True(t, spec.HasCapability(pd.Capabilities, spec.CapabilityAgentContext))
 	_, mixin := fixture(t, "mixin.yaml")
 	_, err = resolve.Resolve([]*resolve.Unit{{Reference: "async-agent-kit", Descriptor: pd}, {Reference: "fixture-mixin", Descriptor: mixin}})
 	require.NoError(t, err)

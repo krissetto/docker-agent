@@ -24,10 +24,14 @@ var capabilityConfigs = map[string]string{
 	"agent-skills@1":   "{path: /home/agent/skills, mode: readonly}",
 	"kit-registry@1":   "",
 	"sbx@1":            "",
+	"git-identity@1":   "",
+	"ssh-agent@1":      "{phase: runtime, unrestricted: false, sign: [git]}",
+	"long-running@1":   "",
+	"agent-skill@1":    "{path: /opt/skills/synthetic, name: synthetic}",
 }
 
 func TestAllCapabilityTypes(t *testing.T) {
-	require.Len(t, capabilityConfigs, 14)
+	require.Len(t, capabilityConfigs, 18)
 	for typ, config := range capabilityConfigs {
 		t.Run(typ, func(t *testing.T) {
 			d := parse(t, capDocument(typ, config))
@@ -45,6 +49,11 @@ func TestAllCapabilityTypes(t *testing.T) {
 
 func TestCapabilityNegatives(t *testing.T) {
 	cases := []struct{ name, typ, config string }{
+		{"ssh unknown phase", "ssh-agent@1", "{phase: boot}"},
+		{"ssh empty bounds", "ssh-agent@1", "{phase: runtime, unrestricted: false}"},
+		{"ssh empty bound", "ssh-agent@1", "{phase: runtime, unrestricted: false, sign: ['']}"},
+		{"skill relative", "agent-skill@1", "{path: relative}"},
+		{"context unsupported directory", "agent-context@1", "{filename: ASYNC_AGENT_KIT.md, directory: /home/agent}"},
 		{"relative volume", "volume@1", "{path: relative}"},
 		{"volume mode", "volume@1", "{path: /state, mode: '0999'}"},
 		{"volume size", "volume@1", "{path: /state, size: huge}"},
@@ -84,7 +93,7 @@ func TestCapabilityNegatives(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { require.Error(t, validationError(capDocument(tc.typ, tc.config))) })
 	}
-	for _, typ := range []string{"sbx@1", "privileged@1", "kit-registry@1"} {
+	for _, typ := range []string{"sbx@1", "privileged@1", "kit-registry@1", "git-identity@1", "long-running@1"} {
 		for _, config := range []string{"{}", "null"} {
 			t.Run(typ+config, func(t *testing.T) { require.Error(t, validationError(capDocument(typ, config))) })
 		}
@@ -201,4 +210,50 @@ func TestCredentialNetworkBinding(t *testing.T) {
 		parse(t, capDocument("volume@1", "{path: /scratch, tmpfs: true, mode: '1777'}"))
 		parse(t, capDocument("port@1", "{container: 5353, transport: udp}"))
 	})
+}
+
+func TestWorkloadOptionalIntegrations(t *testing.T) {
+	raw, err := os.ReadFile("../async-agent.yaml")
+	require.NoError(t, err)
+	d := parse(t, string(raw))
+	require.Len(t, d.Capabilities, 14)
+	for _, c := range d.Capabilities {
+		switch c.Type {
+		case spec.CapabilityCredential:
+			// Exact per-service requiredness is asserted above.
+		case spec.CapabilityNetworkPolicy, spec.CapabilitySbx:
+			require.False(t, c.Optional, c.Type)
+		default:
+			require.True(t, c.Optional, c.Type)
+		}
+	}
+	context, err := spec.AgentContextOf(d.Capabilities)
+	require.NoError(t, err)
+	require.Equal(t, "ASYNC_AGENT_KIT.md", context.Filename)
+	require.Equal(t, "./kit/async-agent-context.md", context.ContentFile)
+	body, err := os.ReadFile("../../" + context.ContentFile)
+	require.NoError(t, err, "contentFile resolves from the repository build context")
+	require.NotEmpty(t, body)
+	sessions, err := spec.AgentSessionsOf(d.Capabilities)
+	require.NoError(t, err)
+	require.EqualValues(t, []string{"/opt/async-agent/docker-agent", "sessions", "list", "--quiet"}, sessions.List)
+	ssh, err := spec.SSHAgentsOf(d.Capabilities)
+	require.NoError(t, err)
+	require.Len(t, ssh, 1)
+	require.EqualValues(t, []string{"runtime"}, ssh[0].Phase)
+	require.True(t, ssh[0].Bounded())
+	require.Equal(t, []string{"git"}, ssh[0].Sign)
+	require.Empty(t, ssh[0].Authenticate)
+	shared, err := spec.AgentSkillsOf(d.Capabilities)
+	require.NoError(t, err)
+	require.Len(t, shared, 1)
+	require.Equal(t, "/home/agent/.agents/skills", shared[0].Path)
+	require.Equal(t, "readonly", shared[0].Mode)
+	volumes, err := spec.VolumesOf(d.Capabilities)
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+	require.Equal(t, "/home/agent/.cagent", volumes[0].Path)
+	require.Equal(t, "0700", volumes[0].Mode)
+	require.Empty(t, volumes[0].Size)
+	require.False(t, volumes[0].Tmpfs)
 }

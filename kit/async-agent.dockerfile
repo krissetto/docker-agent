@@ -57,7 +57,7 @@ RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task
 COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
-RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent
+RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent /home/agent/.cagent
 COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml
 ENV DOCKER_AGENT_AUTO_UPDATE=0 \
     DOCKER_AGENT_NO_TOUR=1 \
