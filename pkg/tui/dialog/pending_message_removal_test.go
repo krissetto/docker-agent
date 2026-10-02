@@ -25,7 +25,7 @@ func TestPendingRemovalConfirmationKeyboardAndSingleResponse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*pendingMessageRemovalDialog)
+			d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*removalConfirmationDialog)
 			d.SetSize(100, 30)
 			view := ansi.Strip(d.View())
 			require.Contains(t, view, "Cancel")
@@ -48,7 +48,7 @@ func TestPendingRemovalConfirmationKeyboardAndSingleResponse(t *testing.T) {
 
 func TestPendingRemovalConfirmationMeasuredPillHits(t *testing.T) {
 	for _, size := range [][2]int{{100, 30}, {40, 12}, {24, 8}} {
-		probe := NewPendingMessageRemovalDialog(nil).(*pendingMessageRemovalDialog)
+		probe := NewPendingMessageRemovalDialog(nil).(*removalConfirmationDialog)
 		probe.SetSize(size[0], size[1])
 		view := probe.View()
 		row, col := probe.Position()
@@ -62,7 +62,7 @@ func TestPendingRemovalConfirmationMeasuredPillHits(t *testing.T) {
 				}
 				counts[key.Code]++
 				calls := 0
-				d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*pendingMessageRemovalDialog)
+				d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*removalConfirmationDialog)
 				d.SetSize(size[0], size[1])
 				_, cmd := d.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				collectMsgs(cmd)
@@ -81,7 +81,7 @@ func TestPendingRemovalConfirmationMeasuredPillHits(t *testing.T) {
 func TestPendingRemovalOutsideAndCloseChromeOnlyCancel(t *testing.T) {
 	for _, closeButton := range []bool{false, true} {
 		calls := 0
-		d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*pendingMessageRemovalDialog)
+		d := NewPendingMessageRemovalDialog(func() tea.Msg { calls++; return nil }).(*removalConfirmationDialog)
 		d.SetSize(100, 30)
 		var cmd tea.Cmd
 		if closeButton {
@@ -102,5 +102,25 @@ func TestPendingRemovalOutsideAndCloseChromeOnlyCancel(t *testing.T) {
 		require.Zero(t, calls)
 		_, cmd = d.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 		require.Nil(t, cmd)
+	}
+}
+
+func TestTodoRemovalUsesSharedSafeConfirmation(t *testing.T) {
+	for _, code := range []rune{tea.KeyEscape, tea.KeyEnter, 'y'} {
+		calls := 0
+		d := NewTodoRemovalDialog(func() tea.Msg { calls++; return nil })
+		d.SetSize(100, 30)
+		view := ansi.Strip(d.View())
+		require.Contains(t, view, "Remove todo")
+		require.Contains(t, view, "Remove this todo?")
+		require.Contains(t, view, "Cancel")
+		require.NotContains(t, strings.ToLower(view), "esc")
+		_, cmd := d.Update(tea.KeyPressMsg{Code: code})
+		collectMsgs(cmd)
+		if code == 'y' {
+			require.Equal(t, 1, calls)
+		} else {
+			require.Zero(t, calls)
+		}
 	}
 }

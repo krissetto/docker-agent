@@ -63,16 +63,7 @@ func (m *model) todoClick(x, y int) (tea.Cmd, bool) {
 		part = "text"
 	}
 	if part == "remove" {
-		if m.todoRemoveArmed != item.ID {
-			m.todoRemoveArmed = item.ID
-			m.invalidateHover()
-			return nil, true
-		}
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Remove: true}), true
-	}
-	if m.todoRemoveArmed != "" {
-		m.todoRemoveArmed = ""
-		m.invalidateHover()
 	}
 	if part == "status" {
 		return core.CmdHandler(messages.EditTodoMsg{Scope: m.todoScope, ID: item.ID, Status: todotool.NextStatus(item.Status)}), true

@@ -9,28 +9,38 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-type pendingMessageRemovalDialog struct {
+type removalConfirmationDialog struct {
 	BaseDialog
-	confirm tea.Cmd
+	confirm         tea.Cmd
+	title, question string
 }
 
 // NewPendingMessageRemovalDialog requires an explicit affirmative action before withdrawal.
 func NewPendingMessageRemovalDialog(confirm tea.Cmd) Dialog {
-	return &pendingMessageRemovalDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, confirm: confirm}
+	return newRemovalConfirmationDialog("Remove queued message", "Remove this queued message?", confirm)
 }
 
-func (d *pendingMessageRemovalDialog) Init() tea.Cmd { return nil }
+// NewTodoRemovalDialog requires explicit confirmation before removing a todo.
+func NewTodoRemovalDialog(confirm tea.Cmd) Dialog {
+	return newRemovalConfirmationDialog("Remove todo", "Remove this todo?", confirm)
+}
 
-func (d *pendingMessageRemovalDialog) CancelDialogCmd() tea.Cmd {
+func newRemovalConfirmationDialog(title, question string, confirm tea.Cmd) Dialog {
+	return &removalConfirmationDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, title: title, question: question, confirm: confirm}
+}
+
+func (d *removalConfirmationDialog) Init() tea.Cmd { return nil }
+
+func (d *removalConfirmationDialog) CancelDialogCmd() tea.Cmd {
 	if !d.claimResponse() {
 		return nil
 	}
 	return core.CmdHandler(CloseDialogByModelMsg{Model: d})
 }
 
-func (d *pendingMessageRemovalDialog) Cleanup() { d.responseSent = true }
+func (d *removalConfirmationDialog) Cleanup() { d.responseSent = true }
 
-func (d *pendingMessageRemovalDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+func (d *removalConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	if d.responseSent {
 		return d, nil
 	}
@@ -87,11 +97,11 @@ func (d *pendingMessageRemovalDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd
 	return d, nil
 }
 
-func (d *pendingMessageRemovalDialog) content() (width int, header, body, footer string) {
+func (d *removalConfirmationDialog) content() (width int, header, body, footer string) {
 	width = d.ComputeDialogWidth(50, 36, 60)
 	contentWidth := d.ContentWidth(width, 2)
-	header = RenderDialogHeader("Remove queued message", contentWidth, styles.DialogTitleStyle)
-	body = styles.DialogQuestionStyle.Width(d.BodyContentWidth(width)).Render("Remove this queued message?")
+	header = RenderDialogHeader(d.title, contentWidth, styles.DialogTitleStyle)
+	body = styles.DialogQuestionStyle.Width(d.BodyContentWidth(width)).Render(d.question)
 	padding := min(2, max(0, (contentWidth-3)/2))
 	footer = d.renderActions(contentWidth, lipgloss.Right, 2, padding,
 		Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: true, HideShortcut: true},
@@ -99,20 +109,20 @@ func (d *pendingMessageRemovalDialog) content() (width int, header, body, footer
 	return width, header, body, footer
 }
 
-func (d *pendingMessageRemovalDialog) View() string {
+func (d *removalConfirmationDialog) View() string {
 	width, header, body, footer := d.content()
 	return d.RenderScrollableBody(styles.DialogStyle.Padding(1, 2), width, header, body, footer)
 }
 
-func (d *pendingMessageRemovalDialog) prepareLayout() {
+func (d *removalConfirmationDialog) prepareLayout() {
 	width, header, body, footer := d.content()
 	d.PrepareScrollableBody(styles.DialogStyle.Padding(1, 2), width, header, body, footer)
 }
 
-func (d *pendingMessageRemovalDialog) SetSize(width, height int) tea.Cmd {
+func (d *removalConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.prepareLayout()
 	return cmd
 }
 
-func (d *pendingMessageRemovalDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }
+func (d *removalConfirmationDialog) Position() (row, col int) { return d.CenterDialog(d.View()) }

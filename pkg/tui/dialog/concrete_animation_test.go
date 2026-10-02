@@ -40,6 +40,7 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 	}{
 		{"commands", func() Dialog { return NewCommandPaletteDialog(concretePaletteCommands(3, 8)) }},
 		{"pending-removal", func() Dialog { return NewPendingMessageRemovalDialog(nil) }},
+		{"todo-removal", func() Dialog { return NewTodoRemovalDialog(nil) }},
 		{"settings", func() Dialog { return NewSettingsDialog(messages.Preferences{}, true) }},
 	}
 	for _, fixture := range fixtures {
@@ -105,7 +106,7 @@ func TestConcreteDialogsStayScreenCenteredThroughDynamicLifecycle(t *testing.T) 
 				assertConcreteRootFrame(t, mgr)
 				stepConcreteDialog(t, runtime, &tick, mgr)
 				assertConcreteRootFrame(t, mgr)
-				if fixture.name != "pending-removal" {
+				if fixture.name != "pending-removal" && fixture.name != "todo-removal" {
 					assert.NotEqual(t, settled, mgr.stack[0].targetHeight)
 				}
 

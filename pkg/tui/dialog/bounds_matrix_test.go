@@ -29,6 +29,7 @@ func TestTopLevelDialogRenderedBoundsMatrix(t *testing.T) {
 	}{
 		{"exit", NewExitConfirmationDialog},
 		{"pending-removal", func() Dialog { return NewPendingMessageRemovalDialog(nil) }},
+		{"todo-removal", func() Dialog { return NewTodoRemovalDialog(nil) }},
 		{"close-root", func() Dialog { return NewCloseRootWithSubagentsDialog("root") }},
 		{"max-iterations", func() Dialog { return NewMaxIterationsDialog(10, "s", "r") }},
 		{"tool-confirmation", func() Dialog {

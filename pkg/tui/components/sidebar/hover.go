@@ -25,9 +25,6 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 	if key == m.hoverTarget {
 		return nil
 	}
-	if m.todoRemoveArmed != "" && !strings.HasPrefix(key, "todo:"+m.todoRemoveArmed+":") {
-		m.todoRemoveArmed = ""
-	}
 	m.hoverTarget = key
 	m.invalidateHover()
 	m.syncBranchHover()
@@ -103,7 +100,6 @@ func (m *model) cancelHover() {
 	m.hoverAnimation.Stop()
 	m.hoverValues = nil
 	m.hoverTarget = ""
-	m.todoRemoveArmed = ""
 	m.hoveredRegion = ClickNone
 	m.hoveredSubagent = ""
 	m.hoveredParent = false
@@ -126,7 +122,7 @@ func (m *model) StopAnimation() {
 
 // CancelHover clears pointer presentation when this page stops receiving ticks.
 func (m *model) CancelHover() {
-	changed := m.todoRemoveArmed != "" || len(m.hoverValues) > 0 || m.hoverTarget != "" || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent || m.hoveredTreeRow != -1
+	changed := len(m.hoverValues) > 0 || m.hoverTarget != "" || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent || m.hoveredTreeRow != -1
 	m.cancelHover()
 	if changed {
 		m.invalidateHover()

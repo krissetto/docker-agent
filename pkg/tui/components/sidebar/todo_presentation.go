@@ -39,12 +39,12 @@ func (m *model) todoHoverKey(row placedRow, col int) string {
 }
 
 func (m *model) todoHoverText(row placedRow) string {
-	return m.actionRowText(row.text, "todo:"+row.payload+":", row.todoControls, true, m.todoRemoveArmed == row.payload)
+	return m.actionRowText(row.text, "todo:"+row.payload+":", row.todoControls, true)
 }
 
-func (m *model) actionRowText(text, base string, first, todo, armed bool) string {
+func (m *model) actionRowText(text, base string, first, todo bool) string {
 	if todo {
-		return m.todoRowText(text, base, first, armed)
+		return m.todoRowText(text, base, first)
 	}
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	indent, actions := rowActions(width, false)
@@ -70,7 +70,7 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 		out.WriteString(ansi.Cut(text, end, col))
 		paint := ansi.Cut(text, col, col+1)
 		if part.name == "remove" {
-			out.WriteString(removeAction(m.hoverValues[base+part.name].value, progress, armed))
+			out.WriteString(removeAction(m.hoverValues[base+part.name].value, progress))
 		} else {
 			paint = styles.HoverText(paint, m.hoverValues[base+part.name].value, styles.TextPrimary)
 			out.WriteString(hoverAction(paint, progress))
@@ -81,7 +81,7 @@ func (m *model) actionRowText(text, base string, first, todo, armed bool) string
 	return out.String()
 }
 
-func (m *model) todoRowText(text, base string, first, armed bool) string {
+func (m *model) todoRowText(text, base string, first bool) string {
 	width := m.contentWidth(m.cachedNeedsScrollbar)
 	_, actions := rowActions(width, true)
 	progress := m.hoverValues[base+"row"].value
@@ -92,16 +92,13 @@ func (m *model) todoRowText(text, base string, first, armed bool) string {
 	// Only paint is occluded: wrapping, canonical text and continuation rows stay intact.
 	text = padRight(ansi.Truncate(text, width-4, "…"), width-4)
 	edit := styles.HoverText(styles.MutedStyle.Render("✎"), m.hoverValues[base+"edit"].value, styles.TextPrimary)
-	remove := removeAction(m.hoverValues[base+"remove"].value, progress, armed)
+	remove := removeAction(m.hoverValues[base+"remove"].value, progress)
 	return text + " " + hoverAction(edit, progress) + " " + remove
 }
 
-func removeAction(emphasis, reveal float64, armed bool) string {
+func removeAction(emphasis, reveal float64) string {
 	if reveal <= 0 {
 		return " "
-	}
-	if armed {
-		emphasis = 1
 	}
 	// Blend after row highlighting so the destructive endpoint stays the theme's error color.
 	r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))

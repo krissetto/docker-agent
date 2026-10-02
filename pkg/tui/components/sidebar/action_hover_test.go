@@ -90,9 +90,6 @@ func TestActionHoverClearsOnScrollResizeAndModal(t *testing.T) {
 				m.scrollview.SetScrollOffset(int(first.y))
 				settlePlacement(t, m, m.updateRegionHover(m.layoutCfg.PaddingLeft+2, int(first.y)-m.scrollview.ScrollOffset()))
 				require.Equal(t, 1.0, m.hoverValues[base+"row"].value)
-				if todo {
-					m.todoRemoveArmed = "opaque"
-				}
 				switch clear {
 				case "scroll":
 					_, cmd := m.Update(messages.WheelCoalescedMsg{Delta: 1})
@@ -106,7 +103,6 @@ func TestActionHoverClearsOnScrollResizeAndModal(t *testing.T) {
 					settlePlacement(t, m, m.setHoverTarget("directory"))
 				}
 				require.Zero(t, m.hoverValues[base+"row"].value)
-				require.Empty(t, m.todoRemoveArmed)
 				require.Zero(t, m.ar.ActiveCount())
 				if clear == "scroll" {
 					next := requirePlaced(t, m, base+"1")

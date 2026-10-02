@@ -98,6 +98,9 @@ type todoMutationMsg struct {
 }
 
 func (m *appModel) editTodo(msg messages.EditTodoMsg) tea.Cmd {
+	if msg.Remove {
+		return m.openTodoRemoval(msg)
+	}
 	data := m.panelOwnerData(msg.Scope.Owner)
 	if data == nil || todoScope(msg.Scope.Owner, data) != msg.Scope || msg.Scope.Owner != m.paneFocus() {
 		return nil
@@ -115,11 +118,7 @@ func (m *appModel) editTodo(msg messages.EditTodoMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if msg.Remove {
-			result.todos, result.err = handle.RemoveTodo(ctx, msg.ID)
-		} else {
-			result.todos, result.err = handle.SetTodoStatus(ctx, msg.ID, msg.Status)
-		}
+		result.todos, result.err = handle.SetTodoStatus(ctx, msg.ID, msg.Status)
 		result.todos = slices.Clone(result.todos)
 		return result
 	}

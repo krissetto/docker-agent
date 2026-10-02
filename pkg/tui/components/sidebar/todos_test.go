@@ -45,9 +45,6 @@ func TestSidebarCanonicalTodosStatusAndRemoval(t *testing.T) {
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Status: "in-progress"}, find(cmd))
 	settlePlacement(t, m, m.updateRegionHover(x+4, y))
 	_, cmd = m.Update(tea.MouseClickMsg{X: m.layoutCfg.PaddingLeft + m.contentWidth(m.cachedNeedsScrollbar) - 1, Y: y, Button: tea.MouseLeft})
-	require.Empty(t, find(cmd).ID)
-	settlePlacement(t, m, m.updateRegionHover(x+4, y))
-	_, cmd = m.Update(tea.MouseClickMsg{X: m.layoutCfg.PaddingLeft + m.contentWidth(m.cachedNeedsScrollbar) - 1, Y: y, Button: tea.MouseLeft})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Remove: true}, find(cmd))
 }
 
@@ -136,7 +133,7 @@ func TestTodoActionsNarrowGeometry(t *testing.T) {
 					require.IsType(t, messages.OpenTodoEditMsg{}, cmd())
 					require.Equal(t, "✎", ansi.Strip(ansi.Cut(m.placementText(row, w), col, col+1)))
 				case "remove":
-					require.Nil(t, cmd)
+					require.Equal(t, messages.EditTodoMsg{Scope: m.todoScope, ID: "todo", Remove: true}, cmd())
 					require.Equal(t, "×", ansi.Strip(ansi.Cut(m.placementText(row, w), col, col+1)))
 				default:
 					require.Nil(t, cmd, "single-click body is inert")

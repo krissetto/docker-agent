@@ -347,7 +347,6 @@ type model struct {
 	budgetUsage       *runtime.BudgetUsageEvent
 	todoComp          *todotool.SidebarComponent
 	todoScope         messages.TodoScope
-	todoRemoveArmed   string
 	lastTodoClick     todoBodyClick
 	ragIndexing       map[string]*ragIndexingState // strategy name -> indexing state
 	spinner           spinner.Spinner
@@ -1548,7 +1547,6 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case messages.TodosSnapshotMsg:
 		if msg.Err == nil {
 			m.todoScope = msg.Scope
-			m.todoRemoveArmed = ""
 			_ = m.SetTodos(&tools.ToolCallResult{Meta: msg.Todos})
 		}
 		return m, nil
@@ -1588,10 +1586,6 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if msg.Button == tea.MouseLeft {
 			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
 				return m, cmd
-			}
-			if m.todoRemoveArmed != "" {
-				m.todoRemoveArmed = ""
-				m.invalidateCache()
 			}
 			if control, ok := m.treeControlAt(msg.X-m.xPos, msg.Y-m.yPos); ok {
 				if !control.whole {
@@ -2180,13 +2174,13 @@ func (m *model) renderFromCache() string {
 	lines := slices.Clone(m.cachedLines)
 	for i, meta := range m.queueRows {
 		if y := m.queueStart + i; meta.turnID != "" && y < len(lines) {
-			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false, false)
+			lines[y] = m.actionRowText(lines[y], "queue:"+meta.turnID+":", meta.first, false)
 		}
 	}
 	for y := m.todoSummaryLine + 2; m.todoSummaryLine >= 0 && y < m.todoEnd; y++ {
 		line := y - m.todoSummaryLine - 2
 		if item, ok := m.todoComp.TodoAtLine(line); ok {
-			lines[y] = m.actionRowText(lines[y], "todo:"+item.ID+":", m.todoComp.ControlsAtLine(line), true, m.todoRemoveArmed == item.ID)
+			lines[y] = m.actionRowText(lines[y], "todo:"+item.ID+":", m.todoComp.ControlsAtLine(line), true)
 		}
 	}
 	m.scrollview.SetContent(lines, len(lines))
@@ -3008,10 +3002,6 @@ func (m *model) updateSubagentHover(y int) {
 // the sidebar.
 func (m *model) ClearSubagentHover() tea.Cmd {
 	m.ResetTodoClick()
-	if m.todoRemoveArmed != "" {
-		m.todoRemoveArmed = ""
-		m.invalidateCache()
-	}
 	changed := m.hoveredTreeRow != -1 || m.hoveredRegion != ClickNone || m.hoveredSubagent != "" || m.hoveredParent
 	m.hoveredTreeRow = -1
 	m.hoveredRegion = ClickNone

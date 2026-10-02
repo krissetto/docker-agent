@@ -29,9 +29,6 @@ func TestTodosEditRemoveRefreshStableSelection(t *testing.T) {
 	d.Update(messages.TodosSnapshotMsg{Scope: scope, Todos: items})
 	require.Equal(t, 1, d.selected)
 	_, cmd = d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Nil(t, cmd)
-	require.Contains(t, ansi.Strip(d.View()), "again to remove")
-	_, cmd = d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "two", Remove: true}, cmd())
 	d.Update(messages.TodosSnapshotMsg{Scope: scope, Todos: []session.Todo{items[0], items[2]}})
 	require.Equal(t, "three", d.todos[d.selected].ID)
@@ -51,8 +48,6 @@ func TestTodosMouseStatusAndRemoveTargets(t *testing.T) {
 	_, cmd := d.Update(tea.MouseClickMsg{X: x + 2, Y: y, Button: tea.MouseLeft})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Status: "in-progress"}, cmd())
 	d.Update(messages.TodosSnapshotMsg{Scope: scope, Todos: items})
-	_, cmd = d.Update(tea.MouseClickMsg{X: x + 4, Y: y, Button: tea.MouseLeft})
-	require.Nil(t, cmd)
 	_, cmd = d.Update(tea.MouseClickMsg{X: x + 4, Y: y, Button: tea.MouseLeft})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "opaque", Remove: true}, cmd())
 }
@@ -211,46 +206,28 @@ func TestTodosNarrowGeometryAndMutationGuards(t *testing.T) {
 	}
 	d.SetSize(80, 24)
 	_, cmd := d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Nil(t, cmd)
-	require.False(t, d.DialogClosable())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Empty(t, d.removeArmed)
-	require.True(t, d.DialogClosable())
+	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "one", Remove: true}, cmd())
+	require.False(t, d.busy, "confirmation request does not leave the inspector saving on cancellation")
 	_, cmd = d.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "one", Status: "in-progress"}, cmd())
 	_, cmd = d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Nil(t, cmd, "busy dialogs do not arm a removal")
-	require.Empty(t, d.removeArmed)
+	require.Nil(t, cmd, "busy dialogs cannot request removal")
 	d.Update(messages.TodosSnapshotMsg{Scope: messages.TodoScope{SessionID: "wrong"}, Todos: nil})
 	require.True(t, d.busy)
 	require.Len(t, d.todos, 2)
 	d.Update(messages.TodosSnapshotMsg{Scope: scope, Todos: []session.Todo{items[1], items[0]}})
 	require.Equal(t, "one", d.todos[d.selected].ID)
-	_, cmd = d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Nil(t, cmd)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	require.Empty(t, d.removeArmed, "moving selection disarms removal")
-	_, cmd = d.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Nil(t, cmd)
 	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyDelete})
 	require.Equal(t, messages.EditTodoMsg{Scope: scope, ID: "two", Remove: true}, cmd())
 }
 
-func TestTodosManagerEscapeCancelsRemovalAndOcclusionStopsHover(t *testing.T) {
+func TestTodosManagerOcclusionStopsHover(t *testing.T) {
 	r := newDialogRuntime()
 	mgr := &manager{runtime: r, width: 100, height: 30}
 	t.Cleanup(mgr.Cleanup)
 	d := NewTodosDialog(messages.TodoScope{}, []session.Todo{{ID: "one", Status: "pending", Description: "Task"}}, "one").(*todosDialog)
 	mgr.Update(OpenDialogMsg{Model: d})
-	for r.HasActive() {
-		mgr.Update(acceptedDialogTick(r, r.Continue()))
-	}
-	mgr.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
-	require.Equal(t, "one", d.removeArmed)
-	_, cmd := mgr.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.Nil(t, cmd)
-	require.Empty(t, d.removeArmed)
-	require.False(t, mgr.Closing())
 	for r.HasActive() {
 		mgr.Update(acceptedDialogTick(r, r.Continue()))
 	}

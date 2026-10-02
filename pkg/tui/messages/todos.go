@@ -15,7 +15,8 @@ type OpenTodosMsg struct {
 type EditTodoMsg struct {
 	Scope      TodoScope
 	ID, Status string
-	Remove     bool
+	// Remove requests confirmation; it never directly authorizes deletion.
+	Remove bool
 }
 type TodosSnapshotMsg struct {
 	Scope TodoScope

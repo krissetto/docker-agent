@@ -87,7 +87,7 @@ func (m *model) placementText(row placedRow, width int) string {
 		case strings.HasPrefix(row.id, "todo:") && row.payload != "":
 			return m.todoHoverText(row)
 		case strings.HasPrefix(row.id, "queue:") && row.payload != "":
-			return m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false, false)
+			return m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false)
 		}
 		return text
 	}
@@ -95,7 +95,7 @@ func (m *model) placementText(row placedRow, width int) string {
 	case strings.HasPrefix(row.id, "todo:") && row.payload != "":
 		text = m.todoHoverText(row)
 	case row.action == ClickQueuedMessage:
-		text = m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false, false)
+		text = m.actionRowText(row.text, "queue:"+row.payload+":", row.queueControls, false)
 	case row.id == "active-agent":
 		text = m.agentIdentityView(width)
 	case row.action == ClickModel:

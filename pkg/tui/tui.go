@@ -1129,6 +1129,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openTodos(msg)
 	case messages.EditTodoMsg:
 		return m, m.editTodo(msg)
+	case todoRemovalConfirmedMsg:
+		return m, m.confirmTodoRemoval(msg)
 	case todoMutationMsg:
 		return m, m.finishTodoMutation(msg)
 	case subagentOpenedMsg:

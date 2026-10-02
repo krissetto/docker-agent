@@ -22,7 +22,6 @@ type todosDialog struct {
 	scope                           messages.TodoScope
 	todos                           []session.Todo
 	busy                            bool
-	removeArmed                     string
 	errorText                       string
 	prepared                        []todoRowGeometry
 	rowCache                        map[string]cachedDialogTodo
@@ -55,11 +54,9 @@ func (d *todosDialog) edit(status string, remove bool) tea.Cmd {
 		return nil
 	}
 	id := d.todos[d.selected].ID
-	if remove && d.removeArmed != id {
-		d.removeArmed = id
-		return nil
+	if remove {
+		return core.CmdHandler(messages.EditTodoMsg{Scope: d.scope, ID: id, Remove: true})
 	}
-	d.removeArmed = ""
 	d.busy = true
 	d.errorText = ""
 	return core.CmdHandler(messages.EditTodoMsg{Scope: d.scope, ID: id, Status: status, Remove: remove})
@@ -103,7 +100,6 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		d.todos = slices.Clone(msg.Todos)
 		d.rowsDirty = true
 		d.selected = min(d.selected, max(0, len(d.todos)-1))
-		d.removeArmed = ""
 		for i, todo := range d.todos {
 			if todo.ID == id {
 				d.selected = i
@@ -117,24 +113,16 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
-			if d.removeArmed != "" {
-				d.removeArmed = ""
-				return d, nil
-			}
 			return d, closeDialogCmd()
 		case "q", "ctrl+c":
 			return d, closeDialogCmd()
 		case "up", "k":
 			d.navigate(-1, len(d.todos), d.selectedLine)
-			d.removeArmed = ""
 		case "down", "j":
 			d.navigate(1, len(d.todos), d.selectedLine)
-			d.removeArmed = ""
 		case "home":
-			d.removeArmed = ""
 			d.navigate(-d.selected, len(d.todos), d.selectedLine)
 		case "end":
-			d.removeArmed = ""
 			d.navigate(len(d.todos)-1-d.selected, len(d.todos), d.selectedLine)
 		case "pgup":
 			d.scrollview.ScrollBy(-d.scrollview.VisibleHeight())
@@ -166,9 +154,6 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		index, line, col := d.hitAt(msg.X, msg.Y)
 		if index < 0 {
 			return d, nil
-		}
-		if d.selected != index {
-			d.removeArmed = ""
 		}
 		d.selected = index
 		g := d.prepared[index]
@@ -211,17 +196,15 @@ func (d *todosDialog) renderBody(prepare bool) string {
 		d.preparedBody = styles.MutedStyle.Render("No todos in this scope.")
 	}
 	hint := "↑↓ choose · Enter/e edit · Space cycle · p/i/c status · d/× remove"
-	if d.removeArmed != "" {
-		hint = "Press d / click × again to remove"
-	} else if d.busy {
+	if d.busy {
 		hint = "Saving…"
 	} else if d.errorText != "" {
 		hint = d.errorText
 	}
-	if d.removeArmed == "" && !d.busy && d.errorText == "" && inner < 60 {
+	if !d.busy && d.errorText == "" && inner < 60 {
 		hint = "↑↓ choose · e edit · Space status · d remove"
 	}
-	if inner < 20 && d.removeArmed == "" && !d.busy && d.errorText == "" {
+	if inner < 20 && !d.busy && d.errorText == "" {
 		hint = "↑↓ · Space · d"
 	}
 	footer := styles.MutedStyle.Render(ansi.Wrap(hint, inner, ""))
@@ -263,13 +246,9 @@ func (d *todosDialog) selectedLine() int {
 	return 0
 }
 
-// Let Escape reach Update while a removal confirmation is armed.
-func (d *todosDialog) DialogClosable() bool { return d.removeArmed == "" }
-
 func (d *todosDialog) openEditor() tea.Cmd {
 	if d.busy || d.selected < 0 || d.selected >= len(d.todos) {
 		return nil
 	}
-	d.removeArmed = ""
 	return core.CmdHandler(messages.OpenTodoEditMsg{Scope: d.scope, ID: d.todos[d.selected].ID})
 }

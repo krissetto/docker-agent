@@ -31,7 +31,7 @@ reference entries in Help remain documentation, not dismissal chrome.
 | Panes | Search/identity, Apply primary, keyboard/double-click exact-once |
 | Subagents | Empty/tree folding/identity, Attach primary, hover/selection |
 | Todo edit | Multiline/blank/cancel, primary Save/plain Cancel, scope/editor-correlated saves, snapshots preserve dirty and saving state, conflict retains draft and explicit reload/retry |
-| Todos | Empty/normal/remove-armed/saving/error, Unicode wrapped body, bounded navigation help |
+| Todos | Empty/normal/removal-confirmation/saving/error, Unicode wrapped body, bounded navigation help |
 | Snapshots | Empty/populated and reset semantics |
 | Context / cost | Empty/live rows, selection-specific commands, Copy and other management hints without fake primary |
 | Help | Context/reference categories; existing category guide retained without duplicate footer |

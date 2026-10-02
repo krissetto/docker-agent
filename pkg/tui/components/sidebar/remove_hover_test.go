@@ -41,36 +41,26 @@ func TestRemoveHoverUsesErrorColorWithoutChangingItemText(t *testing.T) {
 					m.hoverValues = map[string]hoverValue{base + "row": {value: reveal, target: reveal}}
 					baseline := sidebarCells(m.placementText(first, width))
 					continuation := m.placementText(next, width)
-					for _, armed := range []bool{false, true} {
-						m.todoRemoveArmed = ""
-						if armed && todo {
-							m.todoRemoveArmed = "item"
+					for _, progress := range []float64{0, .5, 1, .5, 0} {
+						m.hoverValues[base+"remove"] = hoverValue{value: progress, target: progress}
+						paint := m.placementText(first, width)
+						cells := sidebarCells(paint)
+						require.Len(t, cells, width)
+						require.Equal(t, baseline[:width-1], cells[:width-1], "text, status and edit styling remain unchanged")
+						require.Equal(t, continuation, m.placementText(next, width))
+						require.Equal(t, "×", cells[width-1].glyph)
+						require.Nil(t, cells[width-1].bg, "remove has no opaque background")
+						r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
+						er, eg, eb := styles.ColorToRGB(styles.Error)
+						emphasis := progress
+						want := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
+						require.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cells[width-1].fg), "progress=%v reveal=%v", progress, reveal)
+						if progress == 1 {
+							require.Equal(t, color.NRGBAModel.Convert(styles.Error), color.NRGBAModel.Convert(cells[width-1].fg), "remove stays exactly theme error red, without extra brightening")
 						}
-						for _, progress := range []float64{0, .5, 1, .5, 0} {
-							m.hoverValues[base+"remove"] = hoverValue{value: progress, target: progress}
-							paint := m.placementText(first, width)
-							cells := sidebarCells(paint)
-							require.Len(t, cells, width)
-							require.Equal(t, baseline[:width-1], cells[:width-1], "text, status and edit styling remain unchanged")
-							require.Equal(t, continuation, m.placementText(next, width))
-							require.Equal(t, "×", cells[width-1].glyph)
-							require.Nil(t, cells[width-1].bg, "remove has no opaque background")
-							r, g, b := styles.ColorToRGB(styles.Brighten(styles.MutedStyle.GetForeground(), .25*reveal))
-							er, eg, eb := styles.ColorToRGB(styles.Error)
-							emphasis := progress
-							if armed && todo {
-								emphasis = 1
-							}
-							want := styles.RGBToColor(r+(er-r)*emphasis, g+(eg-g)*emphasis, b+(eb-b)*emphasis)
-							require.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cells[width-1].fg), "armed=%v progress=%v reveal=%v", armed, progress, reveal)
-							if (armed && todo) || progress == 1 {
-								require.Equal(t, color.NRGBAModel.Convert(styles.Error), color.NRGBAModel.Convert(cells[width-1].fg), "remove stays exactly theme error red, without extra brightening")
-							}
-							require.Equal(t, first, requirePlaced(t, m, first.id), "canonical text stays intact")
-							require.Zero(t, m.ar.ActiveCount(), "painting does not schedule ticks")
-						}
+						require.Equal(t, first, requirePlaced(t, m, first.id), "canonical text stays intact")
+						require.Zero(t, m.ar.ActiveCount(), "painting does not schedule ticks")
 					}
-					m.todoRemoveArmed = ""
 				}
 				m.hoverValues = nil
 				require.Equal(t, idle, m.placementText(first, width))

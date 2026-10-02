@@ -95,12 +95,13 @@ func TestTodoMutationPersistsRefreshesDialogAndHiddenPanelAndFencesReset(t *test
 		}
 	}
 	require.Equal(t, "in-progress", data.todos[0].Status)
-	remove := root.editTodo(messages.EditTodoMsg{Scope: scope, ID: "opaque", Remove: true})().(todoMutationMsg)
+	request := openTodoRemovalConfirmation(t, root, scope, "opaque")
+	remove := root.confirmTodoRemoval(request)().(todoMutationMsg)
 	root.finishTodoMutation(remove)
 	stored, err = store.LoadTodos(t.Context(), sess.ID)
 	require.NoError(t, err)
 	require.Empty(t, stored)
-	require.Contains(t, ansi.Strip(root.dialogMgr.TopDialog().View()), "No todos")
+	require.Contains(t, ansi.Strip(data.todoDialog.View()), "No todos")
 	root.ingestPanelEvent("profile", &app.SessionResetEvent{})
 	require.True(t, !root.dialogMgr.HasActiveDialog() || root.dialogMgr.Closing(), "reset retires the old scoped inspector before it can emit a stale action")
 	root.finishTodoMutation(result)
