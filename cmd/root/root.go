@@ -76,6 +76,10 @@ New to docker agent? Take the hands-on tour: docker agent getting-started`,
 				paths.SetDataDir(dir)
 			}
 
+			if isSessionsListCommand(cmd) {
+				return nil
+			}
+
 			// Set the version for automatic telemetry initialization
 			telemetry.SetGlobalTelemetryVersion(version.Version)
 
@@ -206,17 +210,17 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	// Enable `harness:` agents backed by external coding CLIs.
 	runtime.RegisterHarness(codingharness.Factory)
 
-	selfupdate.Cleanup(ctx)
+	rootCmd := NewRootCmd()
+	invoked, _, _ := rootCmd.Find(args)
+	if !isSessionsListCommand(invoked) {
+		selfupdate.Cleanup(ctx)
 
-	// Opt-in self-update: when enabled, replace this binary with the latest
-	// release and re-exec before doing any real work. Skipped for invocations
-	// where restarting would be wrong (plugin metadata handshake, shell
-	// completion) and always falls back to the current binary on any failure.
-	if selfupdate.Enabled() && !isManagementInvocation(args) {
-		selfupdate.Run(ctx, stdin, stderr)
+		// Opt-in self-update: never restart a machine-readable session listing.
+		if selfupdate.Enabled() && !isManagementInvocation(args) {
+			selfupdate.Run(ctx, stdin, stderr)
+		}
 	}
 
-	rootCmd := NewRootCmd()
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)

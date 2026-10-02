@@ -36,7 +36,7 @@ func newSessionsCmd() *cobra.Command {
 		Short:   "Inspect recorded sessions",
 		GroupID: "advanced",
 	}
-	cmd.AddCommand(newSessionsDiffCmd())
+	cmd.AddCommand(newSessionsDiffCmd(), newSessionsListCmd())
 	return cmd
 }
 
