@@ -142,6 +142,7 @@ func (s *Supervisor) RegisterSessionOwner(identity ViewOwnerIdentity, resources 
 		}
 		return ownerError(identity.RootSessionID, runtime.SessionErrorConflict, "root owner already admitted")
 	}
+	s.applySubagentsPolicyLocked(resources.Services)
 	var owner *viewOwner
 	for _, candidate := range s.ownerResources {
 		if !candidate.removed && sameSessionRuntime(candidate.resources.Sessions, resources.Sessions) {
@@ -348,6 +349,7 @@ func (s *Supervisor) buildViewOwner(pending *viewOwner, selectedID string, optio
 			err = runtime.ErrSessionClosed
 		}
 		if err == nil {
+			s.applySubagentsPolicyLocked(resources.Services)
 			pending.resources = resources
 		}
 		s.mu.Unlock()

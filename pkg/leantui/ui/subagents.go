@@ -10,18 +10,20 @@ import (
 
 // SubagentPicker keeps selection by canonical identity, never by display name or row index.
 type SubagentPicker struct {
-	rows      []subagentview.Row
-	nodes     []subagent.NodeSnapshot
-	collapsed map[subagent.NodeID]bool
-	selected  subagent.NodeID
-	current   subagent.NodeID
-	root      subagent.NodeID
-	sessionID string
-	attached  subagent.NodeID
+	UseSubagents bool
+	actionFocus  int // 0: tree, 1: toggle, 2: Attach
+	rows         []subagentview.Row
+	nodes        []subagent.NodeSnapshot
+	collapsed    map[subagent.NodeID]bool
+	selected     subagent.NodeID
+	current      subagent.NodeID
+	root         subagent.NodeID
+	sessionID    string
+	attached     subagent.NodeID
 }
 
 func NewSubagentPicker(snapshot subagent.Snapshot, sessionID string, attached subagent.NodeID) *SubagentPicker {
-	p := &SubagentPicker{collapsed: make(map[subagent.NodeID]bool), sessionID: sessionID, attached: attached}
+	p := &SubagentPicker{UseSubagents: true, collapsed: make(map[subagent.NodeID]bool), sessionID: sessionID, attached: attached}
 	p.Update(snapshot)
 	return p
 }
@@ -70,6 +72,9 @@ func (p *SubagentPicker) Current() (subagent.Node, bool) {
 }
 
 func (p *SubagentPicker) Navigate(key KeyType) {
+	if p.actionFocus > 0 {
+		return
+	}
 	if len(p.rows) == 0 {
 		return
 	}
@@ -123,6 +128,9 @@ func (p *SubagentPicker) Render(width, height int) []string {
 		lines = append(lines, Truncate(StBold().Render("Subagents"), width))
 	}
 	budget := height - len(lines)
+	if height >= 3 {
+		budget--
+	}
 	missing := p.selected == "" && len(p.rows) > 0
 	if missing && height >= 4 {
 		budget--
@@ -172,5 +180,40 @@ func (p *SubagentPicker) Render(width, height int) []string {
 	if missing && height >= 4 {
 		lines = append(lines, Truncate(StMuted().Render("Selection no longer available."), width))
 	}
+	if height >= 3 {
+		label := "Use subagents: ON"
+		if !p.UseSubagents {
+			label = "Use subagents: OFF"
+		}
+		toggle, attach := "[ "+label+" ]", "[ Attach ]"
+		if p.actionFocus == 1 {
+			toggle = StBold().Render(toggle)
+		}
+		if p.actionFocus == 2 {
+			attach = StBold().Render(attach)
+		}
+		lines = append(lines, Truncate(toggle+"  "+attach, width))
+	}
 	return lines
+}
+
+// HandleActionKey returns true only when the saved policy toggle is activated.
+// Attach retains the existing Enter route; tree navigation is otherwise unchanged.
+func (p *SubagentPicker) HandleActionKey(key Key) bool {
+	if key.Typ == KeyRune && string(key.Runes) == "u" {
+		return true
+	}
+	if key.Typ == KeyTab || key.Typ == KeyShiftTab {
+		delta := 1
+		if key.Typ == KeyShiftTab {
+			delta = 2
+		}
+		p.actionFocus = (p.actionFocus + delta) % 3
+		return false
+	}
+	if p.actionFocus > 0 && (key.Typ == KeyLeft || key.Typ == KeyRight) {
+		p.actionFocus = 3 - p.actionFocus
+		return false
+	}
+	return key.Typ == KeyEnter && p.actionFocus == 1
 }

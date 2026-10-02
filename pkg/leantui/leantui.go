@@ -249,44 +249,45 @@ func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 }
 
 type model struct {
-	sessionViews          supervisor.SessionViewAcquirer
-	viewAcquireCancel     context.CancelFunc
-	viewAcquireGeneration uint64
-	transcriber           Transcriber
-	speechGeneration      uint64
-	majorEvents           *messagebar.Aggregator
-	majorHighWater        [2]uint64
-	majorNoticeVisible    bool
-	priorityNoticeUntil   time.Time
-	restoredEntries       []tuistate.TabEntry
-	restoredCleanup       []func()
-	soundSequence         uint64
-	soundEnabled          bool
-	soundThreshold        time.Duration
-	streamStarted         time.Time
-	playSound             func(context.Context, sound.Event)
-	historyStore          *history.History
-	spawnSession          func(context.Context, string, *session.Session) (*app.App, func(), error)
-	runExternal           func(*exec.Cmd) error
-	plansService          plans.Service
-	themeResolve          func(string) string
-	themeList             func() ([]string, error)
-	themeLoad             func(string) (*styles.Theme, error)
-	themeApply            func(*styles.Theme)
-	settingsSave          func(func(*userconfig.Config) error) error
-	queueSendMode         bool
-	interruptMode         string
-	interruptPending      bool
-	lastInterrupt         time.Time
-	budgetUsage           *runtime.BudgetUsageEvent
-	subagentSnapshot      *subagent.Snapshot
-	elicitations          map[string]*runtime.ElicitationRequestEvent
-	maxIterations         map[string]*runtime.MaxIterationsReachedEvent
-	viewers               *viewerHost
-	draftAttachments      []messages.Attachment
-	app                   *app.App
-	term                  *ui.Terminal
-	r                     *ui.Renderer
+	subagentsCompletionText string
+	sessionViews            supervisor.SessionViewAcquirer
+	viewAcquireCancel       context.CancelFunc
+	viewAcquireGeneration   uint64
+	transcriber             Transcriber
+	speechGeneration        uint64
+	majorEvents             *messagebar.Aggregator
+	majorHighWater          [2]uint64
+	majorNoticeVisible      bool
+	priorityNoticeUntil     time.Time
+	restoredEntries         []tuistate.TabEntry
+	restoredCleanup         []func()
+	soundSequence           uint64
+	soundEnabled            bool
+	soundThreshold          time.Duration
+	streamStarted           time.Time
+	playSound               func(context.Context, sound.Event)
+	historyStore            *history.History
+	spawnSession            func(context.Context, string, *session.Session) (*app.App, func(), error)
+	runExternal             func(*exec.Cmd) error
+	plansService            plans.Service
+	themeResolve            func(string) string
+	themeList               func() ([]string, error)
+	themeLoad               func(string) (*styles.Theme, error)
+	themeApply              func(*styles.Theme)
+	settingsSave            func(func(*userconfig.Config) error) error
+	queueSendMode           bool
+	interruptMode           string
+	interruptPending        bool
+	lastInterrupt           time.Time
+	budgetUsage             *runtime.BudgetUsageEvent
+	subagentSnapshot        *subagent.Snapshot
+	elicitations            map[string]*runtime.ElicitationRequestEvent
+	maxIterations           map[string]*runtime.MaxIterationsReachedEvent
+	viewers                 *viewerHost
+	draftAttachments        []messages.Attachment
+	app                     *app.App
+	term                    *ui.Terminal
+	r                       *ui.Renderer
 
 	width  int
 	height int
@@ -351,6 +352,7 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 	branch := gitbranch.Current(cfg.WorkingDir)
 
 	settings := userconfig.Get()
+	applySavedSubagentsPreference(cfg.App)
 	interruptMode := settings.GetInterruptConfirmation()
 	return &model{
 		app:              cfg.App,

@@ -28,7 +28,7 @@ func builtinCommands() []ui.Command {
 		{Name: "snapshots", Desc: "List captured snapshots", Kind: ui.CmdBuiltin},
 		{Name: "undo", Desc: "Restore the latest snapshot: /undo confirm", Kind: ui.CmdBuiltin},
 		{Name: "shell", Desc: "Run a shell command: /shell <command>", Kind: ui.CmdBuiltin},
-		{Name: "subagents", Desc: "Browse the subagent tree and open a live viewer", Kind: ui.CmdBuiltin},
+		{Name: "subagents", Desc: "Browse the tree; /subagents on|off saves Use subagents", Kind: ui.CmdBuiltin},
 		{Name: "back", Desc: "Return to previous viewer without cancelling execution", Kind: ui.CmdBuiltin},
 		{Name: "copy-last", Desc: "Copy the last assistant response", Kind: ui.CmdBuiltin},
 		{Name: "copy-session", Desc: "Copy the conversation", Kind: ui.CmdBuiltin},

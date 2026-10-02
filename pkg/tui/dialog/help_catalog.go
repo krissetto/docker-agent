@@ -434,6 +434,8 @@ func helpDialogFamily(dialog Dialog) (string, *BaseDialog) {
 		return "model-picker", &d.BaseDialog
 	case *themePickerDialog:
 		return "theme-picker", &d.BaseDialog
+	case *subagentsDialog:
+		return "subagents", &d.BaseDialog
 	case *sessionBrowserDialog:
 		return "session-browser", &d.BaseDialog
 	case *planBrowserDialog:

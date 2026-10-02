@@ -606,6 +606,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Initialize tab bar with configurable title length from user settings
 	userSettings := userconfig.Get()
+	applySavedSubagentsPreference(initialApp)
 	panelWorkingDir := initialWorkingDir
 	if panelWorkingDir == "" {
 		panelWorkingDir, _ = os.Getwd()
@@ -853,6 +854,7 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 // Command closures retain the live root resolver, as on normal tab activation;
 // this does not create a supervisor, execution owner, or additional observer.
 func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *session.Session) {
+	applySavedSubagentsPreference(a)
 	if old := m.chatPages[tabID]; old != nil {
 		chat.Cleanup(old)
 	}
@@ -1276,6 +1278,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.CloseTabMsg:
 		return m.handleCloseTab(msg.SessionID)
+
+	case messages.SetUseSubagentsMsg:
+		return m, m.setUseSubagents(msg.Enabled)
 
 	case messages.ShowSubagentSessionsMsg:
 		cmd := m.showSubagentSessions()

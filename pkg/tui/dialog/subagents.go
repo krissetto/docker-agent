@@ -16,6 +16,9 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
+// SubagentsPolicyMsg updates only the saved policy, never the tree or selection.
+type SubagentsPolicyMsg struct{ Enabled bool }
+
 type SubagentsRefreshMsg struct {
 	Dialog Dialog
 	Nodes  []subagent.NodeSnapshot
@@ -25,6 +28,7 @@ type SubagentsRefreshMsg struct {
 // subagentsDialog keeps presentation state locally; node IDs alone are routing keys.
 type subagentsDialog struct {
 	pickerCore
+	useSubagents       bool
 	nodes              []subagent.NodeSnapshot
 	titles             map[string]string
 	cancel             func()
@@ -44,7 +48,7 @@ type subagentsDialog struct {
 }
 
 func NewSubagentsDialog(nodes []subagent.NodeSnapshot, titles map[string]string, selected ...subagent.NodeID) Dialog {
-	d := &subagentsDialog{pickerCore: newPickerCore(pickerLayout{WidthPercent: 85, MinWidth: 36, MaxWidth: 120, HeightPercent: 85, MaxHeight: 40, ListOverhead: 6}, ""), nodes: subagentview.Sorted(nodes), titles: maps.Clone(titles), collapsed: map[subagent.NodeID]bool{}}
+	d := &subagentsDialog{useSubagents: true, pickerCore: newPickerCore(pickerLayout{WidthPercent: 85, MinWidth: 36, MaxWidth: 120, HeightPercent: 85, MaxHeight: 40, ListOverhead: 6}, ""), nodes: subagentview.Sorted(nodes), titles: maps.Clone(titles), collapsed: map[subagent.NodeID]bool{}}
 	d.textInput.Blur()
 	id := subagent.NodeID("")
 	if len(selected) > 0 {
@@ -134,7 +138,18 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			d.syncSpinner()
 		}
 	}()
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if action, handled := d.HandleActionKey(k); handled {
+			if action.Code == 0 {
+				return d, nil
+			}
+			msg = action
+		}
+	}
 	switch msg := msg.(type) {
+	case SubagentsPolicyMsg:
+		d.useSubagents = msg.Enabled
+		d.renderBody(true)
 	case animation.TickMsg:
 		d.tickHover(msg)
 		d.tickSpinner(msg)
@@ -192,6 +207,8 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 			if len(d.rows) > 0 && d.rows[d.selected].Branch {
 				d.branch(d.collapsed[d.selectedID()])
 			}
+		case "u":
+			return d, core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: !d.useSubagents})
 		case "enter":
 			return d, d.attach()
 		}
@@ -245,10 +262,17 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No subagents in this session.")}
 	}
-	actions := actionsForKeys("enter", "Attach")
-	actions[0].Disabled = d.selectedID() == ""
-	actions[0].HideFocusHint = true
-	footer := d.RenderPickerFooter(inner, actions...)
+	label := "Use subagents: ON"
+	if !d.useSubagents {
+		label = "Use subagents: OFF"
+	}
+	actions := actionsForKeys("u", label, "enter", "Attach")
+	actions[1].Disabled = d.selectedID() == ""
+	for i := range actions {
+		actions[i].HideFocusHint = true
+		actions[i].HideShortcut = true
+	}
+	footer := d.RenderActions(inner, actions...)
 	if prepare {
 		d.PrepareScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 		return ""

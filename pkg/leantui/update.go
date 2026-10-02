@@ -124,6 +124,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 		m.screen.Editor.Insert(k.Runes)
 	}
 
+	m.syncSubagentsCompletion()
 	m.screen.Autocomplete.Sync(m.screen.Editor.Text())
 }
 
@@ -1151,7 +1152,8 @@ func (m *model) commitHelp() {
 			}
 		}
 		entry("Disabled commands are rejected, including direct slash input.")
-		entry("/subagents opens the tree: Up/Down select, Left/Right collapse/expand, Home/End first/last.")
+		entry("/subagents opens the tree; /subagents on|off saves Use subagents (default ON).")
+		entry("Tree: Up/Down select, Left/Right collapse/expand; Tab selects actions; u toggles Use subagents.")
 		entry("Enter opens the selected live viewer without sending; Esc closes the tree without cancelling work.")
 		entry("Sending targets the visible viewer. /back restores its predecessor without cancelling execution.")
 		entry("Restored · paused sessions wait for /resume; related sessions require their own explicit Resume.")

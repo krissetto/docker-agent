@@ -70,6 +70,7 @@ type SessionSpawner func(ctx context.Context, workingDir string) (SpawnedSession
 
 // Supervisor manages agent sessions.
 type Supervisor struct {
+	useSubagents         *bool
 	mu                   sync.RWMutex
 	runners              map[string]*SessionTab
 	order                []string // Maintains tab order
@@ -146,6 +147,9 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		return "", fmt.Errorf("session %q is already supervised", sess.ID)
 	}
 
+	if a != nil {
+		s.applySubagentsPolicyLocked(a.Runtime())
+	}
 	runner := &SessionTab{
 		ID:           sess.ID,
 		App:          a,
@@ -706,6 +710,9 @@ func (s *Supervisor) ReplaceRunnerApp(ctx context.Context, sessionID string, spa
 	// transfers the existing runner ownership; an owned replacement installs
 	// its cleanup and retires the prior owner.
 	runner.App = spawned.App
+	if spawned.App != nil {
+		s.applySubagentsPolicyLocked(spawned.App.Runtime())
+	}
 	runner.WorkingDir = workingDir
 	if spawned.Ownership == RuntimeOwned {
 		runner.cleanup = spawned.Cleanup

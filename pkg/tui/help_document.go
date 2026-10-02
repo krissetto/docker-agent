@@ -371,7 +371,7 @@ func paneHelp() help.Section {
 
 func leanSessionHelp() help.Section {
 	return helpSection("lean.sessions", "Lean session navigation", "Normal-screen layout; dialogs remain keyboard-operable; panes and tour require the full TUI",
-		helpEntry("lean.subagents", []string{"/subagents"}, "Browse the subagent tree; arrows navigate, Enter opens, Esc closes without cancelling"),
+		helpEntry("lean.subagents", []string{"/subagents"}, "Browse the tree; /subagents on|off saves Use subagents (default ON); Tab selects actions, u toggles"),
 		helpEntry("lean.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
 		helpEntry("lean.back", []string{"/back"}, "Return to the previous still-open session; preserve drafts and ongoing work"),
 		helpEntry("lean.operations", []string{"/settings", "/plans", "/permissions", "/pause"}, "Use the ordinary nonvisual command handlers and keyboard dialogs"))

@@ -146,7 +146,7 @@ type subagentViewerLookup interface {
 	SubagentNodeForSession(sessionID string) (subagent.NodeID, bool)
 }
 
-func (m *model) handleViewerCommand(ctx context.Context, command, _ string) {
+func (m *model) handleViewerCommand(ctx context.Context, command, arg string) {
 	if command == "back" {
 		if m.viewers == nil || len(m.viewers.back) == 0 {
 			m.reportCapability("No previous viewer.", nil)
@@ -161,7 +161,7 @@ func (m *model) handleViewerCommand(ctx context.Context, command, _ string) {
 		return
 	}
 	if command == "subagents" {
-		m.openSubagentPicker()
+		m.handleSubagentsCommand(arg)
 	}
 }
 
@@ -281,6 +281,7 @@ func (m *model) spawnViewer(ctx context.Context, directory string, fork bool) {
 // fresh; no lifecycle state is inherited from the currently focused session.
 // The host owns service teardown; the view owns its screen and projection.
 func (m *model) newViewer(application *app.App, placeholder string) *model {
+	applySavedSubagentsPreference(application)
 	return &model{
 		app:              application,
 		viewers:          m.viewers,

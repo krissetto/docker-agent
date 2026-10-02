@@ -38,7 +38,7 @@ func helpEntry(t *testing.T, sections []help.Section, id string) help.Entry {
 
 func TestDialogReferenceCatalogIdentitiesAliasesAndIsolation(t *testing.T) {
 	sections := ReferenceHelp()
-	require.Len(t, sections, 36)
+	require.Len(t, sections, 37)
 	seen := map[string]bool{}
 	for _, section := range sections {
 		require.NotEmpty(t, section.ID)
@@ -73,7 +73,7 @@ func TestDialogContextHelpEveryConcreteFamily(t *testing.T) {
 		&toolConfirmationDialog{}, &commandPaletteDialog{}, &filePickerDialog{}, &modelPickerDialog{}, &themePickerDialog{}, &sessionBrowserDialog{},
 		&planBrowserDialog{}, &planStatusDialog{}, &planNameDialog{}, &planDetailDialog{}, &contextDialog{}, &costDialog{}, &effortPickerDialog{},
 		&snapshotsDialog{}, &settingsDialog{}, &workingDirPickerDialog{}, &ElicitationDialog{}, &MCPPromptInputDialog{}, &multiChoiceDialog{},
-		&pendingMessageEditDialog{}, &URLElicitationDialog{}, &tourOfferDialog{},
+		&pendingMessageEditDialog{}, &URLElicitationDialog{}, &tourOfferDialog{}, &subagentsDialog{},
 	}
 	seen := map[string]bool{}
 	for _, d := range families {

@@ -102,3 +102,6 @@ type WorkingStateChangedMsg struct {
 // BellMsg is sent when the terminal bell should be rung to notify the user.
 // This is used when an inactive tab needs attention (e.g., tool confirmation).
 type BellMsg struct{}
+
+// SetUseSubagentsMsg saves and applies the delegation preference without changing existing work.
+type SetUseSubagentsMsg struct{ Enabled bool }

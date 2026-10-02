@@ -1,6 +1,13 @@
 package leantui
 
 import (
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/userconfig"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,4 +106,54 @@ func TestSubagentsPickerComposerCommandAndAliasRemoval(t *testing.T) {
 	assert.Empty(t, handle.sent)
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Nil(t, m.screen.Subagents)
+}
+
+func TestSubagentsPolicyCommandsAndPickerSaveTruthfully(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+	m, _ := sessionModel(t)
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "fixture", agent.WithModel(&viewerLifecycleProvider{})))))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	m.app = app.New(t.Context(), nil, session.New(), runtime.SessionBinding{}, app.WithRuntimeServices(rt))
+	for _, arg := range []string{"ON", "false", "off on"} {
+		require.True(t, m.handleSlash(t.Context(), "/subagents "+arg, busySubmitSteer))
+		require.True(t, rt.UseSubagents())
+		require.Nil(t, m.screen.Subagents)
+	}
+	require.True(t, m.handleSlash(t.Context(), "/subagents", busySubmitSteer))
+	require.True(t, m.screen.Subagents.UseSubagents)
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyTab})
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEnter})
+	require.False(t, rt.UseSubagents())
+	require.False(t, m.screen.Subagents.UseSubagents)
+	require.False(t, userconfig.Get().GetUseSubagents())
+	newRT, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "fixture", agent.WithModel(&viewerLifecycleProvider{})))))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = newRT.Close() })
+	next := m.newViewer(app.New(t.Context(), nil, session.New(), runtime.SessionBinding{}, app.WithRuntimeServices(newRT)), "fixture")
+	require.False(t, subagentsPreference(next.app))
+	blocked := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blocked, []byte("blocked"), 0o600))
+	paths.SetConfigDir(filepath.Join(blocked, "config"))
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune{'u'}})
+	require.False(t, rt.UseSubagents())
+	require.False(t, m.screen.Subagents.UseSubagents)
+}
+
+func TestSubagentsUnsupportedAndCompletion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+	m, _ := sessionModel(t)
+	require.True(t, m.handleSlash(t.Context(), "/subagents off", busySubmitSteer))
+	require.True(t, userconfig.Get().GetUseSubagents())
+	require.Nil(t, m.screen.Subagents)
+	m.screen.Editor.SetText("/subagents o")
+	m.syncSubagentsCompletion()
+	require.True(t, m.screen.Autocomplete.Sync(m.screen.Editor.Text()))
+	choice, ok := m.screen.Autocomplete.Current()
+	require.True(t, ok)
+	require.Contains(t, []string{"on", "off"}, choice.Name)
 }

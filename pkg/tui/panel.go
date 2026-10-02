@@ -164,6 +164,7 @@ func (m *appModel) openSubagentsTree() tea.Cmd {
 		selected = root.Node.ID
 	}
 	d := dialog.NewSubagentsDialog(data.treeNodes, m.panelTitles(data.treeNodes), selected)
+	d.Update(dialog.SubagentsPolicyMsg{Enabled: subagentsPreference(data.application)})
 	data.treeDialog = d
 	return tea.Sequence(core.CmdHandler(dialog.OpenDialogMsg{Model: d}), m.loadPanelTitles(d, data))
 }

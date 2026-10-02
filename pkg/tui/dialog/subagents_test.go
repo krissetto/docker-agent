@@ -105,3 +105,62 @@ func TestSubagentsWrapAndDisclosureNeverAttach(t *testing.T) {
 	}
 	require.False(t, d.collapsed["parent-full"])
 }
+
+func TestSubagentsPolicyActionDoesNotMutateUntilSaved(t *testing.T) {
+	d := NewSubagentsDialog([]subagent.NodeSnapshot{{Node: subagent.Node{ID: "root", Agent: "worker"}}}, nil).(*subagentsDialog)
+	d.SetSize(100, 25)
+	require.Contains(t, ansi.Strip(d.View()), "Use subagents: ON")
+	require.Contains(t, ansi.Strip(d.View()), "Attach")
+	for _, hint := range []string{"esc", "↵", "u Use"} {
+		require.NotContains(t, ansi.Strip(d.View()), hint)
+	}
+	d.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	// Tab starts at the default action (Attach); move to the policy action.
+	if k, _ := d.SelectedActionKey(); k.Code != 'u' {
+		d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	}
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	require.Contains(t, msgs, messages.SetUseSubagentsMsg{Enabled: false})
+	require.Contains(t, ansi.Strip(d.View()), "Use subagents: ON", "save is not optimistic")
+	id := d.selectedID()
+	d.Update(SubagentsPolicyMsg{Enabled: false})
+	require.Equal(t, id, d.selectedID())
+	require.Len(t, d.rows, 1)
+	require.Contains(t, ansi.Strip(d.View()), "Use subagents: OFF")
+	require.Contains(t, ansi.Strip(d.View()), "worker")
+
+	view := d.View()
+	row, col := d.Position()
+	dl := NewDialogLayout(view, row, col)
+	found := false
+	for y := row; y < row+lipgloss.Height(view); y++ {
+		for x := col; x < col+lipgloss.Width(view); x++ {
+			if key, hit := d.ActionKeyAt(x, y, dl); hit && key.Code == 'u' {
+				// The shared dialog manager routes this measured mouse target as a key.
+				_, cmd = d.Update(key)
+				require.Contains(t, collectMsgs(cmd), messages.SetUseSubagentsMsg{Enabled: true})
+				found = true
+			}
+		}
+	}
+	require.True(t, found)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.Contains(t, collectMsgs(cmd), messages.OpenSubagentMsg{NodeID: "root"}, "Attach survives policy changes")
+}
+
+func TestSubagentsPolicyMouseUsesSharedManagerAndRefreshesCache(t *testing.T) {
+	mgr := New(newDialogRuntime()).(*manager)
+	mgr.SetSize(100, 25)
+	d := NewSubagentsDialog(nil, nil)
+	mgr.Update(OpenDialogMsg{Model: d})
+	settleTestDialog(mgr)
+	require.Contains(t, ansi.Strip(mgr.View()), "Use subagents: ON")
+	x, y := familyActionCell(t, d, "Use subagents: ON")
+	_, cmd := mgr.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.Contains(t, collectMsgs(cmd), messages.SetUseSubagentsMsg{Enabled: false})
+	require.Contains(t, ansi.Strip(mgr.View()), "Use subagents: ON")
+	mgr.Update(SubagentsPolicyMsg{Enabled: false})
+	require.Contains(t, ansi.Strip(mgr.View()), "Use subagents: OFF")
+	require.Contains(t, ansi.Strip(mgr.View()), "No subagents")
+}

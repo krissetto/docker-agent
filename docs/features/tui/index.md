@@ -701,3 +701,21 @@ The TUI displays transient notification banners for agent warnings, errors, and 
 | × (close)   | Dismisses immediately; the glyph turns red when hovered |
 
 Hint text in the top-left corner of the notification border shows the available actions at a glance.
+
+## Subagents
+
+`/subagents` opens the existing subagent tree in both full and lean interfaces.
+Use the arrow keys to navigate or fold branches and **Attach** (or Enter) to
+open the selected session. The bottom **Use subagents: ON/OFF** control saves
+the delegation preference, which defaults to **ON**. Use Tab to focus actions
+and Enter to activate them, press `u` to toggle, or click the control in the
+full TUI.
+
+- `/subagents on` enables new subagent delegation.
+- `/subagents off` disables new subagent delegation.
+
+The preference is saved in your user configuration and applies to existing
+local runtimes and new or restored sessions. Disabling it does not cancel
+already accepted work, delete the tree, or prevent attaching to existing
+sessions. Changes are applied only after a successful save. Remote runtimes
+that cannot enforce this preference reject the change without saving it.

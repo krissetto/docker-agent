@@ -48,6 +48,13 @@ func dialogReferenceSections() []help.Section {
 			{ID: "dialog.exit-confirmation.enter-default-action-focus-then-move", Keys: []string{"left", "up", "right", "down"}, Description: "Enter default action focus then move", Condition: "content"},
 			{ID: "dialog.exit-confirmation.confirm-exit", Keys: []string{"ctrl+c"}, Description: "Confirm exit", Condition: "Configured Quit in exit confirmation, including while opening."},
 		}},
+		{ID: "dialog.subagents", Title: "Subagents", Entries: []help.Entry{
+			{ID: "dialog.subagents.navigate", Keys: []string{"up", "k", "down", "j", "home", "end", "pgup", "pgdown"}, Description: "Select a session", Condition: "content"},
+			{ID: "dialog.subagents.fold", Keys: []string{"left", "h", "right", "l", "space"}, Description: "Collapse or expand a branch", Condition: "content"},
+			{ID: "dialog.subagents.attach", Keys: []string{"enter"}, Description: "Attach to the selected session", Condition: "content"},
+			{ID: "dialog.subagents.toggle", Keys: []string{"u"}, Description: "Save and toggle Use subagents (default ON)", Condition: "Existing work and manual attachment remain available."},
+			{ID: "dialog.subagents.close", Keys: []string{"esc", "q", "ctrl+c"}, Description: "Close without cancelling work", Condition: "content"},
+		}},
 		{ID: "dialog.close-root-with-subagents", Title: "Close root with attached sessions", Entries: []help.Entry{
 			{ID: "dialog.close-root-with-subagents.affirmative-decision", Keys: []string{"y", "Y"}, Description: "Close root; retain attached views", Condition: "content"},
 			{ID: "dialog.close-root-with-subagents.negative-cancel-decision", Keys: []string{"n", "N", "esc"}, Description: "Negative/cancel decision", Condition: "Default No; Yes closes only this root, without cascading attached views."},

@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/feedback"
 	"github.com/docker/docker-agent/pkg/tools"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -86,11 +87,23 @@ func builtInSessionCommands() []Item {
 			ID:           "session.subagents",
 			Label:        "Subagents",
 			SlashCommand: "/subagents",
-			Description:  "Browse the subagent tree and open a live session",
+			Description:  "Browse the subagent tree; /subagents on|off saves Use subagents",
 			Category:     "Session",
 			Immediate:    true,
+			CompleteArgument: func() []ArgumentCandidate {
+				return []ArgumentCandidate{{Label: "on", Description: "Enable new subagent delegation"}, {Label: "off", Description: "Disable new subagent delegation"}}
+			},
 			Execute: func(arg string) tea.Cmd {
-				return core.CmdHandler(messages.ShowSubagentSessionsMsg{})
+				switch strings.TrimSpace(arg) {
+				case "":
+					return core.CmdHandler(messages.ShowSubagentSessionsMsg{})
+				case "on":
+					return core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: true})
+				case "off":
+					return core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: false})
+				default:
+					return notification.ErrorCmd("Usage: /subagents [on|off]")
+				}
 			},
 		},
 		{

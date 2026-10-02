@@ -2,9 +2,13 @@ package leantui
 
 import (
 	"context"
+	"strings"
 
+	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func (m *model) openSubagentPicker() {
@@ -21,9 +25,15 @@ func (m *model) openSubagentPicker() {
 	}
 	m.screen.Autocomplete.Dismiss()
 	m.screen.Subagents = ui.NewSubagentPicker(*snapshot, m.app.Session().ID, attached)
+	m.screen.Subagents.UseSubagents = subagentsPreference(m.app)
 }
 
 func (m *model) handleSubagentPickerKey(ctx context.Context, key ui.Key) {
+	picker := m.screen.Subagents
+	if picker.HandleActionKey(key) {
+		m.setUseSubagents(!picker.UseSubagents)
+		return
+	}
 	switch key.Typ {
 	case ui.KeyEsc:
 		m.screen.Subagents = nil
@@ -49,5 +59,105 @@ func (m *model) handleSubagentPickerKey(ctx context.Context, key ui.Key) {
 			}
 		}
 		m.attachSubagentViewer(ctx, string(node.ID))
+	}
+}
+
+func applySavedSubagentsPreference(a *app.App) {
+	if a != nil {
+		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+			rt.SetUseSubagents(userconfig.Get().GetUseSubagents())
+		}
+	}
+}
+func subagentsPreference(a *app.App) bool {
+	if a != nil {
+		if rt, ok := a.Runtime().(*runtime.LocalRuntime); ok {
+			return rt.UseSubagents()
+		}
+	}
+	return userconfig.Get().GetUseSubagents()
+}
+func (m *model) handleSubagentsCommand(arg string) {
+	switch strings.TrimSpace(arg) {
+	case "":
+		m.openSubagentPicker()
+	case "on":
+		m.setUseSubagents(true)
+	case "off":
+		m.setUseSubagents(false)
+	default:
+		m.reportCapability("Usage: /subagents [on|off]", nil)
+	}
+}
+func (m *model) setUseSubagents(enabled bool) {
+	runtimes := make(map[*runtime.LocalRuntime]struct{})
+	add := func(a *app.App) bool {
+		if a == nil {
+			return false
+		}
+		rt, ok := a.Runtime().(*runtime.LocalRuntime)
+		if ok {
+			runtimes[rt] = struct{}{}
+		}
+		return ok
+	}
+	if !add(m.app) {
+		m.reportCapability("Use subagents is unavailable on this runtime; preference not saved", nil)
+		return
+	}
+	if m.viewers != nil {
+		for a := range m.viewers.views {
+			if !add(a) {
+				m.reportCapability("Use subagents cannot be applied to a non-local viewer; preference not saved", nil)
+				return
+			}
+		}
+	}
+	save := userconfig.SetUseSubagents
+	if owner, ok := m.sessionViews.(interface {
+		SaveUseSubagents(bool, app.Services, func(bool) error) error
+	}); ok {
+		save = func(value bool) error {
+			return owner.SaveUseSubagents(value, m.app.Runtime(), userconfig.SetUseSubagents)
+		}
+	}
+	if err := save(enabled); err != nil {
+		m.reportCapability("Failed to save Use subagents: "+err.Error(), nil)
+		return
+	}
+	for rt := range runtimes {
+		rt.SetUseSubagents(enabled)
+	}
+	if m.screen.Subagents != nil {
+		m.screen.Subagents.UseSubagents = enabled
+	}
+	if m.viewers != nil {
+		for _, view := range m.viewers.views {
+			if view.screen.Subagents != nil {
+				view.screen.Subagents.UseSubagents = enabled
+			}
+		}
+	}
+	label := "OFF"
+	if enabled {
+		label = "ON"
+	}
+	m.reportCapability("Use subagents: "+label, nil)
+}
+
+func (m *model) syncSubagentsCompletion() {
+	text := m.screen.Editor.Text()
+	if text == m.subagentsCompletionText {
+		return
+	}
+	m.subagentsCompletionText = text
+	if strings.HasPrefix(text, "/subagents ") {
+		var choices []ui.Command
+		for _, name := range []string{"on", "off"} {
+			choices = append(choices, ui.Command{Name: name, Desc: "Use subagents: " + name, Kind: ui.CmdBuiltin,
+				MatchScore: func(query string) (int, bool) { return 0, strings.HasPrefix(name, query) },
+			})
+		}
+		m.screen.Autocomplete.SetScopedCommands("subagents ", choices)
 	}
 }
