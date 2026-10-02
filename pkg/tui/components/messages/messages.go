@@ -2078,12 +2078,12 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 		return block
 	}
 
+	// Historical calls stay inert; authoritative live seeds restore active status.
 	// addStandaloneToolCall adds a tool call as a standalone message (not in a reasoning block)
 	addStandaloneToolCall := func(agentName string, tc tools.ToolCall, toolDef tools.Tool, toolResults map[string]string) {
-		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusPending)
+		toolMsg := types.ToolCallMessage(agentName, tc, toolDef, types.ToolStatusCompleted)
 		// Apply tool result if available
 		if result, ok := toolResults[tc.ID]; ok {
-			toolMsg.ToolStatus = types.ToolStatusCompleted
 			toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
 		}
 		view := m.createToolCallView(toolMsg)
@@ -2170,7 +2170,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 					}
 
 					if attachToReasoning {
-						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusPending)
+						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, types.ToolStatusCompleted)
 						reasoningBlock.AddToolCall(toolMsg)
 						if result, ok := toolResults[tc.ID]; ok {
 							reasoningBlock.UpdateToolResult(tc.ID, result, types.ToolStatusCompleted, nil)

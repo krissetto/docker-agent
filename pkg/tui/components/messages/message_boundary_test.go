@@ -10,7 +10,9 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -93,15 +95,41 @@ func TestAssistantBoundaryRestoredReasoningAndDeferredBytes(t *testing.T) {
 	assert.Equal(t, []string{"first.", "second.", "wordpart", "next"}, contents(m))
 }
 
-func TestRestoreUnfinishedToolWaitsForAuthoritativeState(t *testing.T) {
+func TestRestoreHistoricalToolNeedsLiveSeedForRunningState(t *testing.T) {
 	call := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "check", Arguments: "canonical"}}
 	item := session.NewMessageItem(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{call}}})
 	m := newAttachTestModel(t, item)
 	require.Len(t, m.messages, 1)
-	assert.Equal(t, types.ToolStatusPending, m.messages[0].ToolStatus)
+	assert.Equal(t, types.ToolStatusCompleted, m.messages[0].ToolStatus)
 	m.AddOrUpdateToolCall("worker", call, tools.Tool{}, types.ToolStatusRunning)
 	assert.Equal(t, types.ToolStatusRunning, m.messages[0].ToolStatus)
 	assert.Equal(t, "canonical", m.messages[0].ToolCall.Function.Arguments)
 	m.AddToolResult(&runtime.ToolCallResponseEvent{ToolCallID: "call", Response: "done", Result: &tools.ToolCallResult{Output: "done"}}, types.ToolStatusCompleted)
 	assert.Equal(t, types.ToolStatusCompleted, m.messages[0].ToolStatus)
+}
+
+func TestRestoreHistoricalToolsDoesNotAnimate(t *testing.T) {
+	for _, reasoning := range []bool{false, true} {
+		for _, hasResult := range []bool{false, true} {
+			ar := animation.NewRuntime()
+			m := NewScrollableView(ar, 80, 24, &service.SessionState{}).(*model)
+			assistant := &session.Message{AgentName: "worker", Message: chat.Message{
+				Role:      chat.MessageRoleAssistant,
+				ToolCalls: []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "check", Arguments: "{}"}}},
+			}}
+			if reasoning {
+				assistant.Message.ReasoningContent = "historical reasoning"
+			}
+			sess := session.New(session.WithID("history"))
+			sess.AddMessage(assistant)
+			if hasResult {
+				sess.AddMessage(&session.Message{AgentName: "worker", Message: chat.Message{Role: chat.MessageRoleTool, ToolCallID: "call", Content: "done"}})
+			}
+			m.LoadFromSession(sess, nil)
+			m.View()
+			assert.Zero(t, ar.ActiveCount(), "reasoning=%v result=%v: snapshot history must not start pending or completion animations", reasoning, hasResult)
+			m.StopAnimations()
+			ar.Stop()
+		}
+	}
 }
