@@ -9,7 +9,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +32,7 @@ type lifecycleHandle struct {
 	runtime.UnsupportedSessionHandle
 
 	id       string
+	live     chan runtime.SessionEvent // optional canonical tail for observer-lifetime tests
 	submits  atomic.Int32
 	releases atomic.Int32
 	cancels  atomic.Int32
@@ -84,7 +84,13 @@ func (h *lifecycleHandle) Steer(ctx context.Context, in runtime.TurnInput) (runt
 	return h.Submit(ctx, in)
 }
 
-func (h *lifecycleHandle) Observe(ctx context.Context, _ runtime.ObserveOptions) (runtime.Observation, error) {
+func (h *lifecycleHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
+	if h.live != nil {
+		return runtime.Observation{Initial: []runtime.SessionSnapshot{{Status: runtime.SessionStatus{SessionID: h.id}}}, Events: h.live, Cancel: func() { h.cancels.Add(1) }}, nil
+	}
 	out := make(chan runtime.SessionEvent)
 	obsCtx, cancel := context.WithCancel(ctx)
 	go func() { <-obsCtx.Done(); close(out) }()
@@ -103,8 +109,10 @@ func (h *lifecycleHandle) Release(context.Context) error { h.releases.Add(1); re
 
 // lifecycleProgramProbe executes observations and cleanup on the model owner,
 // rather than racing asynchronous restore from the test goroutine.
-type lifecycleProgramProbe struct{ inspect func(*appModel) }
-type lifecycleProgramModel struct{ *appModel }
+type (
+	lifecycleProgramProbe struct{ inspect func(*appModel) }
+	lifecycleProgramModel struct{ *appModel }
+)
 
 func (m *lifecycleProgramModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if probe, ok := msg.(lifecycleProgramProbe); ok {

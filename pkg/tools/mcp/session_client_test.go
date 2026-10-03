@@ -3,10 +3,13 @@ package mcp
 import (
 	"context"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // TestApplySamplingHandlerOpts_RegistrationMatrix pins the registration choice
@@ -121,4 +124,52 @@ func TestHandleSamplingWithToolsRequest_LateSetterTakesEffect(t *testing.T) {
 	require.NotNil(t, result)
 	assert.True(t, called, "late SetSamplingWithToolsHandler must take effect without re-init")
 	assert.Equal(t, "late-bound", result.Model)
+}
+
+func TestScopedCallbacksRejectAmbiguousAndUnsolicitedRequests(t *testing.T) {
+	var c sessionClient
+	c.SetElicitationHandler(tools.ScopedElicitationHandler)
+	c.SetSamplingHandler(tools.SamplingScopeHandler)
+	c.SetSamplingWithToolsHandler(tools.SamplingWithToolsScopeHandler)
+	owner := func(name string) context.Context {
+		return tools.WithHandlerScope(t.Context(), tools.HandlerScope{
+			Elicitation: func(context.Context, *gomcp.ElicitParams) (tools.ElicitationResult, error) {
+				return tools.ElicitationResult{Content: map[string]any{"owner": name}}, nil
+			},
+		})
+	}
+	req := &gomcp.ElicitRequest{Params: &gomcp.ElicitParams{}}
+	_, err := c.handleElicitationRequest(owner("stale connection"), req)
+	require.Error(t, err)
+	idA := c.registerCallContext(owner("a"))
+	result, err := c.handleElicitationRequest(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, "a", result.Content["owner"])
+	idB := c.registerCallContext(owner("b"))
+	_, err = c.handleElicitationRequest(t.Context(), req)
+	require.Error(t, err)
+	_, err = c.handleSamplingRequest(t.Context(), &gomcp.CreateMessageRequest{Params: &gomcp.CreateMessageParams{}})
+	require.Error(t, err)
+	_, err = c.handleSamplingWithToolsRequest(t.Context(), &gomcp.CreateMessageWithToolsRequest{Params: &gomcp.CreateMessageWithToolsParams{}})
+	require.Error(t, err)
+	c.unregisterCallContext(idA)
+	result, err = c.handleElicitationRequest(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, "b", result.Content["owner"])
+	c.unregisterCallContext(idB)
+	_, err = c.handleElicitationRequest(t.Context(), req)
+	require.Error(t, err)
+}
+
+func TestScopedCallbackPreservesOwnerAndCancellation(t *testing.T) {
+	var c sessionClient
+	type key struct{}
+	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), key{}, "owner"))
+	defer cancel()
+	id := c.registerCallContext(tools.WithHandlerScope(ctx, tools.HandlerScope{}))
+	callbackCtx, release := c.elicitationContext(t.Context())
+	defer release()
+	require.Equal(t, "owner", callbackCtx.Value(key{}))
+	c.unregisterCallContext(id)
+	require.Eventually(t, func() bool { return callbackCtx.Err() == context.Canceled }, time.Second, time.Millisecond)
 }

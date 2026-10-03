@@ -234,7 +234,7 @@ func TestCanonicalCreationCommittedIdentityReplayAndRestoreBaseline(t *testing.T
 	close(release)
 	coordinationAwait(t, parent, accepted.TurnID)
 	cursor := obs.Primary().Cursor
-	replay, err := parent.Observe(t.Context(), ObserveOptions{Since: &cursor})
+	replay, err := parent.Observe(t.Context(), ObserveOptions{Since: &cursor, SinceEpoch: obs.Primary().Epoch})
 	require.NoError(t, err)
 	defer replay.Cancel()
 	var creations []SessionEvent

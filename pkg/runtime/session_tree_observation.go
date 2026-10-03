@@ -19,7 +19,7 @@ func (h *sessionHandle) observeTree(ctx context.Context, options ObserveOptions)
 }
 
 func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOptions, observe func(context.Context, string, ObserveOptions) (Observation, error)) (Observation, error) {
-	if options.Since != nil {
+	if options.Since != nil || options.SinceEpoch != "" {
 		return Observation{}, &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: "observe_tree_cursor"}
 	}
 	if err := ctx.Err(); err != nil {

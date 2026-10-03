@@ -313,7 +313,7 @@ func (m *subagentManager) registerIdleChild(parent *session.Session, parentAgent
 }
 
 func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
-	if !m.r.UseSubagents() {
+	if !m.r.sessionDelegationEnabled(parent) {
 		return "", errSubagentsDisabled
 	}
 	m.mu.Lock()
@@ -352,7 +352,7 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 	// or already accepted input must retain their normal lifecycle.
 	if autonomous {
 		m.r.subagentAdmissionMu.RLock()
-		if !m.r.UseSubagents() {
+		if !m.r.sessionDelegationEnabled(parent) {
 			m.r.subagentAdmissionMu.RUnlock()
 			return "", errSubagentsDisabled
 		}
@@ -589,8 +589,9 @@ func (m *subagentManager) parentAcceptsSpawnLocked(sessionID string) bool {
 	if m.r.sessionDrivers != nil {
 		m.r.sessionDrivers.mu.Lock()
 		_, deleted := m.r.sessionDrivers.deleted[sessionID]
+		_, stopped := m.r.sessionDrivers.stoppedTrees[sessionID]
 		m.r.sessionDrivers.mu.Unlock()
-		if deleted {
+		if deleted || stopped {
 			return false
 		}
 	}
@@ -643,6 +644,10 @@ func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 // Stopped subagents keep their record so read_subagent still works, but accept
 // no future input.
 func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string, error) {
+	return m.stopChildContext(m.ctx, parentID, id)
+}
+
+func (m *subagentManager) stopChildContext(ctx context.Context, parentID string, id subagent.NodeID) (string, error) {
 	// The manager gate serializes child admission with the canonical stop.
 	// Starting drivers recheck that gate after reserving capacity, so durable
 	// I/O must not hold the registry-wide run admission mutex.
@@ -688,7 +693,7 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 		record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
 		commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
 	}
-	err := m.commitChildren(m.ctx, commits)
+	err := m.commitChildren(ctx, commits)
 	if err != nil {
 		m.mu.Unlock()
 		m.transitionMu.Unlock()
@@ -720,8 +725,26 @@ func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string
 		m.r.sessionDrivers.StopAll(child.sessionID)
 	}
 	for _, child := range stopped {
-		if d, ok := m.r.sessionDrivers.Lookup(child.sessionID); ok {
-			d.Wait()
+		d, ok := m.r.sessionDrivers.Lookup(child.sessionID)
+		if !ok {
+			continue
+		}
+		select {
+		case <-d.Done():
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		d.mu.Lock()
+		settling, generation, runErr := d.settling(), d.generation, d.completionRunErr
+		d.mu.Unlock()
+		if settling {
+			d.finishRunContext(ctx, generation, runErr)
+		}
+		d.mu.Lock()
+		err := d.completionErr
+		d.mu.Unlock()
+		if err != nil {
+			return "", err
 		}
 	}
 	m.signalCapacityRelease()
@@ -780,9 +803,8 @@ func (m *subagentManager) deliverAgent(sessionID, content, senderID, senderName 
 	return m.r.sessionDrivers.PostKnown(m.ctx, sessionID, QueuedMessage{Content: content, RequestID: id, InputOrigin: session.InputOriginAgent, SenderID: senderID, SenderName: senderName, InputMode: "steer"}, true)
 }
 
-// deliverExplicitToParent preserves child-to-top-level delivery when the
-// parent's driver has not been observed yet, but otherwise uses direct
-// admission semantics so capacity denial is surfaced to the tool caller.
+// deliverExplicitToParent rejects absent inboxes rather than acknowledging a
+// process-local orphan buffer as delivery.
 func (m *subagentManager) deliverExplicitToParent(sessionID, content string, sender ...string) bool {
 	var senderID, senderName string
 	if len(sender) == 2 {
@@ -792,7 +814,8 @@ func (m *subagentManager) deliverExplicitToParent(sessionID, content string, sen
 	if err != nil {
 		return false
 	}
-	return m.r.sessionDrivers.PostOrBuffer(m.ctx, sessionID, QueuedMessage{Content: content, RequestID: id, InputOrigin: session.InputOriginAgent, SenderID: senderID, SenderName: senderName, InputMode: "steer"}, true)
+	_, err = m.postAgentCommunication(m.ctx, sessionID, agentCommunication(content, id, senderID, senderName, subagent.DeliveryGuidance))
+	return err == nil
 }
 
 // systemInfo wraps a runtime-authored note so the model can distinguish
@@ -906,46 +929,56 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 // respond: any non-stopped child accepts input (an idle one is re-run). It
 // errors when the id is unknown, not a child of the caller, or stopped.
 func (m *subagentManager) sendToChild(parentID string, id subagent.NodeID, body string) (string, error) {
+	requestID, err := newSessionRequestID()
+	if err != nil {
+		return "", err
+	}
+	_, err = m.sendCommunicationToChild(m.ctx, parentID, id, body, requestID, subagent.DeliveryGuidance)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec := m.children[id]; rec != nil {
+		return rec.name, nil
+	}
+	return "", nil
+}
+
+func (m *subagentManager) sendCommunicationToChild(ctx context.Context, parentID string, id subagent.NodeID, body, requestID string, mode subagent.DeliveryMode) (subagent.DeliveryReceipt, error) {
+	receipt := subagent.DeliveryReceipt{RequestID: requestID, Target: string(id)}
 	m.r.subagentAdmissionMu.RLock()
 	defer m.r.subagentAdmissionMu.RUnlock()
-	if !m.r.UseSubagents() {
-		return "", errSubagentsDisabled
+	parentDriver, known := m.r.sessionDrivers.Lookup(parentID)
+	if (known && !m.r.sessionDelegationEnabled(parentDriver.session())) || (!known && !m.r.UseSubagents()) {
+		return receipt, errSubagentsDisabled
 	}
 	m.mu.Lock()
 	rec := m.children[id]
 	if rec == nil {
 		m.mu.Unlock()
-		return "", fmt.Errorf("no subagent with id %q", id)
+		return receipt, &SessionError{Kind: SessionErrorNotFound, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("no subagent with id %q", id)}
 	}
 	if rec.parentSession != parentID {
 		m.mu.Unlock()
-		return "", fmt.Errorf("subagent %q is not one of yours", id)
+		receipt.Rejection = "unauthorized"
+		return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q is not one of yours", id)}
 	}
 	if rec.durable.Node.State == subagent.NodeStopped {
 		m.mu.Unlock()
-		return "", fmt.Errorf("subagent %q has been stopped; spawn a new one", id)
+		return receipt, &SessionError{Kind: SessionErrorStopped, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q has been stopped; spawn a new one", id)}
 	}
-	sessionID, name := rec.sessionID, rec.name
+	sessionID, senderName := rec.sessionID, rec.parentAgentName
 	m.mu.Unlock()
-
-	if err := m.ensureChildDriver(m.ctx, id); err != nil {
-		return "", err
+	if err := m.ensureChildDriver(ctx, id); err != nil {
+		return receipt, err
 	}
-	senderName := ""
 	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok {
 		senderName = parent.AgentName()
 	}
-	if !m.deliverAgent(sessionID, body, parentID, senderName) {
-		// Capacity reclamation can race the first lookup. Rebind once more and
-		// retry rather than reporting a persistent child as permanently gone.
-		if err := m.ensureChildDriver(m.ctx, id); err != nil || !m.deliverAgent(sessionID, body, parentID, senderName) {
-			if err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("subagent %q is no longer reachable after restoration", id)
-		}
-	}
-	return name, nil
+	// Rejected sends are retriable with the same identity; never blindly replay
+	// after ambiguous storage errors or successful inbox admission.
+	return m.postAgentCommunication(ctx, sessionID, agentCommunication(body, requestID, parentID, senderName, mode))
 }
 
 // hasRunningSubagents reports whether a session has descendants actively

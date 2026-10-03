@@ -87,7 +87,7 @@ func builtInSessionCommands() []Item {
 			ID:           "session.subagents",
 			Label:        "Subagents",
 			SlashCommand: "/subagents",
-			Description:  "Browse the subagent tree; /subagents on|off saves Use subagents",
+			Description:  "Browse the subagent tree; /subagents on|off sets Use subagents for this session tree",
 			Category:     "Session",
 			Immediate:    true,
 			CompleteArgument: func() []ArgumentCandidate {
@@ -104,6 +104,17 @@ func builtInSessionCommands() []Item {
 				default:
 					return notification.ErrorCmd("Usage: /subagents [on|off]")
 				}
+			},
+		},
+		{
+			ID:           "session.attention",
+			Label:        "Attention",
+			SlashCommand: "/attention",
+			Description:  "Open the next subagent waiting for approval or an answer",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(string) tea.Cmd {
+				return core.CmdHandler(messages.OpenTreeAttentionMsg{})
 			},
 		},
 		{

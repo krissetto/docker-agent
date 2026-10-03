@@ -42,10 +42,8 @@ func (m *appModel) tabAgentIdentity(tab messages.TabInfo) (name, nodeID string) 
 		if name == "" {
 			name = sess.AgentName
 		}
-		if lookup, ok := application.Runtime().(subagentSessionLookup); ok {
-			if node, found := lookup.SubagentNodeForSession(sess.ID); found {
-				return name, string(node)
-			}
+		if node, found := application.SubagentNodeForSession(sess.ID); found {
+			return name, string(node)
 		}
 		nodeID = string(subagentpkg.SessionRootID(sess.ID))
 	}

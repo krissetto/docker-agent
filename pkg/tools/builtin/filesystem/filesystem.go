@@ -652,6 +652,13 @@ func (t *ToolSet) resolvePath(path string) string {
 	return filepath.Clean(filepath.Join(t.workingDir, path))
 }
 
+// ResolveAndCheckPath applies the filesystem policy for delegated I/O adapters.
+//
+// The adapter must enforce containment again at its own I/O boundary.
+func (t *ToolSet) ResolveAndCheckPath(path string) (string, error) {
+	return t.resolveAndCheckPath(path)
+}
+
 // resolveAndCheckPath is the canonical entry point used by every filesystem
 // handler that operates on a user-supplied path. It resolves the path against
 // the working directory and validates the result against the allow- and

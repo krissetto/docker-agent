@@ -170,7 +170,13 @@ func (p *PersistenceObserver) OnRunStart(ctx context.Context, sess *session.Sess
 	snapshot := sess.OwnSnapshot()
 	snapshot.Messages = nil
 	data, _ := json.Marshal(snapshot)
-	p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error { return p.store.UpdateSession(ctx, snapshot) })
+	p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
+		unlock := sess.LockMetadata()
+		defer unlock()
+		latest := sess.OwnSnapshot()
+		latest.Messages = nil
+		return p.store.UpdateSession(ctx, latest)
+	})
 }
 
 func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session, event Event) {
@@ -250,7 +256,11 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error { return p.store.UpdateSessionTokens(ctx, id, input, output, cost) })
 		}
 	case *SessionTitleEvent:
-		p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error { return p.store.UpdateSessionTitle(ctx, id, e.Title) })
+		p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error {
+			unlock := sess.LockMetadata()
+			defer unlock()
+			return p.store.UpdateSessionTitle(ctx, id, sess.TitleSnapshot())
+		})
 	case *ErrorEvent:
 		j.streaming = nil
 		ts := e.Timestamp

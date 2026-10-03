@@ -76,7 +76,7 @@ func TestSessionHandleConformance(t *testing.T) {
 				}
 				fixture.settle()
 				zero := uint64(0)
-				observation, observeErr := handle.Observe(t.Context(), ObserveOptions{Since: &zero, Buffer: 64})
+				observation, observeErr := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle), Buffer: 64})
 				require.NoError(t, observeErr)
 				defer observation.Cancel()
 				var previous uint64
@@ -124,14 +124,14 @@ func TestSessionHandleConformance(t *testing.T) {
 				first, err := handle.Submit(t.Context(), TurnInput{Content: "replay"})
 				require.NoError(t, err)
 				zero := uint64(0)
-				replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero})
+				replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 				require.NoError(t, err)
 				require.NotEmpty(t, replayed.Replay)
 				assert.Equal(t, first.TurnID, replayed.Replay[len(replayed.Replay)-1].TurnID)
 				replayed.Cancel()
 
 				fixture.injectGap()
-				gapped, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero})
+				gapped, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 				require.NoError(t, err)
 				defer gapped.Cancel()
 				require.NotEmpty(t, gapped.Replay)
@@ -228,6 +228,21 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 			remote := handle.(*remoteSession)
 			_, _, err := remote.runtime.BranchSession(t.Context(), handle.ID(), BranchOptions{})
 			return err
+		}}},
+		"DelegationPolicy": {{"delegation_policy", func() error {
+			controller, ok := handle.(SessionDelegationController)
+			if !ok {
+				return UnsupportedSessionOperation(handle.ID(), "delegation_policy")
+			}
+			_, err := controller.DelegationPolicy(t.Context())
+			return err
+		}}},
+		"StopSubtree": {{"stop_subtree", func() error {
+			controller, ok := handle.(SessionTreeController)
+			if !ok {
+				return UnsupportedSessionOperation(handle.ID(), "stop_subtree")
+			}
+			return controller.StopSubtree(t.Context())
 		}}},
 		"TodoEditing": {
 			{SessionOperationSetTodoStatus, func() error { _, err := handle.SetTodoStatus(t.Context(), "missing", "completed"); return err }},
@@ -332,7 +347,7 @@ func newRemoteSessionContractFixture(t *testing.T) sessionContractFixture {
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			fixture.sequence++
-			fixture.journal = []remoteSessionEnvelope{{Version: sessionWireVersion, SessionID: handle.ID(), Sequence: fixture.sequence, Gap: true, FirstAvailable: fixture.sequence}}
+			fixture.journal = []remoteSessionEnvelope{{Epoch: "contract-epoch", Version: sessionWireVersion, SessionID: handle.ID(), Sequence: fixture.sequence, Gap: true, FirstAvailable: fixture.sequence}}
 		},
 		settle:       func() {},
 		afterRelease: func() SessionHandle { return handle },
@@ -367,7 +382,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 		turnID := fmt.Sprintf("%s-%d", mode, s.sequence)
 		s.activeTurn, s.cancelling = turnID, false
 		event, _ := json.Marshal(StreamStarted("contract-session", "contract"))
-		s.journal = append(s.journal, remoteSessionEnvelope{Version: sessionWireVersion, SessionID: "contract-session", TurnID: turnID, Sequence: s.sequence, TranscriptPosition: -1, Event: event})
+		s.journal = append(s.journal, remoteSessionEnvelope{Epoch: "contract-epoch", Version: sessionWireVersion, SessionID: "contract-session", TurnID: turnID, Sequence: s.sequence, TranscriptPosition: -1, Event: event})
 		fmt.Fprintf(w, `{"session_id":"contract-session","turn_id":%q,"disposition":"queued"}`, turnID)
 	case "cancel":
 		var request struct {
@@ -387,18 +402,21 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusPreconditionFailed)
 		fmt.Fprint(w, `{"error":"stale","operation":"respond","session_id":"contract-session"}`)
 	case "events":
-		s.writeEvents(w)
+		s.writeEvents(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (s *remoteContractServer) writeEvents(w http.ResponseWriter) {
+func (s *remoteContractServer) writeEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	writer := bufio.NewWriter(w)
-	snapshot := remoteSessionSnapshot{Session: session.New(session.WithID("contract-session")), Status: api.SessionStatus[SessionState]{SessionID: "contract-session", AgentName: "contract", State: SessionStateSettled}, Cursor: s.sequence}
+	snapshot := remoteSessionSnapshot{Epoch: "contract-epoch", Session: session.New(session.WithID("contract-session")), Status: api.SessionStatus[SessionState]{SessionID: "contract-session", AgentName: "contract", State: SessionStateSettled}, Cursor: s.sequence}
 	writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "snapshot", Snapshot: &snapshot})
 	for i := range s.journal {
+		if r.URL.Query().Get("since") == "" || r.URL.Query().Get("since_epoch") != "contract-epoch" {
+			continue
+		}
 		writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "event", Envelope: &s.journal[i]})
 	}
 	writeContractSSE(writer, remoteSessionStreamMessage{Version: sessionWireVersion, Type: "ready", Cursor: s.sequence})
@@ -433,4 +451,12 @@ func TestRemoteSessionObserveReportsSeveredSSE(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("severed SSE did not report a terminal observation error")
 	}
+}
+
+func sessionObservationEpoch(t *testing.T, handle SessionHandle) string {
+	t.Helper()
+	observation, err := handle.Observe(t.Context(), ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	return observation.Primary().Epoch
 }

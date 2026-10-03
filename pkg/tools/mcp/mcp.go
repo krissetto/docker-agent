@@ -192,6 +192,7 @@ type Toolset struct {
 	// following a ToolListChanged notification from the server, or after
 	// a successful supervisor reconnect.
 	toolsChangedHandler func()
+	subscribers         tools.ChangeSubscribers
 }
 
 // invalidateCache clears the cached tools and prompts and bumps the
@@ -717,6 +718,7 @@ func (ts *Toolset) refreshToolCache(ctx context.Context) {
 	if handler != nil {
 		handler()
 	}
+	ts.subscribers.Notify()
 }
 
 // refreshPromptCache fetches the prompt list from the server and populates
@@ -964,6 +966,10 @@ func (ts *Toolset) SetToolsChangedHandler(handler func()) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.toolsChangedHandler = handler
+}
+
+func (ts *Toolset) SubscribeToolsChanged(handler func()) func() {
+	return ts.subscribers.Subscribe(handler)
 }
 
 // ListPrompts retrieves available prompts from the MCP server.

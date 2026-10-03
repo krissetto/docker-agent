@@ -2183,7 +2183,7 @@ func TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper(t *testing.T) {
 	require.NoError(t, err)
 
 	events := make(chan Event, 8)
-	rt.configureToolsetHandlers(root, NewChannelSink(events))
+	rt.configureToolsetHandlers(root)
 	close(events)
 	for range events {
 	}
@@ -3711,7 +3711,7 @@ func TestSkillSubSessionTools_ScopesAndInjects(t *testing.T) {
 		session.WithExtraToolSets([]tools.ToolSet{newStubToolSet(nil, []tools.Tool{extraTool}, nil)}),
 	)
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 
 	names := toolNames(result)
 	// read_file kept (allow-listed), shell/write_file filtered out, fetch injected.
@@ -3732,7 +3732,7 @@ func TestSkillSubSessionTools_NoOpForOrdinarySession(t *testing.T) {
 	inherited := []tools.Tool{{Name: "read_file"}, {Name: "shell"}}
 	sess := session.New()
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 	assert.Equal(t, inherited, result)
 }
 

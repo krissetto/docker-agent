@@ -21,7 +21,7 @@ func TestSubagentsStopRequiresConfirmation(t *testing.T) {
 	_, cmd = d.Update(tea.KeyPressMsg{Code: 's'})
 	require.Empty(t, collectMsgs(cmd))
 	require.Equal(t, subagent.NodeID("child"), d.stopTarget)
-	require.Contains(t, d.View(), "Permanently stop")
+	require.Contains(t, d.View(), "Stop and drain subtree")
 	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Empty(t, collectMsgs(cmd))
 	require.Empty(t, d.stopTarget)

@@ -100,36 +100,66 @@ func (r *LocalRuntime) handleReadSubagent(_ context.Context, sess *session.Sessi
 
 // handleSendMessage delivers an asynchronous message to another agent: the
 // reserved target "parent", or one of the caller's running subagents by id.
-func (r *LocalRuntime) handleSendMessage(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleSendMessage(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args subagent.SendArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	to := strings.TrimSpace(args.To)
-	if to == "" {
-		return tools.ResultError("to is required"), nil
+	args.To = strings.TrimSpace(args.To)
+	receipt := subagent.DeliveryReceipt{RequestID: args.RequestID, Target: args.To}
+	result := func(err error) (*tools.ToolCallResult, error) {
+		receipt = communicationRejection(receipt, err)
+		encoded, marshalErr := json.Marshal(receipt)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		if err != nil {
+			return tools.ResultError(string(encoded)), nil
+		}
+		return tools.ResultSuccess(string(encoded)), nil
 	}
-
-	if to == subagent.ParentAlias {
+	invalid := func(detail string) (*tools.ToolCallResult, error) {
+		return result(&SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationSend, Detail: detail})
+	}
+	if args.To == "" {
+		return invalid("to is required")
+	}
+	if args.DeliveryMode == "" {
+		args.DeliveryMode = subagent.DeliveryGuidance
+	}
+	if args.DeliveryMode != subagent.DeliveryGuidance && args.DeliveryMode != subagent.DeliveryNewTurn {
+		return invalid("delivery_mode must be guidance or new_turn")
+	}
+	if args.RequestID == "" {
+		if tc.ID != "" {
+			args.RequestID = "agent:" + sess.ID + ":" + tc.ID
+		} else {
+			var err error
+			args.RequestID, err = newSessionRequestID()
+			if err != nil {
+				return result(err)
+			}
+		}
+	}
+	receipt.RequestID = args.RequestID
+	if args.To == subagent.ParentAlias {
 		if sess.ParentID == "" {
-			return tools.ResultError("you have no parent to message"), nil
+			return invalid("you have no parent to message")
 		}
 		senderID := sess.ID
 		if id, ok := r.subagents.nodeForSession(sess.ID); ok {
 			senderID = string(id)
 		}
-		if !r.subagents.deliverExplicitToParent(sess.ParentID, args.Message, senderID, r.resolveSessionAgent(sess).Name()) {
-			return tools.ResultError("parent is not currently reachable; message was not delivered"), nil
-		}
-		return tools.ResultSuccess("Message delivered to parent."), nil
+		msg := agentCommunication(args.Message, args.RequestID, senderID, r.resolveSessionAgent(sess).Name(), args.DeliveryMode)
+		var err error
+		receipt, err = r.subagents.postAgentCommunication(ctx, sess.ParentID, msg)
+		receipt.Target = args.To
+		return result(err)
 	}
-
-	// Direct messages retain agent provenance in either direction.
-	name, err := r.subagents.sendToChild(sess.ID, subagent.NodeID(to), args.Message)
-	if err != nil {
-		return tools.ResultError(err.Error()), nil
-	}
-	return tools.ResultSuccess(fmt.Sprintf("Message delivered to subagent %q (%s).", name, to)), nil
+	var err error
+	receipt, err = r.subagents.sendCommunicationToChild(ctx, sess.ID, subagent.NodeID(args.To), args.Message, args.RequestID, args.DeliveryMode)
+	receipt.Target = args.To
+	return result(err)
 }
 
 // handleStopSubagent explicitly finalizes one of the caller's subagents:

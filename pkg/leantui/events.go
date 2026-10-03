@@ -41,6 +41,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.lifecycle = bridged.Projection.Lifecycle
 			m.status.Dormant = bridged.Projection.Status.Dormant
 			m.status.Pending = bridged.Projection.Status.Pending
+			m.status.Interrupted = bridged.Projection.Status.InterruptedTurns
+			m.status.Connection = connectionLabel(bridged.Projection.Connection)
 			shared = true
 			if confirm := m.screen.Confirm; confirm != nil && !bridged.Projection.HasInteraction(app.InteractionKey{SessionID: confirm.SessionID, InteractionID: confirm.RequestID}) {
 				m.screen.Confirm = nil
@@ -48,13 +50,23 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		}
 	}
 	switch e := ev.(type) {
+	case *app.ConnectionStateEvent:
+		m.status.Connection = connectionLabel(e.State)
+		switch e.State {
+		case app.ConnectionReconnecting:
+			m.addNotice("⚠ ", "Session connection lost; reconnecting. Accepted work continues on the server.", ui.StWarning())
+		case app.ConnectionConnected:
+			m.addNotice("✓ ", "Session connection restored.", ui.StMuted())
+		case app.ConnectionDisconnected:
+			m.addNotice("⚠ ", "Session connection closed; accepted work continues on the server. Reopen the session to reattach.", ui.StWarning())
+		}
 	case *runtime.DormancyChangedEvent:
 		if m.app != nil && m.app.Session() != nil && e.SessionID == m.app.Session().ID {
 			m.status.Dormant = e.Dormant
 		}
 	case capabilityResult:
 		if m.app != nil && m.app.Session() != nil && e.sessionID == m.app.Session().ID && m.app.IsCurrentSessionEvent(e.identity) {
-			m.reportCapability(e.value, e.err)
+			m.applyCapabilityResult(e.value, e.err)
 		}
 	case viewerBranch:
 		m.status.Branch = string(e)
@@ -86,6 +98,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.SubagentTreeEvent:
 		snapshot := e.Snapshot
 		m.subagentSnapshot = &snapshot
+		m.observeTreeAttention(snapshot)
 		if m.screen.Subagents != nil {
 			m.screen.Subagents.Update(snapshot)
 		}
@@ -102,6 +115,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *app.SessionResetEvent:
 		m.status.Dormant = e.Snapshot.Status.Dormant
 		m.status.Pending = e.Snapshot.Status.Pending
+		m.status.Interrupted = e.Snapshot.Status.InterruptedTurns
 		m.lifecycle = lifecycle.FromSnapshot(e.Snapshot)
 		m.screen.Transcript.Clear()
 		m.inputReplay.Reset(e.Snapshot.Session)
@@ -148,6 +162,9 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 					m.handleEvent(ctx, confirmation)
 				}
 			}
+		}
+		if n := e.Snapshot.Status.InterruptedTurns; n > 0 {
+			m.addNotice("⚠ ", lifecycle.InterruptedTurnsNotice(n), ui.StWarning())
 		}
 	case *runtime.InteractionResolvedEvent:
 		delete(m.elicitations, e.InteractionID)
@@ -339,8 +356,12 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if e.URL != "" {
 			m.reportCapability("Open this authorization URL only if you trust the requesting server: "+e.URL, nil)
 		}
-		m.reportCapability(e.Schema, nil)
-		m.reportCapability("Reply: /respond "+e.RequestID+" <JSON object>; /respond "+e.RequestID+" cancel|decline. Required fields and defaults are shown in the schema; defaults are not silently accepted.", nil)
+		if fields := elicitationFieldLines(e.Schema); len(fields) > 0 {
+			m.reportCapability("Fields:\n"+strings.Join(fields, "\n"), nil)
+			m.reportCapability("Reply: /respond "+e.RequestID+" name=value … (quote values with spaces; omitted fields use their shown default) · /respond "+e.RequestID+" decline|cancel", nil)
+		} else {
+			m.reportCapability("Reply: /respond "+e.RequestID+" <your answer> · /respond "+e.RequestID+" decline|cancel", nil)
+		}
 	case *runtime.MaxIterationsReachedEvent:
 		if m.maxIterations == nil {
 			m.maxIterations = make(map[string]*runtime.MaxIterationsReachedEvent)

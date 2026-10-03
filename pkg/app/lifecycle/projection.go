@@ -15,6 +15,34 @@ type Projection struct {
 	Status        runtime.SessionStatus
 	PendingInputs []runtime.PendingInput
 	Interactions  []runtime.InteractionSnapshot
+	Connection    ConnectionState
+}
+
+// ConnectionState is the observer's transport state, never the session's
+// execution state: a disconnected view's accepted work keeps running.
+type ConnectionState uint32
+
+const (
+	ConnectionUnknown ConnectionState = iota
+	ConnectionConnecting
+	ConnectionConnected
+	ConnectionReconnecting
+	ConnectionDisconnected
+)
+
+func (s ConnectionState) String() string {
+	switch s {
+	case ConnectionConnecting:
+		return "connecting"
+	case ConnectionConnected:
+		return "connected"
+	case ConnectionReconnecting:
+		return "reconnecting"
+	case ConnectionDisconnected:
+		return "disconnected"
+	default:
+		return "unknown"
+	}
 }
 
 // InteractionKey identifies prompts independently of transport payload identity.
@@ -30,6 +58,21 @@ func InteractionIdentity(event any) InteractionKey {
 		return InteractionKey{e.SessionID, e.RequestID}
 	}
 	return InteractionKey{}
+}
+
+// RecoveryUncertain reports promoted turns that ended without terminal
+// evidence: the session is settled but its last outcome is unknown.
+func (p *Projection) RecoveryUncertain() bool {
+	return p != nil && p.Status.InterruptedTurns > 0
+}
+
+// InterruptedTurnsNotice is the shared client wording for RecoveryUncertain.
+func InterruptedTurnsNotice(n int) string {
+	turns := "turn was"
+	if n != 1 {
+		turns = "turns were"
+	}
+	return fmt.Sprintf("Recovery uncertain: %d %s interrupted without a final result. Review the transcript before continuing.", n, turns)
 }
 
 func (p *Projection) HasInteraction(key InteractionKey) bool {

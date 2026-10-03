@@ -116,7 +116,10 @@ func (a *leanSession) Steer(_ context.Context, input runtime.TurnInput) (runtime
 	return runtime.Submission{SessionID: a.id, TurnID: "send", Disposition: disposition}, nil
 }
 
-func (a *leanSession) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+func (a *leanSession) Observe(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: a.snapshot}}, Cancel: func() {}}, nil
 }
 

@@ -531,3 +531,25 @@ func TestFilesystemToolset_EditFileAppliesNonEmptyEdit(t *testing.T) {
 	require.False(t, result.IsError, result.Output)
 	assert.Equal(t, []string{"LINE ONE\nline two\n"}, responder.writes())
 }
+
+func TestFilesystemToolsetSessionPathPolicy(t *testing.T) {
+	t.Parallel()
+	workingDir := t.TempDir()
+	allowed := filepath.Join(workingDir, "allowed")
+	denied := filepath.Join(allowed, "secret")
+	require.NoError(t, os.MkdirAll(denied, 0o755))
+	const sessionID = "policy-session"
+	agent := &Agent{sessions: map[string]*Session{sessionID: {id: sessionID, workingDir: workingDir}}}
+	ctx := withSessionID(t.Context(), sessionID)
+	ts := NewFilesystemToolset(agent, workingDir, filesystem.WithAllowList([]string{allowed}), filesystem.WithDenyList([]string{denied}))
+	t.Cleanup(func() { require.NoError(t, ts.Close()) })
+	_, err := ts.resolvePathForSession(ctx, "allowed/new.txt")
+	require.NoError(t, err)
+	_, err = ts.resolvePathForSession(ctx, "outside.txt")
+	require.ErrorContains(t, err, "outside the allowed directories")
+	_, err = ts.resolvePathForSession(ctx, "allowed/secret/new.txt")
+	require.ErrorContains(t, err, "inside a denied directory")
+	require.NoError(t, os.Symlink(denied, filepath.Join(allowed, "shortcut")))
+	_, err = ts.resolvePathForSession(ctx, "allowed/shortcut/new.txt")
+	require.ErrorContains(t, err, "inside a denied directory")
+}

@@ -70,3 +70,9 @@ type EventForwarder interface {
 	// SetEventCallback registers the callback; must be called before Start.
 	SetEventCallback(callback EventCallback)
 }
+
+// EventSubscriber registers independently owned RAG progress consumers.
+type EventSubscriber interface {
+	Name() string
+	SubscribeEvents(callback EventCallback) func()
+}

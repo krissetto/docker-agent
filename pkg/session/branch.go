@@ -90,6 +90,8 @@ func (s *Session) clone(referencesOnly bool) *Session {
 
 	clone := &Session{
 		ID:                      s.ID,
+		TurnOutcomes:            maps.Clone(s.TurnOutcomes),
+		TurnOutcomeOrder:        slices.Clone(s.TurnOutcomeOrder),
 		Origin:                  s.Origin,
 		InputID:                 s.InputID,
 		Title:                   s.Title,

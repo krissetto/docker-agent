@@ -11,6 +11,30 @@ import (
 
 type PresentationState = lifecycle.Projection
 
+type ConnectionState = lifecycle.ConnectionState
+
+const (
+	ConnectionUnknown      = lifecycle.ConnectionUnknown
+	ConnectionConnecting   = lifecycle.ConnectionConnecting
+	ConnectionConnected    = lifecycle.ConnectionConnected
+	ConnectionReconnecting = lifecycle.ConnectionReconnecting
+	ConnectionDisconnected = lifecycle.ConnectionDisconnected
+)
+
+// ConnectionStateEvent reports an observer transport transition. It never
+// implies the session stopped; Err is the last transport failure, if any.
+type ConnectionStateEvent struct {
+	SessionID string
+	State     ConnectionState
+	Err       string
+}
+
+func (e *ConnectionStateEvent) GetAgentName() string { return "" }
+func (e *ConnectionStateEvent) GetSessionID() string { return e.SessionID }
+
+// ConnectionState returns the current observer transport state.
+func (a *App) ConnectionState() ConnectionState { return ConnectionState(a.connection.Load()) }
+
 // SessionResetEvent replaces a consumer's complete projection at an observation barrier.
 type SessionResetEvent struct {
 	Snapshot runtime.SessionSnapshot
@@ -57,12 +81,45 @@ func (s *appProjectionSink) Reset(snapshot runtime.SessionSnapshot) {
 		snapshot.Status.SessionID = s.sessionID
 	}
 	s.position = snapshot.TranscriptPosition
+	s.setConnection(ConnectionConnected, nil)
 	s.app.sendBridgedEventFrom(s.ctx, "", &SessionResetEvent{Snapshot: snapshot}, true, s.sessionID, s.epoch)
+	s.app.refreshSubagentTreeView(s.ctx, s.epoch)
+}
+
+// OnConnectionState is the optional transport hook of runtimeclient.Attach:
+// connected=false while it backs off between reconnect attempts. A gap
+// resnapshot (no error) rebuilds the baseline without losing the transport.
+func (s *appProjectionSink) OnConnectionState(connected bool, err error) {
+	switch {
+	case connected:
+		s.setConnection(ConnectionConnected, nil)
+	case err != nil:
+		s.setConnection(ConnectionReconnecting, err)
+	}
+}
+
+func (s *appProjectionSink) setConnection(state ConnectionState, err error) {
+	if s.epoch != 0 && s.epoch != s.app.bridgeEpoch.Load() {
+		return
+	}
+	previous := ConnectionState(s.app.connection.Swap(uint32(state)))
+	if previous == state || (state == ConnectionConnected && previous <= ConnectionConnecting) {
+		// The first baseline carries its connection state in the reset head.
+		return
+	}
+	event := &ConnectionStateEvent{SessionID: s.sessionID, State: state}
+	if err != nil {
+		event.Err = err.Error()
+	}
+	s.app.sendBridgedEventFrom(s.ctx, "", event, false, s.sessionID, s.epoch)
 }
 
 func (s *appProjectionSink) Apply(envelope runtime.SessionEvent) {
 	if s.epoch != 0 && s.epoch != s.app.bridgeEpoch.Load() {
 		return
+	}
+	if ConnectionState(s.app.connection.Load()) != ConnectionConnected {
+		s.setConnection(ConnectionConnected, nil)
 	}
 	withdrawal, canceled := envelope.Event.(*runtime.PendingUserMessageCanceledEvent)
 	if canceled && withdrawal.SessionPosition >= 0 && withdrawal.SessionPosition < s.position {
@@ -107,6 +164,7 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 			Status:        e.Snapshot.Status,
 			PendingInputs: slices.Clone(e.Snapshot.PendingInputs),
 			Interactions:  slices.Clone(e.Snapshot.Interactions),
+			Connection:    a.ConnectionState(),
 		}
 		if e.Snapshot.Session != nil {
 			a.stateMu.Lock()
@@ -145,6 +203,8 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		}
 	case *runtime.PausedEvent:
 		next.Status.Paused = true
+	case *ConnectionStateEvent:
+		next.Connection = e.State
 	default:
 		return previous
 	}
@@ -171,6 +231,7 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 
 func (s *appProjectionSink) OnError(err error) {
 	if s.ctx.Err() == nil {
+		s.setConnection(ConnectionDisconnected, err)
 		s.app.sendEvent(s.ctx, runtime.Error(err.Error()))
 	}
 }

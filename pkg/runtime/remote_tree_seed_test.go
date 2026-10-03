@@ -43,6 +43,7 @@ func observeRemoteTreeSeeds(t *testing.T) Observation {
 	require.NoError(t, err)
 	observation, err := handle.Observe(t.Context(), ObserveOptions{Tree: true})
 	require.NoError(t, err)
+	require.NotNil(t, observation.SessionsAdded)
 	t.Cleanup(observation.Cancel)
 	return observation
 }

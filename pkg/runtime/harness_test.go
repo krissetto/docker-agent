@@ -149,6 +149,7 @@ func TestHarnessAgentResumesPersistedSession(t *testing.T) {
 {"type":"item.completed","item":{"type":"agent_message","text":"second answer"}}
 `)
 	loaded.AddMessage(session.UserMessage("follow up only"))
+	require.NoError(t, rt.Close())
 	rt = newHarnessRuntimeWithStore(t, "codex", store)
 	collectRuntimeEvents(t, rt, loaded)
 

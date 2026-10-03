@@ -35,7 +35,60 @@ type sessionClient struct {
 	samplingHandler          tools.SamplingHandler
 	samplingWithToolsHandler tools.SamplingWithToolsHandler
 	oauthSuccessHandler      func()
+	inflight                 map[uint64]inflightCall
+	nextInflight             uint64
 	mu                       sync.RWMutex
+}
+
+type inflightCall struct {
+	scope  tools.HandlerScope
+	ctx    context.Context //nolint:containedctx // bounded by CallTool and canceled when unregistered
+	cancel context.CancelFunc
+}
+
+func (c *sessionClient) registerCallContext(ctx context.Context) uint64 {
+	scope, _ := tools.HandlerScopeFrom(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextInflight++
+	if c.inflight == nil {
+		c.inflight = make(map[uint64]inflightCall)
+	}
+	ownerCtx, cancel := context.WithCancel(ctx)
+	c.inflight[c.nextInflight] = inflightCall{scope: scope, ctx: ownerCtx, cancel: cancel}
+	return c.nextInflight
+}
+
+func (c *sessionClient) unregisterCallContext(id uint64) {
+	if id == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if call, ok := c.inflight[id]; ok {
+		call.cancel()
+	}
+	delete(c.inflight, id)
+}
+
+// elicitationContext routes callbacks only when exactly one tool call is active.
+// MCP carries no causal call ID; ambiguous and unsolicited scoped callbacks fail closed.
+func (c *sessionClient) elicitationContext(fallback context.Context) (context.Context, func()) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.inflight) == 1 {
+		for _, call := range c.inflight {
+			// Connection contexts outlive turns; retain the owning call's trace instead.
+			owner := call.ctx
+			ctx, cancel := context.WithCancel(tools.WithHandlerScope(owner, call.scope))
+			stop := context.AfterFunc(fallback, cancel)
+			if call.ctx.Err() != nil {
+				cancel()
+			}
+			return ctx, func() { stop(); cancel() }
+		}
+	}
+	return tools.WithoutHandlerScope(fallback), func() {}
 }
 
 // setSession stores the session under the write lock.
@@ -183,6 +236,8 @@ func (c *sessionClient) CallTool(ctx context.Context, request *gomcp.CallToolPar
 		otelmcp.InjectMeta(spanCtx, request.Meta)
 	}
 
+	callID := c.registerCallContext(spanCtx)
+	defer c.unregisterCallContext(callID)
 	result, err := s.CallTool(spanCtx, request)
 	if err != nil {
 		span.RecordError(err, "")
@@ -254,6 +309,8 @@ func (c *sessionClient) GetPrompt(ctx context.Context, request *gomcp.GetPromptP
 // server to the registered handler. It is used as the gomcp ElicitationHandler
 // callback for both stdio and remote clients.
 func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp.ElicitRequest) (*gomcp.ElicitResult, error) {
+	ctx, release := c.elicitationContext(ctx)
+	defer release()
 	slog.DebugContext(ctx, "Received elicitation request from MCP server", "message", req.Params.Message)
 
 	c.mu.RLock()
@@ -287,6 +344,8 @@ func (c *sessionClient) SetElicitationHandler(handler tools.ElicitationHandler) 
 // from the MCP server to the registered handler. It is used as the gomcp
 // CreateMessageHandler callback for both stdio and remote clients.
 func (c *sessionClient) handleSamplingRequest(ctx context.Context, req *gomcp.CreateMessageRequest) (*gomcp.CreateMessageResult, error) {
+	ctx, release := c.elicitationContext(ctx)
+	defer release()
 	slog.DebugContext(ctx, "Received sampling request from MCP server", "messages", len(req.Params.Messages))
 
 	c.mu.RLock()
@@ -318,6 +377,8 @@ func (c *sessionClient) SetSamplingHandler(handler tools.SamplingHandler) {
 // the gomcp CreateMessageWithToolsHandler callback for both stdio and remote
 // clients when the with-tools handler is registered.
 func (c *sessionClient) handleSamplingWithToolsRequest(ctx context.Context, req *gomcp.CreateMessageWithToolsRequest) (*gomcp.CreateMessageWithToolsResult, error) {
+	ctx, release := c.elicitationContext(ctx)
+	defer release()
 	slog.DebugContext(ctx, "Received sampling-with-tools request from MCP server",
 		"messages", len(req.Params.Messages),
 		"tools", len(req.Params.Tools),
@@ -405,7 +466,11 @@ func (c *sessionClient) SetOAuthSuccessHandler(handler func()) {
 }
 
 // oauthSuccess invokes the registered OAuth success handler, if any.
-func (c *sessionClient) oauthSuccess() {
+func (c *sessionClient) oauthSuccess(ctx context.Context) {
+	if tools.HasHandlerScope(ctx) {
+		tools.NotifyScopedOAuthSuccess(ctx)
+		return
+	}
 	c.mu.RLock()
 	handler := c.oauthSuccessHandler
 	c.mu.RUnlock()

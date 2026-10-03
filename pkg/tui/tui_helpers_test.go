@@ -8,6 +8,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
@@ -341,4 +343,11 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 			}
 		}
 	})
+}
+
+func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime, services app.Services, info runtime.SubagentAttachInfo, binding runtime.SessionBinding) *app.App {
+	return app.New(ctx, sessions, info.Session, binding,
+		app.WithRuntimeServices(services),
+		app.WithSubagentAttach(info),
+	)
 }

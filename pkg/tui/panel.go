@@ -151,10 +151,9 @@ func (m *appModel) openSubagentsTree() tea.Cmd {
 	if data == nil {
 		return nil
 	}
-	if source, ok := data.application.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && source.SubagentTree() != nil {
-		snapshot := source.SubagentTree().Snapshot()
-		if data.treeLiveObserved || panelTreeNodes(data.application, &snapshot) != nil {
-			data.refreshTree(&snapshot)
+	if snapshot := data.application.SubagentTreeSnapshot(); snapshot != nil {
+		if data.treeLiveObserved || panelTreeNodes(data.application, snapshot) != nil {
+			data.refreshTree(snapshot)
 		}
 	}
 	selected := subagent.NodeID("")
@@ -164,12 +163,16 @@ func (m *appModel) openSubagentsTree() tea.Cmd {
 		selected = root.Node.ID
 	}
 	d := dialog.NewSubagentsDialog(data.treeNodes, m.panelTitles(data.treeNodes), selected)
-	d.Update(dialog.SubagentsPolicyMsg{Enabled: subagentsPreference(data.application)})
-	_, policyAvailable := data.application.Runtime().(runtime.SubagentPolicy)
-	_, stopAvailable := data.application.Runtime().(runtime.SubagentControl)
-	d.Update(dialog.SubagentsCapabilitiesMsg{Policy: policyAvailable, Stop: stopAvailable})
+	canonical := data.application.CanSetDelegationPolicy()
+	_, localDefault := data.application.Runtime().(runtime.SubagentPolicy)
+	if canonical {
+		d.Update(dialog.SubagentsPolicyMsg{SessionTree: true, Pending: true})
+	} else {
+		d.Update(dialog.SubagentsPolicyMsg{Enabled: subagentsPreference(data.application)})
+	}
+	d.Update(dialog.SubagentsCapabilitiesMsg{Policy: canonical || localDefault, Stop: data.application.CanStopSubtree()})
 	data.treeDialog = d
-	return tea.Sequence(core.CmdHandler(dialog.OpenDialogMsg{Model: d}), m.loadPanelTitles(d, data))
+	return tea.Batch(tea.Sequence(core.CmdHandler(dialog.OpenDialogMsg{Model: d}), m.loadPanelTitles(d, data)), m.queryDelegationPolicy(data.application))
 }
 
 func (m *appModel) ingestPanelEvent(owner string, event runtime.Event) {

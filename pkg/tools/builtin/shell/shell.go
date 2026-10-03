@@ -185,7 +185,18 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tool
 	// Cancellation is handled manually below (timeoutCtx + Process.Kill +
 	// process group + WaitDelay), so we use exec.Command rather than
 	// exec.CommandContext to keep that flow in one place.
-	command, cmdEnv := h.applyAskpass(ctx, command)
+	var cmdEnv []string
+	if scope, scoped := tools.HandlerScopeFrom(ctx); scoped && h.sudoAskpass && askpassSupported() && commandInvokesSudo(command) {
+		// A helper carries its command's owner; it must never survive into another call.
+		srv, err := startAskpassServer(ctx, func() tools.ElicitationHandler { return scope.Elicitation })
+		if err != nil {
+			return tools.ResultError(fmt.Sprintf("Error starting sudo askpass helper: %s", err))
+		}
+		defer srv.close()
+		command, cmdEnv = wrapSudoCommand(command, h.shell), append(append([]string(nil), h.env...), srv.env()...)
+	} else {
+		command, cmdEnv = h.applyAskpass(ctx, command)
+	}
 	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...) //nolint:noctx // see comment above
 	cmd.Env = cmdEnv
 	cmd.Dir = cwd

@@ -96,7 +96,11 @@ func (t *FilesystemToolset) resolvePathForSession(ctx context.Context, userPath 
 	}
 
 	workingDir, roots := acpSess.pathRoots(t.workingDir)
-	return resolvePathInRoots(userPath, workingDir, roots)
+	resolved, err := resolvePathInRoots(userPath, workingDir, roots)
+	if err != nil {
+		return "", err
+	}
+	return t.ResolveAndCheckPath(resolved)
 }
 
 func resolvePathInRoots(userPath, workingDir string, roots []string) (string, error) {

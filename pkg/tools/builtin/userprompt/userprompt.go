@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,6 +25,7 @@ func New() *ToolSet {
 }
 
 type ToolSet struct {
+	mu                 sync.RWMutex
 	elicitationHandler tools.ElicitationHandler
 }
 
@@ -39,6 +41,8 @@ type Response struct {
 }
 
 func (t *ToolSet) SetElicitationHandler(elicitationHandler tools.ElicitationHandler) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.elicitationHandler = elicitationHandler
 }
 
@@ -72,7 +76,13 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 }
 
 func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallResult, error) {
-	if t.elicitationHandler == nil {
+	t.mu.RLock()
+	handler := t.elicitationHandler
+	t.mu.RUnlock()
+	if scope, ok := tools.HandlerScopeFrom(ctx); ok {
+		handler = scope.Elicitation
+	}
+	if handler == nil {
 		return tools.ResultError("user_prompt tool is not available in this context (no elicitation handler configured)"), nil
 	}
 
@@ -95,7 +105,7 @@ func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallR
 		Meta:            meta,
 	}
 
-	result, err := t.elicitationHandler(ctx, req)
+	result, err := handler(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("elicitation request failed: %w", err)
 	}

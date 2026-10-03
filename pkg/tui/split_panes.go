@@ -19,7 +19,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/rendering/retained"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
 const paneMinWidth, paneMinHeight = 24, 6
@@ -501,20 +500,8 @@ func (m *appModel) paneSubagentCount(id string, nodeID subagent.NodeID) int {
 	if runner == nil || runner.App == nil {
 		return 0
 	}
-	if provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil {
-		if count, found := provider.SubagentTree().ChildCount(nodeID); found {
-			return count
-		}
-	}
-	// An initial live tree may not yet contain a restored session's root.
-	if sess := runner.App.Session(); sess != nil {
-		if snapshot := sess.GetSubagentTree(); snapshot != nil {
-			if node, found := subagentview.Find(snapshot.Nodes, nodeID); found {
-				return len(node.Children)
-			}
-		}
-	}
-	return 0
+	count, _ := runner.App.SubagentChildCount(nodeID)
+	return count
 }
 
 // hasRunningPane reports an animated activity glyph in an actually drawn

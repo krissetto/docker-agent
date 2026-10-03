@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -650,4 +651,143 @@ func TestObservationHealthyProgressAllowsProlongedOutage(t *testing.T) {
 	assert.Equal(t, []uint64{1}, sink.applied)
 	require.Len(t, sink.errors, 1)
 	assert.NotContains(t, sink.errors[0].Error(), "startup")
+}
+
+func TestObservationEpochChangeReplacesTranscriptAndInteractions(t *testing.T) {
+	for _, nextCursor := range []uint64{2, 10} {
+		t.Run(strconv.FormatUint(nextCursor, 10), func(t *testing.T) {
+			events := make(chan runtime.SessionEvent)
+			close(events)
+			sink := &approvalSink{}
+			first := obs(5, nil, events)
+			first.Initial[0].Epoch = "old"
+			first.Initial[0].Interactions = []runtime.InteractionSnapshot{{InteractionID: "stale"}}
+			result := projectObservationWithEpoch(t.Context(), sink, first, nil, "", func() {})
+			fresh := obs(nextCursor, []runtime.SessionEvent{{Epoch: "new", Event: runtime.AgentChoice("a", "s", "fresh tail")}}, events)
+			fresh.Initial[0].Epoch = "new"
+			fresh.Initial[0].Interactions = []runtime.InteractionSnapshot{{InteractionID: "fresh"}}
+			fresh.Initial[0].PendingInputs = []runtime.PendingInput{{TurnID: "new-input"}}
+			result = projectObservationWithEpoch(t.Context(), sink, fresh, &result.cursor, result.epoch, func() {})
+			assert.Equal(t, []uint64{5, nextCursor}, sink.resets)
+			assert.Equal(t, []string{"fresh"}, sink.interactions)
+			assert.Equal(t, []string{"new-input"}, sink.pending)
+			assert.Equal(t, []uint64{0}, sink.applied)
+			assert.Equal(t, nextCursor, result.cursor)
+			assert.Equal(t, "new", result.epoch)
+		})
+	}
+}
+
+func TestAttachmentReconnectCarriesEpochAndResetsAfterRestart(t *testing.T) {
+	calls := 0
+	observer := observerFunc(func(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		if calls > 2 {
+			return runtime.Observation{}, classifiedError(false)
+		}
+		events := make(chan runtime.SessionEvent)
+		close(events)
+		observation := obs(5, nil, events)
+		observation.Initial[0].Epoch = "old"
+		if calls == 2 {
+			assert.Equal(t, "old", options.SinceEpoch)
+			require.NotNil(t, options.Since)
+			assert.Equal(t, uint64(5), *options.Since)
+			observation.Initial[0].Epoch = "new"
+			observation.Initial[0].Cursor = 10
+		}
+		return observation, nil
+	})
+	sink := &recordingSink{}
+	a := &Attachment{done: make(chan struct{})}
+	a.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{now: time.Now, wait: func(context.Context, int) bool { return true }})
+	assert.Equal(t, []uint64{5, 10}, sink.resets)
+}
+
+func TestObservationSameEpochReconnectPreservesStreamingTail(t *testing.T) {
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	sink := &transcriptSink{}
+	first := obs(5, []runtime.SessionEvent{{Epoch: "process", Sequence: 6, Event: runtime.AgentChoice("a", "s", "first ")}}, events)
+	first.Initial[0].Epoch = "process"
+	first.Initial[0].Session = session.New(session.WithID("s"))
+	result := projectObservationWithEpoch(t.Context(), sink, first, nil, "", func() {})
+	second := obs(7, []runtime.SessionEvent{{Epoch: "process", Sequence: 7, Event: runtime.AgentChoice("a", "s", "second")}}, events)
+	second.Initial[0].Epoch = "process"
+	second.Initial[0].Session = first.Initial[0].Session.Clone()
+	result = projectObservationWithEpoch(t.Context(), sink, second, &result.cursor, result.epoch, func() {})
+	assert.Equal(t, []uint64{5}, sink.resets)
+	assert.Equal(t, "first second", sink.live)
+	assert.Equal(t, uint64(7), result.cursor)
+}
+
+type connectionSink struct {
+	recordingSink
+
+	transitions []bool
+	failures    []error
+}
+
+func (s *connectionSink) OnConnectionState(connected bool, err error) {
+	s.transitions = append(s.transitions, connected)
+	s.failures = append(s.failures, err)
+}
+
+func TestAttachmentReportsConnectionStateAcrossReconnect(t *testing.T) {
+	offline := errors.New("offline")
+	calls := 0
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		switch calls {
+		case 1, 3:
+			events := make(chan runtime.SessionEvent)
+			close(events)
+			return obs(0, nil, events), nil
+		case 2:
+			return runtime.Observation{}, offline
+		default:
+			return runtime.Observation{}, classifiedError(false)
+		}
+	})
+	sink := &connectionSink{}
+	waits := 0
+	attachment := &Attachment{done: make(chan struct{})}
+	attachment.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{
+		now: time.Now,
+		wait: func(context.Context, int) bool {
+			waits++
+			require.Len(t, sink.transitions, []int{2, 3, 5}[waits-1], "disconnect callback precedes backoff")
+			assert.False(t, sink.transitions[len(sink.transitions)-1])
+			return true
+		},
+	})
+	assert.Equal(t, []bool{true, false, false, true, false}, sink.transitions)
+	require.Len(t, sink.failures, 5)
+	require.NoError(t, sink.failures[0])
+	require.ErrorContains(t, sink.failures[1], "observation stream closed")
+	require.ErrorIs(t, sink.failures[2], offline)
+	require.NoError(t, sink.failures[3])
+	require.ErrorContains(t, sink.failures[4], "observation stream closed")
+	assert.Equal(t, 3, waits)
+	require.Len(t, sink.errors, 1)
+}
+
+func TestAttachmentReportsGapBeforeReconnectBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sink := &connectionSink{}
+	observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		return obs(0, []runtime.SessionEvent{{Gap: true}}, nil), nil
+	})
+	attachment := &Attachment{done: make(chan struct{})}
+	attachment.runWithRetry(ctx, observer, sink, observationRetryPolicy{
+		now: time.Now,
+		wait: func(context.Context, int) bool {
+			assert.Equal(t, []bool{true, false}, sink.transitions)
+			require.NoError(t, sink.failures[1])
+			cancel()
+			return false
+		},
+	})
+	assert.Empty(t, sink.errors)
 }

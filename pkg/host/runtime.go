@@ -18,6 +18,7 @@ import (
 // RuntimeOptions controls host-specific session runtime behavior while keeping
 // canonical loader/model/budget wiring consistent across CLI and embedders.
 type RuntimeOptions struct {
+	SessionService            *runtime.SessionService
 	WorkingDir                string
 	ManagedOAuth              bool
 	UnmanagedOAuthRedirectURI string
@@ -59,6 +60,9 @@ func NewSessionRuntime(ctx context.Context, source config.Source, runConfig *con
 		slog.WarnContext(ctx, "Failed to obtain shared models.dev store", "error", storeErr)
 	}
 	runtimeOpts := []runtime.Opt{runtime.WithSessionStore(store), runtime.WithCurrentAgent(defaultAgent.Name()), runtime.WithWorkingDir(cfg.WorkingDir), runtime.WithManagedOAuth(options.ManagedOAuth), runtime.WithUnmanagedOAuthRedirectURI(options.UnmanagedOAuthRedirectURI), runtime.WithModelSwitcherConfig(modelSwitcher), runtime.WithBudget(loaded.Budget), runtime.WithNamedBudgets(loaded.Budgets, loaded.AgentBudgets)}
+	if options.SessionService != nil {
+		runtimeOpts = append(runtimeOpts, runtime.WithSessionService(options.SessionService))
+	}
 	if options.Tracer != nil {
 		runtimeOpts = append(runtimeOpts, runtime.WithTracer(options.Tracer))
 	}

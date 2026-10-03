@@ -95,3 +95,16 @@ column across renames (cards remember the column they are in by id); when
 omitted, the id is derived from the column's name. When a card enters a
 column with a `prompt`, that prompt is delivered to the card's agent as its
 next message.
+
+### Session authority
+
+Board cards still launch and attach their existing native terminal session in
+tmux, including the per-card worktree and editor/diff workflows. The card's
+private `--listen` Unix socket now carries canonical `/api/v2/sessions` snapshot,
+message, and event requests through the same server authority as the terminal.
+Moving a card forwards submits an idempotent canonical input; it does not start
+a separate board execution loop. Reconnects use the snapshot's epoch and cursor;
+a retention gap or changed epoch forces a fresh snapshot. Outstanding interaction
+requests mark the card paused; attach to that card to answer them in its native
+session UI. Socket filesystem permissions remain the board's local access scope;
+this does not expose an unauthenticated TCP listener.

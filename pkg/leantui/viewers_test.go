@@ -81,7 +81,7 @@ func TestViewerShutdownDetachesWithoutCancelAndCleansOwnedOnce(t *testing.T) {
 func TestUnsupportedSubagentRuntimeIsExplicit(t *testing.T) {
 	m, _ := sessionModel(t)
 	m.attachSubagentViewer(t.Context(), "abcde")
-	assert.Contains(t, strings.Join(m.screen.Transcript.Lines(80, 0, false, nil, nil), "\n"), "does not expose live subagent attachment")
+	assert.Contains(t, strings.Join(m.screen.Transcript.Lines(80, 0, false, nil, nil), "\n"), "no longer available to open")
 }
 
 func TestViewerFocusKeepsTerminalGeometry(t *testing.T) {

@@ -44,10 +44,33 @@ type SpawnArgs struct {
 	Task  string `json:"task" jsonschema:"What the subagent should do, written so it stands on its own: the subagent sees nothing but this text."`
 }
 
+// DeliveryMode selects safe-boundary guidance or a separate FIFO turn.
+type DeliveryMode string
+
+const (
+	DeliveryGuidance DeliveryMode = "guidance"
+	DeliveryNewTurn  DeliveryMode = "new_turn"
+)
+
 // SendArgs are the arguments for send_message.
 type SendArgs struct {
-	To      string `json:"to" jsonschema:"The id of one of your own direct children returned by spawn_subagent, or 'parent' if you were spawned. Sibling and unrelated agent ids are not addressable."`
-	Message string `json:"message" jsonschema:"The message body to deliver."`
+	To           string       `json:"to" jsonschema:"The id of one of your own direct children returned by spawn_subagent, or 'parent' if you were spawned. Sibling and unrelated agent ids are not addressable."`
+	Message      string       `json:"message" jsonschema:"The message body to deliver."`
+	RequestID    string       `json:"request_id,omitempty" jsonschema:"Stable identity for this message. Reuse it only when retrying exactly the same target, message and delivery mode; changed content is rejected."`
+	DeliveryMode DeliveryMode `json:"delivery_mode,omitempty" jsonschema:"guidance (default) joins a busy recipient at its next safe boundary ahead of ordinary turns; new_turn stays in the ordinary FIFO for a separate turn.,enum=guidance,enum=new_turn"`
+}
+
+// DeliveryReceipt acknowledges inbox admission, never model consumption.
+type DeliveryReceipt struct {
+	RequestID   string       `json:"request_id"`
+	Target      string       `json:"target"`
+	Accepted    bool         `json:"accepted"`
+	Idempotent  bool         `json:"idempotent"`
+	Durable     bool         `json:"durable"`
+	Queued      bool         `json:"queued"`
+	Disposition DeliveryMode `json:"disposition,omitempty"`
+	Rejection   string       `json:"rejection,omitempty"`
+	Detail      string       `json:"detail,omitempty"`
 }
 
 // ReadArgs are the arguments for read_subagent.
@@ -79,7 +102,7 @@ func Definitions() []tools.Tool {
 		{
 			Name:        ToolSendMessage,
 			Category:    "subagent",
-			Description: "Send an actionable message to one of your own direct children by id, or to 'parent' if you were spawned; sibling and unrelated ids are not addressable. Use it for a needed decision or blocker, preventing wasted work, a material scope change or correction, or a follow-up task, not routine progress or nudges. Delivery is asynchronous: a busy recipient queues it and an idle one starts another turn. Final responses are reported automatically as potentially truncated previews.",
+			Description: "Send an actionable message to one of your own direct children by id, or to 'parent' if you were spawned; sibling and unrelated ids are not addressable. Use it for a needed decision or blocker, preventing wasted work, a material scope change or correction, or a follow-up task, not routine progress or nudges. Delivery is asynchronous: guidance (default) joins a busy recipient at its next safe boundary, ahead of ordinary queued turns; new_turn waits in the ordinary FIFO for a separate turn. An idle recipient wakes in either mode. The receipt acknowledges inbox admission, not model consumption; durable means admission survived storage commit. Reuse request_id for exact retries, never for changed content. Final responses are reported automatically as potentially truncated previews.",
 			Parameters:  tools.MustSchemaFor[SendArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Send Message"},
 		},

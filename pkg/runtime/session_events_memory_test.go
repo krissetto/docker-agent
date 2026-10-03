@@ -21,5 +21,5 @@ func TestReplayEvictionClearsRetiredCorrelationOwnership(t *testing.T) {
 	require.Len(t, replay, 2)
 	require.True(t, replay[0].Gap)
 	require.EqualValues(t, 2, replay[0].FirstAvailable)
-	require.Equal(t, SequencedSessionEvent{Sequence: 2, RequestID: second.requestID, InteractionID: second.interactionID, Event: second.event}, replay[1])
+	require.Equal(t, SequencedSessionEvent{Epoch: h.epoch, Sequence: 2, RequestID: second.requestID, InteractionID: second.interactionID, Event: second.event}, replay[1])
 }

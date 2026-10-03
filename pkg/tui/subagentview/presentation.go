@@ -94,3 +94,22 @@ func Rows(nodes []subagent.NodeSnapshot, collapsed map[subagent.NodeID]bool) []R
 	walk(nodes, 0, "", "")
 	return rows
 }
+
+// UseSubagentsLabel distinguishes the canonical session-tree policy from the
+// saved local default for new sessions.
+func UseSubagentsLabel(enabled, sessionTree, pending, unavailable bool) string {
+	state := "OFF"
+	if enabled {
+		state = "ON"
+	}
+	switch {
+	case unavailable:
+		return "Use subagents: unavailable"
+	case pending:
+		return "Use subagents (this session tree): …"
+	case sessionTree:
+		return "Use subagents (this session tree): " + state
+	default:
+		return "Use subagents (local default): " + state
+	}
+}

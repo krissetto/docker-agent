@@ -39,7 +39,7 @@ func TestSecondSubmissionDuringSettlementDoesNotReportMailboxCapacity(t *testing
 	d.mu.Unlock()
 	rt.sessionDrivers.signalWork()
 	coordinationAwait(t, h, second.TurnID)
-	obs, err := h.Observe(t.Context(), ObserveOptions{Since: new(uint64)})
+	obs, err := h.Observe(t.Context(), ObserveOptions{Since: new(uint64), SinceEpoch: sessionObservationEpoch(t, h)})
 	require.NoError(t, err)
 	defer obs.Cancel()
 	for _, event := range obs.Replay {
@@ -84,7 +84,7 @@ func TestCompetingWakeDoesNotPublishFalseStartCapacity(t *testing.T) {
 	d.WakePending()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	obs, err := h.Observe(ctx, ObserveOptions{Since: new(uint64)})
+	obs, err := h.Observe(ctx, ObserveOptions{Since: new(uint64), SinceEpoch: sessionObservationEpoch(t, h)})
 	require.NoError(t, err)
 	defer obs.Cancel()
 	for _, event := range obs.Replay {

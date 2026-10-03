@@ -402,3 +402,32 @@ func TestInstructions(t *testing.T) {
 	ts, _ := newTS(t, &fakeDoer{})
 	require.NotEmpty(t, ts.Instructions())
 }
+
+func TestBackgroundDeliveryRetainsInvokingRuntime(t *testing.T) {
+	ts, _ := newTS(t, &fakeDoer{statuses: []int{http.StatusInternalServerError}})
+	ts.minInterval = 0
+	ts.maxAttempts = 2
+	retrying := make(chan struct{}, 2)
+	finish := make(chan struct{})
+	ts.sleep = func(ctx context.Context, _ time.Duration) bool {
+		retrying <- struct{}{}
+		select {
+		case <-finish:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	first, second := &fakeRuntime{recall: true}, &fakeRuntime{recall: true}
+	_, err := ts.send(t.Context(), SendArgs{Message: "first"}, first)
+	require.NoError(t, err)
+	<-retrying
+	_, err = ts.send(t.Context(), SendArgs{Message: "second"}, second)
+	require.NoError(t, err)
+	<-retrying
+	close(finish)
+	ts.wg.Wait()
+	require.Len(t, first.messages(), 1)
+	require.Len(t, second.messages(), 1)
+	require.NoError(t, ts.Stop(t.Context()))
+}

@@ -71,6 +71,7 @@ type startupToolSeed struct {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
+	sessionService   *SessionService
 	harnessFactory   *harness.Factory
 	commandEvaluator *CommandEvaluatorFactory
 
@@ -82,6 +83,7 @@ type LocalRuntime struct {
 	drainCtx                  context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
 	lifecycleCtx              context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
 	toolMap                   map[string]ToolHandlerFunc
+	todoToolsets              map[*todotool.ToolSet]*todotool.ToolSet
 	toolDeferrals             tools.DeferralTracker
 	team                      *team.Team
 	agents                    *agentRouter
@@ -212,8 +214,9 @@ type LocalRuntime struct {
 	// change. Protected by toolsChangedMu because MCP change-notification
 	// goroutines call emitToolsChanged concurrently, mirroring
 	// onBackgroundEvent/backgroundEventMu below.
-	toolsChangedMu sync.RWMutex
-	onToolsChanged func(Event)
+	toolsChangedMu       sync.RWMutex
+	onToolsChanged       func(Event)
+	toolsChangedReleases []func()
 
 	// onBackgroundEvent is called for events surfaced from detached
 	// background work (e.g. background agent tasks). Protected by
@@ -722,7 +725,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	r.startupToolsCtx, r.startupToolsCancel = context.WithCancel(context.WithoutCancel(ctx))
 	r.bgAgents = agenttool.NewHandler(r)
 	r.fallback.prepareMessages = r.prepareMessagesForModel
-	r.fallback.prepareTools = r.filterDelegationTools
+	r.fallback.prepareTools = r.filterSessionDelegationTools
 
 	// stripUnsupportedModalitiesTransform captures the runtime closure to
 	// resolve the agent from Input.AgentName, so it lives here rather
@@ -771,6 +774,9 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// Derive the per-limit fields once, after all policy options compose.
 	r.applyResourcePolicy()
 
+	if r.sessionService == nil {
+		r.sessionService = NewSessionService(SessionServiceOptions{MaxSessions: UnlimitedSessionResources})
+	}
 	r.sessionEvents = newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes)
 	r.sessionDrivers = newSessionDriverRegistry(r)
 	r.subagents = newSubagentManager(r)
@@ -786,25 +792,26 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		}
 	}
 
-	// Bind every todo toolset to session-keyed durable storage when the configured
-	// session store supports it. Shared toolset instances remain shared, while
-	// their values cannot leak across session IDs.
-	if store, ok := r.sessionStore.(session.TodoStore); ok {
-		var sharedTodoStorage *todotool.SessionStorage
-		for _, name := range r.team.AgentNames() {
-			if a, err := r.team.Agent(name); err == nil {
-				for _, toolset := range a.ToolSets() {
-					if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
-						adapter := runtimeTodoStore{store: store, changed: r.publishTodosChanged}
-						if todoSet.Shared() {
-							if sharedTodoStorage == nil {
-								adapter.scope = r.todoRootSessionID
-								sharedTodoStorage = todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext)
-							}
-							todoSet.SetStorage(sharedTodoStorage)
-						} else {
-							todoSet.SetStorage(todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext))
+	// Bind runtime-owned todo instances without mutating the team definitions.
+	r.todoToolsets = make(map[*todotool.ToolSet]*todotool.ToolSet)
+	store, ok := r.sessionStore.(session.TodoStore)
+	if !ok {
+		store = session.NewInMemorySessionStore().(session.TodoStore)
+	}
+	var sharedTodoStorage *todotool.SessionStorage
+	for _, name := range r.team.AgentNames() {
+		if a, err := r.team.Agent(name); err == nil {
+			for _, toolset := range a.ToolSets() {
+				if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
+					adapter := runtimeTodoStore{store: store, changed: r.publishTodosChanged}
+					if todoSet.Shared() {
+						if sharedTodoStorage == nil {
+							adapter.scope = r.todoRootSessionID
+							sharedTodoStorage = todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext)
 						}
+						r.todoToolsets[todoSet] = todoSet.BindStorage(sharedTodoStorage)
+					} else {
+						r.todoToolsets[todoSet] = todoSet.BindStorage(todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext))
 					}
 				}
 			}
@@ -890,6 +897,12 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		r.observers = append([]EventObserver{obs}, r.observers...)
 	}
 
+	if err := r.sessionService.register(r); err != nil {
+		lifecycleCancel()
+		r.startupToolsCancel()
+		return nil, err
+	}
+
 	slog.DebugContext(ctx, "Creating new runtime", "agent", r.agents.Name(), "available_agents", agents.Size())
 
 	return r, nil
@@ -935,7 +948,7 @@ func (r *LocalRuntime) AgentTools(ctx context.Context, agentName string) ([]tool
 	if err != nil {
 		return nil, err
 	}
-	return a.Tools(ctx)
+	return a.Tools(todotool.WithBindings(ctx, r.todoToolsets))
 }
 
 func (r *LocalRuntime) CurrentAgentCommands(context.Context) types.Commands {
@@ -946,7 +959,7 @@ func (r *LocalRuntime) CurrentAgentCommands(context.Context) types.Commands {
 // This starts the toolsets if needed and returns all available tools.
 func (r *LocalRuntime) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	a := r.currentAgent()
-	return a.Tools(ctx)
+	return a.Tools(todotool.WithBindings(ctx, r.todoToolsets))
 }
 
 // ToolsetState is the coarse lifecycle bucket the agent inspector renders as a
@@ -1719,6 +1732,7 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 	if r.sessionEvents != nil {
 		r.sessionEvents.Close()
 	}
+	r.sessionService.unregister(r)
 	return nil
 }
 
@@ -1730,15 +1744,24 @@ func (r *LocalRuntime) Close() error {
 
 // UpdateSessionTitle persists the session title via the session store.
 func (r *LocalRuntime) UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error {
-	sess.SetTitle(title)
+	if sess == nil {
+		return &SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationUpdateTitle}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-		d.events.Publish(sess.ID, SessionTitle(sess.ID, title))
-	} else {
-		r.sessionEvents.Publish(sess.ID, SessionTitle(sess.ID, title))
+		return d.UpdateTitle(ctx, title)
 	}
+	unlockMetadata := sess.LockMetadata()
+	defer unlockMetadata()
 	if r.sessionStore != nil {
-		return r.sessionStore.UpdateSession(ctx, sess)
+		if err := r.sessionStore.UpdateSessionTitle(ctx, sess.ID, title); err != nil {
+			return err
+		}
 	}
+	sess.SetTitle(title)
+	r.sessionEvents.Publish(sess.ID, SessionTitle(sess.ID, title))
 	return nil
 }
 
@@ -1766,17 +1789,27 @@ func (r *LocalRuntime) ResetStartupInfo() {}
 // to update the tool count immediately.
 func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 	r.toolsChangedMu.Lock()
+	defer r.toolsChangedMu.Unlock()
+	for _, release := range r.toolsChangedReleases {
+		release()
+	}
+	r.toolsChangedReleases = nil
 	r.onToolsChanged = handler
-	r.toolsChangedMu.Unlock()
-
+	if handler == nil {
+		return
+	}
+	seen := make(map[tools.ChangeSubscriber]bool)
 	for _, name := range r.team.AgentNames() {
 		a, err := r.team.Agent(name)
 		if err != nil {
 			continue
 		}
 		for _, ts := range a.ToolSets() {
-			if n, ok := tools.As[tools.ChangeNotifier](ts); ok {
-				n.SetToolsChangedHandler(r.emitToolsChanged)
+			if n, ok := tools.As[tools.ChangeSubscriber](ts); ok && !seen[n] {
+				seen[n] = true
+				release := n.SubscribeToolsChanged(r.emitToolsChanged)
+				stop := context.AfterFunc(r.lifetime(), release)
+				r.toolsChangedReleases = append(r.toolsChangedReleases, func() { stop(); release() })
 			}
 		}
 	}

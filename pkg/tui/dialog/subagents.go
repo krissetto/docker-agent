@@ -16,8 +16,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
-// SubagentsPolicyMsg updates only the saved policy, never the tree or selection.
-type SubagentsPolicyMsg struct{ Enabled bool }
+// SubagentsPolicyMsg updates only the delegation policy shown, never the tree
+// or selection. SessionTree marks the canonical per-tree policy (otherwise the
+// local default); Pending shows a read in flight.
+type SubagentsPolicyMsg struct{ Enabled, SessionTree, Pending bool }
 
 // SubagentsCapabilitiesMsg marks optional controls without affecting browsing.
 type SubagentsCapabilitiesMsg struct{ Policy, Stop bool }
@@ -32,6 +34,7 @@ type SubagentsRefreshMsg struct {
 type subagentsDialog struct {
 	pickerCore
 	useSubagents                       bool
+	policySessionTree, policyPending   bool
 	stopTarget                         subagent.NodeID
 	stopIdentity                       string
 	policyUnavailable, stopUnavailable bool
@@ -96,12 +99,14 @@ func (d *subagentsDialog) rebuild(id subagent.NodeID) {
 	d.renderBody(true)
 	d.ensureSelectedVisible()
 }
+
 func (d *subagentsDialog) selectedID() subagent.NodeID {
 	if d.selected >= 0 && d.selected < len(d.rows) {
 		return d.rows[d.selected].Node.ID
 	}
 	return ""
 }
+
 func (d *subagentsDialog) attach() tea.Cmd {
 	id := d.selectedID()
 	if id == "" || !d.claimResponse() {
@@ -109,6 +114,7 @@ func (d *subagentsDialog) attach() tea.Cmd {
 	}
 	return tea.Sequence(closeDialogCmd(), core.CmdHandler(messages.OpenSubagentMsg{NodeID: string(id)}))
 }
+
 func (d *subagentsDialog) move(delta int) {
 	if len(d.rows) == 0 {
 		return
@@ -131,6 +137,7 @@ func (d *subagentsDialog) branch(expand bool) {
 		d.rebuild(row.Parent)
 	}
 }
+
 func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) {
 	defer func() {
 		if preparesDialogBody(msg) {
@@ -178,7 +185,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 		}
 		d.renderBody(true)
 	case SubagentsPolicyMsg:
-		d.useSubagents = msg.Enabled
+		d.useSubagents, d.policySessionTree, d.policyPending = msg.Enabled, msg.SessionTree, msg.Pending
 		d.renderBody(true)
 	case animation.TickMsg:
 		d.tickHover(msg)
@@ -243,7 +250,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 				d.stopIdentity = cleanDetail(d.rows[d.selected].Node.DisplayName()) + " (" + cleanDetail(string(d.stopTarget)) + ")"
 			}
 		case "u":
-			if d.policyUnavailable {
+			if d.policyUnavailable || d.policyPending {
 				return d, nil
 			}
 			return d, core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: !d.useSubagents})
@@ -279,6 +286,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 	}
 	return d, nil
 }
+
 func (d *subagentsDialog) SetSize(w, h int) tea.Cmd {
 	cmd := d.pickerCore.SetSize(w, h)
 	d.renderBody(true)
@@ -300,22 +308,16 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	if len(lines) == 0 {
 		lines = []string{styles.MutedStyle.Render("No subagents in this session.")}
 	}
-	label := "Use subagents: ON (global)"
-	if !d.useSubagents {
-		label = "Use subagents: OFF (global)"
-	}
+	label := subagentview.UseSubagentsLabel(d.useSubagents, d.policySessionTree, d.policyPending, d.policyUnavailable)
 	stopLabel := "Stop subtree"
-	if d.policyUnavailable {
-		label = "Use subagents: unavailable"
-	}
 	if d.stopUnavailable {
 		stopLabel = "Stop subtree: unavailable"
 	}
 	actions := actionsForKeys("u", label, "enter", "Attach", "s", stopLabel)
-	actions[0].Disabled = d.policyUnavailable
+	actions[0].Disabled = d.policyUnavailable || d.policyPending
 	actions[2].Disabled = !d.canStop()
 	if d.stopTarget != "" {
-		lines = append([]string{styles.MutedStyle.Render(ansi.Hardwrap("Permanently stop subtree "+d.stopIdentity+"? Children stop too. History remains. [y] Confirm [n/esc] Cancel", inner, true))}, lines...)
+		lines = append([]string{styles.MutedStyle.Render(ansi.Hardwrap("Stop and drain subtree "+d.stopIdentity+"? Children stop too. History remains. [y] Confirm [n/esc] Cancel", inner, true))}, lines...)
 		actions = nil
 	}
 	if len(actions) > 1 {
@@ -332,6 +334,7 @@ func (d *subagentsDialog) renderBody(prepare bool) string {
 	}
 	return d.RenderScrollableBody(styles.DialogStyle, width, header, strings.Join(lines, "\n"), footer)
 }
+
 func (d *subagentsDialog) canStop() bool {
 	if d.stopUnavailable || d.selected < 0 || d.selected >= len(d.rows) {
 		return false

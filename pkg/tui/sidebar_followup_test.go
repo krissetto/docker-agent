@@ -118,7 +118,8 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 				childNode.Node.ID:           {NodeID: childNode.Node.ID, Agent: "worker", Session: child, ParentAgent: "director", ParentSessionID: parent.ID},
 				"grand-full-canonical-node": {NodeID: "grand-full-canonical-node", Agent: "reviewer", Session: grand, ParentAgent: "worker", ParentSessionID: child.ID},
 			}}
-			application := app.New(t.Context(), &openSubagentSessions{}, parent, runtime.SessionBinding{AgentName: "director"}, app.WithRuntimeServices(services))
+			views := services.preparedViews(parent)
+			application := app.New(t.Context(), views, parent, runtime.SessionBinding{AgentName: "director"}, app.WithRuntimeServices(services))
 			root := newSidebarProgramRoot(t, application)
 			_, _ = root.updateWithLifecycle(runtime.TeamInfo([]runtime.AgentDetails{{Name: "director"}, {Name: "worker"}}, "director"))
 			program := startTestProgram(t, root, &shellProgramModel{root: root}, tea.WithOutput(&cacheProgramWriter{}))
@@ -398,7 +399,8 @@ func TestActualProgramSidebarBranchToggleTwiceRetainsControlIdentity(t *testing.
 	child := session.New(session.WithID("branch-child"), session.WithAgentName("worker"))
 	child.SetSubagentTree(&tree)
 	services := &sidebarAttachRuntime{closeTabRuntime: newCloseTabRuntime("root", false), infos: map[subagent.NodeID]runtime.SubagentAttachInfo{"branch-full-node": {NodeID: "branch-full-node", Session: child, Agent: "worker", ParentSessionID: sess.ID, ParentAgent: "root"}}}
-	application := app.New(t.Context(), &openSubagentSessions{}, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
+	views := services.preparedViews(sess)
+	application := app.New(t.Context(), views, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
 	root := newSidebarProgramRoot(t, application)
 	coalescer := tuiinput.NewMouseCoalescer()
 	t.Cleanup(coalescer.Stop)

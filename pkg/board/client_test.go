@@ -2,6 +2,7 @@ package board
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -108,4 +109,46 @@ func TestStreamEventsNoHeartbeatNoWatchdog(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
+}
+
+func TestCanonicalSnapshotAndEpochObservation(t *testing.T) {
+	socket := serveUnix(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/sessions/s/snapshot":
+			fmt.Fprint(w, `{"session":{"id":"s","title":"Current"},"status":{"state":"running"},"epoch":"epoch-one","cursor":9,"interactions":[{"interaction_id":"ask","kind":"confirmation"}]}`)
+		case "/api/v2/sessions/s/events":
+			assert.Equal(t, "9", r.URL.Query().Get("since"))
+			assert.Equal(t, "epoch-one", r.URL.Query().Get("since_epoch"))
+			fmt.Fprint(w, "data: {\"type\":\"snapshot\",\"snapshot\":{\"epoch\":\"epoch-one\",\"cursor\":9,\"status\":{\"state\":\"running\"}}}\n\n")
+			fmt.Fprint(w, "data: {\"type\":\"event\",\"envelope\":{\"epoch\":\"epoch-two\",\"sequence\":1,\"event\":{\"type\":\"stream_started\"}}}\n\n")
+		default:
+			t.Errorf("unexpected endpoint %s", r.URL.Path)
+		}
+	}))
+	client := newClient(socket, "s")
+	snap, err := client.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "Current", snap.Title)
+	assert.True(t, snap.Paused)
+	err = client.StreamEvents(t.Context(), snap.LastEventSeq, func(ev event) bool {
+		if ev.Type == eventBaseline {
+			require.NotNil(t, ev.Baseline)
+			assert.Equal(t, "running", ev.Baseline.State)
+			return true
+		}
+		assert.Equal(t, eventGap, ev.Type)
+		return false
+	})
+	require.NoError(t, err)
+}
+
+func TestCanonicalFollowupKeepsIdempotency(t *testing.T) {
+	socket := serveUnix(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v2/sessions/s/messages", r.URL.Path)
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"content":"follow up","request_id":"key"}`, string(body))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	require.NoError(t, newClient(socket, "s").Followup(t.Context(), "key", "follow up"))
 }

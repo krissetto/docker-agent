@@ -395,7 +395,8 @@ func (s *Supervisor) projectRoutedEvent(sessionID string, expectedApp *app.App, 
 	}
 	if _, ok := msg.(*runtime.SubagentTreeEvent); ok {
 		// Topology invalidates descendant presentation only, never lifecycle.
-		if runner.App == nil || s.runtimeTreeInvalidationOwnerLocked(runner.App.Runtime()) == runner.ID {
+		// Observed (remote) trees are per view; a shared live tree notifies once.
+		if runner.App == nil || !runner.App.LiveRuntimeTree() || s.runtimeTreeInvalidationOwnerLocked(runner.App.Runtime()) == runner.ID {
 			s.notifyTabsUpdated()
 		}
 	}
@@ -472,38 +473,47 @@ func (s *Supervisor) runtimeTreeInvalidationOwnerLocked(services app.Services) s
 	return fallback
 }
 
-// tabActivity derives presentation state from the runtime's current tree.
+// tabActivity derives presentation state from the view's current tree.
 // The snapshot is synchronous and authoritative, which also seeds tabs opened
 // after a tree event and naturally clears state after replacement or teardown.
-func tabActivity(runner *SessionTab, snapshots map[*subagent.Tree]subagent.Snapshot) (messages.TabActivity, bool) {
+// attention reports a strict descendant waiting on a human, from the same
+// portable tree for in-process and remote owners.
+func tabActivity(runner *SessionTab, snapshots map[*subagent.Tree]subagent.Snapshot) (activity messages.TabActivity, attached, attention bool) {
+	own := ownSessionActivity(runner.sessionState)
 	if runner.App == nil {
-		return ownSessionActivity(runner.sessionState), false
+		return own, false, false
 	}
-
-	attached := runner.App.AttachedSubagent()
-	isAttached := attached != nil
-	provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree })
-	if !ok || provider.SubagentTree() == nil {
-		return ownSessionActivity(runner.sessionState), isAttached
-	}
-
+	attachedNode := runner.App.AttachedSubagent()
+	attached = attachedNode != nil
 	var nodeID subagent.NodeID
-	if attached != nil {
-		nodeID = attached.NodeID
-	} else if sess := runner.App.Session(); sess != nil {
+	sess := runner.App.Session()
+	if attachedNode != nil {
+		nodeID = attachedNode.NodeID
+	} else if sess != nil {
 		nodeID = subagent.SessionRootID(sess.ID)
 	}
+	var snapshot subagent.Snapshot
+	// One in-process tree is shared by every view of its runtime: read it once per rebuild.
+	if provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil {
+		tree := provider.SubagentTree()
+		cached, found := snapshots[tree]
+		if !found {
+			cached = tree.Snapshot()
+			snapshots[tree] = cached
+		}
+		snapshot = cached
+	} else if view := runner.App.SubagentTreeSnapshot(); view != nil {
+		snapshot = *view
+	} else {
+		return own, attached, false
+	}
 	if nodeID == "" {
-		return messages.TabActivityNone, isAttached
+		return messages.TabActivityNone, attached, false
 	}
-
-	tree := provider.SubagentTree()
-	snapshot, cached := snapshots[tree]
-	if !cached {
-		snapshot = tree.Snapshot()
-		snapshots[tree] = snapshot
+	if sess != nil {
+		attention = len(app.DescendantAttention(snapshot, sess.ID)) > 0
 	}
-	return deriveTabActivity(snapshot, nodeID, ownSessionActivity(runner.sessionState)), isAttached
+	return deriveTabActivity(snapshot, nodeID, own), attached, attention
 }
 
 func deriveTabActivity(snapshot subagent.Snapshot, nodeID subagent.NodeID, own messages.TabActivity) messages.TabActivity {
@@ -565,7 +575,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			title = filepath.Base(runner.WorkingDir)
 		}
 
-		activity, attached := tabActivity(runner, snapshots)
+		activity, attached, attention := tabActivity(runner, snapshots)
 		tabs = append(tabs, messages.TabInfo{
 			SessionID:      id,
 			Title:          title,
@@ -573,7 +583,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			IsRunning:      sessionStateRunning(runner.sessionState),
 			IsAttached:     attached,
 			Activity:       activity,
-			NeedsAttention: runner.NeedsAttn,
+			NeedsAttention: runner.NeedsAttn || attention || runner.projection.RecoveryUncertain(),
 		})
 	}
 	return tabs

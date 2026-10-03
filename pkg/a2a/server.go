@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -49,6 +50,8 @@ func routableAddr(addr string) string {
 }
 
 type RunOptions struct {
+	// SessionRuntime is borrowed; invocation cancellation never shuts it down.
+	SessionRuntime runtime.SessionRuntime
 	CLISafety      session.SafetyPolicy
 	OnSafetyPolicy func(servesafety.Resolved)
 	AuthToken      string
@@ -128,7 +131,7 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 }
 
 func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, options.SessionRuntime)
 	if err != nil {
 		return nil, err
 	}

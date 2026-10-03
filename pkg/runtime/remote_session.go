@@ -339,6 +339,14 @@ func (s *remoteSession) Cancel(ctx context.Context, turnID string) (CancelResult
 	}
 	return out, err
 }
+
+func (s *remoteSession) StopSubtree(ctx context.Context) error {
+	if !s.Metadata().Capabilities.StopSubtree {
+		return sessionUnsupported(s.ID(), "stop_subtree")
+	}
+	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("stop-subtree"), nil, nil)
+}
+
 func (s *remoteSession) Release(context.Context) error { return nil }
 func (s *remoteSession) Observe(ctx context.Context, options ObserveOptions) (Observation, error) {
 	return s.runtime.client.attachSession(ctx, s.ID(), options)
@@ -620,7 +628,7 @@ func (m remoteSessionMetadata) runtime() SessionMetadata {
 		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: slices.Clone(capabilities.AvailableModels), Durability: subagent.Durability(capabilities.Durability),
 		Compaction: capabilities.Compaction, TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching,
-		ContextInspection: capabilities.ContextInspection, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
+		DelegationPolicy: capabilities.DelegationPolicy, StopSubtree: capabilities.StopSubtree, ContextInspection: capabilities.ContextInspection, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
 		ForkSkills: capabilities.ForkSkills, Pause: capabilities.Pause, ModelCatalogRefresh: capabilities.ModelCatalogRefresh, ThinkingLevels: capabilities.ThinkingLevels,
 		Todos: capabilities.Todos,
 	}}
@@ -702,7 +710,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 	kind := SessionErrorInvalid
 	validKind := func(candidate SessionErrorKind) bool {
 		switch candidate {
-		case SessionErrorPersistence, SessionErrorConflict, SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession:
+		case SessionErrorPersistence, SessionErrorConflict, SessionErrorInterrupted, SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession:
 			return true
 		default:
 			return false
@@ -740,6 +748,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	if options.Since != nil {
 		q := u.Query()
 		q.Set("since", strconv.FormatUint(*options.Since, 10))
+		if options.SinceEpoch != "" {
+			q.Set("since_epoch", options.SinceEpoch)
+		}
 		u.RawQuery = q.Encode()
 	}
 	streamCtx, cancelStream := context.WithCancel(ctx)
@@ -799,7 +810,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	for _, item := range snapshots {
 		replaySequences[item.Status.SessionID] = item.Cursor
 	}
-	if options.Since != nil {
+	baseline := options.Since == nil || options.SinceEpoch != snapshot.Epoch
+	replayEpochs := map[string]string{id: snapshot.Epoch}
+	if !baseline {
 		replaySequences[id] = *options.Since
 	}
 	for {
@@ -823,6 +836,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			}
 			snapshots = append(snapshots, additional)
 			replaySequences[additional.Status.SessionID] = additional.Cursor
+			replayEpochs[additional.Status.SessionID] = additional.Epoch
 			continue
 		}
 		if message.Type == "ready" {
@@ -845,8 +859,8 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			return Observation{}, protocolError(decodeErr)
 		}
 		previous, known := replaySequences[envelope.SessionID]
-		zeroSeed := options.Since == nil && known && envelope.IsLiveSeed()
-		if (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
+		zeroSeed := baseline && known && envelope.IsLiveSeed()
+		if envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
 			resp.Body.Close()
 			cancel()
 			return Observation{}, protocolError(errors.New("invalid session replay sequence or session"))
@@ -902,6 +916,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 					return
 				}
 				lastSequences[additional.Status.SessionID] = additional.Cursor
+				replayEpochs[additional.Status.SessionID] = additional.Epoch
 				select {
 				case sessionsAdded <- additional:
 				case <-streamCtx.Done():
@@ -919,7 +934,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				return
 			}
 			previous := lastSequences[env.SessionID]
-			if (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
+			if env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
 				errorsCh <- protocolError(fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous))
 				return
 			}
@@ -1048,7 +1063,7 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 	if in.Session == nil || in.Session.ID == "" || in.Status.SessionID != in.Session.ID {
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
-	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, TranscriptPosition: in.TranscriptPosition}
+	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition}
 	for _, pending := range in.PendingInputs {
 		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, ReportOutcome: pending.ReportOutcome, InputMode: pending.InputMode})
 	}
@@ -1069,7 +1084,7 @@ func (c *Client) decodeSessionEnvelope(in remoteSessionEnvelope) (SessionEvent, 
 	if in.Version != sessionWireVersion || in.SessionID == "" || (in.Sequence == 0 && !in.Gap && len(in.Event) == 0) {
 		return SessionEvent{}, errors.New("invalid session envelope identity or version")
 	}
-	out := SessionEvent{Version: in.Version, SessionID: in.SessionID, TurnID: in.TurnID, InteractionID: in.InteractionID, Sequence: in.Sequence, TranscriptPosition: in.TranscriptPosition, Gap: in.Gap, FirstAvailable: in.FirstAvailable}
+	out := SessionEvent{Version: in.Version, SessionID: in.SessionID, TurnID: in.TurnID, InteractionID: in.InteractionID, Sequence: in.Sequence, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, Gap: in.Gap, FirstAvailable: in.FirstAvailable}
 	if len(in.Event) > 0 {
 		e, err := c.decodeSessionEvent(in.Event)
 		if err != nil {

@@ -491,13 +491,26 @@ func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
 	return content, firstErrorIdx
 }
 
-// parseAndValidateField parses and validates a field value, returning the parsed value and an error message.
 func (d *ElicitationDialog) parseAndValidateField(val string, field ElicitationField) (any, string) {
+	return ParseElicitationValue(val, field)
+}
+
+// ParseElicitationValue parses and validates one typed field value with the
+// dialog's rules, returning the value or a human-readable error message.
+func ParseElicitationValue(val string, field ElicitationField) (any, string) {
 	if val == "" {
 		return nil, ""
 	}
 
 	switch field.Type {
+	case "boolean":
+		switch strings.ToLower(val) {
+		case "true", "yes", "y", "on", "1":
+			return true, ""
+		case "false", "no", "n", "off", "0":
+			return false, ""
+		}
+		return nil, "Must be true or false"
 	case "number":
 		f, err := strconv.ParseFloat(val, 64)
 		if err != nil {

@@ -36,6 +36,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
+	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/userconfig"
 	"github.com/docker/docker-agent/pkg/workspacemedia"
@@ -379,6 +380,17 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// back to the originating session. Plumbing happens in
 	// pkg/httpclient/userAgentTransport, gated on `X-Cagent-Forward`.
 	ctx = httpclient.ContextWithSessionID(ctx, sess.ID)
+	ctx = todotool.WithBindings(ctx, r.todoToolsets)
+	ctx = tools.WithHandlerScope(ctx, tools.HandlerScope{
+		Elicitation:               r.elicitationHandler,
+		Sampling:                  r.samplingHandler,
+		SamplingWithTools:         r.samplingWithToolsHandler,
+		ManagedOAuth:              r.managedOAuth,
+		UnmanagedOAuthRedirectURI: r.unmanagedOAuthRedirectURI,
+		OAuthSuccess: func() {
+			nonBlocking(sink).Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgent(sess).Name()))
+		},
+	})
 	r.telemetry.RecordSessionStart(ctx, r.currentAgentName(), sess.ID)
 
 	// Seed `gen_ai.conversation.id` into baggage at the session
@@ -463,6 +475,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// the events channel — on every exit path, including errors and
 	// cancellation — so no subscription outlives its sink.
 	defer r.subscribePlanChanges(sess, sink)()
+	defer r.subscribeRAGChanges(sess, sink)()
 
 	a := r.resolveSessionAgent(sess)
 
@@ -495,7 +508,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 
 	r.emitAgentWarnings(a, sink)
-	r.configureToolsetHandlers(a, sink)
+	r.configureToolsetHandlers(a)
 
 	agentTools, err := r.getTools(ctx, sess, a, sessionSpan, sink, true)
 	if err != nil {
@@ -503,8 +516,8 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		return
 	}
 	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
-	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools, sink)
-	agentTools = r.filterDelegationTools(a.FilterTools(addAsyncChildTools(sess, agentTools)))
+	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
+	agentTools = r.filterSessionDelegationTools(sess, a.FilterTools(addAsyncChildTools(sess, agentTools)))
 
 	// Record the catalogue size on the session span — answers "how
 	// many tools could this turn actually use?" without having to
@@ -580,7 +593,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		}
 
 		r.emitAgentWarnings(a, sink)
-		r.configureToolsetHandlers(a, sink)
+		r.configureToolsetHandlers(a)
 
 		agentTools, err := r.getTools(ctx, sess, a, sessionSpan, sink, true)
 		if err != nil {
@@ -588,8 +601,8 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			return
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
-		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools, sink)
-		agentTools = r.filterDelegationTools(a.FilterTools(addAsyncChildTools(sess, agentTools)))
+		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
+		agentTools = r.filterSessionDelegationTools(sess, a.FilterTools(addAsyncChildTools(sess, agentTools)))
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -910,7 +923,7 @@ func (r *LocalRuntime) runTurn(
 	// uses the capabilities of the provider that will receive it.
 
 	// Try primary model with fallback chain if configured
-	agentTools = r.filterDelegationTools(agentTools)
+	agentTools = r.filterSessionDelegationTools(sess, agentTools)
 	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)
 	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
 		streamCtx = d.steeringContext(streamCtx)
@@ -1727,7 +1740,7 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 	agentTools, err := a.Tools(ctx)
 	if err == nil {
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
-		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools, events)
+		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
 		// Tool-mode structured output rides on the same error path: a name
 		// collision with the reserved internal tool or an uncompilable schema
 		// must fail the turn loudly, not mask one of the two tools.
@@ -1742,29 +1755,35 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 	}
 
 	slog.DebugContext(ctx, "Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
-	return r.filterDelegationTools(a.FilterTools(agentTools)), nil
+	return r.filterSessionDelegationTools(sess, a.FilterTools(agentTools)), nil
 }
 
-// configureToolsetHandlers sets up elicitation and OAuth handlers for all toolsets of an agent.
-func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent, events EventSink) {
+// configureToolsetHandlers installs stable operation-scoped dispatchers.
+func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent) {
 	for _, toolset := range a.ToolSets() {
-		tools.ConfigureHandlers(toolset,
-			r.elicitationHandler,
-			r.samplingHandler,
-			r.samplingWithToolsHandler,
-			func() { events.Emit(Authorization(tools.ElicitationActionAccept, a.Name())) },
-			r.managedOAuth,
-			r.unmanagedOAuthRedirectURI,
-		)
+		tools.ConfigureScopedHandlers(toolset)
+	}
+}
 
-		// Wire RAG event forwarding so the TUI shows indexing progress.
-		// Use a non-blocking sink because the RAG file watcher is a
-		// long-lived goroutine that may outlive the per-message events
-		// channel; a blocking send after the channel is closed would
-		// crash, and a blocking send when the consumer has gone away
-		// would deadlock.
-		if ragTool, ok := tools.As[ragtypes.EventForwarder](toolset); ok {
-			ragTool.SetEventCallback(ragEventForwarder(ragTool.Name(), r, nonBlocking(events).Emit))
+// subscribeRAGChanges owns progress subscriptions for the duration of this stream.
+func (r *LocalRuntime) subscribeRAGChanges(sess *session.Session, events EventSink) func() {
+	toolsets := slices.Clone(sess.ExtraToolSets)
+	for _, name := range r.team.AgentNames() {
+		if a, err := r.team.Agent(name); err == nil {
+			toolsets = append(toolsets, a.ToolSets()...)
+		}
+	}
+	seen := make(map[ragtypes.EventSubscriber]bool)
+	var releases []func()
+	for _, ts := range toolsets {
+		if notifier, ok := tools.As[ragtypes.EventSubscriber](ts); ok && !seen[notifier] {
+			seen[notifier] = true
+			releases = append(releases, notifier.SubscribeEvents(ragEventForwarder(notifier.Name(), r, nonBlocking(events).Emit)))
+		}
+	}
+	return func() {
+		for _, release := range releases {
+			release()
 		}
 	}
 }
@@ -1962,7 +1981,7 @@ func toolNameMatchesAny(name string, patterns []string) bool {
 // inherited agent tools, then appends the tools from the skill's assistive
 // toolsets (which bypass the allow-list — the skill explicitly asked for
 // them). It is a no-op for ordinary sessions that set neither field.
-func (r *LocalRuntime) skillSubSessionTools(ctx context.Context, sess *session.Session, a *agent.Agent, agentTools []tools.Tool, events EventSink) []tools.Tool {
+func (r *LocalRuntime) skillSubSessionTools(ctx context.Context, sess *session.Session, a *agent.Agent, agentTools []tools.Tool) []tools.Tool {
 	if len(sess.AllowedTools) == 0 && len(sess.ExtraToolSets) == 0 {
 		return agentTools
 	}
@@ -1970,14 +1989,7 @@ func (r *LocalRuntime) skillSubSessionTools(ctx context.Context, sess *session.S
 	agentTools = filterAllowedTools(agentTools, sess.AllowedTools)
 
 	for _, ts := range sess.ExtraToolSets {
-		tools.ConfigureHandlers(ts,
-			r.elicitationHandler,
-			r.samplingHandler,
-			r.samplingWithToolsHandler,
-			func() { events.Emit(Authorization(tools.ElicitationActionAccept, a.Name())) },
-			r.managedOAuth,
-			r.unmanagedOAuthRedirectURI,
-		)
+		tools.ConfigureScopedHandlers(ts)
 		if startable, ok := tools.As[tools.Startable](ts); ok {
 			if err := startable.Start(ctx); err != nil {
 				slog.WarnContext(ctx, "Skill toolset failed to start; skipping",

@@ -51,17 +51,23 @@ type httpSession struct {
 	statusErr          error
 	steerDisposition   runtime.SubmissionDisposition
 	retryDisposition   runtime.SubmissionDisposition
+	stopSubtree        bool
+	stops              int
+	submitErr          error
 }
 
 func (a *httpSession) ID() string        { return a.id }
 func (a *httpSession) AgentName() string { return a.agent }
 func (a *httpSession) Metadata() runtime.SessionMetadata {
-	return runtime.SessionMetadata{SessionID: a.id, AgentName: a.agent, Model: a.model}
+	return runtime.SessionMetadata{SessionID: a.id, AgentName: a.agent, Model: a.model, Capabilities: runtime.SessionCapabilities{StopSubtree: a.stopSubtree}}
 }
 
 func (a *httpSession) Submit(_ context.Context, in runtime.TurnInput) (runtime.Submission, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.submitErr != nil {
+		return runtime.Submission{}, a.submitErr
+	}
 	a.submits = append(a.submits, in)
 	return runtime.Submission{SessionID: a.id, TurnID: "submit-turn"}, nil
 }
@@ -140,6 +146,7 @@ type httpSessionRegistry struct {
 	createCount int
 	store       session.Store
 	deleted     []string
+	submitErr   error
 }
 
 func (r *httpSessionRegistry) CreateSession(ctx context.Context, s *session.Session, b runtime.SessionBinding) (runtime.SessionHandle, error) {
@@ -153,7 +160,7 @@ func (r *httpSessionRegistry) CreateSession(ctx context.Context, s *session.Sess
 			}
 		}
 	}
-	a := &httpSession{id: s.ID, agent: b.AgentName, model: b.Model, snapshot: s.Clone()}
+	a := &httpSession{id: s.ID, agent: b.AgentName, model: b.Model, snapshot: s.Clone(), submitErr: r.submitErr}
 	r.sessions[s.ID] = a
 	r.binding = b
 	r.created = s
@@ -1205,11 +1212,11 @@ func TestSessionHTTPBodyLimitsAndAttachUnaffected(t *testing.T) {
 func TestCanonicalSessionRouteInventoryAndSessionNamespaceAbsent(t *testing.T) {
 	srv, _ := newSessionHTTPServer(t, &httpSessionRegistry{sessions: map[string]*httpSession{}})
 	want := map[string]bool{
-		"GET /api/v2/sessions": true, "POST /api/v2/sessions": true,
+		"GET /api/v2/sessions": true, "POST /api/v2/sessions": true, "POST /api/v2/sessions/start": true,
 		"GET /api/v2/sessions/:id": true, "GET /api/v2/sessions/:id/status": true,
 		"GET /api/v2/sessions/:id/snapshot": true, "GET /api/v2/sessions/:id/events": true,
 		"POST /api/v2/sessions/:id/messages": true, "POST /api/v2/sessions/:id/retry": true,
-		"POST /api/v2/sessions/:id/responses": true, "POST /api/v2/sessions/:id/cancel": true,
+		"POST /api/v2/sessions/:id/responses": true, "POST /api/v2/sessions/:id/cancel": true, "POST /api/v2/sessions/:id/stop-subtree": true,
 		"PATCH /api/v2/sessions/:id/title": true, "GET /api/v2/sessions/:id/tree": true,
 		"DELETE /api/v2/sessions/:id": true,
 	}
@@ -1348,3 +1355,49 @@ func TestSessionSnapshotPreservesTypedInputMetadata(t *testing.T) {
 		assert.Contains(t, string(data), `"input_mode":"steer"`)
 	}
 }
+
+func TestSessionHTTPEpochMismatchCarriesFreshBaseline(t *testing.T) {
+	live := make(chan runtime.SessionEvent)
+	close(live)
+	sess := session.New(session.WithID("epoch-session"))
+	sess.AddMessage(session.UserMessage("fresh transcript"))
+	approval := &runtime.ToolCallConfirmationEvent{Type: "tool_call_confirmation", SessionID: sess.ID, RequestID: "fresh-approval"}
+	handle := &httpSession{id: sess.ID, agent: "root", attach: runtime.Observation{
+		Initial: []runtime.SessionSnapshot{{
+			Epoch: "new-process", Cursor: 10, Session: sess,
+			Status:       runtime.SessionStatus{SessionID: sess.ID, AgentName: "root", State: runtime.SessionStateRunning},
+			Interactions: []runtime.InteractionSnapshot{{SessionID: sess.ID, InteractionID: "fresh-approval", Kind: runtime.InteractionConfirmation, Event: approval}},
+		}},
+		Replay: []runtime.SessionEvent{{Version: 1, SessionID: sess.ID, Epoch: "new-process", TranscriptPosition: -1, Event: runtime.AgentChoice("root", sess.ID, "fresh tail")}},
+		Events: live, Cancel: func() {},
+	}}
+	server, _ := newSessionHTTPServer(t, &httpSessionRegistry{sessions: map[string]*httpSession{sess.ID: handle}})
+	httpServer := httptest.NewServer(server.e)
+	defer httpServer.Close()
+	client, err := runtime.NewClient(httpServer.URL)
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client)
+	require.NoError(t, err)
+	remote, err := transport.SessionByID(sess.ID)
+	require.NoError(t, err)
+	cursor := uint64(5)
+	observation, err := remote.Observe(t.Context(), runtime.ObserveOptions{Since: &cursor, SinceEpoch: "old-process"})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	assert.Equal(t, "new-process", observation.Primary().Epoch)
+	assert.Equal(t, uint64(10), observation.Primary().Cursor)
+	assert.Equal(t, "fresh transcript", observation.Primary().Session.Messages[0].Message.Message.Content)
+	require.Len(t, observation.Primary().Interactions, 1)
+	assert.Equal(t, "fresh-approval", observation.Primary().Interactions[0].InteractionID)
+	require.Len(t, observation.Replay, 1)
+	assert.True(t, observation.Replay[0].IsLiveSeed())
+	assert.Equal(t, "new-process", observation.Replay[0].Epoch)
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	require.Len(t, handle.attachOptions, 1)
+	assert.Equal(t, "old-process", handle.attachOptions[0].SinceEpoch)
+	require.NotNil(t, handle.attachOptions[0].Since)
+	assert.Equal(t, cursor, *handle.attachOptions[0].Since)
+}
+
+func (a *httpSession) StopSubtree(context.Context) error { a.stops++; return nil }

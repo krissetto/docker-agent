@@ -53,11 +53,16 @@ type legacyDelegationGrant struct {
 	used    atomic.Bool
 }
 
-func (r *LocalRuntime) acceptLegacyDelegation(ctx context.Context) bool {
+func (r *LocalRuntime) acceptLegacyDelegation(ctx context.Context, sessions ...*session.Session) bool {
 	if grant, _ := ctx.Value(legacyDelegationKey{}).(*legacyDelegationGrant); grant != nil && grant.runtime == r && grant.used.CompareAndSwap(false, true) {
 		return true
 	}
-	return r.acceptAutonomousDelegation()
+	if len(sessions) == 0 {
+		return r.acceptAutonomousDelegation()
+	}
+	r.subagentAdmissionMu.RLock()
+	defer r.subagentAdmissionMu.RUnlock()
+	return r.sessionDelegationEnabled(sessions[0])
 }
 
 // HandleRun queues a goroutine before calling RunAgent. The one-shot grant
@@ -66,7 +71,7 @@ func (r *LocalRuntime) acceptLegacyDelegation(ctx context.Context) bool {
 func (r *LocalRuntime) admitBackgroundDelegation(ctx context.Context, sess *session.Session, tc tools.ToolCall, run func(context.Context, *session.Session, tools.ToolCall) (*tools.ToolCallResult, error)) (*tools.ToolCallResult, error) {
 	r.subagentAdmissionMu.RLock()
 	defer r.subagentAdmissionMu.RUnlock()
-	if !r.UseSubagents() {
+	if !r.sessionDelegationEnabled(sess) {
 		return tools.ResultError(errSubagentsDisabled.Error()), nil
 	}
 	ctx = context.WithValue(ctx, legacyDelegationKey{}, &legacyDelegationGrant{runtime: r})
@@ -74,7 +79,11 @@ func (r *LocalRuntime) admitBackgroundDelegation(ctx context.Context, sess *sess
 }
 
 func (r *LocalRuntime) filterDelegationTools(agentTools []tools.Tool) []tools.Tool {
-	if r.UseSubagents() {
+	return r.filterSessionDelegationTools(nil, agentTools)
+}
+
+func (r *LocalRuntime) filterSessionDelegationTools(sess *session.Session, agentTools []tools.Tool) []tools.Tool {
+	if r.sessionDelegationEnabled(sess) {
 		return agentTools
 	}
 	return filterExcludedTools(agentTools, []string{
@@ -88,7 +97,7 @@ func (r *LocalRuntime) filterDelegationTools(agentTools []tools.Tool) []tools.To
 // generated messages from that prefix, never user/skill text containing a tool
 // name, and never mutate the shared agent or persisted session instructions.
 func (r *LocalRuntime) filterDelegationMessages(a *agent.Agent, sess *session.Session, messages []chat.Message) []chat.Message {
-	if r.UseSubagents() {
+	if r.sessionDelegationEnabled(sess) {
 		return messages
 	}
 	generated := map[string]bool{}

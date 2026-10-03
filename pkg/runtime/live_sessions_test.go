@@ -85,6 +85,7 @@ func newLiveSessionsRuntime(t *testing.T, workerProvider *stepProvider, store Mo
 		WithModelStore(store),
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	return rt
 }
 
@@ -136,14 +137,16 @@ func TestLiveSessions_ListsRootAndActiveChildren(t *testing.T) {
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 1000})
 
-	rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
+	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
 	rootSess.SetUsage(100, 50)
 
 	// Two concurrent runs of the SAME agent: they must both be listed,
 	// never collapsed by agent name.
-	childA := newWorkerSession("child-a")
+	childA := newWorkerSession(t.Name() + "/child-a")
+	childA.ParentID = rootSess.ID
 	childA.SetUsage(600, 100)
-	childB := newWorkerSession("child-b")
+	childB := newWorkerSession(t.Name() + "/child-b")
+	childB.ParentID = rootSess.ID
 	childB.SetUsage(10, 5)
 
 	streamA := rt.runExecution(t.Context(), childA)
@@ -155,19 +158,19 @@ func TestLiveSessions_ListsRootAndActiveChildren(t *testing.T) {
 	require.Len(t, rows, 3, "current root plus both live children")
 
 	assert.True(t, rows[0].Current)
-	assert.Equal(t, "root-session", rows[0].SessionID)
+	assert.Equal(t, t.Name()+"/root-session", rows[0].SessionID)
 	assert.Equal(t, "root", rows[0].AgentName)
 	assert.Equal(t, int64(150), rows[0].UsedTokens())
 	assert.Equal(t, int64(1000), rows[0].ContextLimit)
 
 	// Child rows are stable-sorted by agent name then session ID.
-	assert.Equal(t, "child-a", rows[1].SessionID)
+	assert.Equal(t, childA.ID, rows[1].SessionID)
 	assert.Equal(t, "worker", rows[1].AgentName)
 	assert.Equal(t, int64(700), rows[1].UsedTokens())
 	assert.Equal(t, int64(1000), rows[1].ContextLimit)
 	assert.False(t, rows[1].Current)
 
-	assert.Equal(t, "child-b", rows[2].SessionID)
+	assert.Equal(t, childB.ID, rows[2].SessionID)
 	assert.Equal(t, "worker", rows[2].AgentName)
 	assert.Equal(t, int64(15), rows[2].UsedTokens())
 
@@ -189,7 +192,7 @@ func TestLiveSessions_UnknownContextLimit(t *testing.T) {
 	prov := &stepProvider{id: "test/mock-model"}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStore{})
 
-	rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
+	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
 	rootSess.SetUsage(42, 8)
 
 	rows := rt.LiveSessions(t.Context(), rootSess)
@@ -253,8 +256,9 @@ func TestLiveSessions_CompactionModelAttribution(t *testing.T) {
 			prov := &stepProvider{id: "worker/primary"}
 			rt := newLiveSessionsRuntime(t, prov, tt.store, tt.workerOpts...)
 
-			rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
-			child := newWorkerSession("child-1")
+			rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
+			child := newWorkerSession(t.Name() + "/child-1")
+			child.ParentID = rootSess.ID
 			rt.registerLiveSession(child)
 
 			rows := rt.LiveSessions(t.Context(), rootSess)
@@ -299,8 +303,8 @@ func TestLiveSessions_ExcludesSessionsOutsideCurrentRootTree(t *testing.T) {
 	require.Len(t, rows, 4, "current plus its direct and nested descendants only")
 	assert.True(t, rows[0].Current)
 	assert.Equal(t, "root-current", rows[0].SessionID)
-	assert.Equal(t, "child-a", rows[1].SessionID)
-	assert.Equal(t, "child-b", rows[2].SessionID)
+	assert.Equal(t, childA.ID, rows[1].SessionID)
+	assert.Equal(t, childB.ID, rows[2].SessionID)
 	assert.Equal(t, "nested-1", rows[3].SessionID)
 
 	rows = rt.LiveSessions(t.Context(), nil)
@@ -323,8 +327,8 @@ func TestLiveSessions_KeepsNestedBackgroundAfterParentFinishes(t *testing.T) {
 	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 1000})
 
 	current := session.New(session.WithID("root-current"), session.WithUserMessage("hi"))
-	child := session.New(session.WithID("child-1"), session.WithParentID("root-current"), session.WithAgentName("worker"))
-	nested := session.New(session.WithID("nested-bg"), session.WithParentID("child-1"), session.WithAgentName("worker"))
+	child := session.New(session.WithID(t.Name()+"/child-1"), session.WithParentID("root-current"), session.WithAgentName("worker"))
+	nested := session.New(session.WithID("nested-bg"), session.WithParentID(t.Name()+"/child-1"), session.WithAgentName("worker"))
 
 	// Registration order mirrors the real flow: each child stream starts
 	// from within its parent's still-live stream.
@@ -413,15 +417,15 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	child := newWorkerSession("child-1")
+	child := newWorkerSession(t.Name() + "/child-1")
 	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "first child turn")
 
 	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+	require.NoError(t, rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", NewChannelSink(requestEvents)))
 
 	// A second request while one is pending is rejected clearly.
-	err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
+	err := rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already pending")
 
@@ -433,7 +437,7 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 	for ev := range requestEvents {
 		switch e := ev.(type) {
 		case *SessionCompactionEvent:
-			assert.Equal(t, "child-1", e.SessionID)
+			assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 			assert.Equal(t, "worker", e.AgentName)
 			if e.Status == "completed" {
 				kinds = append(kinds, "completed:"+e.Outcome)
@@ -441,10 +445,10 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 				kinds = append(kinds, e.Status)
 			}
 		case *SessionSummaryEvent:
-			assert.Equal(t, "child-1", e.SessionID)
+			assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 			kinds = append(kinds, "summary")
 		case *TokenUsageEvent:
-			assert.Equal(t, "child-1", e.SessionID)
+			assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 			assert.Equal(t, "worker", e.AgentName)
 			kinds = append(kinds, "usage")
 		}
@@ -471,12 +475,12 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
-	child := newWorkerSession("child-1")
+	child := newWorkerSession(t.Name() + "/child-1")
 	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "final child turn")
 
 	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+	require.NoError(t, rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", NewChannelSink(requestEvents)))
 
 	close(release)
 	drainStream(t, stream)
@@ -488,14 +492,14 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 		select {
 		case ev := <-requestEvents:
 			if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
-				assert.Equal(t, "child-1", e.SessionID)
+				assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 				assert.Equal(t, "worker", e.AgentName)
 				assert.Equal(t, CompactionOutcomeApplied, e.Outcome)
 				assert.Equal(t, "teardown summary", child.LastSummary())
 
 				// The session is gone from the registry: further requests
 				// are rejected instead of stranded.
-				err := rt.CompactLiveSession(t.Context(), "child-1", "", nil)
+				err := rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", nil)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), "not live")
 				return
@@ -570,12 +574,12 @@ func TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent(t *testing.T)
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
 
 	ctx, cancel := context.WithCancel(t.Context())
-	child := newWorkerSession("child-1")
+	child := newWorkerSession(t.Name() + "/child-1")
 	stream := rt.runExecution(ctx, child)
 	waitClosed(t, started, "child turn")
 
 	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+	require.NoError(t, rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", NewChannelSink(requestEvents)))
 
 	cancel()
 	drainStream(t, stream)
@@ -584,7 +588,7 @@ func TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent(t *testing.T)
 	var kinds []string
 	for ev := range requestEvents {
 		if e, ok := ev.(*SessionCompactionEvent); ok {
-			assert.Equal(t, "child-1", e.SessionID)
+			assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 			assert.Equal(t, "worker", e.AgentName)
 			kinds = append(kinds, e.Status+":"+e.Outcome)
 		}
@@ -626,12 +630,12 @@ func TestCompactLiveSession_HookVetoSynthesizesSkipped(t *testing.T) {
 		},
 	))
 
-	child := newWorkerSession("child-1")
+	child := newWorkerSession(t.Name() + "/child-1")
 	stream := rt.runExecution(t.Context(), child)
 	waitClosed(t, started, "first child turn")
 
 	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "child-1", "", NewChannelSink(requestEvents)))
+	require.NoError(t, rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", NewChannelSink(requestEvents)))
 
 	close(release)
 	drainStream(t, stream)
@@ -659,7 +663,7 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build(), release: release},
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 1000})
-	rootSess := session.New(session.WithID("root-session"), session.WithUserMessage("hi"))
+	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -677,7 +681,7 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 		})
 	}
 
-	child := newWorkerSession("child-1")
+	child := newWorkerSession(t.Name() + "/child-1")
 	stream := rt.runExecution(t.Context(), child)
 	close(release)
 	drainStream(t, stream)

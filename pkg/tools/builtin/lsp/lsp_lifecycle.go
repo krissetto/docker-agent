@@ -205,6 +205,7 @@ func (h *lspHandler) fireToolsChanged() {
 	if handler != nil {
 		handler()
 	}
+	h.subscribers.Notify()
 }
 
 // lspSession is a single live LSP server session. cmd.Wait must be called

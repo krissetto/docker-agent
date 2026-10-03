@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +22,7 @@ func newPressureRuntime(t *testing.T, maxSessions int) *LocalRuntime {
 	prov := &mockProvider{id: "test/pressure", stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()}
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(prov)))), WithSessionResourcePolicy(policy))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	return rt
 }
 
@@ -93,13 +96,15 @@ func TestSessionCapacityPressureProtectsObserverPendingSteeringInteractionAndRun
 }
 
 func TestSessionCapacityPressureStaleSubmitObserveRaceRejected(t *testing.T) {
-	for range 50 {
+	for i := range 50 {
 		rt := newPressureRuntime(t, 1)
-		stale, err := rt.CreateSession(t.Context(), session.New(session.WithID("stale")), SessionBinding{})
+		stale, err := rt.CreateSession(t.Context(), session.New(session.WithID(fmt.Sprintf("%s/stale/%d", t.Name(), i))), SessionBinding{})
 		require.NoError(t, err)
-		_, err = rt.CreateSession(t.Context(), session.New(session.WithID("replacement")), SessionBinding{})
-		require.NoError(t, err)
-		_, exists := rt.sessionDrivers.Lookup("stale")
+		require.Eventually(t, func() bool {
+			_, err = rt.CreateSession(t.Context(), session.New(session.WithID(fmt.Sprintf("%s/replacement/%d", t.Name(), i))), SessionBinding{})
+			return err == nil
+		}, time.Second, time.Millisecond)
+		_, exists := rt.sessionDrivers.Lookup(stale.ID())
 		require.False(t, exists)
 		start := make(chan struct{})
 		var wg sync.WaitGroup

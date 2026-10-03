@@ -28,7 +28,7 @@ func TestUpdateTitlePersistsBeforeOrderedPublishAndSeedsLateAttach(t *testing.T)
 	assert.Equal(t, "Canonical title", loaded.TitleSnapshot(), "publish follows durable mutation")
 
 	zero := uint64(0)
-	attached, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero})
+	attached, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 	require.NoError(t, err)
 	defer attached.Cancel()
 	assert.Equal(t, "Canonical title", attached.Primary().Session.TitleSnapshot())
@@ -76,7 +76,7 @@ func TestInteractionJournalCarriesImmutableCorrelation(t *testing.T) {
 	require.NoError(t, err)
 	driver := handle.(*sessionHandle).driver
 	zero := uint64(0)
-	observation, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero})
+	observation, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 	require.NoError(t, err)
 	defer observation.Cancel()
 
@@ -93,7 +93,7 @@ func TestInteractionJournalCarriesImmutableCorrelation(t *testing.T) {
 		assert.Same(t, event, envelope.Event)
 	}
 
-	replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero})
+	replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})
 	require.NoError(t, err)
 	defer replayed.Cancel()
 	require.Len(t, replayed.Replay, len(events))

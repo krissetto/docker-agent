@@ -400,6 +400,20 @@ func (c *codeModeTool) SetUnmanagedOAuthRedirectURI(uri string) {
 	}
 }
 
+func (c *codeModeTool) SubscribeToolsChanged(handler func()) func() {
+	var releases []func()
+	for _, ts := range c.toolsets {
+		if n, ok := tools.As[tools.ChangeSubscriber](ts); ok {
+			releases = append(releases, n.SubscribeToolsChanged(handler))
+		}
+	}
+	return func() {
+		for _, release := range releases {
+			release()
+		}
+	}
+}
+
 // SetToolsChangedHandler forwards the handler to every inner toolset that
 // can report a tool-list change (e.g. an MCP server sending
 // ToolListChanged). See SetElicitationHandler for why forwarding is needed.

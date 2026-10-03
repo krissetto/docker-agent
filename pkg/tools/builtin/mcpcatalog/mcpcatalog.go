@@ -95,6 +95,7 @@ type Toolset struct {
 	elicitationHandler        tools.ElicitationHandler
 	oauthSuccessHandler       func()
 	toolsChangedHandler       func()
+	subscribers               tools.ChangeSubscribers
 	managedOAuth              bool
 	managedOAuthSet           bool // distinguishes "default" from "explicitly false"
 	unmanagedOAuthRedirectURI string
@@ -384,9 +385,23 @@ func (t *Toolset) SetToolsChangedHandler(handler func()) {
 	t.mu.Unlock()
 	for _, ts := range enabled {
 		if n, ok := tools.As[tools.ChangeNotifier](ts); ok {
-			n.SetToolsChangedHandler(handler)
+			n.SetToolsChangedHandler(t.notifyToolsChanged)
 		}
 	}
+}
+
+func (t *Toolset) SubscribeToolsChanged(handler func()) func() {
+	return t.subscribers.Subscribe(handler)
+}
+
+func (t *Toolset) notifyToolsChanged() {
+	t.mu.RLock()
+	handler := t.toolsChangedHandler
+	t.mu.RUnlock()
+	if handler != nil {
+		handler()
+	}
+	t.subscribers.Notify()
 }
 
 // snapshotEnabled returns the currently enabled toolsets as a fresh slice.
@@ -732,9 +747,10 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 			mcpToolset.SetUnmanagedOAuthRedirectURI(t.unmanagedOAuthRedirectURI)
 		}
 
+		mcpToolset.SetToolsChangedHandler(t.notifyToolsChanged)
 		wrapped = tools.NewStartable(mcpToolset)
 		t.enabled[id] = wrapped
-		notify = t.toolsChangedHandler
+		notify = t.notifyToolsChanged
 	}
 	t.mu.Unlock()
 
@@ -873,7 +889,7 @@ func (t *Toolset) disableAfterDecline(ctx context.Context, id string, wrapped *t
 		// session in a partially-initialised state.
 		stillEnabled = false
 	}
-	notify := t.toolsChangedHandler
+	notify := t.notifyToolsChanged
 	t.mu.Unlock()
 
 	if err := wrapped.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -883,7 +899,7 @@ func (t *Toolset) disableAfterDecline(ctx context.Context, id string, wrapped *t
 
 	// Only notify when WE removed the entry; if a concurrent caller
 	// already mutated t.enabled, they will have notified themselves.
-	if stillEnabled && notify != nil {
+	if stillEnabled {
 		notify()
 	}
 }
@@ -898,7 +914,7 @@ func (t *Toolset) handleDisable(ctx context.Context, args DisableArgs) (*tools.T
 		return tools.ResultError(fmt.Sprintf("server %q is not enabled", id)), nil
 	}
 	delete(t.enabled, id)
-	notify := t.toolsChangedHandler
+	notify := t.notifyToolsChanged
 	t.mu.Unlock()
 
 	if err := wrapped.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -907,9 +923,7 @@ func (t *Toolset) handleDisable(ctx context.Context, args DisableArgs) (*tools.T
 		slog.WarnContext(ctx, "Failed to stop remote MCP toolset on disable", "id", id, "error", err)
 	}
 
-	if notify != nil {
-		notify()
-	}
+	notify()
 
 	return tools.ResultSuccess(fmt.Sprintf("disabled %q", id)), nil
 }
@@ -975,7 +989,7 @@ func (t *Toolset) handleResetAuth(ctx context.Context, args ResetAuthArgs) (*too
 	if wasEnabled {
 		delete(t.enabled, id)
 	}
-	notify := t.toolsChangedHandler
+	notify := t.notifyToolsChanged
 	t.mu.Unlock()
 
 	if wasEnabled {
@@ -988,7 +1002,7 @@ func (t *Toolset) handleResetAuth(ctx context.Context, args ResetAuthArgs) (*too
 	// active set), so the tools surface has changed regardless of whether
 	// the keyring removal below succeeds. Notify *before* the keyring call
 	// so a transient keyring failure can't desync the runtime's tool list.
-	if wasEnabled && notify != nil {
+	if wasEnabled {
 		notify()
 	}
 

@@ -152,11 +152,11 @@ func sharedTreeSupervisor(tb testing.TB, count int) (*Supervisor, *activityTreeS
 func TestTabActivitySharesOneTreeSnapshotPerRebuild(t *testing.T) {
 	s, services := sharedTreeSupervisor(t, 2)
 	cache := make(map[*subagent.Tree]subagent.Snapshot)
-	activity, _ := tabActivity(s.runners["tab-0"], cache)
+	activity, _, _ := tabActivity(s.runners["tab-0"], cache)
 	require.Equal(t, messages.TabActivityNone, activity)
 	require.Len(t, cache, 1)
 	require.NoError(t, services.tree.AddSubtree([]subagent.Node{{ID: "child", Parent: subagent.SessionRootID("tab-1"), Agent: "agent", State: subagent.NodeRunning}}))
-	activity, _ = tabActivity(s.runners["tab-1"], cache)
+	activity, _, _ = tabActivity(s.runners["tab-1"], cache)
 	require.Equal(t, messages.TabActivityNone, activity, "one rebuild sees one coherent tree head")
 	tabs, _ := s.GetTabs()
 	require.Equal(t, messages.TabActivityDescendantRunning, tabs[1].Activity, "the next rebuild sees new tree activity")
@@ -186,4 +186,36 @@ func BenchmarkTabsSharedTree(b *testing.B) {
 			}
 		})
 	}
+}
+
+// Remote views have no in-process tree: their projected topology and status
+// still mark the tab, so descendants and uncertain recovery are never idle.
+func TestTabAttentionFromPortableTreeAndRecoveryUncertainty(t *testing.T) {
+	s := New(nil)
+	t.Cleanup(s.Shutdown)
+	sess := session.New(session.WithID("remote-root"))
+	tree := subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{
+		Node:     subagent.Node{ID: subagent.SessionRootID(sess.ID), SessionID: sess.ID, State: subagent.NodeIdle},
+		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "c0ffe", Parent: subagent.SessionRootID(sess.ID), SessionID: "child", State: subagent.NodeRunning, NeedsAttention: true, WaitingOn: "approve tool"}}},
+	}}}
+	sess.SetSubagentTree(&tree)
+	a := app.New(t.Context(), nil, sess, runtime.SessionBinding{})
+	s.runners[sess.ID] = &SessionTab{ID: sess.ID, App: a}
+	s.order = append(s.order, sess.ID)
+	s.activeID = sess.ID
+
+	tabs, _ := s.GetTabs()
+	require.Len(t, tabs, 1)
+	assert.True(t, tabs[0].NeedsAttention, "a waiting descendant marks even the active tab")
+	assert.Equal(t, messages.TabActivityDescendantRunning, tabs[0].Activity)
+
+	tree.Nodes[0].Children[0].Node.NeedsAttention, tree.Nodes[0].Children[0].Node.State = false, subagent.NodeIdle
+	sess.SetSubagentTree(&tree)
+	s.runners[sess.ID].App = app.New(t.Context(), nil, sess, runtime.SessionBinding{})
+	tabs, _ = s.GetTabs()
+	assert.False(t, tabs[0].NeedsAttention)
+
+	s.runners[sess.ID].projection = &app.PresentationState{Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled, InterruptedTurns: 1}}
+	tabs, _ = s.GetTabs()
+	assert.True(t, tabs[0].NeedsAttention, "uncertain recovery is not presented as a normal idle tab")
 }

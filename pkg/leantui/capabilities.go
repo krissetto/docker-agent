@@ -207,7 +207,7 @@ func (m *model) handleCapabilityCommand(ctx context.Context, name, arg string, m
 		} else {
 			m.runBangCommand(ctx, arg)
 		}
-	case "subagents", "back":
+	case "subagents", "back", "attention":
 		m.handleViewerCommand(ctx, name, arg)
 	case "panes":
 		m.reportCapability("Pane layouts require the full TUI and are unavailable in standalone lean. Use /subagents and /back to navigate session viewers.", nil)
@@ -343,12 +343,12 @@ func (m *model) respondInteraction(ctx context.Context, arg string) {
 		case "decline":
 			response.Elicitation.Action = tools.ElicitationActionDecline
 		default:
-			var content map[string]any
-			if err := json.Unmarshal([]byte(answer), &content); err != nil {
+			content, err := parseElicitationAnswer(event.Schema, answer)
+			if err != nil {
 				m.reportCapability(nil, err)
 				return
 			}
-			if event.Schema != nil {
+			if event.Schema != nil && content != nil {
 				result, err := gojsonschema.Validate(gojsonschema.NewGoLoader(event.Schema), gojsonschema.NewGoLoader(content))
 				if err != nil {
 					m.reportCapability(nil, err)
@@ -458,9 +458,17 @@ type capabilityResult struct {
 	err       error
 }
 
+func (m *model) applyCapabilityResult(value any, err error) {
+	if result, ok := value.(delegationPolicyResult); ok {
+		m.applyDelegationPolicy(result, err)
+		return
+	}
+	m.reportCapability(value, err)
+}
+
 func (m *model) capabilityJob(ctx context.Context, work func(context.Context) (any, error)) {
 	if m.viewers == nil {
-		m.reportCapability(work(ctx))
+		m.applyCapabilityResult(work(ctx))
 		return
 	}
 	origin, sessionID, host := m.app, m.app.Session().ID, m.viewers

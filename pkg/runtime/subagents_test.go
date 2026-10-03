@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -481,7 +482,7 @@ func TestReadSubagentDeniesAnotherRootChild(t *testing.T) {
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
 	rootA := session.New(session.WithID("root-a"))
 	rootB := session.New(session.WithID("root-b"))
@@ -526,7 +527,7 @@ func TestSendMessageRestoresChildAfterCapacityReclamation(t *testing.T) {
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store), WithSessionResourcePolicy(policy))
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
 	root := session.New(session.WithID("root"))
 	require.NoError(t, store.AddSession(t.Context(), root))
@@ -554,16 +555,19 @@ func TestSendMessageRestoresChildAfterCapacityReclamation(t *testing.T) {
 
 	send := tools.ToolCall{Function: tools.FunctionCall{
 		Name:      subagent.ToolSendMessage,
-		Arguments: `{"to":"` + string(id) + `","message":"second turn"}`,
+		Arguments: `{"to":"` + string(id) + `","message":"second turn","request_id":"capacity-restored-second-turn"}`,
 	}}
-	result, err := rt.toolMap[subagent.ToolSendMessage](t.Context(), root, send, nil, tools.NopRuntime{})
-	require.NoError(t, err)
-	require.False(t, result.IsError, result.Output)
+	result := retryCapacityCommunication(t, func() (*tools.ToolCallResult, error) {
+		return rt.toolMap[subagent.ToolSendMessage](t.Context(), root, send, nil, tools.NopRuntime{})
+	})
 	assert.Contains(t, result.Output, string(id))
 	require.Eventually(t, func() bool {
 		rebound, exists := rt.sessionDrivers.Lookup(info.Session.ID)
 		return exists && strings.Contains(renderTranscript(rebound.session(), 0), "second turn")
 	}, 2*time.Second, 10*time.Millisecond)
+	rebound, exists := rt.sessionDrivers.Lookup(info.Session.ID)
+	require.True(t, exists)
+	require.Equal(t, 1, strings.Count(renderTranscript(rebound.session(), 0), "second turn"))
 }
 
 func TestSendMessageRestoresVolatileChildFromLiveSnapshot(t *testing.T) {
@@ -578,7 +582,7 @@ func TestSendMessageRestoresVolatileChildFromLiveSnapshot(t *testing.T) {
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionResourcePolicy(policy))
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	root := session.New(session.WithID("volatile-root"))
 	id, err := rt.subagents.Spawn(root, "root", subagent.AllowedSubagent{Agent: "planner"}, "first turn")
 	require.NoError(t, err)
@@ -588,21 +592,24 @@ func TestSendMessageRestoresVolatileChildFromLiveSnapshot(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	rec, ok := rt.subagents.Read(id)
 	require.True(t, ok)
-	_, err = rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
+	pressure, err := rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
 	require.NoError(t, err)
+	require.Eventually(t, func() bool { return pressure.(*sessionHandle).driver.Settled() }, 2*time.Second, 10*time.Millisecond)
 	_, exists := rt.sessionDrivers.Lookup(rec.sessionID)
 	require.False(t, exists)
 
-	result, err := rt.handleSendMessage(t.Context(), root, tools.ToolCall{Function: tools.FunctionCall{
-		Name: subagent.ToolSendMessage, Arguments: `{"to":"` + string(id) + `","message":"follow up"}`,
-	}}, nil, tools.NopRuntime{})
-	require.NoError(t, err)
-	require.False(t, result.IsError, result.Output)
+	send := tools.ToolCall{Function: tools.FunctionCall{
+		Name: subagent.ToolSendMessage, Arguments: `{"to":"` + string(id) + `","message":"follow up","request_id":"volatile-restored-follow-up"}`,
+	}}
+	retryCapacityCommunication(t, func() (*tools.ToolCallResult, error) {
+		return rt.handleSendMessage(t.Context(), root, send, nil, tools.NopRuntime{})
+	})
 	rebound, exists := rt.sessionDrivers.Lookup(rec.sessionID)
 	require.True(t, exists)
 	require.Eventually(t, func() bool {
 		return strings.Contains(renderTranscript(rebound.session(), 0), "follow up")
 	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, 1, strings.Count(renderTranscript(rebound.session(), 0), "follow up"))
 	transcript := renderTranscript(rebound.session(), 0)
 	assert.Contains(t, transcript, "settled answer")
 	assert.Contains(t, transcript, "follow up")
@@ -625,7 +632,7 @@ func TestSpawnToolNeedsNoReceiver(t *testing.T) {
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	sess := session.New(session.WithID("parent-sess"))
 
 	tc := tools.ToolCall{Function: tools.FunctionCall{
@@ -653,7 +660,7 @@ func TestSpawnedSubagentInheritsSafetySettings(t *testing.T) {
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
 	parent := session.New(
 		session.WithID("parent-sess"),
@@ -721,4 +728,33 @@ func (m *subagentManager) reportTurn(t *testing.T, id subagent.NodeID, state sub
 	parent.mu.Unlock()
 	require.NoError(t, m.completeSessionTurn(d, fmt.Sprintf("test-turn-%d", rec.durable.Revision), errMsg))
 	m.r.sessionDrivers.deliverReports(parent)
+}
+
+func retryCapacityCommunication(t *testing.T, send func() (*tools.ToolCallResult, error)) *tools.ToolCallResult {
+	t.Helper()
+	var accepted *tools.ToolCallResult
+	var receipt subagent.DeliveryReceipt
+	require.Eventually(t, func() bool {
+		result, err := send()
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(result.Output), &receipt))
+		if result.IsError {
+			require.False(t, receipt.Accepted)
+			require.Equal(t, "capacity", receipt.Rejection, result.Output)
+			return false
+		}
+		require.True(t, receipt.Accepted, result.Output)
+		require.False(t, receipt.Idempotent)
+		accepted = result
+		return true
+	}, 2*time.Second, 10*time.Millisecond)
+	requestID := receipt.RequestID
+	replay, err := send()
+	require.NoError(t, err)
+	require.False(t, replay.IsError, replay.Output)
+	require.NoError(t, json.Unmarshal([]byte(replay.Output), &receipt))
+	require.Equal(t, requestID, receipt.RequestID)
+	require.True(t, receipt.Accepted)
+	require.True(t, receipt.Idempotent)
+	return accepted
 }

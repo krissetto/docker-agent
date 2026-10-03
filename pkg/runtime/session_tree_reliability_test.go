@@ -19,6 +19,7 @@ func TestTreeObservationChildlessRootAndBufferOne(t *testing.T) {
 	observation, err := handle.Observe(t.Context(), ObserveOptions{Tree: true, Buffer: 1})
 	require.NoError(t, err)
 	defer observation.Cancel()
+	require.NotNil(t, observation.SessionsAdded)
 	require.Len(t, observation.Initial, 1)
 	assert.Equal(t, root.ID, observation.Initial[0].Session.ID)
 	late := session.New(session.WithID("late"), session.WithParentID(root.ID), session.WithAgentName("root"))

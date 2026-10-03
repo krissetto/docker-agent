@@ -42,6 +42,10 @@ var (
 
 // Config describes an embedded agent session.
 type Config struct {
+	// SessionRuntime attaches to a borrowed authority instead of creating a runtime.
+	// SessionID identifies an existing session and requires SessionLoader.
+	SessionRuntime dagentruntime.SessionRuntime
+	SessionID      string
 	// Team is a pre-built team. Embedders that assemble their agents in code
 	// use it instead of AgentSource: no YAML loading happens, and — the point
 	// — docker-agent's full toolset and provider registries are never linked
@@ -71,8 +75,13 @@ type Config struct {
 	InitialSession *session.Session
 	// EventBuffer controls the size of the channel returned by Send. When zero,
 	// a small default buffer is used.
-	EventBuffer int
+	EventBuffer        int
+	InteractionHandler InteractionHandler
 }
+
+// InteractionHandler answers an interaction synchronously. When absent, the
+// interaction is emitted to the caller, which must answer it with Respond.
+type InteractionHandler func(context.Context, dagentruntime.InteractionSnapshot) (dagentruntime.InteractionResponse, error)
 
 // Event is the UI-friendly form of one runtime stream event.
 type Event struct {
@@ -87,6 +96,7 @@ type Event struct {
 	// RuntimeEvent is the original docker-agent runtime event for projected
 	// events. Not every runtime event is forwarded by this compact API.
 	RuntimeEvent dagentruntime.Event
+	Interaction  *dagentruntime.InteractionSnapshot
 }
 
 // ToolActivity describes one tool call surfaced by the runtime.
@@ -129,11 +139,26 @@ type Session struct {
 	closed              bool
 	pendingConfirmation string
 	pendingHandle       dagentruntime.SessionHandle
+	pendingInteractions map[string]dagentruntime.SessionHandle
 }
 
 // New builds the runtime for the configured team (or loads AgentSource) and
 // creates the first conversation session.
 func New(ctx context.Context, cfg Config) (*Session, error) {
+	if cfg.SessionRuntime != nil {
+		loader, ok := cfg.SessionRuntime.(dagentruntime.SessionLoader)
+		if !ok || cfg.SessionID == "" {
+			return nil, dagentruntime.UnsupportedSessionOperation(cfg.SessionID, dagentruntime.SessionOperationAttach)
+		}
+		handle, snapshot, err := loader.LoadSession(ctx, cfg.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("embeddedchat: attach session: %w", err)
+		}
+		if handle == nil || snapshot == nil || handle.ID() != cfg.SessionID || snapshot.ID != cfg.SessionID {
+			return nil, errors.New("embeddedchat: invalid attached session identity")
+		}
+		return &Session{cfg: cfg, rt: cfg.SessionRuntime, handle: handle, conversation: snapshot.Clone(), workingDir: snapshot.WorkingDir}, nil
+	}
 	if cfg.Team == nil && cfg.AgentSource == nil {
 		return nil, ErrAgentSourceRequired
 	}
@@ -272,14 +297,17 @@ func (s *Session) Restart() error {
 	// Restart has no caller context; cleanup must outlive the cancelled Send.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //rubocop:disable Lint/ContextConnectivity
 	defer cancel()
-	if s.handle != nil {
+	if s.handle != nil && s.supervisor != nil {
 		if err := s.handle.Release(ctx); err != nil {
 			return fmt.Errorf("embeddedchat: release previous session: %w", err)
 		}
 	}
 	s.drainErr = nil
 	s.pendingConfirmation, s.pendingHandle = "", nil
+	s.pendingInteractions = nil
+	agentName := s.handle.AgentName()
 	s.resetConversationLocked()
+	s.conversation.AgentName = agentName
 	return s.bindConversationLocked(ctx)
 }
 
@@ -402,6 +430,11 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				s.pendingConfirmation, s.pendingHandle = "", nil
 			}
 			s.activeCancel = nil
+			for id, handle := range s.pendingInteractions {
+				if handle == sessionHandle {
+					delete(s.pendingInteractions, id)
+				}
+			}
 		}
 	}()
 
@@ -432,9 +465,9 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
 			}
 		case *dagentruntime.ElicitationRequestEvent:
-			_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: dagentruntime.ElicitationResult{Action: tools.ElicitationActionDecline}})
+			return s.forwardInteraction(ctx, sessionHandle, dagentruntime.InteractionSnapshot{SessionID: envelope.SessionID, InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionElicitation, ElicitationID: e.ElicitationID, Event: event}, emit)
 		case *dagentruntime.MaxIterationsReachedEvent:
-			_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionMaxIterations, Resume: dagentruntime.ResumeReject("")})
+			return s.forwardInteraction(ctx, sessionHandle, dagentruntime.InteractionSnapshot{SessionID: envelope.SessionID, InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionMaxIterations, Event: event}, emit)
 		case *dagentruntime.ErrorEvent:
 			if errSent {
 				return true
@@ -484,6 +517,50 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 	if !errSent && ctx.Err() == nil {
 		emit(Event{Done: true})
 	}
+}
+
+// Respond answers an emitted interaction using its canonical correlation token.
+func (s *Session) Respond(ctx context.Context, response dagentruntime.InteractionResponse) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	handle := s.pendingInteractions[response.InteractionID]
+	s.mu.Unlock()
+	if handle == nil {
+		return &dagentruntime.SessionError{Kind: dagentruntime.SessionErrorStale, Operation: dagentruntime.SessionOperationRespond}
+	}
+	if err := handle.Respond(ctx, response); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pendingInteractions, response.InteractionID)
+	return nil
+}
+
+func (s *Session) forwardInteraction(ctx context.Context, handle dagentruntime.SessionHandle, interaction dagentruntime.InteractionSnapshot, emit func(Event) bool) bool {
+	s.mu.Lock()
+	if s.pendingInteractions == nil {
+		s.pendingInteractions = make(map[string]dagentruntime.SessionHandle)
+	}
+	s.pendingInteractions[interaction.InteractionID] = handle
+	s.mu.Unlock()
+	if s.cfg.InteractionHandler == nil {
+		return emit(Event{RuntimeEvent: interaction.Event, Interaction: &interaction})
+	}
+	response, err := s.cfg.InteractionHandler(ctx, interaction)
+	if err == nil {
+		response.InteractionID, response.Kind = interaction.InteractionID, interaction.Kind
+		response.ElicitationID = interaction.ElicitationID
+		err = s.Respond(ctx, response)
+	}
+	if err != nil {
+		emit(Event{Err: err})
+		return false
+	}
+	return true
 }
 
 func eventBufferSize(configured int) int {

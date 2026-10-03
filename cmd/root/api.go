@@ -189,10 +189,16 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	if f.manifest != nil {
 		loaderOptions = append(loaderOptions, teamloader.WithSourceResolver(f.manifest.SourceResolver), teamloader.WithModelOverrides(f.manifest.Startup().ModelOverrides))
 	}
+	sessionService := runtime.NewSessionService()
+	defer func() {
+		if err := sessionService.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			slog.ErrorContext(ctx, "Failed to shut down session service", "error", err)
+		}
+	}()
 	serverOpts := []server.SessionManagerOpt{
 		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
 		server.WithSessionRuntimeFactory(func(ctx context.Context, source config.Source, workingDir string) (runtime.SessionRuntimeSupervisor, error) {
-			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{LoaderOptions: loaderOptions, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
+			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{SessionService: sessionService, LoaderOptions: loaderOptions, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
 		}),
 	}
 

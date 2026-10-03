@@ -108,6 +108,7 @@ type sessionDriver struct {
 	retryRunning       bool
 	turnChanged        chan struct{}
 	completedTurns     []string
+	consumedSteering   []string
 	recentRetries      map[string]bool
 	pending            []QueuedMessage
 	adoptedInputs      map[string]bool
@@ -391,6 +392,9 @@ func (d *sessionDriver) promoteInputLocked(msg QueuedMessage) error {
 	}
 	if !d.sess.PromotePendingUserMessageByTurnID(msg.RequestID) {
 		return &SessionError{Kind: SessionErrorStale, SessionID: d.sess.ID, RequestID: msg.RequestID, Operation: "promote_input"}
+	}
+	if msg.InputMode == "steer" || msg.trustedSteering() {
+		d.consumedSteering = append(d.consumedSteering, msg.RequestID)
 	}
 	d.lastFailureKey = ""
 	d.events.PublishForRequest(d.sess.ID, msg.RequestID, inputEventMetadata(PendingUserMessagePromoted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
@@ -946,6 +950,8 @@ func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	unlockMetadata := d.sess.LockMetadata()
+	defer unlockMetadata()
 	previous, previousCustom := d.sess.ModelStateSnapshot()
 	d.sess.SetAgentModelOverride(agentName, modelRef)
 	if d.r.sessionStore != nil {
@@ -966,6 +972,8 @@ func (d *sessionDriver) SetStarred(ctx context.Context, starred bool) error {
 	if d.stopped || d.sess == nil {
 		return &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "set_starred"}
 	}
+	unlockMetadata := d.sess.LockMetadata()
+	defer unlockMetadata()
 	previous := d.sess.Starred
 	d.sess.Starred = starred
 	if d.r.sessionStore != nil {
@@ -983,6 +991,8 @@ func (d *sessionDriver) RemoveAttachment(ctx context.Context, path string) error
 	if d.stopped || d.sess == nil {
 		return &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "remove_attachment"}
 	}
+	unlockMetadata := d.sess.LockMetadata()
+	defer unlockMetadata()
 	if !d.sess.RemoveAttachedFile(path) {
 		return &SessionError{Kind: SessionErrorNotFound, SessionID: d.sess.ID, Operation: "remove_attachment"}
 	}
@@ -1002,6 +1012,8 @@ func (d *sessionDriver) UpdateTitle(ctx context.Context, title string) error {
 		d.mu.Unlock()
 		return &SessionError{Kind: SessionErrorStopped, SessionID: sessionID, Operation: "update_title"}
 	}
+	unlockMetadata := d.sess.LockMetadata()
+	defer unlockMetadata()
 	previous := d.sess.TitleSnapshot()
 	d.sess.SetTitle(title)
 	if d.r.sessionStore != nil {
@@ -1297,7 +1309,8 @@ func (d *sessionDriver) statusLocked() SessionStatus {
 		state = SessionStateQueued
 	}
 	status := SessionStatus{
-		State: state, Pending: len(d.pending), TurnID: d.activeRequestID, LastError: d.lastError, Dormant: d.viewDormant,
+		InterruptedTurns: d.interruptedTurnsLocked(),
+		State:            state, Pending: len(d.pending), TurnID: d.activeRequestID, LastError: d.lastError, Dormant: d.viewDormant,
 		PauseArmed: d.pauseCh != nil, Paused: d.pauseCh != nil && (d.pausePublished == d.pauseGeneration || (!d.running() && !d.starting())), PauseGeneration: d.pauseGeneration,
 	}
 	if d.sess != nil {
@@ -1733,6 +1746,17 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 	}
 	if completionErr == nil && d.r.subagents != nil {
 		completionErr = d.r.subagents.completeSessionTurnContext(ctx, d, turnID, runErr)
+	}
+	if completionErr == nil && turnID != "" {
+		d.mu.Lock()
+		outcome := TurnCompleted
+		if d.canceledOutcome || d.stopped || d.r.lifetime().Err() != nil {
+			outcome = TurnCanceled
+		} else if runErr != "" {
+			outcome = TurnFailed
+		}
+		completionErr = d.persistTurnOutcomeLocked(ctx, turnID, outcome)
+		d.mu.Unlock()
 	}
 	if completionErr != nil {
 		d.mu.Lock()

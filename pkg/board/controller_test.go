@@ -589,3 +589,17 @@ func TestControllerNoDowngradeToStartupPhase(t *testing.T) {
 		return err == nil && card.Status != StatusRunning
 	}, 300*time.Millisecond, 10*time.Millisecond)
 }
+
+func TestCanonicalBaselineDoesNotReplayStaleLifecycle(t *testing.T) {
+	t.Parallel()
+	store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", LastEventSeq: 7}, []event{
+		{Type: eventBaseline, Baseline: &snapshot{Epoch: "one", State: "settled", LastEventSeq: 8}},
+	})
+	waitForStatus(t, store, StatusWaiting)
+}
+
+func TestCanonicalOutstandingInteractionNeedsAttachment(t *testing.T) {
+	t.Parallel()
+	store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", LastEventSeq: 7}, []event{{Type: eventInteraction, Seq: 8}})
+	waitForStatus(t, store, StatusPaused)
+}

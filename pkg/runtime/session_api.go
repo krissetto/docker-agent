@@ -246,11 +246,9 @@ type SessionRuntimeSupervisor interface {
 	Shutdown(ctx context.Context) error
 }
 
-// SessionHandle is the complete session-owned operation surface consumers retain
-// instead of a concrete LocalRuntime. SessionCapabilities is the read-only
-// discovery surface for optional affordances; unsupported operations return a
-// typed SessionError.
-type SessionHandle interface {
+// SessionLifecycle is the portable execution and observation contract. Views
+// borrow execution: canceling observation does not stop accepted work.
+type SessionLifecycle interface {
 	ID() string
 	AgentName() string
 	Metadata() SessionMetadata
@@ -260,12 +258,17 @@ type SessionHandle interface {
 	Observe(ctx context.Context, options ObserveOptions) (Observation, error)
 	Status(ctx context.Context) (SessionStatus, error)
 	Respond(ctx context.Context, response InteractionResponse) error
-	UpdateTitle(ctx context.Context, title string) error
 	Cancel(ctx context.Context, turnID string) (CancelResult, error)
 	AwaitTurn(ctx context.Context, turnID string) error
+	Snapshot(ctx context.Context) (*session.Session, error)
+}
+
+// SessionOperations is the compatibility extension surface. Capability flags
+// describe which optional operations are usable by a particular handle.
+type SessionOperations interface {
+	UpdateTitle(ctx context.Context, title string) error
 	Edit(ctx context.Context, edit SessionEdit) (*session.Session, error)
 	Release(ctx context.Context) error
-	Snapshot(ctx context.Context) (*session.Session, error)
 	Todos(ctx context.Context) ([]session.Todo, error)
 	SetTodoStatus(ctx context.Context, id, status string) ([]session.Todo, error)
 	SetTodoDescription(ctx context.Context, id, expectedDescription, description string) ([]session.Todo, error)
@@ -289,6 +292,19 @@ type SessionHandle interface {
 	ThinkingLevels(ctx context.Context) []effort.Level
 	CurrentThinkingLevel(ctx context.Context) effort.Level
 	EmitPinnedAgentInfo(ctx context.Context, sink EventSink)
+}
+
+// SessionTreeController fences and drains a root or child subtree, preserving history.
+// This is distinct from turn cancellation and view release.
+type SessionTreeController interface {
+	StopSubtree(ctx context.Context) error
+}
+
+// SessionHandle preserves the existing complete operation surface. New portable
+// consumers can depend on SessionLifecycle and negotiate optional capabilities.
+type SessionHandle interface {
+	SessionLifecycle
+	SessionOperations
 }
 
 // UnsupportedSessionOperation returns the typed unsupported error required by
@@ -406,6 +422,8 @@ type SessionBinding struct {
 // SessionCapabilities are read-only facts; false capabilities must return a
 // typed unsupported error rather than silently mutating shared runtime state.
 type SessionCapabilities struct {
+	DelegationPolicy      bool
+	StopSubtree           bool
 	ToolInspection        bool
 	ToolsetRestart        bool
 	PermissionsInspection bool
@@ -512,16 +530,17 @@ const (
 
 // SessionStatus is a point-in-time, immutable status reading.
 type SessionStatus struct {
-	SessionID       string       `json:"session_id"`
-	AgentName       string       `json:"agent_name"`
-	State           SessionState `json:"state"`
-	Pending         int          `json:"pending"`
-	TurnID          string       `json:"turn_id,omitempty"`
-	LastError       string       `json:"last_error,omitempty"`
-	Dormant         bool         `json:"dormant,omitempty"`
-	PauseArmed      bool         `json:"pause_armed,omitempty"`
-	Paused          bool         `json:"paused,omitempty"`
-	PauseGeneration uint64       `json:"pause_generation,omitempty"`
+	InterruptedTurns int          `json:"interrupted_turns,omitempty"`
+	SessionID        string       `json:"session_id"`
+	AgentName        string       `json:"agent_name"`
+	State            SessionState `json:"state"`
+	Pending          int          `json:"pending"`
+	TurnID           string       `json:"turn_id,omitempty"`
+	LastError        string       `json:"last_error,omitempty"`
+	Dormant          bool         `json:"dormant,omitempty"`
+	PauseArmed       bool         `json:"pause_armed,omitempty"`
+	Paused           bool         `json:"paused,omitempty"`
+	PauseGeneration  uint64       `json:"pause_generation,omitempty"`
 }
 
 // SubmissionDisposition describes how an accepted input will be delivered.
@@ -574,9 +593,10 @@ type InteractionResponse struct {
 // ObserveOptions selects replay after Since. A nil cursor means snapshot plus
 // tail from the observation boundary. Buffer <= 0 uses the runtime default.
 type ObserveOptions struct {
-	Since  *uint64
-	Buffer int
-	Tree   bool
+	SinceEpoch string
+	Since      *uint64
+	Buffer     int
+	Tree       bool
 }
 
 // InteractionSnapshot is an immutable outstanding interaction. Event is
@@ -606,6 +626,7 @@ type PendingInput struct {
 // is a clone and therefore safe for consumers to retain. Interactions reseed
 // outstanding prompts after reconnect or a bounded-journal gap.
 type SessionSnapshot struct {
+	Epoch              string
 	Session            *session.Session
 	Status             SessionStatus
 	Interactions       []InteractionSnapshot
@@ -619,6 +640,7 @@ type SessionSnapshot struct {
 // cannot satisfy the requested cursor. Observer cancellation only closes this
 // observation and never cancels session execution.
 type SessionEvent struct {
+	Epoch              string
 	Version            int
 	SessionID          string
 	TurnID             string

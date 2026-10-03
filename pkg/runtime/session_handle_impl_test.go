@@ -62,7 +62,7 @@ func newSessionFixture(t *testing.T) (*LocalRuntime, *session.Session) {
 	rt, err := NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
-	return rt, session.New(session.WithID("session-sess"))
+	return rt, session.New(session.WithID(t.Name() + "/session"))
 }
 
 func TestSessionWakesIdleSessionOnNote(t *testing.T) {

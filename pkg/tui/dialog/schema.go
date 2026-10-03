@@ -6,6 +6,9 @@ import (
 	"slices"
 )
 
+// ParseElicitationSchema exposes the dialog's schema fields to other clients.
+func ParseElicitationSchema(schema any) []ElicitationField { return parseElicitationSchema(schema) }
+
 // parseElicitationSchema extracts fields from a JSON schema.
 // Supports both object schemas with properties and primitive type schemas.
 func parseElicitationSchema(schema any) []ElicitationField {

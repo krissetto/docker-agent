@@ -53,6 +53,9 @@ type OpenSubagentMsg struct {
 // ShowSubagentSessionsMsg opens a searchable list of canonical subagent sessions.
 type ShowSubagentSessionsMsg struct{}
 
+// OpenTreeAttentionMsg opens the next descendant session waiting on a human.
+type OpenTreeAttentionMsg struct{}
+
 // ReturnToPreviousSessionMsg returns to the previous still-open view, without closing it.
 type ReturnToPreviousSessionMsg struct{}
 
@@ -103,7 +106,8 @@ type WorkingStateChangedMsg struct {
 // This is used when an inactive tab needs attention (e.g., tool confirmation).
 type BellMsg struct{}
 
-// SetUseSubagentsMsg saves and applies the delegation preference without changing existing work.
+// SetUseSubagentsMsg changes new delegation for the session tree (or the local
+// default when the owner has no tree policy) without changing existing work.
 type SetUseSubagentsMsg struct{ Enabled bool }
 
 // StopSubagentSubtreeMsg is emitted only after explicit human confirmation.

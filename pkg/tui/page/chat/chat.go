@@ -10,8 +10,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/docker/docker-agent/pkg/tui/widgets/help"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -32,6 +30,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentindex"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 const (
@@ -577,10 +577,9 @@ func (p *chatPage) hydrateSidebarSession(sess *session.Session) tea.Cmd {
 			snapshot = current.GetSubagentTree()
 		}
 	}
-	if provider, ok := p.app.Runtime().(interface{ SubagentTree() *subagent.Tree }); ok && provider.SubagentTree() != nil && rootID != "" {
-		live := provider.SubagentTree().Snapshot()
+	if live := p.app.SubagentTreeSnapshot(); live != nil && rootID != "" {
 		if _, found := subagentview.Find(live.Nodes, rootID); found {
-			snapshot = &live
+			snapshot = live
 		}
 	}
 	hydrated := sess.Clone()

@@ -287,9 +287,9 @@ func TestSessionElicitationSubscribersRouteToNearestOpenAncestor(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	parent := session.New(session.WithID("parent"))
-	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
-	detached := session.New(session.WithID("detached"), session.WithParentID(child.ID))
+	parent := session.New(session.WithID(t.Name() + "/parent"))
+	child := session.New(session.WithID(t.Name()+"/child"), session.WithParentID(parent.ID))
+	detached := session.New(session.WithID(t.Name()+"/detached"), session.WithParentID(child.ID))
 	rt.sessionDrivers.Get(parent)
 	rt.sessionDrivers.Get(child)
 	rt.sessionDrivers.Get(detached)
@@ -332,8 +332,8 @@ func TestSessionElicitationSinkAvailabilityIsRouteAware(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	open := session.New(session.WithID("open-root"))
-	unrelated := session.New(session.WithID("unrelated-root"))
+	open := session.New(session.WithID(t.Name() + "/open-root"))
+	unrelated := session.New(session.WithID(t.Name() + "/unrelated-root"))
 	rt.sessionDrivers.Get(open)
 	rt.sessionDrivers.Get(unrelated)
 	cancel, _ := rt.SubscribeSessionElicitations(open.ID, "", func(Event) bool { return true })
@@ -348,8 +348,8 @@ func TestSessionElicitationUnsubscribeWaitsForSelectedDelivery(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	parent := session.New(session.WithID("parent"))
-	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
+	parent := session.New(session.WithID(t.Name() + "/parent"))
+	child := session.New(session.WithID(t.Name()+"/child"), session.WithParentID(parent.ID))
 	rt.sessionDrivers.Get(parent)
 	rt.sessionDrivers.Get(child)
 
@@ -399,7 +399,7 @@ func TestSessionElicitationCallbackMayReenterRegistry(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	sess := session.New(session.WithID("reentrant"))
+	sess := session.New(session.WithID(t.Name() + "/reentrant"))
 	rt.sessionDrivers.Get(sess)
 	done := make(chan struct{})
 	cancel, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(Event) bool {
@@ -423,7 +423,7 @@ func TestSessionElicitationUnsubscribeCancelsBlockedCallback(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	sess := session.New(session.WithID("full-app-bus"))
+	sess := session.New(session.WithID(t.Name() + "/full-app-bus"))
 	rt.sessionDrivers.Get(sess)
 	ctx, cancelCtx := context.WithCancel(t.Context())
 	bus := make(chan Event, 1)
@@ -457,8 +457,8 @@ func TestElicitationHandler_RejectedScopedDeliveryFastDeclinesThenHandsOff(t *te
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	parent := session.New(session.WithID("parent"))
-	child := session.New(session.WithID("child"), session.WithParentID(parent.ID))
+	parent := session.New(session.WithID(t.Name() + "/parent"))
+	child := session.New(session.WithID(t.Name()+"/child"), session.WithParentID(parent.ID))
 	rt.sessionDrivers.Get(parent)
 	rt.sessionDrivers.Get(child)
 
@@ -498,7 +498,7 @@ func TestElicitationHandler_BackgroundUnregisterAfterAvailabilityFastDeclines(t 
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	sess := session.New(session.WithID("background"))
+	sess := session.New(session.WithID(t.Name() + "/background"))
 	rt.sessionDrivers.Get(sess)
 	cancel, _ := rt.SubscribeSessionElicitations(sess.ID, "", func(Event) bool { return true })
 	require.True(t, rt.hasElicitationSink(sess.ID), "barrier: availability was observed before unregister")
@@ -517,7 +517,7 @@ func TestSessionElicitationSubscribersConcurrentLifecycle(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-	sess := session.New(session.WithID("shared"))
+	sess := session.New(session.WithID(t.Name() + "/shared"))
 	rt.sessionDrivers.Get(sess)
 	event := ElicitationRequest("request", "form", nil, "", "eid", "", sess.ID, nil, "root")
 

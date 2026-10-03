@@ -22,7 +22,7 @@ func TestSubagentPickerStopRequiresPinnedConfirmation(t *testing.T) {
 	id, _ = p.HandleStopKey(stop)
 	require.Empty(t, id)
 	require.Equal(t, subagent.NodeID("child"), p.StopTarget)
-	require.Contains(t, strings.Join(p.Render(120, 12), "\n"), "Permanently stop subtree?")
+	require.Contains(t, strings.Join(p.Render(120, 12), "\n"), "Stop and drain subtree?")
 	id, _ = p.HandleStopKey(Key{Typ: KeyEsc})
 	require.Empty(t, id)
 	require.Empty(t, p.StopTarget)

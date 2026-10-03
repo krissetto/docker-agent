@@ -169,6 +169,12 @@ func (v *localSessionRuntimeView) ListSessionSummaries(ctx context.Context, opti
 }
 
 func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
+	v.runtime.creationMu.Lock()
+	defer v.runtime.creationMu.Unlock()
+	return v.loadSession(ctx, sessionID)
+}
+
+func (v *localSessionRuntimeView) loadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
 	if found, err := v.SessionByID(sessionID); err == nil {
 		if handle, ok := found.(*sessionHandle); ok {
 			return found, handle.driver.session().Clone(), nil
@@ -189,7 +195,7 @@ func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID str
 		sess.AgentName = boundAgent
 	}
 	binding := SessionBinding{AgentName: boundAgent, Model: sess.AgentModelOverrides[boundAgent]}
-	handle, err := v.CreateSession(ctx, sess, binding)
+	handle, err := v.runtime.createSession(ctx, sess, binding)
 	return handle, sess, err
 }
 
@@ -270,12 +276,20 @@ type sessionHandle struct {
 func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
 	r.creationMu.Lock()
 	defer r.creationMu.Unlock()
+	return r.createSession(ctx, sess, binding)
+}
+
+func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
 	}
+	if err := r.sessionDrivers.beginClaim(sess.ID); err != nil {
+		return nil, err
+	}
+	defer r.sessionDrivers.releaseUnpublishedClaim(sess.ID)
 	if binding.ParentSessionID != "" {
 		return r.createClientChild(ctx, sess, binding)
 	}
@@ -442,6 +456,9 @@ func (h *sessionHandle) todoToolSet() *todotool.ToolSet {
 	if a != nil {
 		for _, toolset := range a.ToolSets() {
 			if todoSet, ok := tools.As[*todotool.ToolSet](toolset); ok {
+				if bound := h.runtime.todoToolsets[todoSet]; bound != nil {
+					return bound
+				}
 				return todoSet
 			}
 		}
@@ -531,7 +548,7 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 		forkSkills = slices.ContainsFunc(st.Skills(), func(skill skills.Skill) bool { return skill.IsFork() })
 	}
 	return SessionMetadata{SessionID: h.sessionID, AgentName: h.AgentName(), Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
-		ToolInspection: true, ToolsetRestart: true, PermissionsInspection: true, MCPPrompts: true, TodoEditing: true, Branching: true,
+		DelegationPolicy: true, StopSubtree: true, ToolInspection: true, ToolsetRestart: true, PermissionsInspection: true, MCPPrompts: true, TodoEditing: true, Branching: true,
 		AvailableModels: available, Durability: durability,
 		Compaction: true, TargetCompaction: true, ModelSwitching: modelSwitching, ContextInspection: true, LiveSessions: true, SessionEditing: true,
 		ForkSkills: forkSkills, Pause: true, ModelCatalogRefresh: modelStoreCanRefresh(h.runtime.modelsStore), ThinkingLevels: modelSwitching && len(levels) > 1, Todos: true,
@@ -1058,7 +1075,11 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
 	}
-	observed := h.driver.observe(options.Since, buffer)
+	since := options.Since
+	if since != nil && options.SinceEpoch != h.driver.events.epoch {
+		since = nil
+	}
+	observed := h.driver.observe(since, buffer)
 	if observed.live == nil || observed.cancel == nil {
 		return Observation{}, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: "observe"}
 	}
@@ -1091,7 +1112,7 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 		replay[i] = sessionEnvelope(h.sessionID, item)
 	}
 	return Observation{
-		Initial: []SessionSnapshot{{Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position}},
+		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position}},
 		Replay:  replay, Events: out, Cancel: cancel,
 	}, nil
 }
@@ -1110,7 +1131,7 @@ func sessionEnvelope(sessionID string, item SequencedSessionEvent) SessionEvent 
 	case *UserMessageEvent:
 		position = event.SessionPosition
 	}
-	return SessionEvent{Version: 1, SessionID: sessionID, TurnID: item.RequestID, InteractionID: item.InteractionID, Sequence: item.Sequence, TranscriptPosition: position, Event: item.Event, Gap: item.Gap, FirstAvailable: item.FirstAvailable}
+	return SessionEvent{Epoch: item.Epoch, Version: 1, SessionID: sessionID, TurnID: item.RequestID, InteractionID: item.InteractionID, Sequence: item.Sequence, TranscriptPosition: position, Event: item.Event, Gap: item.Gap, FirstAvailable: item.FirstAvailable}
 }
 
 // DeleteSession cascades through the topology manager, driver/interactions,
@@ -1181,4 +1202,27 @@ func sessionInputID(sessionID, requestID string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(sessionID + "\x00" + requestID))
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func (h *sessionHandle) StopSubtree(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if h.driver.session().ParentID == "" {
+		return h.stopRootTree(ctx)
+	}
+	h.runtime.subagents.mu.Lock()
+	var nodeID subagent.NodeID
+	for id, rec := range h.runtime.subagents.children {
+		if rec.sessionID == h.sessionID {
+			nodeID = id
+			break
+		}
+	}
+	h.runtime.subagents.mu.Unlock()
+	if nodeID == "" {
+		return &SessionError{Kind: SessionErrorNotFound, SessionID: h.sessionID, Operation: "stop_subtree"}
+	}
+	_, err := h.runtime.subagents.stopChildContext(ctx, h.driver.session().ParentID, nodeID)
+	return err
 }

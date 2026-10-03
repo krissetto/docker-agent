@@ -117,10 +117,10 @@ type ToolSet struct {
 	sleep func(ctx context.Context, d time.Duration) bool
 
 	mu       sync.Mutex
-	rt       tools.Runtime
 	recent   map[string]time.Time
 	lastSent time.Time
 
+	// Delivery lifetime is owned by the team toolset; each job retains its invoking runtime.
 	cancels []context.CancelFunc
 	stopped bool
 	wg      sync.WaitGroup
@@ -190,13 +190,12 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 	t.markSent(args, now)
 
 	if rt != nil && rt.Supports(tools.CapabilityRecall) {
-		t.setRuntime(rt)
 		bg, cancel, ok := t.deliveryContext(ctx)
 		if ok {
 			t.wg.Go(func() {
 				defer cancel()
 				if msg, failed := t.deliver(bg, args); failed {
-					t.recall(bg, msg)
+					t.recall(bg, msg, rt)
 				}
 			})
 			return tools.ResultSuccess(fmt.Sprintf(
@@ -362,26 +361,10 @@ func (t *ToolSet) markSent(args SendArgs, now time.Time) {
 	t.lastSent = now
 }
 
-func (t *ToolSet) recall(ctx context.Context, message string) {
-	rt := t.runtime()
-	if rt == nil {
-		return
-	}
+func (t *ToolSet) recall(ctx context.Context, message string, rt tools.Runtime) {
 	if err := rt.Recall(ctx, "⚠️ "+message); err != nil {
 		slog.WarnContext(ctx, "Failed to enqueue webhook delivery-failure recall", "error", err)
 	}
-}
-
-func (t *ToolSet) setRuntime(rt tools.Runtime) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.rt = rt
-}
-
-func (t *ToolSet) runtime() tools.Runtime {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.rt
 }
 
 func (t *ToolSet) deliveryContext(callCtx context.Context) (context.Context, context.CancelFunc, bool) {

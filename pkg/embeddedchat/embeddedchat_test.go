@@ -358,7 +358,7 @@ func TestSessionSendHandlesRuntimeErrorWithoutDone(t *testing.T) {
 	assertClosed(t, out)
 }
 
-func TestSessionSendDeclinesElicitationAndRejectsMaxIterations(t *testing.T) {
+func TestSessionSendSurfacesElicitationAndMaxIterations(t *testing.T) {
 	t.Parallel()
 	rt := newFakeRuntime()
 	s := newTestSession(rt)
@@ -369,10 +369,15 @@ func TestSessionSendDeclinesElicitationAndRejectsMaxIterations(t *testing.T) {
 	rt.events <- dagentruntime.MaxIterationsReached(3)
 	close(rt.events)
 
+	elicitation := receiveEvent(t, out)
+	require.NotNil(t, elicitation.Interaction)
+	require.Equal(t, dagentruntime.InteractionElicitation, elicitation.Interaction.Kind)
+	iterations := receiveEvent(t, out)
+	require.NotNil(t, iterations.Interaction)
+	require.Equal(t, dagentruntime.InteractionMaxIterations, iterations.Interaction.Kind)
 	require.True(t, receiveEvent(t, out).Done)
-	require.Equal(t, []tools.ElicitationAction{"decline"}, rt.elicitations)
-	require.Len(t, rt.resumes, 1)
-	require.Equal(t, dagentruntime.ResumeTypeReject, rt.resumes[0].Type)
+	require.Empty(t, rt.elicitations)
+	require.Empty(t, rt.resumes)
 }
 
 func TestSessionSendRejectsConcurrentRun(t *testing.T) {
@@ -573,4 +578,49 @@ func conversationSnapshot(t *testing.T, s *Session) *session.Session {
 	snapshot, err := s.Conversation(t.Context())
 	require.NoError(t, err)
 	return snapshot
+}
+
+func TestBorrowedSessionAttachAndClosePreservesAuthority(t *testing.T) {
+	t.Parallel()
+	owner, err := New(t.Context(), Config{Team: newCodeBuiltTeam()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, owner.Close()) })
+	original := conversationSnapshot(t, owner)
+	attached, err := New(t.Context(), Config{SessionRuntime: owner.SessionRuntime(), SessionID: original.ID})
+	require.NoError(t, err)
+	require.Equal(t, original.ID, conversationSnapshot(t, attached).ID)
+	require.NoError(t, attached.Close())
+	require.Equal(t, original.ID, conversationSnapshot(t, owner).ID)
+}
+
+func TestBorrowedSessionRestartDoesNotReleaseOriginal(t *testing.T) {
+	t.Parallel()
+	owner, err := New(t.Context(), Config{Team: newCodeBuiltTeam()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, owner.Close()) })
+	original := conversationSnapshot(t, owner)
+	attached, err := New(t.Context(), Config{SessionRuntime: owner.SessionRuntime(), SessionID: original.ID})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, attached.Close()) })
+	require.NoError(t, attached.Restart())
+	require.NotEqual(t, original.ID, conversationSnapshot(t, attached).ID)
+	require.Equal(t, original.ID, conversationSnapshot(t, owner).ID)
+	_, err = owner.handle.Status(t.Context())
+	require.NoError(t, err)
+}
+
+func TestSessionInteractionHandlerAnswersElicitation(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.cfg.InteractionHandler = func(_ context.Context, interaction dagentruntime.InteractionSnapshot) (dagentruntime.InteractionResponse, error) {
+		require.Equal(t, dagentruntime.InteractionElicitation, interaction.Kind)
+		return dagentruntime.InteractionResponse{Elicitation: dagentruntime.ElicitationResult{Action: tools.ElicitationActionAccept}}, nil
+	}
+	out, err := s.Send(t.Context(), "hi")
+	require.NoError(t, err)
+	rt.events <- dagentruntime.ElicitationRequest("authorize", "url", nil, "https://example.com", "id", "", "sess", nil, "agent")
+	close(rt.events)
+	require.True(t, receiveEvent(t, out).Done)
+	require.Equal(t, []tools.ElicitationAction{tools.ElicitationActionAccept}, rt.elicitations)
 }

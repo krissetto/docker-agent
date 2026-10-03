@@ -24,6 +24,8 @@ type sessionDriverRegistry struct {
 	deleted            map[string]struct{}
 	reservations       map[string]*restoreDriverReservation
 	prepareRestoreHook func(string) // test-only barrier before reservation
+	stoppedTrees       map[string]struct{}
+	pendingClaims      map[string]int
 	closed             bool
 	workOnce           sync.Once
 	work               chan struct{}
@@ -181,6 +183,10 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "register"}
 	}
+	if err := g.beginClaim(sess.ID); err != nil {
+		return nil, err
+	}
+	defer g.releaseUnpublishedClaim(sess.ID)
 	if !bind && sess.AgentName == "" && g.r != nil && g.r.team != nil {
 		defaultAgent, err := g.r.team.DefaultAgent()
 		if err != nil {
@@ -197,6 +203,10 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 	if g.closed {
 		g.mu.Unlock()
 		return nil, &SessionError{Kind: SessionErrorClosed, SessionID: sess.ID, Operation: "register"}
+	}
+	if _, stopped := g.stoppedTrees[sess.ID]; stopped {
+		g.mu.Unlock()
+		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: SessionOperationCreateSession}
 	}
 	if _, deleted := g.deleted[sess.ID]; deleted {
 		g.mu.Unlock()
@@ -219,6 +229,12 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		d = nil
 	}
 	if d == nil {
+		if g.r != nil {
+			if err := g.r.sessionService.claim(g.r, sess.ID); err != nil {
+				g.mu.Unlock()
+				return nil, err
+			}
+		}
 		maxSessions := g.maxSessionsLocked()
 		if maxSessions > 0 && !limitAllows(len(g.drivers)-replacing, maxSessions) {
 			g.evictSettledForCapacityLocked()
@@ -297,6 +313,10 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "restore_prepare"}
 	}
+	if err := g.beginClaim(sess.ID); err != nil {
+		return nil, err
+	}
+	defer g.releaseUnpublishedClaim(sess.ID)
 	if g.prepareRestoreHook != nil {
 		g.prepareRestoreHook(sess.ID)
 	}
@@ -327,6 +347,9 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 	if g.drivers[sess.ID] != replaces || g.reservations[sess.ID] != nil || (replaces != nil && !replaces.stoppedViewReplaceable()) {
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "restore_collision"}
 	}
+	if _, stopped := g.stoppedTrees[sess.ID]; stopped {
+		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: SessionOperationRestorePrepare}
+	}
 	if _, deleted := g.deleted[sess.ID]; deleted {
 		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "restore_prepare"}
 	}
@@ -342,6 +365,9 @@ func (r *restoreDriverReservation) Discard() {
 	defer r.registry.mu.Unlock()
 	if r.registry.reservations[r.id] == r {
 		delete(r.registry.reservations, r.id)
+		if r.registry.pendingClaims[r.id] == 0 && r.registry.drivers[r.id] == nil && r.registry.r != nil {
+			r.registry.r.sessionService.release(r.registry.r, r.id)
+		}
 	}
 }
 
@@ -602,6 +628,7 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		g.releasePersistence(sessionID)
 	}
 	delete(g.orphans, sessionID)
+	delete(g.stoppedTrees, sessionID)
 	g.mu.Unlock()
 	if g.r != nil && g.r.interactions != nil {
 		g.r.interactions.deleteSession(sessionID)
@@ -687,6 +714,10 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	for id := range g.drivers {
 		g.releasePersistence(id)
 	}
+	for id := range g.reservations {
+		g.releasePersistence(id)
+	}
+	g.reservations = map[string]*restoreDriverReservation{}
 	g.drivers = map[string]*sessionDriver{}
 	g.orphans = map[string][]QueuedMessage{}
 	return nil
@@ -719,9 +750,42 @@ func (g *sessionDriverRegistry) ancestorResidentLocked(id string) bool {
 	return false
 }
 
+func (g *sessionDriverRegistry) beginClaim(id string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return &SessionError{Kind: SessionErrorClosed, SessionID: id, Operation: SessionOperationCreateSession}
+	}
+	if g.r != nil {
+		if err := g.r.sessionService.claim(g.r, id); err != nil {
+			return err
+		}
+	}
+	if g.pendingClaims == nil {
+		g.pendingClaims = make(map[string]int)
+	}
+	g.pendingClaims[id]++
+	return nil
+}
+
+func (g *sessionDriverRegistry) releaseUnpublishedClaim(id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pendingClaims[id]--
+	if g.pendingClaims[id] <= 0 {
+		delete(g.pendingClaims, id)
+	}
+	if g.pendingClaims[id] == 0 && g.drivers[id] == nil && g.reservations[id] == nil && g.r != nil {
+		g.r.sessionService.release(g.r, id)
+	}
+}
+
 func (g *sessionDriverRegistry) releasePersistence(id string) {
 	if g.r == nil {
 		return
+	}
+	if g.pendingClaims[id] == 0 {
+		g.r.sessionService.release(g.r, id)
 	}
 	for _, observer := range g.r.observers {
 		if p, ok := observer.(*PersistenceObserver); ok {

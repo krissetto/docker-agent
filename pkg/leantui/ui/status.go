@@ -21,7 +21,14 @@ type ThinkingStatus struct {
 
 // StatusModel is the snapshot of run state shown in the footer.
 type StatusModel struct {
-	Dormant    bool
+	Dormant bool
+	// Connection is a non-healthy observer transport state ("reconnecting",
+	// "disconnected"); empty while connected.
+	Connection string
+	// Interrupted counts turns that ended without terminal evidence.
+	Interrupted int
+	// Attention counts descendants waiting on a human.
+	Attention  int
 	Active     bool
 	Pending    int
 	WorkingDir string
@@ -75,8 +82,16 @@ func RenderStatus(d StatusModel, width int) []string {
 		}
 	case d.Active:
 		right1 += StMuted().Render(" · active")
+	case d.Interrupted > 0:
+		right1 += StWarning().Render(fmt.Sprintf(" · recovery uncertain (%d interrupted)", d.Interrupted))
 	case d.Agent != "":
 		right1 += StMuted().Render(" · ready")
+	}
+	if d.Attention > 0 {
+		right1 += StWarning().Render(fmt.Sprintf(" · %d waiting · /attention", d.Attention))
+	}
+	if d.Connection != "" {
+		left1 = StWarning().Render("Connection " + d.Connection + " · work continues on the server")
 	}
 
 	left2 := RenderContext(d)

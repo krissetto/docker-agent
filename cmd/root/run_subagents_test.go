@@ -36,7 +36,7 @@ func TestRuntimeOptsReloadsUseSubagents(t *testing.T) {
 	}
 }
 
-func TestSelectRemoteBackendUseSubagents(t *testing.T) {
+func TestSelectRemoteBackendIgnoresLocalDelegationDefault(t *testing.T) {
 	// Not parallel: SetConfigDir mutates process-global state.
 	paths.SetConfigDir(t.TempDir())
 	t.Cleanup(func() { paths.SetConfigDir("") })
@@ -48,8 +48,9 @@ func TestSelectRemoteBackendUseSubagents(t *testing.T) {
 
 	require.NoError(t, userconfig.SetUseSubagents(false))
 	b, err = flags.selectBackend("agent.yaml")
-	require.ErrorContains(t, err, "--remote does not support disabling subagents")
-	assert.Nil(t, b)
+	require.NoError(t, err)
+	assert.IsType(t, &remoteBackend{}, b)
+	assert.False(t, userconfig.Get().GetUseSubagents(), "remote selection must not rewrite the local default")
 
 	require.NoError(t, userconfig.SetUseSubagents(true))
 	b, err = flags.selectBackend("agent.yaml")

@@ -143,7 +143,10 @@ type blockedOpeningHandle struct {
 	started, gate, cancelled chan struct{}
 }
 
-func (h *blockedOpeningHandle) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+func (h *blockedOpeningHandle) Observe(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	close(h.started)
 	<-h.gate
 	return runtime.Observation{Events: make(chan runtime.SessionEvent), Cancel: func() { close(h.cancelled) }}, nil
@@ -191,33 +194,18 @@ func TestOpeningProgramCloseDoesNotWaitForBlockedObservationAndShutdownDrains(t 
 	}
 }
 
-type openingLifetimeServices struct {
-	*openSubagentRuntime
-
-	events chan runtime.Event
-}
-
-func (s *openingLifetimeServices) EmitStartupInfo(ctx context.Context, _ *session.Session, sink runtime.EventSink) {
-	for {
-		select {
-		case event := <-s.events:
-			sink.Emit(event)
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
 func TestOpeningProgramInstalledObserverSurvivesPresentationCancellation(t *testing.T) {
 	for _, switchEarly := range []bool{false, true} {
 		t.Run(map[bool]string{false: "settled", true: "switch during fade"}[switchEarly], func(t *testing.T) {
-			root, _ := openingFixture(t)
+			root, rt := openingFixture(t)
 			sess := session.New(session.WithID("retained-observer"), session.WithAgentName("root"))
-			info := runtime.SubagentAttachInfo{NodeID: "lifetime-node", Session: sess, Agent: "root"}
-			services := &openingLifetimeServices{openSubagentRuntime: &openSubagentRuntime{closeTabRuntime: newCloseTabRuntime("root", false), info: info}, events: make(chan runtime.Event, 1)}
-			origin := app.New(t.Context(), &openSubagentSessions{}, root.application.Session(), runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
-			root.application = origin
-			root.supervisor.GetRunner(root.paneFocus()).App = origin
+			sess.ParentID = "profile"
+			// The opened view's canonical observation must outlive the opening presentation.
+			handle := &lifecycleHandle{id: sess.ID, live: make(chan runtime.SessionEvent, 1)}
+			rt.prepared = &sourcePreparedFixture{handle: handle, info: runtime.PreparedSessionViewInfo{
+				SessionID: sess.ID, RootSessionID: "profile", Session: sess, Binding: runtime.SessionBinding{AgentName: "root"},
+				Attach: &runtime.SubagentAttachInfo{NodeID: "lifetime-node", Session: sess, Agent: "root", ParentSessionID: "profile", ParentAgent: "root"},
+			}}
 			program := startTestProgram(t, root, &openingProgram{&shellProgramModel{root: root}}, tea.WithOutput(&cacheProgramWriter{}))
 			root.supervisor.SetProgram(program)
 			program.Send(openingAction{apply: func(m *appModel) tea.Cmd { return m.beginSubagentOpening("lifetime-node", sess.ID, "Retained", "root") }})
@@ -232,7 +220,7 @@ func TestOpeningProgramInstalledObserverSurvivesPresentationCancellation(t *test
 				program.Send(messages.SwitchTabMsg{SessionID: "second"})
 				require.Equal(t, "second", queryOpening(t, program).focus)
 			}
-			services.events <- runtime.UserMessage("OBSERVER STILL LIVE", sess.ID, nil)
+			handle.live <- runtime.SessionEvent{SessionID: sess.ID, Sequence: 1, Event: runtime.UserMessage("OBSERVER STILL LIVE", sess.ID, nil)}
 			if switchEarly {
 				program.Send(messages.SwitchTabMsg{SessionID: sess.ID})
 			}

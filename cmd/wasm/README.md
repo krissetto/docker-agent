@@ -166,9 +166,9 @@ These are not bugs to fix; they are direct consequences of `GOOS=js`:
 
 - **No tools, no MCP, no hooks, no sub-agent handoffs.** Anything that needs
   `os/exec` or local file I/O is excluded from the build.
-- **No sessions.** `pkg/session` and `pkg/memory/database/sqlite` pull in
-  `modernc.org/libc` which does not have a js port. The browser caller is
-  responsible for keeping the message history.
+- **No browser-local durable sessions.** The demo caller keeps its own message
+  history. Native runtime sqlite cannot be linked into this build; HTTP authority
+  mode below instead uses portable session contracts and server-owned persistence.
 - **Explicit provider selection.** The demo registers OpenAI, Anthropic and
   Google in `providers.go`. The shared core provider registry is empty on
   every platform; embedders register only the implementations they need.
@@ -241,3 +241,53 @@ task test-wasm-providers
 # End-to-end runtime smoke test.
 node cmd/wasm/smoke_test.js
 ```
+
+## Common-authority HTTP mode
+
+`connectAuthority` is a transport-only alternative to `chat`: it never loads a
+browser-local team or runs the simplified demo loop. The API server owns session
+execution, persistence, tools, interactions, and cancellation. Serve the page
+from the same origin (or configure an authenticated reverse proxy with appropriate
+CORS); a browser cannot connect directly to the board's Unix socket. Do not expose
+an unauthenticated API to the network or store bearer tokens in localStorage.
+
+```js
+const authority = dockerAgent.connectAuthority({url: "https://agent.example", token});
+const session = await authority.create({source: "team.yaml", agent_name: "root"});
+const id = session.session_id;
+const snapshot = await authority.attach(id);
+const subscription = authority.observe(id, message => {
+  // snapshot replaces the presentation baseline, including outstanding prompts.
+  // event.envelope carries epoch, sequence, turn_id and interaction_id.
+  // On a gap, discard the stale tail, close, re-attach and observe again.
+  console.log(message);
+});
+const accepted = await authority.submit(id, {content: "Inspect this project", request_id: crypto.randomUUID()});
+// Respond using the exact interaction identity from snapshot.interactions or an envelope:
+await authority.respond(id, {interaction_id, kind: "confirmation", confirmation: "approve"});
+await authority.wait(id, accepted.turn_id); // exact durable turn settlement
+subscription.close(); // detaches observation, NEVER cancels execution
+await subscription.done;
+```
+
+Reconnect with `observe(id, callback, {since: cursor, epoch})`. An epoch mismatch
+produces a fresh snapshot baseline; chunked snapshots are assembled before the
+callback. A disconnect rejects `subscription.done` so the host can reconnect;
+there is no automatic retry of mutations or interaction answers. Save both epoch
+and sequence, not sequence alone. `cancel(id, turnID)` cancels an exact turn;
+`stopSubtree(id)` uses the advertised stop-subtree capability and must not be
+substituted for cancellation on servers lacking it. `disconnect()` closes this
+client's observations without stopping sessions. `request(method, relativePath,
+body)` exposes the remaining canonical v2 surface (tools, permissions, branches,
+model changes, todos, pause, editing, and deletion) without maintaining a second
+browser-specific execution model. Server errors reject promises. CRUD requests have a 30-second timeout; use the
+caller-visible timeout as an unknown mutation outcome, not permission to retry
+without the original request identity. `disconnect()` also cancels pending
+requests and permanently closes this authority connection. Observation validates
+wire version, session identity, epoch, sequence and chunk cursors; a gap is
+delivered once and terminates that subscription before any stale tail.
+
+The existing `chat({yaml, env, messages}, callback)` and `abort()` remain the
+**legacy local demo boundary**. They do not attach to daemon sessions and must not
+be presented as equivalent session authority. `pkg/api/session.go` supplies the
+portable HTTP contracts; this mode does not import native `pkg/runtime` or sqlite.

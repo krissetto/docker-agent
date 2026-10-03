@@ -3,7 +3,9 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,9 +22,14 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/httpsec"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -520,4 +527,26 @@ func TestNewToolCallSession(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
 	assert.Equal(t, "hello", sess.GetLastUserMessageContent())
 	assert.Equal(t, "/srv/workspace", sess.WorkingDir)
+}
+
+func TestBorrowedMCPHandlerDoesNotShutdownAuthorityOnStartFailure(t *testing.T) {
+	t.Parallel()
+	tm := team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(mcpStubProvider{}))))
+	rt, err := runtime.NewLocalRuntime(t.Context(), tm, runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	handler := CreateToolHandler(tm, "root", session.SafetyPolicyRestricted, t.TempDir(), owner.Runtime())
+	_, _, err = handler(t.Context(), nil, ToolInput{Message: "hello"})
+	require.Error(t, err, "stub provider fails the invocation")
+	_, err = owner.Runtime().CreateSession(t.Context(), session.New(), runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err, "borrowed authority remains open after the invocation")
+}
+
+type mcpStubProvider struct{}
+
+func (mcpStubProvider) ID() modelsdev.ID        { return modelsdev.ParseIDOrZero("test/mcp-stub") }
+func (mcpStubProvider) BaseConfig() base.Config { return base.Config{} }
+func (mcpStubProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	return nil, errors.New("injected provider failure")
 }

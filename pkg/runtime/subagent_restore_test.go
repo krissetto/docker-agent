@@ -35,9 +35,9 @@ func newRestoreFixture(t *testing.T) (*LocalRuntime, session.Store, *session.Ses
 	))
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionStore(store))
 	require.NoError(t, err)
-	t.Cleanup(rt.subagents.Close)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
-	sess := session.New(session.WithID("parent-sess"))
+	sess := session.New(session.WithID(t.Name() + "/parent-sess"))
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	return rt, store, sess
 }
@@ -419,10 +419,11 @@ func TestRestorePreflightAcceptsUnambiguousAliasRenameAndSessionlessFailure(t *t
 }
 
 func TestRestorePreflightRejectsConfigDriftBindingMismatch(t *testing.T) {
+	parentSessionID := t.Name() + "/parent-sess"
 	tests := map[string]func(rootID subagent.NodeID) (subagent.Snapshot, []*session.Session){
 		"unknown agent child": func(rootID subagent.NodeID) (subagent.Snapshot, []*session.Session) {
 			child := session.New(session.WithID("unknown-bound-child"))
-			child.ParentID = "parent-sess"
+			child.ParentID = t.Name() + "/parent-sess"
 			child.SetAttribute(SessionAgentAttribute, "root")
 			return subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{
 				Node:     subagent.Node{ID: rootID, Agent: "root"},
@@ -431,7 +432,7 @@ func TestRestorePreflightRejectsConfigDriftBindingMismatch(t *testing.T) {
 		},
 		"descendant under drift-stopped parent": func(rootID subagent.NodeID) (subagent.Snapshot, []*session.Session) {
 			parent := session.New(session.WithID("drift-bound-parent"))
-			parent.ParentID = "parent-sess"
+			parent.ParentID = t.Name() + "/parent-sess"
 			descendant := session.New(session.WithID("drift-bound-descendant"))
 			descendant.ParentID = parent.ID
 			descendant.SetAttribute(SessionAgentAttribute, "root")
@@ -451,6 +452,9 @@ func TestRestorePreflightRejectsConfigDriftBindingMismatch(t *testing.T) {
 			rt, store, sess := newRestoreFixture(t)
 			snapshot, sessions := fixture(subagent.SessionRootID(sess.ID))
 			for _, child := range sessions {
+				if child.ParentID == parentSessionID {
+					child.ParentID = sess.ID
+				}
 				require.NoError(t, store.AddSession(t.Context(), child))
 			}
 
@@ -610,15 +614,15 @@ func TestRestoreSubagentTreeResumesIdleSubagents(t *testing.T) {
 
 	rt, store, sess := newRestoreFixture(t)
 
-	childSess := session.New(session.WithID("child-sess"))
+	childSess := session.New(session.WithID(t.Name() + "/child-sess"))
 	childSess.ParentID = sess.ID
 	childSess.AddMessage(session.NewAgentMessage("planner", &chat.Message{Role: chat.MessageRoleAssistant, Content: "the plan"}))
 	require.NoError(t, store.AddSession(t.Context(), childSess))
-	stoppedSess := session.New(session.WithID("stopped-sess"))
+	stoppedSess := session.New(session.WithID(t.Name() + "/stopped-sess"))
 	stoppedSess.ParentID = sess.ID
 	stoppedSess.AddMessage(session.NewAgentMessage("planner", &chat.Message{Role: chat.MessageRoleAssistant, Content: "stopped plan"}))
 	require.NoError(t, store.AddSession(t.Context(), stoppedSess))
-	stoppedChildSess := session.New(session.WithID("stopped-child-sess"))
+	stoppedChildSess := session.New(session.WithID(t.Name() + "/stopped-child-sess"))
 	stoppedChildSess.ParentID = stoppedSess.ID
 	stoppedChildSess.AddMessage(session.NewAgentMessage("planner", &chat.Message{Role: chat.MessageRoleAssistant, Content: "stopped child plan"}))
 	require.NoError(t, store.AddSession(t.Context(), stoppedChildSess))
@@ -627,12 +631,12 @@ func TestRestoreSubagentTreeResumesIdleSubagents(t *testing.T) {
 	stored := subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{
 		Node: subagent.Node{ID: rootID, Agent: "root", State: subagent.NodeRunning},
 		Children: []subagent.NodeSnapshot{
-			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: "child-sess", State: subagent.NodeRunning}},
+			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: t.Name() + "/child-sess", State: subagent.NodeRunning}},
 			{Node: subagent.Node{ID: "00bad", Agent: "planner", Parent: rootID, SessionID: "missing-session", State: subagent.NodeIdle}}, // absent stored session: unresumable
 			{
-				Node: subagent.Node{ID: "55d0f", Agent: "planner", Parent: rootID, SessionID: "stopped-sess", State: subagent.NodeStopped},
+				Node: subagent.Node{ID: "55d0f", Agent: "planner", Parent: rootID, SessionID: t.Name() + "/stopped-sess", State: subagent.NodeStopped},
 				Children: []subagent.NodeSnapshot{
-					{Node: subagent.Node{ID: "c001d", Agent: "planner", Parent: "55d0f", SessionID: "stopped-child-sess", State: subagent.NodeRunning}},
+					{Node: subagent.Node{ID: "c001d", Agent: "planner", Parent: "55d0f", SessionID: t.Name() + "/stopped-child-sess", State: subagent.NodeRunning}},
 				},
 			},
 		},
@@ -667,11 +671,11 @@ func TestRestoreSubagentTreeResumesIdleSubagents(t *testing.T) {
 	assert.Equal(t, subagent.NodeStopped, stoppedDescendant.State, "descendants of stopped subagents stay stopped")
 	stoppedInfo, ok := rt.SubagentAttachInfo("55d0f")
 	require.True(t, ok, "stopped subagents with stored sessions remain attachable")
-	assert.Equal(t, "stopped-sess", stoppedInfo.Session.ID)
+	assert.Equal(t, t.Name()+"/stopped-sess", stoppedInfo.Session.ID)
 	assert.Equal(t, "stopped plan", ownAssistantResult(stoppedInfo.Session), "parent result comes from its own row, not the linked descendant")
 	stoppedChildInfo, ok := rt.SubagentAttachInfo("c001d")
 	require.True(t, ok, "stopped descendants with stored sessions remain attachable")
-	assert.Equal(t, "stopped-child-sess", stoppedChildInfo.Session.ID)
+	assert.Equal(t, t.Name()+"/stopped-child-sess", stoppedChildInfo.Session.ID)
 	assert.Equal(t, "stopped child plan", ownAssistantResult(stoppedChildInfo.Session))
 	stoppedDescendantRec, ok := rt.subagents.Read("c001d")
 	require.True(t, ok)
@@ -685,7 +689,7 @@ func TestRestoreSubagentTreeResumesIdleSubagents(t *testing.T) {
 	require.Error(t, err)
 	_, err = rt.subagents.sendToChild(sess.ID, "55d0f", "hello?")
 	require.Error(t, err)
-	_, err = rt.subagents.sendToChild("stopped-sess", "c001d", "hello?")
+	_, err = rt.subagents.sendToChild(t.Name()+"/stopped-sess", "c001d", "hello?")
 	require.Error(t, err)
 
 	// Idempotent for a session already tracked in-process.
@@ -702,7 +706,7 @@ func TestSessionEventsMirrorSubagentRuns(t *testing.T) {
 
 	rt, store, sess := newRestoreFixture(t)
 
-	childSess := session.New(session.WithID("child-sess"))
+	childSess := session.New(session.WithID(t.Name() + "/child-sess"))
 	childSess.ParentID = sess.ID
 	require.NoError(t, store.AddSession(t.Context(), childSess))
 
@@ -710,7 +714,7 @@ func TestSessionEventsMirrorSubagentRuns(t *testing.T) {
 	stored := subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{
 		Node: subagent.Node{ID: rootID, Agent: "root", State: subagent.NodeRunning},
 		Children: []subagent.NodeSnapshot{
-			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: "child-sess", State: subagent.NodeIdle}},
+			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: t.Name() + "/child-sess", State: subagent.NodeIdle}},
 		},
 	}}}
 	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), sess.ID, stored))
@@ -723,12 +727,12 @@ func TestSessionEventsMirrorSubagentRuns(t *testing.T) {
 	assert.Equal(t, sess.ID, info.ParentSessionID)
 	assert.Equal(t, "root", info.ParentAgent)
 	require.NotNil(t, info.Session)
-	assert.Equal(t, "child-sess", info.Session.ID)
+	assert.Equal(t, t.Name()+"/child-sess", info.Session.ID)
 
-	_, events, cancel := subscribeSessionEventsForTest(rt, "child-sess")
+	_, events, cancel := subscribeSessionEventsForTest(rt, t.Name()+"/child-sess")
 	defer cancel()
 
-	require.True(t, deliverMessageForTest(rt, t.Context(), "child-sess", "keep going"))
+	require.True(t, deliverMessageForTest(rt, t.Context(), t.Name()+"/child-sess", "keep going"))
 
 	var sawUser, sawStop bool
 	deadline := time.After(10 * time.Second)
@@ -757,7 +761,7 @@ func TestRestoredSubagentsSurviveNewSpawns(t *testing.T) {
 
 	rt, store, sess := newRestoreFixture(t)
 
-	childSess := session.New(session.WithID("child-sess"))
+	childSess := session.New(session.WithID(t.Name() + "/child-sess"))
 	childSess.ParentID = sess.ID
 	require.NoError(t, store.AddSession(t.Context(), childSess))
 
@@ -765,7 +769,7 @@ func TestRestoredSubagentsSurviveNewSpawns(t *testing.T) {
 	stored := subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{
 		Node: subagent.Node{ID: rootID, Agent: "root", State: subagent.NodeRunning},
 		Children: []subagent.NodeSnapshot{
-			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: "child-sess", State: subagent.NodeIdle}},
+			{Node: subagent.Node{ID: "77c88", Agent: "planner", Parent: rootID, SessionID: t.Name() + "/child-sess", State: subagent.NodeIdle}},
 		},
 	}}}
 	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), sess.ID, stored))

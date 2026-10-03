@@ -308,6 +308,7 @@ func TestACPRealToolConfirmationRoundTrip(t *testing.T) {
 		t.Run(decision, func(t *testing.T) { testACPRealInteraction(t, false, decision) })
 	}
 }
+
 func TestACPRealMaxIterationsRoundTrip(t *testing.T) {
 	for _, decision := range []string{"continue", "stop"} {
 		t.Run(decision, func(t *testing.T) { testACPRealInteraction(t, true, decision) })
@@ -343,7 +344,7 @@ func testACPRealInteraction(t *testing.T, maxIterations bool, decision string) {
 	rt, err := runtime.NewLocalRuntime(ctx, team.New(team.WithAgents(root)), runtime.WithSessionStore(session.NewInMemorySessionStore()))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
-	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.Background())) })
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	sess := session.New(session.WithAgentName("root"))
 	if maxIterations {
 		sess.MaxIterations = 1
@@ -363,7 +364,11 @@ func testACPRealInteraction(t *testing.T, maxIterations bool, decision string) {
 	}
 	assert.Equal(t, acpsdk.ToolCallId(expectedTool), requests[0].ToolCall.ToolCallId)
 	var since uint64
-	obs, err := h.Observe(ctx, runtime.ObserveOptions{Since: &since})
+	baseline, err := h.Observe(ctx, runtime.ObserveOptions{})
+	require.NoError(t, err)
+	epoch := baseline.Primary().Epoch
+	baseline.Cancel()
+	obs, err := h.Observe(ctx, runtime.ObserveOptions{Since: &since, SinceEpoch: epoch})
 	require.NoError(t, err)
 	defer obs.Cancel()
 	var interaction string
@@ -535,4 +540,25 @@ func TestACPCloseRacingStopDrainsOnceAndHonorsWaiterDeadline(t *testing.T) {
 	a.Stop(t.Context())
 	require.True(t, a.stopped)
 	require.EqualValues(t, 1, owner.calls.Load())
+}
+
+func TestACPAttachAndLoadUsesBorrowedCanonicalTranscript(t *testing.T) {
+	t.Parallel()
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(&realACPProvider{})))), runtime.WithSessionStore(session.NewInMemorySessionStore()))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sess := session.New(session.WithAgentName("root"), session.WithWorkingDir(t.TempDir()))
+	sess.AddMessage(session.UserMessage("historical user"))
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "historical assistant"}))
+	handle, err := owner.Runtime().CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	fixture := newRunAgentFixture(t, &fakeRuntime{}, &captureWriter{})
+	require.NoError(t, fixture.agent.AttachSession(t.Context(), owner.Runtime(), sess.ID))
+	_, err = fixture.agent.LoadSession(t.Context(), acpsdk.LoadSessionRequest{SessionId: acpsdk.SessionId(sess.ID), Cwd: sess.WorkingDir})
+	require.NoError(t, err)
+	_, err = fixture.agent.CloseSession(t.Context(), acpsdk.CloseSessionRequest{SessionId: acpsdk.SessionId(sess.ID)})
+	require.NoError(t, err)
+	_, err = handle.Status(t.Context())
+	require.NoError(t, err)
 }

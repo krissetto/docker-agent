@@ -166,7 +166,10 @@ func (s *sessionTestSession) Steer(_ context.Context, input runtime.TurnInput) (
 	return runtime.Submission{SessionID: s.id, TurnID: "send", Disposition: disposition}, nil
 }
 
-func (s *sessionTestSession) Observe(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+func (s *sessionTestSession) Observe(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	return s.observation, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -527,10 +528,29 @@ func (a *App) DeleteCard(cardID string) error {
 	if err != nil {
 		return err
 	}
-	// Remove from the store first: combined with the controller's relaunch
-	// lock (Teardown), this guarantees no in-flight relaunch resurrects the
-	// session after it is killed here.
-	if err := a.store.DeleteCard(cardID); err != nil {
+	// Fence relaunch while the authority drains and the card is unpublished.
+	err = func() error {
+		a.controller.relaunchMu.Lock()
+		defer a.controller.relaunchMu.Unlock()
+		if alive, err := a.sessions.Alive(card.Session); err != nil {
+			return err
+		} else if alive {
+			client := a.controller.clientFor(socketPath(card.AgentSession), card.AgentSession)
+			stopper, ok := client.(interface {
+				StopSubtree(ctx context.Context) error
+			})
+			if !ok {
+				return errors.New("card authority cannot stop its session tree")
+			}
+			ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+			defer cancel()
+			if err := stopper.StopSubtree(ctx); err != nil {
+				return fmt.Errorf("stop card before deletion: %w", err)
+			}
+		}
+		return a.store.DeleteCard(cardID)
+	}()
+	if err != nil {
 		return err
 	}
 	a.controller.Stop(cardID)

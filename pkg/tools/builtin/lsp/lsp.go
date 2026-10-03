@@ -85,6 +85,7 @@ type lspHandler struct {
 	// capability-filtered) tool list. nil until SetToolsChangedHandler is
 	// called.
 	toolsChangedHandler func()
+	subscribers         tools.ChangeSubscribers
 
 	// Configuration
 	command    string
@@ -572,6 +573,10 @@ func (t *ToolSet) SetToolsChangedHandler(handler func()) {
 	t.handler.mu.Lock()
 	defer t.handler.mu.Unlock()
 	t.handler.toolsChangedHandler = handler
+}
+
+func (t *ToolSet) SubscribeToolsChanged(handler func()) func() {
+	return t.handler.subscribers.Subscribe(handler)
 }
 
 // allLSPTools returns the full catalogue of LSP tools backed by h. It is

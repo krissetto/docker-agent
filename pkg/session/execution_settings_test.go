@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,4 +41,40 @@ func TestSQLiteExecutionSettingsRoundTrip(t *testing.T) {
 	check()
 	require.NoError(t, store.PersistCompaction(t.Context(), sess, 1, 2, Item{Summary: "summary"}))
 	check()
+}
+
+func TestTurnOutcomesPersistAndClone(t *testing.T) {
+	for _, store := range []Store{openMemoryStore(t), NewInMemorySessionStore()} {
+		sess := New()
+		sess.SetTurnOutcome("accepted", "completed")
+		require.NoError(t, store.AddSession(t.Context(), sess))
+		loaded, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.Equal(t, "completed", loaded.TurnOutcome("accepted"))
+		cloned := loaded.Clone()
+		cloned.SetTurnOutcome("accepted", "failed")
+		require.Equal(t, "completed", loaded.TurnOutcome("accepted"))
+		require.NoError(t, store.UpdateSession(t.Context(), cloned))
+		updated, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.Equal(t, "failed", updated.TurnOutcome("accepted"))
+	}
+}
+
+func TestTurnOutcomeRetentionSurvivesReload(t *testing.T) {
+	store := openMemoryStore(t)
+	sess := New()
+	sess.SetTurnOutcome("old", "completed")
+	for i := range MaxRetainedTurnOutcomes {
+		sess.SetTurnOutcome(strconv.Itoa(i), "completed")
+	}
+	require.Len(t, sess.TurnOutcomesSnapshot(), MaxRetainedTurnOutcomes)
+	require.Empty(t, sess.TurnOutcome("old"))
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	loaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	loaded.SetTurnOutcome("new", "failed")
+	require.Len(t, loaded.TurnOutcomesSnapshot(), MaxRetainedTurnOutcomes)
+	require.Empty(t, loaded.TurnOutcome("0"))
+	require.Equal(t, "failed", loaded.TurnOutcome("new"))
 }

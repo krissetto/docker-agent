@@ -33,6 +33,7 @@ func TestRemoteLateAttachLiveSeeds(t *testing.T) {
 			e.Event = json.RawMessage(`{"type":"agent_choice","session_id":"s","content":""}`)
 		}, wantError: true},
 		{name: "wrong_session", mutate: func(e *remoteSessionEnvelope) { e.SessionID = "other" }, wantError: true},
+		{name: "wrong_epoch", mutate: func(e *remoteSessionEnvelope) { e.Epoch = "other-process" }, wantError: true},
 		{name: "wrong_event_session", mutate: func(e *remoteSessionEnvelope) {
 			e.Event = json.RawMessage(`{"type":"stream_started","session_id":"other"}`)
 		}, wantError: true},

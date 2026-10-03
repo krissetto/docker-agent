@@ -296,6 +296,20 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 		// user turns, right before the turn's outermost stream_started — is
 		// the recovery point that resets a drifted depth.
 		depth := 0
+		canonical := snap.Epoch != ""
+		if canonical {
+			switch {
+			case snap.Paused:
+				c.setStatus(cardID, StatusPaused)
+			case snap.State == "running" || snap.State == "cancelling":
+				depth = 1
+				c.setStatus(cardID, StatusRunning)
+			case snap.LastError != "":
+				c.setStatus(cardID, StatusError)
+			case !c.turnExpected(cardID):
+				c.setStatus(cardID, StatusWaiting)
+			}
+		}
 		// failed marks that the current turn emitted an error event. It is
 		// applied immediately (the error event is delivered reliably, the
 		// stream_stopped that follows is not), and cleared when the
@@ -312,7 +326,7 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 		// only update the derived state, which is applied once, when the
 		// replay catches up with the snapshot. Replayed titles are dropped
 		// entirely: the snapshot's title already reflects them.
-		replaying := snap.LastEventSeq > 0
+		replaying := !canonical && snap.LastEventSeq > 0
 		var replayStatus CardStatus
 		flushReplay := func() {
 			replaying = false
@@ -329,11 +343,37 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 		}
 
 		exited := false
-		_ = client.StreamEvents(ctx, 0, func(ev event) bool {
+		since := uint64(0)
+		if canonical {
+			since = snap.LastEventSeq
+		}
+		_ = client.StreamEvents(ctx, since, func(ev event) bool {
 			if replaying && (ev.Seq == 0 || ev.Seq > snap.LastEventSeq) {
 				flushReplay() // past the snapshot: this event is live
 			}
 			switch ev.Type {
+			case eventBaseline:
+				baseline := ev.Baseline
+				if baseline == nil {
+					return false
+				}
+				depth = 0
+				failed = baseline.LastError != ""
+				paused = baseline.Paused
+				if baseline.Title != "" {
+					c.setTitle(cardID, baseline.Title)
+				}
+				switch {
+				case paused:
+					setStatus(StatusPaused)
+				case baseline.State == "running" || baseline.State == "cancelling":
+					depth = 1
+					setStatus(StatusRunning)
+				case failed:
+					setStatus(StatusError)
+				case !c.turnExpected(cardID):
+					setStatus(StatusWaiting)
+				}
 			case eventGap:
 				return false // resume point evicted: reconnect and re-snapshot
 			case eventSessionExited:
@@ -372,6 +412,9 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 						setStatus(StatusWaiting)
 					}
 				}
+			case eventInteraction:
+				paused = true
+				setStatus(StatusPaused)
 			case eventRuntimePaused:
 				paused = true
 				setStatus(StatusPaused)

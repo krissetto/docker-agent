@@ -120,6 +120,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 		return false
 	}
 	epoch := a.bridgeEpoch.Add(1)
+	a.connection.Store(uint32(ConnectionConnecting))
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	stopBusCancel := context.AfterFunc(a.busLifetime(), cancel)
 	attachment, err := runtimeclient.Attach(bridgeCtx, session, &appProjectionSink{app: a, ctx: bridgeCtx, sessionID: sess.ID, epoch: epoch})
@@ -129,6 +130,7 @@ func (a *App) startSessionEventBridge(ctx context.Context) bool {
 		a.sendEvent(ctx, runtime.Error(err.Error()))
 		return false
 	}
+	a.startSubagentTreeWatch(bridgeCtx, session, sess.ID, epoch)
 	var stopOnce sync.Once
 	a.stopBridge = func() {
 		stopOnce.Do(func() {
@@ -177,7 +179,7 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	defer a.lifecycleMu.Unlock()
 
 	switch e.(type) {
-	case *SessionResetEvent, *SessionViewEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.DormancyChangedEvent:
+	case *SessionResetEvent, *SessionViewEvent, *ConnectionStateEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.DormancyChangedEvent:
 		return e
 	}
 	_, cancelled := a.cancelledRequests[requestID]

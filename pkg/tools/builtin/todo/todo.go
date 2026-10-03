@@ -3,6 +3,7 @@ package todo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -190,6 +191,18 @@ func New(opts ...Option) *ToolSet {
 		opt(t)
 	}
 	return t
+}
+
+// BindStorage creates a runtime-owned instance without rebinding shared definitions.
+func (t *ToolSet) BindStorage(storage Storage) *ToolSet {
+	return New(WithShared(t.shared), WithStorage(storage))
+}
+
+type bindingsKey struct{}
+
+// WithBindings attaches immutable runtime-owned todo instances to an operation.
+func WithBindings(ctx context.Context, bindings map[*ToolSet]*ToolSet) context.Context {
+	return context.WithValue(ctx, bindingsKey{}, bindings)
 }
 
 func (t *ToolSet) SetStorage(storage Storage) {
@@ -382,7 +395,17 @@ func (h *todoHandler) listTodos(ctx context.Context, _ tools.ToolCall, _ tools.R
 	return h.jsonResult(ctx, out)
 }
 
-func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
+func (t *ToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
+	if bindings, ok := ctx.Value(bindingsKey{}).(map[*ToolSet]*ToolSet); ok {
+		if bound := bindings[t]; bound != nil && bound != t {
+			return bound.tools()
+		}
+		return nil, errors.New("todo toolset has no runtime-owned storage binding")
+	}
+	return t.tools()
+}
+
+func (t *ToolSet) tools() ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
 			Name:         ToolNameCreateTodo,

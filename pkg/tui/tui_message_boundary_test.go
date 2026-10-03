@@ -257,6 +257,9 @@ type boundaryReplayHandle struct {
 }
 
 func (h *boundaryReplayHandle) Observe(ctx context.Context, opts runtime.ObserveOptions) (runtime.Observation, error) {
+	if opts.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	observation, err := h.SessionHandle.Observe(ctx, opts)
 	if err != nil {
 		return observation, err

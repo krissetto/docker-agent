@@ -84,6 +84,8 @@ type SessionMetadata struct {
 }
 
 type SessionCapabilities struct {
+	DelegationPolicy      bool     `json:"delegation_policy,omitempty"`
+	StopSubtree           bool     `json:"stop_subtree"`
 	ToolInspection        bool     `json:"tool_inspection,omitempty"`
 	ToolsetRestart        bool     `json:"toolset_restart,omitempty"`
 	PermissionsInspection bool     `json:"permissions_inspection,omitempty"`
@@ -141,16 +143,17 @@ type SessionResponseRequest[Kind ~string] struct {
 }
 
 type SessionStatus[State ~string] struct {
-	SessionID       string `json:"session_id"`
-	AgentName       string `json:"agent_name"`
-	State           State  `json:"state"`
-	Pending         int    `json:"pending"`
-	TurnID          string `json:"turn_id,omitempty"`
-	LastError       string `json:"last_error,omitempty"`
-	Dormant         bool   `json:"dormant,omitempty"`
-	PauseArmed      bool   `json:"pause_armed,omitempty"`
-	Paused          bool   `json:"paused,omitempty"`
-	PauseGeneration uint64 `json:"pause_generation,omitempty"`
+	InterruptedTurns int    `json:"interrupted_turns,omitempty"`
+	SessionID        string `json:"session_id"`
+	AgentName        string `json:"agent_name"`
+	State            State  `json:"state"`
+	Pending          int    `json:"pending"`
+	TurnID           string `json:"turn_id,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
+	Dormant          bool   `json:"dormant,omitempty"`
+	PauseArmed       bool   `json:"pause_armed,omitempty"`
+	Paused           bool   `json:"paused,omitempty"`
+	PauseGeneration  uint64 `json:"pause_generation,omitempty"`
 }
 
 type SessionPendingInput struct {
@@ -178,6 +181,7 @@ type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
 	Status             SessionStatus[State]              `json:"status"`
 	Interactions       []SessionInteraction[Kind, Event] `json:"interactions"`
 	PendingInputs      []SessionPendingInput             `json:"pending_inputs"`
+	Epoch              string                            `json:"epoch,omitempty"`
 	Cursor             uint64                            `json:"cursor"`
 	TranscriptPosition int                               `json:"transcript_position"`
 }
@@ -194,6 +198,7 @@ type SessionEnvelope[Event any] struct {
 	SessionID          string `json:"session_id"`
 	TurnID             string `json:"turn_id,omitempty"`
 	InteractionID      string `json:"interaction_id,omitempty"`
+	Epoch              string `json:"epoch,omitempty"`
 	Sequence           uint64 `json:"sequence"`
 	TranscriptPosition int    `json:"transcript_position"`
 	Event              Event  `json:"event,omitempty"`

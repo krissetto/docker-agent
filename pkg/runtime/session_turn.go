@@ -15,6 +15,34 @@ func (r *LocalRuntime) lifetime() context.Context {
 	return context.Background() //rubocop:disable Lint/ContextConnectivity // isolated test drivers have no supervisor
 }
 
+const SessionErrorInterrupted SessionErrorKind = "interrupted"
+
+// persistTurnOutcomeLocked commits terminal evidence before publishing settlement.
+// A promoted admission without this evidence is uncertain after a restart.
+func (d *sessionDriver) persistTurnOutcomeLocked(ctx context.Context, id string, outcome TurnOutcome) error {
+	if d.sess == nil {
+		return nil
+	}
+	unlock := d.sess.LockMetadata()
+	defer unlock()
+	next := d.sess.OwnSnapshot()
+	next.SetTurnOutcome(id, string(outcome))
+	for _, steeringID := range d.consumedSteering {
+		next.SetTurnOutcome(steeringID, string(outcome))
+	}
+	if d.r.sessionStore != nil {
+		if err := d.r.sessionStore.UpdateSession(ctx, next); err != nil {
+			return err
+		}
+	}
+	d.sess.SetTurnOutcome(id, string(outcome))
+	for _, steeringID := range d.consumedSteering {
+		d.sess.SetTurnOutcome(steeringID, string(outcome))
+	}
+	d.consumedSteering = nil
+	return nil
+}
+
 type InteractionResolution string
 
 const (
@@ -79,11 +107,17 @@ func (h *sessionHandle) AwaitTurn(ctx context.Context, turnID string) error {
 	for {
 		d.mu.Lock()
 		active := d.activeRequestID == turnID && (d.running() || d.starting() || d.settling())
+		consumed := slices.Contains(d.consumedSteering, turnID)
 		pending := active
 		for _, msg := range append(slices.Clone(d.pending), d.steering...) {
 			pending = pending || msg.RequestID == turnID
 		}
-		known = known || pending || slices.Contains(d.completedTurns, turnID)
+		completed := slices.Contains(d.completedTurns, turnID) || consumed
+		terminal := ""
+		if d.sess != nil {
+			terminal = d.sess.TurnOutcome(turnID)
+		}
+		known = known || pending || completed || terminal != ""
 		if !known && d.sess != nil {
 			for _, item := range d.sess.MessagesSnapshot() {
 				if item.Message != nil && item.Message.TurnID == turnID && item.Message.Accepted {
@@ -103,7 +137,10 @@ func (h *sessionHandle) AwaitTurn(ctx context.Context, turnID string) error {
 			return completionErr
 		}
 		if !pending || (stopped && !active) {
-			return nil
+			if completed || terminal == string(TurnCompleted) || terminal == string(TurnFailed) || terminal == string(TurnCanceled) {
+				return nil
+			}
+			return &SessionError{Kind: SessionErrorInterrupted, SessionID: h.sessionID, RequestID: turnID, Operation: "await_turn", Detail: "turn has no durable terminal outcome; execution may have been interrupted and must not be automatically replayed"}
 		}
 		select {
 		case <-changed:
@@ -120,4 +157,27 @@ func (r *LocalRuntime) durabilityContext() context.Context {
 		return r.drainCtx
 	}
 	return r.lifetime()
+}
+
+// interruptedTurnsLocked separates execution uncertainty from scheduler idleness.
+func (d *sessionDriver) interruptedTurnsLocked() int {
+	if d.sess == nil {
+		return 0
+	}
+	outcomes := d.sess.TurnOutcomesSnapshot()
+	count := 0
+	for _, item := range d.sess.MessagesSnapshot() {
+		msg := item.Message
+		if msg == nil || !msg.Accepted || msg.Pending || msg.TurnID == "" {
+			continue
+		}
+		if msg.TurnID == d.activeRequestID || slices.Contains(d.consumedSteering, msg.TurnID) {
+			continue
+		}
+		outcome := outcomes[msg.TurnID]
+		if outcome != string(TurnCompleted) && outcome != string(TurnFailed) && outcome != string(TurnCanceled) {
+			count++
+		}
+	}
+	return count
 }

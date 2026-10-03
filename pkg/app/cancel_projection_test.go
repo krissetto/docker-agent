@@ -27,6 +27,7 @@ type projectionSession struct {
 	cancelTurnID string
 	inputs       []runtime.TurnInput
 	observe      func(context.Context, runtime.ObserveOptions) (runtime.Observation, error)
+	observeTree  func(context.Context) (runtime.Observation, error)
 }
 
 func (a *projectionSession) ID() string      { return a.id }
@@ -52,6 +53,12 @@ func (a *projectionSession) Steer(ctx context.Context, input runtime.TurnInput) 
 }
 
 func (a *projectionSession) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		if a.observeTree != nil {
+			return a.observeTree(ctx)
+		}
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	if a.observe != nil {
 		return a.observe(ctx, options)
 	}
@@ -230,7 +237,9 @@ func (a *projectionSession) Release(context.Context) error { return nil }
 
 func (a *projectionSession) UpdateTitle(context.Context, string) error { return nil }
 
-func TestAppProjectionTransportErrorIsEmitted(t *testing.T) {
+// A retryable transport loss is a connection state, not a session error:
+// accepted work continues on the owner while the observer reconnects.
+func TestAppProjectionTransportLossReportsReconnecting(t *testing.T) {
 	sess := session.New()
 	events := make(chan runtime.SessionEvent)
 	errs := make(chan error, 1)
@@ -247,8 +256,8 @@ func TestAppProjectionTransportErrorIsEmitted(t *testing.T) {
 	require.Eventually(t, func() bool {
 		select {
 		case msg := <-got:
-			_, ok := msg.(*runtime.ErrorEvent)
-			return ok
+			event, ok := msg.(*ConnectionStateEvent)
+			return ok && event.State == ConnectionReconnecting && event.Err == "transport dropped"
 		default:
 			return false
 		}

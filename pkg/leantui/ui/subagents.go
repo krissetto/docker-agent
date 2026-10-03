@@ -1,8 +1,9 @@
 package ui
 
 import (
-	"github.com/charmbracelet/x/ansi"
 	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -14,16 +15,19 @@ type SubagentPicker struct {
 	PolicyUnavailable, StopUnavailable bool
 	stopIdentity                       string
 	UseSubagents                       bool
-	StopTarget                         subagent.NodeID
-	actionFocus                        int // 0: tree, 1: toggle, 2: Attach, 3: stop subtree
-	rows                               []subagentview.Row
-	nodes                              []subagent.NodeSnapshot
-	collapsed                          map[subagent.NodeID]bool
-	selected                           subagent.NodeID
-	current                            subagent.NodeID
-	root                               subagent.NodeID
-	sessionID                          string
-	attached                           subagent.NodeID
+	// PolicySessionTree marks the canonical per-tree policy (otherwise the
+	// local default); PolicyPending shows a read or change in flight.
+	PolicySessionTree, PolicyPending bool
+	StopTarget                       subagent.NodeID
+	actionFocus                      int // 0: tree, 1: toggle, 2: Attach, 3: stop subtree
+	rows                             []subagentview.Row
+	nodes                            []subagent.NodeSnapshot
+	collapsed                        map[subagent.NodeID]bool
+	selected                         subagent.NodeID
+	current                          subagent.NodeID
+	root                             subagent.NodeID
+	sessionID                        string
+	attached                         subagent.NodeID
 }
 
 func NewSubagentPicker(snapshot subagent.Snapshot, sessionID string, attached subagent.NodeID) *SubagentPicker {
@@ -189,13 +193,7 @@ func (p *SubagentPicker) Render(width, height int) []string {
 		lines = append(lines, Truncate(StMuted().Render("Selection no longer available."), width))
 	}
 	if height >= 3 {
-		label := "Use subagents: ON (global)"
-		if !p.UseSubagents {
-			label = "Use subagents: OFF (global)"
-		}
-		if p.PolicyUnavailable {
-			label = "Use subagents: unavailable"
-		}
+		label := subagentview.UseSubagentsLabel(p.UseSubagents, p.PolicySessionTree, p.PolicyPending, p.PolicyUnavailable)
 		toggle, attach, stop := "[ "+label+" ]", "[ Attach ]", "[ s: Stop subtree ]"
 		if p.StopUnavailable {
 			stop = "[ Stop subtree: unavailable ]"
@@ -211,7 +209,7 @@ func (p *SubagentPicker) Render(width, height int) []string {
 		}
 		footer := toggle + "  " + attach + "  " + stop
 		if p.StopTarget != "" {
-			footer = "Permanently stop subtree? [y] Confirm [esc] Cancel; history remains"
+			footer = "Stop and drain subtree? [y] Confirm [esc] Cancel; history remains"
 		}
 		lines = append(lines, Truncate(footer, width))
 	}
@@ -222,7 +220,7 @@ func (p *SubagentPicker) Render(width, height int) []string {
 // Attach retains the existing Enter route; tree navigation is otherwise unchanged.
 func (p *SubagentPicker) HandleActionKey(key Key) bool {
 	if key.Typ == KeyRune && string(key.Runes) == "u" {
-		return !p.PolicyUnavailable
+		return !p.PolicyUnavailable && !p.PolicyPending
 	}
 	if key.Typ == KeyTab || key.Typ == KeyShiftTab {
 		delta := 1
@@ -240,7 +238,7 @@ func (p *SubagentPicker) HandleActionKey(key Key) bool {
 		}
 		return false
 	}
-	return !p.PolicyUnavailable && key.Typ == KeyEnter && p.actionFocus == 1
+	return !p.PolicyUnavailable && !p.PolicyPending && key.Typ == KeyEnter && p.actionFocus == 1
 }
 
 // HandleStopKey consumes a separate, explicit confirmation before any stop.

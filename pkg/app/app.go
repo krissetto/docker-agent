@@ -96,6 +96,9 @@ type App struct {
 	bridgeEpoch  atomic.Uint64
 	presentation atomic.Pointer[PresentationState]
 	projectionMu sync.Mutex
+	connection   atomic.Uint32 // ConnectionState of the current bridge
+	treeMu       sync.Mutex
+	treeWatch    *treeWatch
 	runCancelled atomic.Bool
 	// lifecycleMu correlates accepted submissions with cancellation and bridged
 	// envelopes. A cancelled request only mutes its own tail; a stale stop can

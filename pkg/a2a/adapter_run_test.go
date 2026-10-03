@@ -682,3 +682,23 @@ func TestRunDockerAgent_RuntimeCreationError(t *testing.T) {
 	require.Error(t, events[0].err)
 	assert.Contains(t, events[0].err.Error(), "failed to create runtime")
 }
+
+func TestBorrowedA2ARuntimeSurvivesInvocation(t *testing.T) {
+	t.Parallel()
+	tm, ag := newMockTeam("reply")
+	store := session.NewInMemorySessionStore()
+	rt, err := dagentruntime.NewLocalRuntime(t.Context(), tm, dagentruntime.WithSessionStore(store))
+	require.NoError(t, err)
+	owner := dagentruntime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	ctx := newFakeInvocationContext(t.Context(), "borrowed-a2a", "hi")
+	for _, err := range runDockerAgent(ctx, tm, ag.Name(), ag, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot, owner.Runtime()) {
+		require.NoError(t, err)
+	}
+	handle, err := owner.Runtime().SessionByID("borrowed-a2a")
+	require.NoError(t, err)
+	_, err = handle.Status(t.Context())
+	require.NoError(t, err)
+	_, err = owner.Runtime().CreateSession(t.Context(), session.New(), dagentruntime.SessionBinding{AgentName: ag.Name()})
+	require.NoError(t, err)
+}

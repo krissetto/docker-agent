@@ -1,7 +1,9 @@
 package board
 
 import (
+	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -225,4 +227,34 @@ func TestAttachCommandExplainsFailedRelaunch(t *testing.T) {
 	app := &App{ctx: t.Context(), store: store, sessions: sessions, controller: c, onChanged: func() {}}
 	_, err = app.AttachCommand("c1")
 	assert.ErrorContains(t, err, "bad working directory")
+}
+
+type stoppingCardClient struct {
+	fakeClient
+
+	stopErr error
+	stopped bool
+}
+
+func (c *stoppingCardClient) StopSubtree(context.Context) error {
+	c.stopped = true
+	return c.stopErr
+}
+
+func TestDeleteCardRequiresAuthorityDrainBeforeRemovingWorktree(t *testing.T) {
+	store := testStore(t)
+	worktree := t.TempDir()
+	marker := filepath.Join(worktree, "keep")
+	require.NoError(t, os.WriteFile(marker, []byte("unsettled tools"), 0o600))
+	require.NoError(t, store.InsertCard(&Card{ID: "c", Session: "tmux", AgentSession: "session", Worktree: worktree}))
+	client := &stoppingCardClient{stopErr: errors.New("authority unavailable")}
+	controller := newController(t.Context(), store, fakeSessions{}, func() {})
+	controller.clientFor = func(_, _ string) sessionClient { return client }
+	app := &App{ctx: t.Context(), store: store, sessions: fakeSessions{}, controller: controller, onChanged: func() {}}
+	require.ErrorContains(t, app.DeleteCard("c"), "authority unavailable")
+	assert.True(t, client.stopped)
+	_, err := store.GetCard("c")
+	require.NoError(t, err)
+	_, err = os.Stat(marker)
+	require.NoError(t, err)
 }

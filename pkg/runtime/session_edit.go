@@ -86,6 +86,8 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 	if transcript && (d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {
 		return nil, ErrSessionCapacity
 	}
+	unlockMetadata := d.sess.LockMetadata()
+	defer unlockMetadata()
 	next := d.sess.Clone()
 	store := d.r.sessionStore
 	var err error

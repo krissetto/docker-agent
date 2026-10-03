@@ -443,3 +443,9 @@ func requireMeta(t *testing.T, result *tools.ToolCallResult, expectedLen int) {
 	require.True(t, ok, "Meta should be []Todo")
 	require.Len(t, metaTodos, expectedLen)
 }
+
+func TestRuntimeBindingsRejectUnownedTodoToolset(t *testing.T) {
+	toolset := New()
+	_, err := toolset.Tools(WithBindings(t.Context(), map[*ToolSet]*ToolSet{}))
+	require.ErrorContains(t, err, "no runtime-owned storage binding")
+}

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -16,6 +18,7 @@ const defaultSessionEventReplayCapacity = 1024
 // SequencedSessionEvent is a replayable session event. Gap marks that events
 // after the requested cursor were evicted and the consumer must resnapshot.
 type SequencedSessionEvent struct {
+	Epoch          string
 	Sequence       uint64
 	RequestID      string
 	InteractionID  string
@@ -34,6 +37,7 @@ type retainedSessionEvent struct {
 }
 
 type sessionEventHub struct {
+	epoch       string
 	mu          sync.Mutex
 	subs        map[string]map[*sessionEventSubscriber]struct{}
 	seqSubs     map[string]map[*sequencedSessionEventSubscriber]struct{}
@@ -77,6 +81,7 @@ func newSessionEventHubWithLimits(capacity, maxBytes int) *sessionEventHub {
 		panic("session replay limits cannot be negative")
 	}
 	return &sessionEventHub{
+		epoch:       uuid.NewString(),
 		subs:        map[string]map[*sessionEventSubscriber]struct{}{},
 		seqSubs:     map[string]map[*sequencedSessionEventSubscriber]struct{}{},
 		inflight:    map[string]*inflightAssistant{},
@@ -134,7 +139,7 @@ func (h *sessionEventHub) SubscribeSequenced(sessionID string, since *uint64, bu
 	cursor = h.nextSeq[sessionID]
 	if since == nil {
 		for _, event := range h.liveSeedLocked(sessionID) {
-			seed = append(seed, SequencedSessionEvent{Event: event})
+			seed = append(seed, SequencedSessionEvent{Epoch: h.epoch, Event: event})
 		}
 	} else {
 		seed = h.replayLocked(sessionID, *since)
@@ -211,7 +216,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- SequencedSessionEvent{Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: event}:
+		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: event}:
 		default:
 			h.gapSequencedSubscriberLocked(sessionID, sub)
 		}
@@ -274,17 +279,17 @@ func (h *sessionEventHub) replayLocked(sessionID string, since uint64) []Sequenc
 	replay := h.replay[sessionID]
 	if len(replay) == 0 {
 		if since != h.nextSeq[sessionID] {
-			return []SequencedSessionEvent{{Gap: true, FirstAvailable: h.nextSeq[sessionID] + 1}}
+			return []SequencedSessionEvent{{Epoch: h.epoch, Gap: true, FirstAvailable: h.nextSeq[sessionID] + 1}}
 		}
 		return nil
 	}
 	out := make([]SequencedSessionEvent, 0, len(replay)+1)
 	if since > h.nextSeq[sessionID] || replay[0].sequence > since+1 {
-		out = append(out, SequencedSessionEvent{Gap: true, FirstAvailable: replay[0].sequence})
+		out = append(out, SequencedSessionEvent{Epoch: h.epoch, Gap: true, FirstAvailable: replay[0].sequence})
 	}
 	for _, retained := range replay {
 		if retained.sequence > since {
-			out = append(out, SequencedSessionEvent{Sequence: retained.sequence, RequestID: retained.requestID, InteractionID: retained.interactionID, Event: retained.event})
+			out = append(out, SequencedSessionEvent{Epoch: h.epoch, Sequence: retained.sequence, RequestID: retained.requestID, InteractionID: retained.interactionID, Event: retained.event})
 		}
 	}
 	return out
@@ -409,7 +414,7 @@ func (h *sessionEventHub) gapSequencedSubscriberLocked(sessionID string, sub *se
 	if sub.closed {
 		return
 	}
-	gap := SequencedSessionEvent{Gap: true, FirstAvailable: h.nextSeq[sessionID]}
+	gap := SequencedSessionEvent{Epoch: h.epoch, Gap: true, FirstAvailable: h.nextSeq[sessionID]}
 	select {
 	case sub.out <- gap:
 	default:

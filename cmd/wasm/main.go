@@ -78,6 +78,7 @@ func main() {
 	api.Set("_listAgents", js.FuncOf(listAgentsJS))
 	api.Set("chat", js.FuncOf(chatJS))
 	api.Set("abort", js.FuncOf(abortJS))
+	api.Set("_connectAuthority", js.FuncOf(connectAuthorityJS))
 	js.Global().Set("dockerAgent", api)
 
 	// Wrap _parseConfig and _listAgents with JS shims that detect the
@@ -97,6 +98,21 @@ func main() {
   }
   wrapSync("parseConfig");
   wrapSync("listAgents");
+  wrapSync("connectAuthority");
+  const connect = globalThis.dockerAgent.connectAuthority;
+  globalThis.dockerAgent.connectAuthority = function (options) {
+    const authority = connect(options);
+    const path = id => "/" + encodeURIComponent(id);
+    authority.catalog = () => authority.request("GET", "");
+    authority.create = options => authority.request("POST", "", options);
+    authority.attach = id => authority.request("GET", path(id) + "/snapshot");
+    authority.submit = (id, input) => authority.request("POST", path(id) + "/messages", input);
+    authority.respond = (id, response) => authority.request("POST", path(id) + "/responses", response);
+    authority.cancel = (id, turnID) => authority.request("POST", path(id) + "/cancel", {turn_id: turnID || ""});
+    authority.stopSubtree = id => authority.request("POST", path(id) + "/stop-subtree");
+    authority.wait = (id, turnID) => authority.request("POST", path(id) + "/turns/" + encodeURIComponent(turnID) + "/wait");
+    return authority;
+  };
 })();
 	`)
 

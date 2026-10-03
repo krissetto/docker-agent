@@ -21,6 +21,11 @@ type Sink interface {
 	OnError(err error)
 }
 
+// ConnectionStateSink optionally receives observation connection transitions.
+type ConnectionStateSink interface {
+	OnConnectionState(connected bool, err error)
+}
+
 type Attachment struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -67,13 +72,18 @@ func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Si
 	initial := policy.now()
 	gaps := 0
 	var cursor *uint64
+	var epoch string
 	attempt := 0
+	connection, reportsConnection := sink.(ConnectionStateSink)
 	for ctx.Err() == nil {
-		observation, err := session.Observe(ctx, runtime.ObserveOptions{Since: cursor})
+		observation, err := session.Observe(ctx, runtime.ObserveOptions{Since: cursor, SinceEpoch: epoch})
 		if err == nil {
+			if reportsConnection && ctx.Err() == nil {
+				connection.OnConnectionState(true, nil)
+			}
 			started := policy.now()
 			sustained := time.AfterFunc(5*time.Second, func() { startup.Stop() })
-			result := projectObservationWithProgress(ctx, sink, observation, cursor, func() { startup.Stop() })
+			result := projectObservationWithEpoch(ctx, sink, observation, cursor, epoch, func() { startup.Stop() })
 			sustained.Stop()
 			if observation.Cancel != nil {
 				observation.Cancel()
@@ -95,6 +105,7 @@ func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Si
 				// A gap needs a fresh baseline, including outstanding interactions. Apply
 				// backoff even here: a persistently overflowing observer must not spin.
 				cursor = nil
+				epoch = ""
 				gaps++
 				if gaps >= 4 {
 					sink.OnError(&RepeatedObservationGapError{})
@@ -103,6 +114,7 @@ func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Si
 			} else {
 				value := result.cursor
 				cursor = &value
+				epoch = result.epoch
 				if result.err == nil {
 					return
 				}
@@ -125,6 +137,9 @@ func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Si
 		if err != nil && !retryObservation(err) {
 			sink.OnError(fmt.Errorf("session observation failed: %w", err))
 			return
+		}
+		if reportsConnection {
+			connection.OnConnectionState(false, err)
 		}
 		if !policy.wait(ctx, attempt) {
 			if ctx.Err() != nil && originalCtx.Err() == nil {
@@ -159,6 +174,7 @@ func retryObservation(err error) bool {
 
 type projectionResult struct {
 	cursor   uint64
+	epoch    string
 	gap      bool
 	progress bool
 	err      error
@@ -207,7 +223,12 @@ func (*RepeatedObservationGapError) Retryable() bool { return false }
 func projectObservation(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64) projectionResult {
 	return projectObservationWithProgress(ctx, sink, observation, since, func() {})
 }
+
 func projectObservationWithProgress(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64, onProgress func()) projectionResult {
+	return projectObservationWithEpoch(ctx, sink, observation, since, "", onProgress)
+}
+
+func projectObservationWithEpoch(ctx context.Context, sink Sink, observation runtime.Observation, since *uint64, sinceEpoch string, onProgress func()) projectionResult {
 	if ctx.Err() != nil {
 		return projectionResult{}
 	}
@@ -217,7 +238,7 @@ func projectObservationWithProgress(ctx context.Context, sink Sink, observation 
 	primary := observation.Primary()
 	cursor := primary.Cursor
 	progress := false
-	if since == nil {
+	if since == nil || primary.Epoch != sinceEpoch {
 		sink.Reset(primary)
 	} else {
 		// Reconnect replay extends the existing projection; the newer snapshot
@@ -225,7 +246,7 @@ func projectObservationWithProgress(ctx context.Context, sink Sink, observation 
 		cursor = *since
 	}
 	apply := func(envelope runtime.SessionEvent) bool {
-		if envelope.Gap {
+		if envelope.Gap || envelope.Epoch != primary.Epoch {
 			return false
 		}
 		if envelope.Sequence != 0 && envelope.Sequence <= cursor {
@@ -241,29 +262,29 @@ func projectObservationWithProgress(ctx context.Context, sink Sink, observation 
 	}
 	for _, envelope := range observation.Replay {
 		if !apply(envelope) {
-			return projectionResult{cursor: cursor, progress: progress, gap: true}
+			return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress, gap: true}
 		}
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return projectionResult{cursor: cursor, progress: progress}
+			return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress}
 		case envelope, ok := <-observation.Events:
 			if !ok {
 				if observation.Errors != nil {
 					select {
 					case err, open := <-observation.Errors:
 						if open && err != nil {
-							return projectionResult{cursor: cursor, progress: progress, err: err}
+							return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress, err: err}
 						}
 					case <-ctx.Done():
-						return projectionResult{cursor: cursor, progress: progress}
+						return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress}
 					}
 				}
-				return projectionResult{cursor: cursor, progress: progress, err: errors.New("observation stream closed")}
+				return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress, err: errors.New("observation stream closed")}
 			}
 			if !apply(envelope) {
-				return projectionResult{cursor: cursor, progress: progress, gap: true}
+				return projectionResult{cursor: cursor, epoch: primary.Epoch, progress: progress, gap: true}
 			}
 		}
 	}

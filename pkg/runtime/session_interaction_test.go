@@ -12,7 +12,7 @@ func respondToElicitation(t *testing.T, rt *LocalRuntime, event *ElicitationRequ
 	t.Helper()
 	sessionID := event.SessionID
 	if sessionID == "" {
-		sessionID = "elicitation-test-session"
+		sessionID = t.Name() + "/elicitation-test-session"
 	}
 	handle, err := rt.SessionByID(sessionID)
 	if err != nil {

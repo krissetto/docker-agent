@@ -11,7 +11,6 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/app"
-	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -79,29 +78,9 @@ func (m *appModel) beginSubagentOpening(nodeID subagent.NodeID, target, title, a
 	m.opening = r
 	m.editor.Blur()
 	owner := m.supervisor
-	origin := m.application
-	sessions, services := origin.SessionRuntime(), origin.Runtime()
-	_, preparedSupported := sessions.(runtime.SessionViewPreparer)
 	tabs, active := owner.GetTabs()
 	tabCmd := m.setTabs(tabs, active)
 	return tea.Batch(tabCmd, func() tea.Msg {
-		if !preparedSupported {
-			lookup, ok := services.(subagentSessionLookup)
-			if !ok {
-				return subagentOpenedMsg{request: r, err: runtime.ErrUnsupported}
-			}
-			info, ok := lookup.SubagentAttachInfo(nodeID)
-			if !ok || info.Session == nil {
-				return subagentOpenedMsg{request: r, err: runtime.ErrUnsupported}
-			}
-			info.Session = info.Session.Clone()
-			a := newAttachedSubagentApp(lifetime, sessions, services, info, runtime.SessionBinding{AgentName: info.Agent, Model: info.Session.AgentModelOverrides[info.Agent]})
-			if ctx.Err() != nil {
-				a.Close()
-				return subagentOpenedMsg{request: r, err: ctx.Err()}
-			}
-			return subagentOpenedMsg{request: r, application: a}
-		}
 		prepared, err := owner.AcquireSessionView(ctx, target)
 		result := subagentOpenedMsg{request: r, prepared: prepared, err: err}
 		if err == nil {

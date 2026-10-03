@@ -474,7 +474,7 @@ type oauthTransport struct {
 	// onOAuthSuccess notifies the runtime that a token was obtained or
 	// silently refreshed; production wiring points it at
 	// sessionClient.oauthSuccess. May be nil (tests); then it's a no-op.
-	onOAuthSuccess            func()
+	onOAuthSuccess            func(context.Context)
 	tokenStore                OAuthTokenStore
 	baseURL                   string
 	managed                   bool
@@ -540,9 +540,9 @@ func (t *oauthTransport) elicit(ctx context.Context, params *mcpsdk.ElicitParams
 }
 
 // notifyOAuthSuccess invokes the injected OAuth-success callback, if any.
-func (t *oauthTransport) notifyOAuthSuccess() {
+func (t *oauthTransport) notifyOAuthSuccess(ctx context.Context) {
 	if t.onOAuthSuccess != nil {
-		t.onOAuthSuccess()
+		t.onOAuthSuccess(ctx)
 	}
 }
 
@@ -601,7 +601,7 @@ func (t *oauthTransport) handleServerRejectedToken(ctx context.Context, prev *OA
 		_, err := t.refreshStoredToken(ctx, prev)
 		if err == nil {
 			slog.DebugContext(ctx, "Silently refreshed server-rejected token", "url", sanitizeURLForLog(t.baseURL))
-			t.notifyOAuthSuccess()
+			t.notifyOAuthSuccess(ctx)
 			return nil
 		}
 		slog.DebugContext(ctx, "Refresh failed after server-side token rejection; falling back to interactive auth",
@@ -1213,10 +1213,17 @@ func selectDCRScopes(configured, challengeScopes, prmScopesSupported []string) [
 	return normalizeScopes(prmScopesSupported)
 }
 
+func (t *oauthTransport) managedFor(ctx context.Context) bool {
+	if scope, ok := tools.HandlerScopeFrom(ctx); ok {
+		return scope.ManagedOAuth
+	}
+	return t.managed
+}
+
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
 func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAuth string) (err error) {
 	kind := "unmanaged"
-	if t.managed {
+	if t.managedFor(ctx) {
 		kind = "managed"
 	}
 	// Interactive OAuth flows can take seconds to minutes (user
@@ -1244,7 +1251,7 @@ func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAut
 		span.End()
 	}()
 
-	if t.managed {
+	if t.managedFor(ctx) {
 		return t.handleManagedOAuthFlow(ctx, authServer, wwwAuth)
 	}
 	return t.handleUnmanagedOAuthFlow(ctx, authServer, wwwAuth)
@@ -1372,7 +1379,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "OAuth flow completed successfully")
 	return nil
@@ -1539,6 +1546,9 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	// emits authorize_url + state in the elicitation; otherwise it emits
 	// only metadata and waits for the client to return a ready token.
 	redirectURI := t.unmanagedRedirectURI()
+	if scope, ok := tools.HandlerScopeFrom(ctx); ok && (t.oauthConfig == nil || t.oauthConfig.CallbackRedirectURL == "") {
+		redirectURI = scope.UnmanagedOAuthRedirectURI
+	}
 	driveFlow := redirectURI != ""
 
 	meta := map[string]any{
@@ -1759,7 +1769,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "Unmanaged OAuth flow completed successfully")
 	return nil

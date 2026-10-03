@@ -4,21 +4,25 @@ import "encoding/json"
 
 // Execution settings exclude live toolsets and runtime synchronization state.
 type executionSettings struct {
-	AgentName               string       `json:"agent_name,omitempty"`
-	AsyncSubagent           bool         `json:"async_subagent,omitempty"`
-	AttachedFiles           []string     `json:"attached_files,omitempty"`
-	DelegationLineage       []string     `json:"delegation_lineage,omitempty"`
-	NonInteractive          bool         `json:"non_interactive,omitempty"`
-	HideToolResults         bool         `json:"hide_tool_results,omitempty"`
-	PriorSafetyPolicy       SafetyPolicy `json:"prior_safety_policy,omitempty"`
-	MaxConsecutiveToolCalls int          `json:"max_consecutive_tool_calls,omitempty"`
-	MaxOldToolCallTokens    int          `json:"max_old_tool_call_tokens,omitempty"`
-	MaxToolResultTokens     int          `json:"max_tool_result_tokens,omitempty"`
+	TurnOutcomes            map[string]string `json:"turn_outcomes,omitempty"`
+	TurnOutcomeOrder        []string          `json:"turn_outcome_order,omitempty"`
+	AgentName               string            `json:"agent_name,omitempty"`
+	AsyncSubagent           bool              `json:"async_subagent,omitempty"`
+	AttachedFiles           []string          `json:"attached_files,omitempty"`
+	DelegationLineage       []string          `json:"delegation_lineage,omitempty"`
+	NonInteractive          bool              `json:"non_interactive,omitempty"`
+	HideToolResults         bool              `json:"hide_tool_results,omitempty"`
+	PriorSafetyPolicy       SafetyPolicy      `json:"prior_safety_policy,omitempty"`
+	MaxConsecutiveToolCalls int               `json:"max_consecutive_tool_calls,omitempty"`
+	MaxOldToolCallTokens    int               `json:"max_old_tool_call_tokens,omitempty"`
+	MaxToolResultTokens     int               `json:"max_tool_result_tokens,omitempty"`
 }
 
 func encodeExecutionSettings(s *Session) (string, error) {
 	settings := executionSettings{
-		AgentName: s.AgentName, AsyncSubagent: s.AsyncSubagent,
+		TurnOutcomes:     s.TurnOutcomesSnapshot(),
+		TurnOutcomeOrder: s.TurnOutcomeOrderSnapshot(),
+		AgentName:        s.AgentName, AsyncSubagent: s.AsyncSubagent,
 		AttachedFiles: s.AttachedFiles, DelegationLineage: s.DelegationLineage,
 		NonInteractive: s.NonInteractive, HideToolResults: s.HideToolResults,
 		PriorSafetyPolicy:       s.PriorSafetyPolicy,
@@ -37,6 +41,8 @@ func decodeExecutionSettings(s *Session, data string) error {
 	if err := json.Unmarshal([]byte(data), &settings); err != nil {
 		return err
 	}
+	s.TurnOutcomes = settings.TurnOutcomes
+	s.TurnOutcomeOrder = settings.TurnOutcomeOrder
 	s.AgentName, s.AsyncSubagent = settings.AgentName, settings.AsyncSubagent
 	s.AttachedFiles, s.DelegationLineage = settings.AttachedFiles, settings.DelegationLineage
 	s.NonInteractive, s.HideToolResults = settings.NonInteractive, settings.HideToolResults

@@ -307,7 +307,7 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (a
 			Title:   &agentTitle,
 		},
 		AgentCapabilities: acp.AgentCapabilities{
-			LoadSession: false,
+			LoadSession: true,
 			SessionCapabilities: acp.SessionCapabilities{
 				AdditionalDirectories: &acp.SessionAdditionalDirectoriesCapabilities{},
 				Close:                 &acp.SessionCloseCapabilities{},
@@ -480,10 +480,38 @@ func (a *Agent) Logout(ctx context.Context, _ acp.LogoutRequest) (acp.LogoutResp
 	return acp.LogoutResponse{}, acp.NewMethodNotFound(acp.AgentMethodLogout)
 }
 
-// LoadSession implements [acp.AgentLoader] (optional, not supported).
-func (a *Agent) LoadSession(ctx context.Context, _ acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	slog.DebugContext(ctx, "ACP LoadSession called (not supported)")
-	return acp.LoadSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionLoad)
+// LoadSession resumes canonical ownership and replays the detached text transcript.
+func (a *Agent) LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	if _, err := a.ResumeSession(ctx, acp.ResumeSessionRequest{SessionId: params.SessionId, Cwd: params.Cwd, AdditionalDirectories: params.AdditionalDirectories, McpServers: params.McpServers}); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	a.mu.Lock()
+	attached := a.sessions[string(params.SessionId)]
+	a.mu.Unlock()
+	if attached == nil {
+		return acp.LoadSessionResponse{}, errSessionClosed
+	}
+	snapshot, err := attached.session.Snapshot(ctx)
+	if err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	for _, message := range snapshot.GetAllMessages() {
+		var update acp.SessionUpdate
+		switch message.Message.Role {
+		case chat.MessageRoleUser:
+			update = acp.UpdateUserMessageText(message.Message.Content)
+		case chat.MessageRoleAssistant:
+			update = acp.UpdateAgentMessageText(message.Message.Content)
+		default:
+			continue
+		}
+		if message.Message.Content != "" {
+			if err := a.sendUpdate(ctx, attached.id, update); err != nil {
+				return acp.LoadSessionResponse{}, err
+			}
+		}
+	}
+	return acp.LoadSessionResponse{}, nil
 }
 
 // CloseSession implements [acp.Agent].
@@ -1024,7 +1052,8 @@ func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session
 	case "allow":
 		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeApprove, RequestID: e.RequestID}
 	case "allow-always":
-		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeApproveAutonomous, RequestID: e.RequestID}
+		response.Resume = runtime.ResumeApproveTool(e.ToolCall.Function.Name)
+		response.Resume.RequestID = e.RequestID
 	case "reject":
 		response.Resume = runtime.ResumeRequest{Type: runtime.ResumeTypeReject, RequestID: e.RequestID}
 	default:
@@ -1075,14 +1104,11 @@ func (a *Agent) handleMaxIterationsReached(ctx context.Context, acpSess *Session
 
 // emitAvailableCommands sends the list of available slash commands to the client.
 func (a *Agent) emitAvailableCommands(ctx context.Context, acpSess *Session) error {
+	// Slash input currently goes to the model, not a lifecycle command dispatcher.
 	return a.sendUpdate(ctx, acpSess.id, acp.SessionUpdate{
 		AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{
-			SessionUpdate: "available_commands_update",
-			AvailableCommands: []acp.AvailableCommand{
-				{Name: "new", Description: "Clear session history and start fresh"},
-				{Name: "compact", Description: "Generate summary and compact session history"},
-				{Name: "usage", Description: "Display token usage statistics"},
-			},
+			SessionUpdate:     "available_commands_update",
+			AvailableCommands: []acp.AvailableCommand{},
 		},
 	})
 }
@@ -1227,4 +1253,25 @@ func resolveAdditionalDirectories(dirs []string) ([]string, error) {
 		resolved = append(resolved, absDir)
 	}
 	return dedupePaths(resolved), nil
+}
+
+// AttachSession registers a borrowed canonical session for an ACP client.
+// Closing the ACP connection detaches this registration, never its authority.
+func (a *Agent) AttachSession(ctx context.Context, registry runtime.SessionRuntime, sessionID string) error {
+	loader, ok := registry.(runtime.SessionLoader)
+	if !ok {
+		return runtime.UnsupportedSessionOperation(sessionID, runtime.SessionOperationAttach)
+	}
+	handle, snapshot, err := loader.LoadSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if handle == nil || snapshot == nil || handle.ID() != sessionID || snapshot.ID != sessionID {
+		return errors.New("invalid ACP attached session identity")
+	}
+	outcome := a.registerSessionIfAbsent(&Session{id: sessionID, rt: registry, session: handle, sess: snapshot.Clone(), workingDir: snapshot.WorkingDir})
+	if outcome != registrationStored && outcome != registrationDuplicate {
+		return fmt.Errorf("ACP session attach rejected: %v", outcome)
+	}
+	return nil
 }

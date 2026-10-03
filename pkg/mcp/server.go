@@ -41,8 +41,10 @@ type ToolOutput struct {
 }
 
 type HTTPOptions struct {
-	CLISafety      session.SafetyPolicy
-	AuthToken      string
+	CLISafety session.SafetyPolicy
+	AuthToken string
+	// SessionRuntime is borrowed; handler cancellation never shuts it down.
+	SessionRuntime runtime.SessionRuntime
 	OnSafetyPolicy func(servesafety.Resolved)
 }
 
@@ -101,7 +103,7 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 		options.OnSafetyPolicy(resolvedSafety)
 	}
 
-	server, err := createMCPServerForTeam(ctx, t, agentFilename, agentName, runConfig, resolvedSafety.Policy)
+	server, err := createMCPServerForTeam(ctx, t, agentFilename, agentName, runConfig, resolvedSafety.Policy, options.SessionRuntime)
 	if err != nil {
 		return err
 	}
@@ -178,7 +180,7 @@ func createMCPServer(ctx context.Context, agentFilename, agentName string, runCo
 	return server, cleanup, nil
 }
 
-func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, agentName string, runConfig *config.RuntimeConfig, safety session.SafetyPolicy) (*mcp.Server, error) {
+func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, agentName string, runConfig *config.RuntimeConfig, safety session.SafetyPolicy, registries ...runtime.SessionRuntime) (*mcp.Server, error) {
 	// The SDK only starts keep-alive when KeepAlive > 0. StartHTTPServer (and
 	// the CLI, for early UX) rejects a nonzero keep-alive, so this only ever
 	// takes effect for stdio: the stateless HTTP transport (MCP 2026-07-28)
@@ -234,17 +236,17 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 			OutputSchema: tools.MustSchemaFor[ToolOutput](),
 		}
 
-		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety, workingDir))
+		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety, workingDir, registries...))
 	}
 
 	return server, nil
 }
 
-func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
-	return createToolHandler(t, agentName, safety, workingDir)
+func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string, registries ...runtime.SessionRuntime) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+	return createToolHandler(t, agentName, safety, workingDir, registries...)
 }
 
-func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string, registries ...runtime.SessionRuntime) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input ToolInput) (result *mcp.CallToolResult, output ToolOutput, err error) {
 		// Extract W3C trace context from `params._meta` (per the OTel
 		// MCP semconv) so the SERVER span chains onto the calling
@@ -284,21 +286,20 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 		}
 		sess := session.New(sessionOptions...)
 
-		rt, err := runtime.New(ctx, t,
-			runtime.WithCurrentAgent(agentName),
-			runtime.WithNonInteractive(true),
-			// See pkg/a2a/adapter.go for rationale — without this
-			// the runtime's startSpan is a no-op when cagent runs as
-			// an MCP server, so all our runtime.* spans go silent.
-			runtime.WithTracer(otel.Tracer(version.AppName)),
-		)
-		if err != nil {
-			return nil, ToolOutput{}, fmt.Errorf("failed to create runtime: %w", err)
+		var registry runtime.SessionRuntime
+		if len(registries) != 0 {
+			registry = registries[0]
 		}
-
-		supervisor := runtime.NewSessionRuntimeSupervisor(rt)
-		defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
-		handle, err := supervisor.Runtime().CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
+		if registry == nil {
+			rt, err := runtime.New(ctx, t, runtime.WithCurrentAgent(agentName), runtime.WithNonInteractive(true), runtime.WithTracer(otel.Tracer(version.AppName)))
+			if err != nil {
+				return nil, ToolOutput{}, fmt.Errorf("failed to create runtime: %w", err)
+			}
+			supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+			defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+			registry = supervisor.Runtime()
+		}
+		handle, err := registry.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
 		if err != nil {
 			return nil, ToolOutput{}, fmt.Errorf("bind MCP session: %w", err)
 		}

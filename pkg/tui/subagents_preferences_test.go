@@ -1,24 +1,25 @@
 package tui
 
 import (
-	"github.com/docker/docker-agent/pkg/tui/animation"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/require"
+
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/userconfig"
-	"github.com/stretchr/testify/require"
 )
 
 func preferenceApp(t *testing.T) (*app.App, *runtime.LocalRuntime) {
@@ -42,7 +43,7 @@ func TestSubagentsPreferenceSaveApplyFailureAndNewRuntime(t *testing.T) {
 	require.Equal(t, notification.TypeSuccess, notice.Type)
 	require.False(t, rt.UseSubagents())
 	require.False(t, userconfig.Get().GetUseSubagents())
-	require.Contains(t, ansi.Strip(d.View()), "Use subagents: OFF")
+	require.Contains(t, ansi.Strip(d.View()), "Use subagents (local default): OFF")
 	next, nextRuntime := preferenceApp(t)
 	applySavedSubagentsPreference(next)
 	require.False(t, nextRuntime.UseSubagents(), "new/restored apps reconcile saved false")
@@ -55,7 +56,7 @@ func TestSubagentsPreferenceSaveApplyFailureAndNewRuntime(t *testing.T) {
 	notice = m.setUseSubagents(true)().(notification.ShowMsg)
 	require.Equal(t, notification.TypeError, notice.Type)
 	require.False(t, rt.UseSubagents())
-	require.Contains(t, ansi.Strip(d.View()), "Use subagents: OFF")
+	require.Contains(t, ansi.Strip(d.View()), "Use subagents (local default): OFF")
 }
 
 func TestSubagentsPreferenceUnsupportedDoesNotSave(t *testing.T) {
@@ -93,11 +94,11 @@ func TestSubagentsPreferenceRefreshesVisibleInspectorWithoutClearingTree(t *test
 			}
 		}
 	}
-	require.Contains(t, ansi.Strip(root.dialogMgr.View()), "Use subagents: ON")
+	require.Contains(t, ansi.Strip(root.dialogMgr.View()), "Use subagents (local default): ON")
 	// Prime the manager's intrinsic view cache before changing policy.
 	_ = root.dialogMgr.View()
 	root.Update(messages.SetUseSubagentsMsg{Enabled: false})
 	require.False(t, rt.UseSubagents())
-	require.Contains(t, ansi.Strip(root.dialogMgr.View()), "Use subagents: OFF")
+	require.Contains(t, ansi.Strip(root.dialogMgr.View()), "Use subagents (local default): OFF")
 	require.Contains(t, ansi.Strip(opened.Model.View()), "worker")
 }

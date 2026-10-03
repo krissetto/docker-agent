@@ -104,7 +104,11 @@ func TestSequentialSendsWithPersistentHistoryBeyondMailboxLimit(t *testing.T) {
 		assert.Zero(t, status.Pending)
 		require.Same(t, handle, s.handle, "both sends reuse the same canonical handle")
 		var since uint64
-		observation, err := handle.Observe(ctx, runtime.ObserveOptions{Since: &since})
+		baseline, err := handle.Observe(ctx, runtime.ObserveOptions{})
+		require.NoError(t, err)
+		epoch := baseline.Primary().Epoch
+		baseline.Cancel()
+		observation, err := handle.Observe(ctx, runtime.ObserveOptions{Since: &since, SinceEpoch: epoch})
 		require.NoError(t, err)
 		var stoppedTurn string
 		for _, event := range observation.Replay {
@@ -198,6 +202,7 @@ func TestRealToolConfirmationRoundTrip(t *testing.T) {
 
 type blockedResponseHandle struct {
 	runtime.SessionHandle
+
 	entered chan struct{}
 	proceed chan struct{}
 }

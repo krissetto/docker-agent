@@ -659,7 +659,7 @@ func requireAvailableCommands(t *testing.T, update acpsdk.SessionUpdate) {
 	for _, cmd := range update.AvailableCommandsUpdate.AvailableCommands {
 		names = append(names, cmd.Name)
 	}
-	assert.Equal(t, []string{"new", "compact", "usage"}, names)
+	assert.Empty(t, names, "unsupported lifecycle commands must not be advertised")
 }
 
 func agentMessageText(t *testing.T, update acpsdk.SessionUpdate) string {
@@ -957,9 +957,9 @@ func TestRunAgent_ToolCallConfirmationOutcomes(t *testing.T) {
 			wantResume: []runtime.ResumeRequest{{Type: runtime.ResumeTypeApprove}},
 		},
 		{
-			name:       "allow-always approves session",
+			name:       "allow-always approves only this tool",
 			result:     permissionSelected("allow-always"),
-			wantResume: []runtime.ResumeRequest{{Type: runtime.ResumeTypeApproveAutonomous}},
+			wantResume: []runtime.ResumeRequest{{Type: runtime.ResumeTypeApproveTool, ToolName: "shell"}},
 		},
 		{
 			name:       "reject rejects",

@@ -53,6 +53,7 @@ const (
 func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("", s.sessionCatalog)
 	group.POST("", s.createCanonicalSession)
+	group.POST("/start", s.startCanonicalSession)
 	group.GET("/:id", s.getCanonicalSession)
 	group.GET("/:id/status", s.canonicalSessionStatus)
 	group.GET("/:id/snapshot", s.canonicalSessionSnapshot)
@@ -61,6 +62,9 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.POST("/:id/retry", s.retrySession)
 	group.POST("/:id/responses", s.respondSession)
 	group.POST("/:id/cancel", s.cancelSession)
+	group.POST("/:id/stop-subtree", s.stopSessionSubtree)
+	group.GET("/:id/delegation-policy", s.canonicalDelegationPolicy)
+	group.PATCH("/:id/delegation-policy", s.canonicalDelegationPolicy)
 	group.POST("/:id/turns/:turnID/wait", s.awaitSessionTurn)
 	group.PATCH("/:id", s.editCanonicalSession)
 	group.PATCH("/:id/title", s.updateCanonicalSessionTitle)
@@ -543,6 +547,21 @@ func (s *Server) cancelSession(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"session_id": result.SessionID, "turn_id": result.TurnID, "outcome": result.Outcome})
 }
 
+func (s *Server) stopSessionSubtree(c echo.Context) error {
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	controller, ok := handle.(runtime.SessionTreeController)
+	if !ok || !handle.Metadata().Capabilities.StopSubtree {
+		return sessionHTTPError(runtime.UnsupportedSessionOperation(handle.ID(), "stop_subtree"))
+	}
+	if err := controller.StopSubtree(c.Request().Context()); err != nil {
+		return sessionHTTPError(err)
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (s *Server) editCanonicalSession(c echo.Context) error {
 	var edit runtime.SessionEdit
 	if err := decodeSessionJSON(c, &edit); err != nil {
@@ -596,7 +615,11 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 	if rawSince == "" {
 		rawSince = c.Request().Header.Get("Last-Event-ID")
 	}
-	if tree && rawSince != "" {
+	sinceEpoch := c.QueryParam("since_epoch")
+	if sinceEpoch != "" && rawSince == "" {
+		return sessionRequestError("since_epoch requires since or Last-Event-ID")
+	}
+	if tree && (rawSince != "" || sinceEpoch != "") {
 		return sessionRequestError("tree streams do not accept since or Last-Event-ID")
 	}
 	if rawSince != "" {
@@ -606,7 +629,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		}
 		since = &value
 	}
-	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{Since: since, Tree: tree})
+	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree})
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -720,20 +743,20 @@ func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: capabilities.AvailableModels, Durability: string(capabilities.Durability), Compaction: capabilities.Compaction,
 		TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching, ContextInspection: capabilities.ContextInspection,
-		LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
+		DelegationPolicy: capabilities.DelegationPolicy, StopSubtree: capabilities.StopSubtree, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
 		ForkSkills: capabilities.ForkSkills, Pause: capabilities.Pause, ModelCatalogRefresh: capabilities.ModelCatalogRefresh, ThinkingLevels: capabilities.ThinkingLevels, Todos: capabilities.Todos,
 	}}
 }
 
 func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 	return sessionStatusDTO{
-		SessionID: status.SessionID, AgentName: status.AgentName, State: status.State, Pending: status.Pending, TurnID: status.TurnID, LastError: status.LastError,
+		InterruptedTurns: status.InterruptedTurns, SessionID: status.SessionID, AgentName: status.AgentName, State: status.State, Pending: status.Pending, TurnID: status.TurnID, LastError: status.LastError,
 		Dormant: status.Dormant, PauseArmed: status.PauseArmed, Paused: status.Paused, PauseGeneration: status.PauseGeneration,
 	}
 }
 
 func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
-	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, TranscriptPosition: snapshot.TranscriptPosition, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
+	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
 	for i, interaction := range snapshot.Interactions {
 		out.Interactions[i] = sessionInteractionDTO{SessionID: interaction.SessionID, InteractionID: interaction.InteractionID, Kind: interaction.Kind, ElicitationID: interaction.ElicitationID, Event: interaction.Event}
 	}
@@ -744,7 +767,7 @@ func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 }
 
 func sessionEnvelope(envelope runtime.SessionEvent) sessionEnvelopeDTO {
-	return sessionEnvelopeDTO{Version: api.SessionAPIVersion, SessionID: envelope.SessionID, TurnID: envelope.TurnID, InteractionID: envelope.InteractionID, Sequence: envelope.Sequence, TranscriptPosition: envelope.TranscriptPosition, Event: sessionEventDTO(envelope.Event), Gap: envelope.Gap, FirstAvailable: envelope.FirstAvailable}
+	return sessionEnvelopeDTO{Version: api.SessionAPIVersion, SessionID: envelope.SessionID, TurnID: envelope.TurnID, InteractionID: envelope.InteractionID, Sequence: envelope.Sequence, Epoch: envelope.Epoch, TranscriptPosition: envelope.TranscriptPosition, Event: sessionEventDTO(envelope.Event), Gap: envelope.Gap, FirstAvailable: envelope.FirstAvailable}
 }
 
 func sessionEventDTO(event runtime.Event) any {
@@ -807,7 +830,7 @@ func sessionHTTPError(err error) error {
 			status = http.StatusPreconditionFailed
 		case runtime.SessionErrorUnsupported:
 			status = http.StatusNotImplemented
-		case runtime.SessionErrorConflict, runtime.SessionErrorWrongSession:
+		case runtime.SessionErrorConflict, runtime.SessionErrorWrongSession, runtime.SessionErrorInterrupted:
 			status = http.StatusConflict
 		}
 		payload := map[string]any{"error": sessionErr.Kind, "operation": publicSessionOperation(string(sessionErr.Operation)), "reason": sessionErr.Reason, "session_id": sessionErr.SessionID}

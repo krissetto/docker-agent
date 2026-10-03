@@ -17,8 +17,6 @@ import (
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/docker/docker-agent/pkg/tui/widgets/help"
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
@@ -52,7 +50,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/tui/styles"
-	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/widgets/help"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/userconfig"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -85,6 +84,7 @@ const (
 
 // Model is the top-level TUI model that wraps the chat page.
 type appModel struct {
+	treeAttention      map[string][]app.TreeAttention // per routed owner; union drives notices and /attention
 	metadataGeneration uint64
 	metadataApp        *app.App
 	metadataSessionID  string
@@ -1330,6 +1330,10 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.SetUseSubagentsMsg:
 		return m, m.setUseSubagents(msg.Enabled)
 
+	case delegationPolicyMsg:
+		cmd := m.applyDelegationPolicy(msg)
+		return m, cmd
+
 	case messages.ShowSubagentSessionsMsg:
 		cmd := m.showSubagentSessions()
 		return m, cmd
@@ -1339,6 +1343,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.OpenSubagentMsg:
 		return m.handleOpenSubagent(msg)
+
+	case messages.OpenTreeAttentionMsg:
+		return m.openTreeAttention()
 
 	case messages.ReorderTabMsg:
 		m.handleReorderTab(msg)
@@ -2057,6 +2064,18 @@ func (m *appModel) applyActiveRuntimeEvent(event runtime.Event) {
 
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
+	var signal tea.Cmd
+	if generation, ok := m.supervisor.RouteGeneration(msg.SessionID); ok && (msg.RouteGeneration == 0 || msg.RouteGeneration == generation) {
+		signal = m.observeSessionSignals(msg.SessionID, msg.Inner)
+	}
+	model, cmd := m.deliverRoutedMsg(msg)
+	if signal == nil {
+		return model, cmd
+	}
+	return model, tea.Batch(signal, cmd)
+}
+
+func (m *appModel) deliverRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	if generation, ok := m.supervisor.RouteGeneration(msg.SessionID); !ok || (msg.RouteGeneration != 0 && msg.RouteGeneration != generation) {
 		if image, ok := msg.Inner.(messages.OpenImagePreviewMsg); ok && image.Preview != nil {
 			image.Preview.Close()
@@ -2435,64 +2454,30 @@ type stashedDialog struct {
 	event  tea.Msg
 }
 
-// subagentSessionLookup is implemented by runtimes that can attach a live
-// viewer to an async subagent's sub-session (the local runtime).
-type subagentSessionLookup interface {
-	SubagentAttachInfo(id subagentpkg.NodeID) (runtime.SubagentAttachInfo, bool)
-	SubagentNodeForSession(sessionID string) (subagentpkg.NodeID, bool)
-}
-
-// handleOpenSubagent opens (or focuses) a tab attached to a subagent's
-// sub-session. The tab shares the spawning tab's runtime: the subagent
-// manager keeps driving the session, the new tab watches it live and can
-// message it. Attached tabs are not persisted — on restart the subagent is
-// re-adopted under its parent's session instead.
+// handleOpenSubagent opens (or focuses) a view of a subagent's canonical
+// session. Node and session IDs resolve through the portable tree of the
+// active view, so in-process and remote owners take the same
+// PrepareSessionView route. Attached tabs are not persisted.
 func (m *appModel) handleOpenSubagent(msg messages.OpenSubagentMsg) (tea.Model, tea.Cmd) {
 	runner := m.supervisor.ActiveRunner()
 	if runner == nil || runner.App == nil {
 		return m, nil
 	}
-	rt, ok := runner.App.Runtime().(subagentSessionLookup)
+	target, ok := runner.App.ResolveSubagentTarget(msg.NodeID)
 	if !ok {
-		return m, notification.WarningCmd("Subagent sessions can only be opened on a local runtime")
-	}
-	nodeID := subagentpkg.NodeID(strings.TrimSpace(msg.NodeID))
-	if node, found := rt.SubagentNodeForSession(string(nodeID)); found {
-		nodeID = node
-	}
-	// Warm tabs are identified without touching transcript storage or restore locks.
-	tabs, _ := m.supervisor.GetTabs()
-	for _, tab := range tabs {
-		open := m.supervisor.GetRunner(tab.SessionID)
-		if open.App != nil {
-			if attached := open.App.AttachedSubagent(); attached != nil && attached.NodeID == nodeID {
-				return m.handleSwitchTab(open.ID)
-			}
+		// The rendered tree may be newer than the App's (e.g. a tree event).
+		if data := m.panelData[m.paneFocus()]; data != nil {
+			target, ok = app.FindSubagentTarget(subagentpkg.Snapshot{Nodes: data.treeNodes}, msg.NodeID)
 		}
 	}
-	if tree, ok := runner.App.Runtime().(interface{ SubagentTree() *subagentpkg.Tree }); ok && tree.SubagentTree() != nil {
-		if node, found := tree.SubagentTree().Node(nodeID); found && node.SessionID != "" {
-			if open := m.supervisor.FindBySession(node.SessionID); open != nil {
-				return m.handleSwitchTab(open.ID)
-			}
-			cmd := m.beginSubagentOpening(nodeID, node.SessionID, node.DisplayName(), node.Agent)
-			return m, cmd
-		}
+	if !ok {
+		return m, notification.WarningCmd("This subagent has no session to open")
 	}
-	if snapshot := runner.App.Session().GetSubagentTree(); snapshot != nil {
-		if node, found := subagentview.Find(snapshot.Nodes, nodeID); found && node.Node.SessionID != "" {
-			cmd := m.beginSubagentOpening(nodeID, node.Node.SessionID, node.Node.DisplayName(), node.Node.Agent)
-			return m, cmd
-		}
+	if open := m.supervisor.FindBySession(target.SessionID); open != nil {
+		return m.handleSwitchTab(open.ID)
 	}
-	return m, notification.WarningCmd("This subagent has no session to open")
-}
-
-func newAttachedSubagentApp(ctx context.Context, sessions runtime.SessionRuntime, services app.Services, info runtime.SubagentAttachInfo, binding runtime.SessionBinding) *app.App {
-	return app.New(ctx, sessions, info.Session, binding,
-		app.WithRuntimeServices(services),
-		app.WithSubagentAttach(info),
-	)
+	cmd := m.beginSubagentOpening(target.NodeID, target.SessionID, target.Name, target.Agent)
+	return m, cmd
 }
 
 // handleSwitchTab switches to a different session.
@@ -2544,10 +2529,8 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		// parent is itself a subagent). Open an attached tab for it so session
 		// links always work.
 		if active := m.supervisor.ActiveRunner(); active != nil && active.App != nil {
-			if rt, ok := active.App.Runtime().(subagentSessionLookup); ok {
-				if node, ok := rt.SubagentNodeForSession(sessionID); ok {
-					return m.handleOpenSubagent(messages.OpenSubagentMsg{NodeID: string(node)})
-				}
+			if _, ok := active.App.ResolveSubagentTarget(sessionID); ok {
+				return m.handleOpenSubagent(messages.OpenSubagentMsg{NodeID: sessionID})
 			}
 		}
 		return m, notification.ErrorCmd("Session not found")
@@ -2823,8 +2806,7 @@ func (m *appModel) descendantAttachedTabs(sessionID string) []string {
 	}
 	target := runner.App.Session().ID
 	parents := make(map[string]string)
-	if provider, ok := runner.App.Runtime().(interface{ SubagentTree() *subagentpkg.Tree }); ok && provider.SubagentTree() != nil {
-		snapshot := provider.SubagentTree().Snapshot()
+	if snapshot := runner.App.SubagentTreeSnapshot(); snapshot != nil {
 		nodeSessions := make(map[subagentpkg.NodeID]string)
 		var index func([]subagentpkg.NodeSnapshot)
 		index = func(nodes []subagentpkg.NodeSnapshot) {

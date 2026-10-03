@@ -368,5 +368,6 @@ func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
 	root := agent.New("root", "test", agent.WithModel(prov))
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	return rt
 }

@@ -31,7 +31,7 @@ import (
 // newDockerAgentAdapter creates a new ADK agent adapter from a docker agent team and agent name.
 // When agentName is empty, the team's default agent (one explicitly named "root" if it
 // exists, otherwise the first agent declared) is used.
-func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string) (agent.Agent, error) {
+func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string, registries ...runtime.SessionRuntime) (agent.Agent, error) {
 	a, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent %s: %w", agentName, err)
@@ -44,13 +44,13 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 		Name:        agentName,
 		Description: desc,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir)
+			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir, registries...)
 		},
 	})
 }
 
 // runDockerAgent executes a docker agent and returns ADK session events
-func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string) iter.Seq2[*adksession.Event, error] {
+func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string, registries ...runtime.SessionRuntime) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
 		// Decorate the inbound `a2a.message` SERVER span (created by
 		// otelhttp.NewHandler in server.go) with the GenAI semconv
@@ -112,26 +112,20 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			}
 		}
 
-		// Create runtime
-		rt, err := runtime.NewLocalRuntime(ctx, t,
-			runtime.WithSessionStore(sessStore),
-			// Match the tracer scope used by `cmd/root/run.go` so
-			// MCP / A2A / API spans share the same instrumentation
-			// scope as the CLI's runtime spans. Without this option
-			// `LocalRuntime.startSpan` sees a nil tracer and silently
-			// returns no-op spans for runtime.session, runtime.stream,
-			// runtime.tool.call, runtime.fallback, runtime.run_skill,
-			// hook events, and so on.
-			runtime.WithTracer(otel.Tracer(version.AppName)),
-		)
-		if err != nil {
-			yield(nil, fmt.Errorf("failed to create runtime: %w", err))
-			return
+		var sessionRuntime runtime.SessionRuntime
+		if len(registries) != 0 {
+			sessionRuntime = registries[0]
 		}
-
-		supervisor := runtime.NewSessionRuntimeSupervisor(rt)
-		defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
-		sessionRuntime := supervisor.Runtime()
+		if sessionRuntime == nil {
+			rt, err := runtime.NewLocalRuntime(ctx, t, runtime.WithSessionStore(sessStore), runtime.WithTracer(otel.Tracer(version.AppName)))
+			if err != nil {
+				yield(nil, fmt.Errorf("failed to create runtime: %w", err))
+				return
+			}
+			supervisor := runtime.NewSessionRuntimeSupervisor(rt)
+			defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+			sessionRuntime = supervisor.Runtime()
+		}
 
 		// Re-adopt any persisted subagent swarm so a resumed conversation's
 		// send_message / read_subagent keep working.
@@ -142,7 +136,21 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			}
 		}
 
-		handle, err := sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
+		handle, err := sessionRuntime.SessionByID(sess.ID)
+		switch {
+		case err != nil:
+			var sessionErr *runtime.SessionError
+			if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound {
+				yield(nil, fmt.Errorf("look up canonical A2A session: %w", err))
+				return
+			}
+			handle, err = sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
+		case handle.AgentName() != agentName:
+			err = &runtime.SessionError{Kind: runtime.SessionErrorWrongSession, SessionID: sess.ID, Operation: runtime.SessionOperationBindAgent}
+		default:
+			policy := sess.GetSafetyPolicy()
+			_, err = handle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditPolicy, SafetyPolicy: &policy})
+		}
 		if err != nil {
 			yield(nil, fmt.Errorf("bind A2A session: %w", err))
 			return

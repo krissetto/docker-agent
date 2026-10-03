@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -169,7 +170,7 @@ func newViewerLifecycleFixture(t *testing.T) *viewerLifecycleFixture {
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	borrowed := owner.Runtime()
 	dir := t.TempDir()
-	rootSession := session.New(session.WithID("11111111-1111-4111-8111-111111111111"), session.WithAgentName("root"), session.WithWorkingDir(dir))
+	rootSession := session.New(session.WithID(uuid.NewString()), session.WithAgentName("root"), session.WithWorkingDir(dir))
 	rootSession.AddMessage(session.UserMessage("original committed history"))
 	services := &viewerLifecycleLocalServices{local: local}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -177,7 +178,7 @@ func newViewerLifecycleFixture(t *testing.T) *viewerLifecycleFixture {
 	root := app.New(ctx, borrowed, rootSession, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
 	require.NotNil(t, root.SessionHandle())
 	t.Cleanup(root.Close)
-	child, err := borrowed.CreateSession(t.Context(), session.New(session.WithID("22222222-2222-4222-8222-222222222222")), runtime.SessionBinding{AgentName: "worker", ParentSessionID: rootSession.ID})
+	child, err := borrowed.CreateSession(t.Context(), session.New(session.WithID(uuid.NewString())), runtime.SessionBinding{AgentName: "worker", ParentSessionID: rootSession.ID})
 	require.NoError(t, err)
 	node, ok := local.SubagentNodeForSession(child.ID())
 	require.True(t, ok)
@@ -548,7 +549,7 @@ func TestViewerLifecycleRemoteUnsupportedAndAdmissionFailureAreTruthful(t *testi
 			require.NotNil(t, m.app.SessionHandle())
 			assert.False(t, runtime.IsLocalSessionHandle(m.app.SessionHandle()))
 			m.attachSubagentViewer(t.Context(), "abcde")
-			assert.Contains(t, viewerLifecycleText(m), "does not expose live subagent attachment")
+			assert.Contains(t, viewerLifecycleText(m), "no longer available to open")
 			m.spawnViewer(t.Context(), "", false)
 			assert.Contains(t, viewerLifecycleText(m), "not configured")
 			m.screen.Editor.SetText("remote draft")
@@ -647,9 +648,8 @@ func TestViewerLifecycleAsyncCapabilityResultKeepsOriginAndRejectsStaleGeneratio
 }
 
 var (
-	_ app.Services         = (*viewerLifecycleServices)(nil)
-	_ app.Services         = (*viewerLifecycleLocalServices)(nil)
-	_ subagentViewerLookup = (*viewerLifecycleLocalServices)(nil)
+	_ app.Services = (*viewerLifecycleServices)(nil)
+	_ app.Services = (*viewerLifecycleLocalServices)(nil)
 )
 
 func TestViewerLifecycleStoppedAttachRequiresFreshManualInput(t *testing.T) {

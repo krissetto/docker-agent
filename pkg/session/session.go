@@ -254,7 +254,12 @@ type Session struct {
 	// mu protects Messages and metadata that is written cross-goroutine
 	// (Title, Attributes, InputTokens, OutputTokens, Cost, ...) from concurrent
 	// read/write access. Shared-session readers must use the locked accessors.
-	mu sync.RWMutex `json:"-"`
+	mu         sync.RWMutex `json:"-"`
+	metadataMu sync.Mutex
+
+	// TurnOutcomes contains committed terminal evidence; absence never proves success.
+	TurnOutcomes     map[string]string `json:"turn_outcomes,omitempty"`
+	TurnOutcomeOrder []string          `json:"turn_outcome_order,omitempty"`
 
 	// now and newID are per-session sources of time and identity. They are
 	// indirected (rather than calling time.Now/uuid.New directly) so that
@@ -2946,4 +2951,54 @@ func middleOutCut(content string, keep int) (head, tailStart int) {
 		tailStart++
 	}
 	return head, tailStart
+}
+
+// LockMetadata serializes authoritative metadata commits with observer retries.
+// The returned unlock must run after the live session reflects a successful write.
+func (s *Session) LockMetadata() func() {
+	s.metadataMu.Lock()
+	return s.metadataMu.Unlock
+}
+
+func (s *Session) TurnOutcomesSnapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.TurnOutcomes)
+}
+
+func (s *Session) TurnOutcome(id string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.TurnOutcomes[id]
+}
+
+// MaxRetainedTurnOutcomes bounds terminal evidence; older admissions recover as uncertain.
+const MaxRetainedTurnOutcomes = 1024
+
+func (s *Session) TurnOutcomeOrderSnapshot() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.TurnOutcomeOrder)
+}
+
+func (s *Session) SetTurnOutcome(id, outcome string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TurnOutcomes == nil {
+		s.TurnOutcomes = map[string]string{}
+	}
+	if len(s.TurnOutcomeOrder) == 0 && len(s.TurnOutcomes) > 0 {
+		for existingID := range s.TurnOutcomes {
+			s.TurnOutcomeOrder = append(s.TurnOutcomeOrder, existingID)
+		}
+		slices.Sort(s.TurnOutcomeOrder)
+	}
+	if _, exists := s.TurnOutcomes[id]; !exists {
+		s.TurnOutcomeOrder = append(s.TurnOutcomeOrder, id)
+	}
+	s.TurnOutcomes[id] = outcome
+	for len(s.TurnOutcomeOrder) > MaxRetainedTurnOutcomes {
+		delete(s.TurnOutcomes, s.TurnOutcomeOrder[0])
+		s.TurnOutcomeOrder = s.TurnOutcomeOrder[1:]
+	}
 }

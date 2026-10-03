@@ -45,7 +45,7 @@ type fallbackExecutor struct {
 	// selected for each attempt. It is set by [NewLocalRuntime].
 	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) []chat.Message
 	// prepareTools reapplies live runtime policy after retry backoff.
-	prepareTools func([]tools.Tool) []tools.Tool
+	prepareTools func(*session.Session, []tools.Tool) []tools.Tool
 
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit)
 	// errors when no fallback models are configured. When false (default),
@@ -338,7 +338,7 @@ func (e *fallbackExecutor) execute(
 			}()
 			attemptTools := agentTools
 			if e.prepareTools != nil {
-				attemptTools = e.prepareTools(agentTools)
+				attemptTools = e.prepareTools(sess, agentTools)
 			}
 			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, attemptTools)
 			close(creating)

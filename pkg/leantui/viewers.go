@@ -8,7 +8,6 @@ import (
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
@@ -141,11 +140,6 @@ func (m *model) focusViewer(target *model, remember bool) {
 	}
 }
 
-type subagentViewerLookup interface {
-	SubagentAttachInfo(id subagent.NodeID) (runtime.SubagentAttachInfo, bool)
-	SubagentNodeForSession(sessionID string) (subagent.NodeID, bool)
-}
-
 func (m *model) handleViewerCommand(ctx context.Context, command, arg string) {
 	if command == "back" {
 		if m.viewers == nil || len(m.viewers.back) == 0 {
@@ -160,35 +154,28 @@ func (m *model) handleViewerCommand(ctx context.Context, command, arg string) {
 		}
 		return
 	}
-	if command == "subagents" {
-		m.handleSubagentsCommand(arg)
+	switch command {
+	case "subagents":
+		m.handleSubagentsCommand(ctx, arg)
+	case "attention":
+		m.openTreeAttention(ctx)
 	}
 }
 
+// attachSubagentViewer opens a descendant by canonical session ID through the
+// portable PrepareSessionView route; in-process and remote owners share it.
 func (m *model) attachSubagentViewer(ctx context.Context, id string) {
-	lookup, ok := m.app.Runtime().(subagentViewerLookup)
-	if !ok {
-		m.reportCapability("This runtime does not expose live subagent attachment.", nil)
-		return
-	}
 	// Node IDs are canonical fivehex values. Session IDs are resolved exactly
-	// by the runtime; display names and partial UUIDs are never lookup keys.
-	nodeID := subagent.NodeID(id)
-	if resolved, found := lookup.SubagentNodeForSession(id); found {
-		nodeID = resolved
+	// by the portable tree; display names and partial UUIDs are never lookup keys.
+	target, ok := m.app.ResolveSubagentTarget(id)
+	if !ok && m.subagentSnapshot != nil {
+		target, ok = app.FindSubagentTarget(*m.subagentSnapshot, id)
 	}
-	resolve := lookup.SubagentAttachInfo
-	if reader, ok := m.app.Runtime().(interface {
-		SubagentViewInfo(subagent.NodeID) (runtime.SubagentAttachInfo, bool)
-	}); ok {
-		resolve = reader.SubagentViewInfo
-	}
-	info, ok := resolve(nodeID)
-	if !ok || info.Session == nil {
+	if !ok {
 		m.reportCapability("That subagent is no longer available to open.", nil)
 		return
 	}
-	if info.Session.ID == m.app.Session().ID {
+	if target.SessionID == m.app.Session().ID {
 		m.reportCapability("Already viewing this session.", nil)
 		return
 	}
@@ -196,42 +183,40 @@ func (m *model) attachSubagentViewer(ctx context.Context, id string) {
 		m.reportCapability("Live viewer navigation requires the running lean event loop.", nil)
 		return
 	}
-	for application, target := range m.viewers.views {
-		if application.Session().ID == info.Session.ID {
-			m.focusViewer(target, true)
+	for application, view := range m.viewers.views {
+		if application.Session().ID == target.SessionID {
+			m.focusViewer(view, true)
 			return
 		}
 	}
 	if m.sessionViews != nil {
-		m.acquireSessionView(ctx, info.Session.ID)
+		m.acquireSessionView(ctx, target.SessionID)
 		return
 	}
-	binding := runtime.SessionBinding{AgentName: info.Agent, Model: info.Session.AgentModelOverrides[info.Agent]}
+	preparer, ok := m.app.SessionRuntime().(runtime.SessionViewPreparer)
+	if !ok {
+		m.reportCapability("This runtime cannot open session views.", nil)
+		return
+	}
 	viewerCtx, cancel := context.WithCancel(m.viewers.ctx())
-	var application *app.App
-	if preparer, ok := m.app.SessionRuntime().(runtime.SessionViewPreparer); ok {
-		prepared, err := preparer.PrepareSessionView(viewerCtx, info.Session.ID)
-		if err != nil {
-			cancel()
-			m.reportCapability(nil, err)
-			return
-		}
-		defer prepared.Abort()
-		committed, err := prepared.Commit(viewerCtx)
-		if err != nil {
-			cancel()
-			m.reportCapability(nil, err)
-			return
-		}
-		application, err = app.NewResolvedFromTemplate(viewerCtx, m.app.SessionRuntime(), committed, m.app)
-		if err != nil {
-			cancel()
-			m.reportCapability(nil, err)
-			return
-		}
-	} else {
-		application = app.New(viewerCtx, m.app.SessionRuntime(), info.Session, binding,
-			app.WithRuntimeServices(m.app.Runtime()), app.WithSubagentAttach(info))
+	prepared, err := preparer.PrepareSessionView(viewerCtx, target.SessionID)
+	if err != nil {
+		cancel()
+		m.reportCapability(nil, err)
+		return
+	}
+	defer prepared.Abort()
+	committed, err := prepared.Commit(viewerCtx)
+	if err != nil {
+		cancel()
+		m.reportCapability(nil, err)
+		return
+	}
+	application, err := app.NewResolvedFromTemplate(viewerCtx, m.app.SessionRuntime(), committed, m.app)
+	if err != nil {
+		cancel()
+		m.reportCapability(nil, err)
+		return
 	}
 	if application.SessionHandle() == nil {
 		cancel()
@@ -239,14 +224,18 @@ func (m *model) attachSubagentViewer(ctx context.Context, id string) {
 		return
 	}
 	m.viewers.cancel = append(m.viewers.cancel, cancel)
-	target := m.newViewer(application, "Message this subagent; /back to return")
-	target.loadInitialSessionTranscript()
+	view := m.newViewer(application, "Message this subagent; /back to return")
+	view.loadInitialSessionTranscript()
 	m.subscribeViewer(viewerCtx, application)
 	application.Start(viewerCtx)
-	target.watchViewerBranch(viewerCtx)
-	m.focusViewer(target, true)
+	view.watchViewerBranch(viewerCtx)
+	m.focusViewer(view, true)
 	m.refreshCommands(ctx)
-	m.reportCapability("Live subagent viewer: "+info.Name+". Sending targets this session; /back returns without cancelling it.", nil)
+	name := target.Name
+	if name == "" {
+		name = target.SessionID
+	}
+	m.reportCapability("Live subagent viewer: "+name+". Sending targets this session; /back returns without cancelling it.", nil)
 }
 
 func (m *model) spawnViewer(ctx context.Context, directory string, fork bool) {

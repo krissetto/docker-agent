@@ -258,7 +258,10 @@ type dormantResumeHandle struct {
 	cancelCalls atomic.Int32
 }
 
-func (h *dormantResumeHandle) Observe(ctx context.Context, _ runtime.ObserveOptions) (runtime.Observation, error) {
+func (h *dormantResumeHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	if options.Tree {
+		return runtime.Observation{}, runtime.ErrUnsupported
+	}
 	h.mu.Lock()
 	h.events = make(chan runtime.SessionEvent, 8)
 	status := runtime.SessionStatus{SessionID: h.id, AgentName: "root", Dormant: h.dormant, Pending: h.pending}

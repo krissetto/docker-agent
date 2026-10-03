@@ -281,6 +281,7 @@ type model struct {
 	lastInterrupt           time.Time
 	budgetUsage             *runtime.BudgetUsageEvent
 	subagentSnapshot        *subagent.Snapshot
+	treeAttention           map[string]string // descendant session -> waiting on
 	elicitations            map[string]*runtime.ElicitationRequestEvent
 	maxIterations           map[string]*runtime.MaxIterationsReachedEvent
 	viewers                 *viewerHost

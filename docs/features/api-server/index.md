@@ -72,9 +72,12 @@ The canonical endpoints are:
 | `GET` | `/api/v2/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
 | `GET` | `/api/v2/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
 | `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
+| `POST` | `/api/v2/sessions/start` | Recoverable idempotent root creation and initial submission. Requires `session_id` and `input.request_id`; retry the identical creation/input payload. |
 | `POST` | `/api/v2/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
 | `POST` | `/api/v2/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |
 | `POST` | `/api/v2/sessions/:id/cancel` | Cancel the active or exactly named active/queued `turn_id` without closing the session. |
+| `GET` / `PATCH` | `/api/v2/sessions/:id/delegation-policy` | Read or set session-tree delegation (`enabled` boolean). A child resolves its verified canonical root. Absent override uses the local runtime default; updates persist on the root and affect only new delegations, never daemon-global preferences or existing children. |
+| `POST` | `/api/v2/sessions/:id/stop-subtree` | Stop a child session and its descendants without deleting history. Requires the `stop_subtree` capability; including a root and its entire tree. |
 | `POST` | `/api/v2/sessions/:id/turns/:turnID/wait` | Wait for this exact turn to settle, including durable completion; `204` on success, typed `404` for unknown/expired turns. Disconnecting cancels only the wait. |
 | `POST` | `/api/v2/sessions/:id/retry` | Retry the last failed settled turn. |
 | `PATCH` | `/api/v2/sessions/:id/title` | Session-ordered durable title change. |
@@ -93,6 +96,17 @@ The canonical endpoints are:
 | `POST` | `/api/v2/sessions/:id/switch-agent` | Branch into a new session bound to another agent. |
 | `PATCH` | `/api/v2/sessions/:id/starred` | Set starred state. |
 | `DELETE` | `/api/v2/sessions/:id/attachments` | Remove an attachment. |
+
+| `GET` | `/api/v2/server` | Authenticated server identity, readiness and portable capability discovery without reading session history. |
+| `GET` | `/api/v2/sessions/:id/agent-info` | Session-bound agent presentation metadata. |
+| `GET` | `/api/v2/sessions/:id/tools` | Tool definitions and lifecycle statuses. |
+| `POST` | `/api/v2/sessions/:id/toolsets/restart` | Restart an eligible toolset at a safe session boundary. |
+| `GET` | `/api/v2/sessions/:id/permissions` | Effective session permissions. |
+| `GET` | `/api/v2/sessions/:id/mcp/prompts` | Discover MCP prompts. |
+| `POST` | `/api/v2/sessions/:id/mcp/prompts/execute` | Expand an MCP prompt to text. |
+| `POST` | `/api/v2/sessions/:id/branches` | Create a canonical branch with optional transcript position and expected-snapshot proof. |
+| `PATCH` | `/api/v2/sessions/:id/todos/:todoID` | Update todo status or description; description edits require the expected description. |
+| `DELETE` | `/api/v2/sessions/:id/todos/:todoID` | Remove a session todo. |
 
 Additional canonical metadata and editing endpoints:
 
@@ -219,9 +233,16 @@ removes the matching pending interaction and carries reason `responded`,
 `stream_stopped` is not transport EOF or a durable-completion barrier; use the
 turn wait endpoint when durable settlement is required.
 
-Reconnect with either `?since=<last sequence>` or `Last-Event-ID`. A retained
-cursor is replayed before `ready`. A `gap` envelope is a hard resnapshot
-barrier. When `DELETE /api/v2/sessions/:id` closes an attached stream, the stream
+Reconnect with `?since=<last sequence>&since_epoch=<snapshot epoch>` (or use
+`Last-Event-ID` for the numeric sequence and retain the `since_epoch` query).
+Snapshots and envelopes carry an `epoch`; sequences are ordered only within
+that epoch. A matching retained cursor is replayed before `ready`. A missing
+or mismatched epoch establishes a fresh snapshot, outstanding interactions,
+and live seeds rather than replaying business events. Clients must replace
+their projection when the snapshot epoch changes. Numeric SSE IDs remain
+compatible, but alone cannot resume an earlier process's journal. A `gap`
+envelope is a hard resnapshot barrier.
+When `DELETE /api/v2/sessions/:id` closes an attached stream, the stream
 emits a terminal `stream_stopped` event with reason `deleted` before transport
 EOF. Clients should consume that terminal event rather than treating EOF alone
 as successful deletion.
@@ -442,7 +463,7 @@ curl -X POST http://127.0.0.1:8080/api/v2/sessions/$SID/messages \
   -H 'Content-Type: application/json' \
   -d '{"mode":"submit","content":"Now add tests"}'
 curl -N -H 'Last-Event-ID: 42' \
-  http://127.0.0.1:8080/api/v2/sessions/$SID/events
+  "http://127.0.0.1:8080/api/v2/sessions/$SID/events?since_epoch=$EPOCH"
 ```
 
 The run keeps its interactive TUI; accepted input is executed by the session
@@ -497,3 +518,40 @@ resubmit merely because execution has not started yet. The response's immutable
 SSE journal, reconnecting from the last sequence when transport closes. A `gap`
 requires a fresh snapshot before continuing. Capacity, stopped-session, and
 persistence failures are returned as errors and are not acceptance.
+
+### Borrowed adapter lifetimes
+
+The daemon's workspace/source runtimes share one process-local `SessionService`.
+Embedders can attach `embeddedchat.Config.SessionRuntime` plus `SessionID` to an
+existing canonical session; `Close` detaches that embedding without shutting
+down its borrowed authority. Elicitation and iteration-limit interactions are
+emitted with correlation tokens and answered with `Respond`, or handled by
+`Config.InteractionHandler`; they are not silently declined.
+
+A2A `RunOptions.SessionRuntime` and MCP `HTTPOptions.SessionRuntime` (or the
+optional registry argument to `CreateToolHandler`) likewise borrow a host-owned
+registry. Without one, they retain invocation-owned runtime behavior. Cancelling
+an invocation cancels and drains its exact accepted turn, never the borrowed
+service. The host remains responsible for the service, backing store, agent
+bindings, toolsets, and durable background-work lifetime.
+
+ACP exposes `AttachSession` for host-controlled canonical attachment. ACP
+`session/load` resumes canonical ownership and replays user/assistant text from
+a detached snapshot; historical tool activities and multimodal blocks are not
+reconstructed in this text projection.
+Slash commands are not advertised until they have a lifecycle dispatcher.
+Filesystem requests enforce ACP workspace roots and configured filesystem
+allow/deny rules before delegated client I/O; the client owns the final I/O
+boundary and must preserve containment against concurrent symlink changes.
+
+`POST /api/v2/sessions/start` provides recoverable idempotent creation plus initial
+submission. It persists an immutable creation/input proof, then submits the stable
+input token. If submission fails after creation, retrying the same request resumes
+the second step; a different payload or unrelated existing identity conflicts.
+The two writes are not a database-atomic transaction.
+
+For clients using the separate creation and submission operations:
+Clients requiring recovery after ambiguous creation should supply a stable
+`session_id` and inspect that identity after a conflict. Retrying creation
+without an ID can create another session. Input retries must reuse the same
+`request_id` and payload; a new or omitted token is a distinct input.

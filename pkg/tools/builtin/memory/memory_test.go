@@ -280,3 +280,16 @@ func TestCreateToolSet_DefaultPath_SanitisesReservedChars(t *testing.T) {
 	assert.NotContains(t, name, `\`)
 	assert.NotContains(t, name, "/")
 }
+
+func TestBackendFactoryDoesNotCreateLocalDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-created", "memory.db")
+	backend := new(MockDB)
+	ts, err := CreateToolSetWithBackend(latest.Toolset{Path: path}, "", &config.RuntimeConfig{}, "test", func(resolved string) (DB, error) {
+		require.Equal(t, path, resolved)
+		return backend, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, backend, ts.(*ToolSet).db)
+	_, err = os.Stat(filepath.Dir(path))
+	require.True(t, os.IsNotExist(err))
+}

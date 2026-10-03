@@ -1206,7 +1206,7 @@ func (m *model) commitHelp() {
 		entry("Y / y: approve once. A / a: always approve this tool.")
 		entry("B / b: auto-approve safe tools (balanced). S / s: approve autonomously for the session.")
 		entry("N / n / Esc: reject. R / r: reject with a reason; Enter submits it, Esc goes back.")
-		entry("Elicitation/OAuth: /respond <request-id> <JSON|decline|cancel>; schema required fields are validated.")
+		entry("Elicitation/OAuth: /respond <request-id> name=value …|<answer>|decline|cancel; fields are typed and validated against the schema.")
 		entry("Maximum iterations: /respond <request-id> continue|cancel. Responses keep exact session correlation.")
 		entry("Other keys, including Enter, Ctrl+C and Ctrl+D, are ignored at the approval prompt.")
 
