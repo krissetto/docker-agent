@@ -30,13 +30,14 @@ func ResolveInputReference(snapshot *subagent.Snapshot, parentSessionID, senderI
 	var byID, bySession *subagent.Node
 	var walk func([]subagent.NodeSnapshot)
 	walk = func(nodes []subagent.NodeSnapshot) {
-		for _, item := range nodes {
-			node := item.Node
+		for j := range nodes {
+			item := &nodes[j]
+			node := &item.Node
 			if string(node.ID) == senderID {
-				byID = &node
+				byID = node
 			}
 			if node.SessionID == senderID {
-				bySession = &node
+				bySession = node
 			}
 			walk(item.Children)
 		}

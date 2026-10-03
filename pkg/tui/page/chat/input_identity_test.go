@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -94,4 +95,40 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 			t.Fatal("rendered sender coordinate missing")
 		})
 	}
+}
+
+type referenceRefreshCounter struct {
+	messages.Model
+	refreshes int
+}
+
+func (m *referenceRefreshCounter) RefreshInputReferences() {
+	m.refreshes++
+	m.Model.RefreshInputReferences()
+}
+
+func TestTreeMetricsDoNotRefreshTranscriptReferences(t *testing.T) {
+	sess := session.New()
+	a, _ := newSessionTestApp(t, sess, nil, nil)
+	p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+	counter := &referenceRefreshCounter{Model: p.messages}
+	p.messages = counter
+	tree := subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", SessionID: "child-session", Agent: "worker"}}}}
+	handled, _ := p.handleRuntimeEvent(&runtime.SubagentTreeEvent{Snapshot: tree})
+	require.True(t, handled)
+	require.Equal(t, 1, counter.refreshes)
+	for j := range 10 {
+		tree.Nodes[0].Node.Cost = float64(j)
+		tree.Nodes[0].Node.OutputTokens = int64(j)
+		tree.Nodes[0].Node.State = subagent.NodeRunning
+		tree.Nodes[0].Node.WaitingOn = "tool"
+		p.handleRuntimeEvent(&runtime.SubagentTreeEvent{Snapshot: tree})
+	}
+	assert.Equal(t, 1, counter.refreshes, "metric/activity trees must not walk or invalidate the transcript")
+	tree.Nodes[0].Node.Name = "Renamed worker"
+	p.handleRuntimeEvent(&runtime.SubagentTreeEvent{Snapshot: tree})
+	assert.Equal(t, 2, counter.refreshes)
+	assert.Equal(t, "Renamed worker", p.subagents.Resolve("", "child-session", "").Name)
+	p.handleRuntimeEvent(&runtime.SubagentTreeEvent{})
+	assert.Equal(t, 3, counter.refreshes, "authoritative empty tree removes stale references")
 }

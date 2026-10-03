@@ -269,10 +269,11 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.forwardToSidebar(msg)
 
 	case *runtime.SubagentTreeEvent:
-		// Keep the id → name index fresh so subagent tool calls can be
-		// attributed by name while still running.
-		p.subagents.Reset(msg.Snapshot)
-		p.messages.RefreshInputReferences()
+		// Metrics/activity updates do not change transcript identities. Rebuild
+		// lookups and refresh references only when identity/topology changes.
+		if p.subagents.Reset(msg.Snapshot) {
+			p.messages.RefreshInputReferences()
+		}
 		return true, p.forwardToSidebar(msg)
 
 	case *runtime.SessionCompactionEvent:

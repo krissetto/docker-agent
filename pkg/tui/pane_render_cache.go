@@ -1,11 +1,11 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/docker/docker-agent/pkg/tui/rendering/retained"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -31,7 +31,29 @@ type panePreparationInput struct {
 	width, height int
 }
 
-type panePreparedRow struct{ slot retained.Slot[string] }
+type panePreparedRow struct {
+	spans    []paneRowSpan
+	width    int
+	rendered string
+	valid    bool
+	builds   uint64
+}
+
+func (r *panePreparedRow) render(spans []paneRowSpan, width int) string {
+	if r.valid && r.width == width && slices.Equal(r.spans, spans) {
+		return r.rendered
+	}
+	// Own the complete input before assembly sorts the caller's spans. Never
+	// retain the caller's slice: composition may reuse or mutate its metadata.
+	// Clear old entries so shrinking rows cannot retain off-viewport strings.
+	clear(r.spans)
+	r.spans = append(r.spans[:0], spans...)
+	r.width = width
+	r.rendered = trimPaneDefaultPadding(assemblePaneRow(spans, width))
+	r.valid = true
+	r.builds++
+	return r.rendered
+}
 
 func (c *paneRenderCache) prepare(key, raw string, width, height int) []paneRowSpan {
 	if c.parts == nil {
@@ -84,8 +106,7 @@ func (c *paneRenderCache) render(rows [][]paneRowSpan, width int) string {
 	}
 	lines := make([]string, len(rows))
 	for y, spans := range rows {
-		raw := assemblePaneRow(spans, width)
-		lines[y] = c.rows[y].slot.Render(raw, trimPaneDefaultPadding)
+		lines[y] = c.rows[y].render(spans, width)
 	}
 	return strings.Join(lines, "\n")
 }

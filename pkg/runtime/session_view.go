@@ -342,7 +342,7 @@ func (p *preparedSessionView) canonicalResult() (CommittedSessionView, error) {
 	}
 	driver := handle.(*sessionHandle).driver
 	driver.mu.Lock()
-	info := cloneSessionViewInfo(p.info)
+	info := p.info
 	info.Session = driver.sess.Clone()
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
@@ -351,6 +351,9 @@ func (p *preparedSessionView) canonicalResult() (CommittedSessionView, error) {
 	info.WorkingDir = driver.sess.WorkingDir
 	driver.mu.Unlock()
 	if info.Attach != nil {
+		// Copy attach metadata without cloning the stale session it replaces.
+		attach := *info.Attach
+		info.Attach = &attach
 		info.Attach.Session = info.Session.Clone()
 		info.Attach.Agent = info.Binding.AgentName
 	}
@@ -395,10 +398,11 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	}
 	if len(p.reservations) == 0 {
 		result, err := p.canonicalResult()
-		if err == nil {
-			p.committed = &result
+		if err != nil {
+			return CommittedSessionView{}, err
 		}
-		return result, err
+		p.committed = &result
+		return CommittedSessionView{SessionHandle: result.SessionHandle, Info: cloneSessionViewInfo(result.Info)}, nil
 	}
 	known := make(map[subagent.NodeID]session.ChildRecord, len(p.records))
 	for _, record := range p.records {
@@ -564,7 +568,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		return CommittedSessionView{}, errors.New("selected view driver was not published")
 	}
 	driver.mu.Lock()
-	info := cloneSessionViewInfo(p.info)
+	info := p.info
 	info.Session = driver.sess.Clone()
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
@@ -573,6 +577,9 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	info.WorkingDir = driver.sess.WorkingDir
 	driver.mu.Unlock()
 	if info.Attach != nil {
+		// Copy attach metadata without cloning the stale session it replaces.
+		attach := *info.Attach
+		info.Attach = &attach
 		info.Attach.Session = info.Session.Clone()
 		info.Attach.Agent = info.Binding.AgentName
 	}

@@ -286,6 +286,12 @@ func sameOverlays(a, b []overlay) bool {
 }
 
 func extractOverlays(content string) (string, []overlay) {
+	// Most frames contain only text. Keep the exact bytes without allocating a
+	// line table or rebuilding the frame; SetContent still compares the empty
+	// overlay set so placements from a previous image frame are cleared.
+	if !strings.Contains(content, markerPrefix) && !strings.Contains(content, "\x1b_G") {
+		return content, nil
+	}
 	lines := strings.Split(content, "\n")
 	overlays := extractMarkerOverlays(lines)
 	for y, line := range lines {

@@ -7,51 +7,121 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 )
 
-// Index maps subagent node IDs to names for one chat-page/session view.
+// Index maps canonical node and session identities for one chat-page/session view.
+// It owns scalar metadata only, never a caller's mutable snapshot.
 type Index struct {
-	mu       sync.RWMutex
-	names    map[subagent.NodeID]string
-	snapshot *subagent.Snapshot
+	mu         sync.RWMutex
+	root       subagent.NodeID
+	identities []identity
+	byID       map[subagent.NodeID]int
+	bySession  map[string]int
 }
 
-func New() *Index { return &Index{names: make(map[subagent.NodeID]string)} }
+type identity struct {
+	id, parent  subagent.NodeID
+	sessionID   string
+	name, agent string
+	children    int
+	ref         lifecycle.InputReference
+}
 
-// Reset authoritatively rebuilds the index from snapshot.
-func (i *Index) Reset(snapshot subagent.Snapshot) {
-	names := make(map[subagent.NodeID]string)
+func New() *Index { return &Index{} }
+
+// Reset authoritatively replaces identity metadata, returning whether it changed.
+// Tree events also carry metrics/activity updates: compare only identity and
+// topology in traversal order before allocating or rebuilding lookup maps.
+func (i *Index) Reset(snapshot subagent.Snapshot) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	position := 0
+	var same func([]subagent.NodeSnapshot) bool
+	same = func(nodes []subagent.NodeSnapshot) bool {
+		for j := range nodes {
+			item := &nodes[j]
+			node := &item.Node
+			if position >= len(i.identities) {
+				return false
+			}
+			old := &i.identities[position]
+			if old.id != node.ID || old.parent != node.Parent || old.sessionID != node.SessionID || old.name != node.Name || old.agent != node.Agent || old.children != len(item.Children) {
+				return false
+			}
+			position++
+			if !same(item.Children) {
+				return false
+			}
+		}
+		return true
+	}
+	if i.root == snapshot.Root && same(snapshot.Nodes) && position == len(i.identities) {
+		return false
+	}
+
+	i.root = snapshot.Root
+	clear(i.identities)
+	i.identities = i.identities[:0]
+	i.byID = make(map[subagent.NodeID]int)
+	i.bySession = make(map[string]int)
 	var walk func([]subagent.NodeSnapshot)
 	walk = func(nodes []subagent.NodeSnapshot) {
-		for _, node := range nodes {
-			names[node.Node.ID] = node.Node.DisplayName()
-			walk(node.Children)
+		for j := range nodes {
+			item := &nodes[j]
+			node := &item.Node
+			position := len(i.identities)
+			i.identities = append(i.identities, identity{
+				id: node.ID, parent: node.Parent, sessionID: node.SessionID,
+				name: node.Name, agent: node.Agent, children: len(item.Children),
+				ref: lifecycle.InputReference{
+					Kind: lifecycle.InputReferenceNode, ID: string(node.ID),
+					Name: node.DisplayName(), Agent: node.Agent, DisplayID: subagent.ShortID(string(node.ID)),
+				},
+			})
+			// Last depth-first match wins, just as in ResolveInputReference.
+			i.byID[node.ID] = position
+			i.bySession[node.SessionID] = position
+			walk(item.Children)
 		}
 	}
 	walk(snapshot.Nodes)
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.names = names
-	i.snapshot = &snapshot
+	return true
 }
 
 func (i *Index) Clear() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.names = make(map[subagent.NodeID]string)
-	i.snapshot = nil
+	i.root = ""
+	i.identities = nil
+	i.byID = nil
+	i.bySession = nil
 }
 
 func (i *Index) Name(id subagent.NodeID) (string, bool) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	name, ok := i.names[id]
-	return name, ok
+	position, ok := i.byID[id]
+	if !ok {
+		return "", false
+	}
+	return i.identities[position].ref.Name, true
 }
 
 func (i *Index) Resolve(parentID, senderID, senderName string) lifecycle.InputReference {
-	if i == nil {
+	if i == nil || senderID == "" {
 		return lifecycle.ResolveInputReference(nil, parentID, senderID, senderName)
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycle.ResolveInputReference(i.snapshot, parentID, senderID, senderName)
+	position, ok := i.byID[subagent.NodeID(senderID)]
+	if !ok {
+		position, ok = i.bySession[senderID]
+	}
+	if !ok {
+		return lifecycle.ResolveInputReference(nil, parentID, senderID, senderName)
+	}
+	entry := &i.identities[position]
+	ref := entry.ref
+	if parentID != "" && (senderID == parentID || entry.sessionID == parentID) {
+		ref.Kind, ref.ID = lifecycle.InputReferenceParent, parentID
+	}
+	return ref
 }
