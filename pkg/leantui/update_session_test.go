@@ -396,12 +396,13 @@ func TestBusyQueuedSteerIsClassifiedAsFollowUp(t *testing.T) {
 
 func TestInterruptStopsSessionHandle(t *testing.T) {
 	t.Parallel()
-	m, handle := sessionModel(t)
+	m, handle := cancellationModel(t)
 	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.handleInterrupt()
 
 	assert.Equal(t, 1, handle.stops)
+	assert.Equal(t, handle.turnID, handle.cancelledTurn)
 	assert.True(t, m.cancelMarkerPending, "marker waits for buffered response events")
 	assert.Equal(t, 0, m.screen.Transcript.BlockCount())
 }
@@ -558,11 +559,12 @@ func TestLeanLoadSessionTranscriptRestoresToolCalls(t *testing.T) {
 }
 
 func TestLeanEscapeCancelsActorAndOrdersMarkerAfterBufferedResponse(t *testing.T) {
-	m, handle := sessionModel(t)
+	m, handle := cancellationModel(t)
 	m.lifecycle.Status = runtime.SessionStateRunning
 
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	require.Equal(t, 1, handle.stops)
+	assert.Equal(t, handle.turnID, handle.cancelledTurn)
 	assert.True(t, m.cancelMarkerPending)
 	assert.Equal(t, 0, m.screen.Transcript.BlockCount())
 

@@ -113,6 +113,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			m.sessionState.SetSessionTitle(e.Session.TitleSnapshot())
 		}
 	case *app.SessionResetEvent:
+		m.clearInterruptIntent()
 		m.status.Dormant = e.Snapshot.Status.Dormant
 		m.status.Pending = e.Snapshot.Status.Pending
 		m.status.Interrupted = e.Snapshot.Status.InterruptedTurns

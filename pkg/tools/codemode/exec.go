@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -35,6 +36,7 @@ type ToolCallInfo struct {
 // toolCallTracker tracks tool calls made during script execution.
 type toolCallTracker struct {
 	calls []ToolCallInfo
+	stop  error
 }
 
 func (t *toolCallTracker) record(info ToolCallInfo) {
@@ -42,7 +44,24 @@ func (t *toolCallTracker) record(info ToolCallInfo) {
 }
 
 func (c *codeModeTool) runJavascript(ctx context.Context, rt tools.Runtime, script string) (ScriptResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ScriptResult{}, err
+	}
 	vm := goja.New()
+	watchDone := make(chan struct{})
+	watchJoined := make(chan struct{})
+	go func() {
+		defer close(watchJoined)
+		select {
+		case <-ctx.Done():
+			vm.Interrupt(ctx.Err())
+		case <-watchDone:
+		}
+	}()
+	defer func() {
+		close(watchDone)
+		<-watchJoined
+	}()
 	tracker := &toolCallTracker{}
 
 	// Always stamp a hash + length so dashboards can correlate
@@ -98,6 +117,12 @@ func (c *codeModeTool) runJavascript(ctx context.Context, rt tools.Runtime, scri
 
 	// Run the script.
 	v, err := vm.RunString(script)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return ScriptResult{}, cancelErr
+	}
+	if tracker.stop != nil {
+		return ScriptResult{}, tracker.stop
+	}
 	if err != nil {
 		// Script execution failed - include tool call history to help LLM understand what went wrong
 		return ScriptResult{
@@ -121,11 +146,13 @@ func (c *codeModeTool) runJavascript(ctx context.Context, rt tools.Runtime, scri
 	}, nil
 }
 
-// callTool wraps a tool as a goja-callable function. rt is forwarded to the
-// inner handler so nested tools keep their runtime capabilities (streaming
-// output, recall) when invoked from a script.
+// callTool wraps a tool as a goja-callable function. Hosted calls re-enter
+// dispatch so inner tools retain their own policies and runtime attribution.
 func callTool(ctx context.Context, rt tools.Runtime, tool tools.Tool, tracker *toolCallTracker) func(args map[string]any) (string, error) {
 	return func(args map[string]any) (string, error) {
+		if tracker.stop != nil {
+			return "", tracker.stop
+		}
 		output, filtered, err := invokeTool(ctx, rt, tool, args)
 
 		info := ToolCallInfo{
@@ -133,6 +160,10 @@ func callTool(ctx context.Context, rt tools.Runtime, tool tools.Tool, tracker *t
 			Arguments: filtered,
 		}
 		if err != nil {
+			var stop interface{ AbortExpansion() }
+			if errors.As(err, &stop) {
+				tracker.stop = err
+			}
 			info.Error = err.Error()
 		} else {
 			info.Result = output
@@ -146,6 +177,9 @@ func callTool(ctx context.Context, rt tools.Runtime, tool tools.Tool, tracker *t
 // invokeTool calls a single tool handler, filtering out nil optional arguments.
 // It returns the output, the filtered arguments actually sent, and any error.
 func invokeTool(ctx context.Context, rt tools.Runtime, tool tools.Tool, args map[string]any) (string, map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return "", args, err
+	}
 	if tool.Handler == nil {
 		return "", args, fmt.Errorf("tool %q is not available in code mode", tool.Name)
 	}
@@ -170,18 +204,30 @@ func invokeTool(ctx context.Context, rt tools.Runtime, tool tools.Tool, args map
 		return "", filtered, err
 	}
 
-	result, err := tool.Handler(ctx, tools.ToolCall{
+	call := tools.ToolCall{
 		Function: tools.FunctionCall{
 			Name:      tool.Name,
 			Arguments: string(arguments),
 		},
-	}, rt)
+	}
+	var result *tools.ToolCallResult
+	switch host := rt.(type) {
+	case tools.NestedToolInvoker:
+		result, err = host.InvokeTool(ctx, tool, call)
+	case tools.NopRuntime:
+		result, err = tool.Handler(ctx, call, rt)
+	default:
+		return "", filtered, errors.New("host does not support nested tool dispatch")
+	}
 	if err != nil {
 		return "", filtered, err
 	}
 
 	if result == nil {
 		return "", filtered, nil
+	}
+	if result.IsError {
+		return "", filtered, fmt.Errorf("%s", result.Output)
 	}
 	return result.Output, filtered, nil
 }

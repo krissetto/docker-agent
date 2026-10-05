@@ -1095,7 +1095,16 @@ func (p *chatPage) Help() help.KeyMap {
 // CancelResponse uses the existing canonical cancellation path after root confirmation.
 func CancelResponse(page Page) (tea.Cmd, bool) {
 	p, ok := page.(*chatPage)
-	if !ok || p.app == nil || p.app.CancelRun() == runtime.CancelNotActive {
+	if !ok || p.app == nil {
+		return nil, false
+	}
+	return CancelResponseIntent(page, p.app.CaptureCancelRun())
+}
+
+// CancelResponseIntent applies the exact turn captured when confirmation armed.
+func CancelResponseIntent(page Page, cancel func() runtime.CancelOutcome) (tea.Cmd, bool) {
+	p, ok := page.(*chatPage)
+	if !ok || p.app == nil || cancel == nil || cancel() == runtime.CancelNotActive {
 		return nil, false
 	}
 	return p.finishCancelStream(true), true

@@ -35,6 +35,12 @@ type ConfirmedRun struct {
 	Metadata map[string]string
 }
 
+// NestedToolInvoker lets a composite tool execute an inner declaration through
+// the host's complete dispatch pipeline, rather than invoking its raw handler.
+type NestedToolInvoker interface {
+	InvokeTool(ctx context.Context, tool Tool, call ToolCall) (*ToolCallResult, error)
+}
+
 // Runtime is the tool-side handle to the hosting agent runtime, passed
 // explicitly to every [ToolHandler]. Implementations must remain valid after
 // the handler returns so background work can hold the handle; every method

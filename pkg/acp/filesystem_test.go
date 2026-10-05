@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 )
@@ -305,7 +306,7 @@ func TestFilesystemToolset_ReadFileForwardsLineRange(t *testing.T) {
 	})
 
 	ts := NewFilesystemToolset(acpAgent, workingDir)
-	ctx := withSessionID(t.Context(), sessionID)
+	ctx := httpclient.ContextWithSessionID(t.Context(), sessionID)
 
 	result, err := ts.handleReadFile(ctx, tools.ToolCall{
 		Function: tools.FunctionCall{
@@ -373,7 +374,7 @@ func TestFilesystemToolset_ReadFileRejectsInvalidRange(t *testing.T) {
 	})
 
 	ts := NewFilesystemToolset(acpAgent, workingDir)
-	ctx := withSessionID(t.Context(), sessionID)
+	ctx := httpclient.ContextWithSessionID(t.Context(), sessionID)
 
 	for _, tc := range []struct {
 		name      string
@@ -491,7 +492,7 @@ func newEditFileFixture(t *testing.T, content string) (*FilesystemToolset, conte
 		}
 	})
 
-	return NewFilesystemToolset(acpAgent, workingDir), withSessionID(t.Context(), sessionID), responder
+	return NewFilesystemToolset(acpAgent, workingDir), httpclient.ContextWithSessionID(t.Context(), sessionID), responder
 }
 
 // The ACP toolset serves the same edit_file tool name and schema as the built-in
@@ -540,7 +541,7 @@ func TestFilesystemToolsetSessionPathPolicy(t *testing.T) {
 	require.NoError(t, os.MkdirAll(denied, 0o755))
 	const sessionID = "policy-session"
 	agent := &Agent{sessions: map[string]*Session{sessionID: {id: sessionID, workingDir: workingDir}}}
-	ctx := withSessionID(t.Context(), sessionID)
+	ctx := httpclient.ContextWithSessionID(t.Context(), sessionID)
 	ts := NewFilesystemToolset(agent, workingDir, filesystem.WithAllowList([]string{allowed}), filesystem.WithDenyList([]string{denied}))
 	t.Cleanup(func() { require.NoError(t, ts.Close()) })
 	_, err := ts.resolvePathForSession(ctx, "allowed/new.txt")

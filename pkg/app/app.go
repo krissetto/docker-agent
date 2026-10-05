@@ -90,16 +90,17 @@ type App struct {
 	// source and Run's own channel is drained for flow control only.
 	// runCancelled mutes bridged events after the user cancels the in-flight
 	// turn (all but the stream stop), mirroring the classic drop-on-cancel.
-	bridgeMu     sync.Mutex
-	stopBridge   func()
-	hubBridged   bool
-	bridgeEpoch  atomic.Uint64
-	presentation atomic.Pointer[PresentationState]
-	projectionMu sync.Mutex
-	connection   atomic.Uint32 // ConnectionState of the current bridge
-	treeMu       sync.Mutex
-	treeWatch    *treeWatch
-	runCancelled atomic.Bool
+	bridgeMu         sync.Mutex
+	stopBridge       func()
+	hubBridged       bool
+	bridgeEpoch      atomic.Uint64
+	presentation     atomic.Pointer[PresentationState]
+	projectionMu     sync.Mutex
+	cancelGeneration uint64
+	connection       atomic.Uint32 // ConnectionState of the current bridge
+	treeMu           sync.Mutex
+	treeWatch        *treeWatch
+	runCancelled     atomic.Bool
 	// lifecycleMu correlates accepted submissions with cancellation and bridged
 	// envelopes. A cancelled request only mutes its own tail; a stale stop can
 	// never clear presentation state for a newer request.
@@ -348,6 +349,11 @@ func (a *App) replaceSessionState(state sessionState) {
 		state.session = state.session.Clone()
 	}
 	a.presentation.Store(nil)
+	a.cancelGeneration++
+	a.lifecycleMu.Lock()
+	a.projectedRequestID, a.latestRequestID = "", ""
+	a.cancelledRequests = make(map[string]struct{})
+	a.lifecycleMu.Unlock()
 	a.stateMu.Lock()
 	defer a.stateMu.Unlock()
 	a.currentState = state
@@ -1755,14 +1761,32 @@ func (a *App) recordSubmission(requestID string) {
 // CancelRun cancels the current run without ending the pinned handle lifetime.
 // It returns whether a run was active.
 func (a *App) CancelRun() runtime.CancelOutcome {
-	a.lifecycleMu.Lock()
-	turnID := a.projectedRequestID
-	if turnID == "" {
-		turnID = a.latestRequestID
-	}
-	a.lifecycleMu.Unlock()
+	return a.CaptureCancelRun()()
+}
+
+// CaptureCancelRun captures the current canonical turn and handle together.
+// A delayed UI confirmation never retargets a replacement session or turn.
+func (a *App) CaptureCancelRun() func() runtime.CancelOutcome {
+	a.projectionMu.Lock()
 	state := a.state()
-	if state.handle == nil || turnID == "" {
+	generation := a.cancelGeneration
+	turnID := ""
+	if projection := a.presentation.Load(); projection != nil {
+		turnID = projection.Status.TurnID
+	}
+	a.projectionMu.Unlock()
+	return func() runtime.CancelOutcome {
+		return a.cancelTurn(state, turnID, generation)
+	}
+}
+
+func (a *App) cancelTurn(state sessionState, turnID string, generation uint64) runtime.CancelOutcome {
+	a.projectionMu.Lock()
+	current := a.state()
+	projection := a.presentation.Load()
+	valid := a.cancelGeneration == generation && current.handle == state.handle && projection != nil && projection.Status.TurnID == turnID
+	a.projectionMu.Unlock()
+	if !valid || state.handle == nil || turnID == "" {
 		return runtime.CancelNotActive
 	}
 	result, err := state.handle.Cancel(a.ctx(), turnID)
@@ -1770,9 +1794,13 @@ func (a *App) CancelRun() runtime.CancelOutcome {
 		return runtime.CancelNotActive
 	}
 	if result.Outcome == runtime.CancelAccepted || result.Outcome == runtime.CancelAlreadyCancelling {
-		a.lifecycleMu.Lock()
-		a.cancelledRequests[turnID] = struct{}{}
-		a.lifecycleMu.Unlock()
+		a.projectionMu.Lock()
+		if current := a.state(); current.handle == state.handle {
+			a.lifecycleMu.Lock()
+			a.cancelledRequests[turnID] = struct{}{}
+			a.lifecycleMu.Unlock()
+		}
+		a.projectionMu.Unlock()
 	}
 	return result.Outcome
 }

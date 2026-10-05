@@ -65,22 +65,34 @@ func (r *LocalRuntime) handleBackgroundList(_ context.Context, sess *session.Ses
 	return tools.ResultSuccess(out.String()), nil
 }
 
-func (r *LocalRuntime) handleBackgroundView(ctx context.Context, sess *session.Session, tc tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleBackgroundView(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args agenttool.ViewBackgroundAgentArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	encoded, _ := json.Marshal(subagent.ReadArgs{SubagentID: args.TaskID, Full: true})
-	tc.Function.Arguments = string(encoded)
-	return r.handleReadSubagent(ctx, sess, tc, events, rt)
+	id := strings.TrimSpace(args.TaskID)
+	if id == "" {
+		return tools.ResultError("subagent_id is required"), nil
+	}
+	rec, err := r.subagents.readRootChild(sess.ID, subagent.NodeID(id))
+	if err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
+	return readSubagentResult(rec, id, subagent.ReadArgs{Full: true}), nil
 }
 
-func (r *LocalRuntime) handleBackgroundStop(ctx context.Context, sess *session.Session, tc tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleBackgroundStop(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args agenttool.StopBackgroundAgentArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	encoded, _ := json.Marshal(subagent.StopArgs{SubagentID: args.TaskID})
-	tc.Function.Arguments = string(encoded)
-	return r.handleStopSubagent(ctx, sess, tc, events, rt)
+	id := strings.TrimSpace(args.TaskID)
+	if id == "" {
+		return tools.ResultError("subagent_id is required"), nil
+	}
+	name, err := r.subagents.stopChildContext(r.subagents.ctx, sess.ID, subagent.NodeID(id))
+	if err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
+	return tools.ResultSuccess(fmt.Sprintf("Stopped subagent %q (%s).", name, id)), nil
 }

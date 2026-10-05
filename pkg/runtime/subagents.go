@@ -394,6 +394,8 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 }
 
 func (m *subagentManager) admitChildContext(ctx context.Context, parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool) (subagent.NodeID, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+	defer cancel()
 	transition := m.transition(m.rootSessionLockedSafe(parent.ID))
 	if err := transition.LockContext(ctx); err != nil {
 		return "", err
@@ -403,16 +405,18 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 		return "", errSubagentsDisabled
 	}
 	if m.r.sessionStore != nil {
-		if _, err := m.r.sessionStore.GetSession(m.ctx, parent.ID); errors.Is(err, session.ErrNotFound) {
+		if _, err := m.r.sessionStore.GetSession(ctx, parent.ID); errors.Is(err, session.ErrNotFound) {
 			parent.SetAttribute(SessionAgentAttribute, parentAgent)
-			if err := m.r.sessionStore.AddSession(m.ctx, parent.OwnSnapshot()); err != nil && !errors.Is(err, session.ErrAlreadyExists) {
+			if err := m.r.sessionStore.AddSession(ctx, parent.OwnSnapshot()); err != nil && !errors.Is(err, session.ErrAlreadyExists) {
 				return "", err
 			}
+		} else if err != nil {
+			return "", err
 		}
 	}
 	child.SetAttribute(SessionAgentAttribute, ref.Agent)
 	child.SetAttribute(SessionParentAgentAttribute, parentAgent)
-	reservation, err := m.r.sessionDrivers.PrepareRestore(m.ctx, child)
+	reservation, err := m.r.sessionDrivers.PrepareRestore(ctx, child)
 	if err != nil {
 		return "", err
 	}
@@ -423,6 +427,10 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 		}
 	}
 	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return "", err
+	}
 	if err := m.spawnAdmissionErrorLocked(parent); err != nil {
 		m.mu.Unlock()
 		return "", err
@@ -439,6 +447,11 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 	d := reservation.driver
 	d.SetPreStartErrorGate(func() error { return m.admitChildRun(id) }, nil)
 	rec.unwatch = d.OnStarted(func() { m.markChildRunning(id) })
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		rec.unwatch()
+		return "", err
+	}
 	if m.admissions == nil {
 		m.admissions = make(map[string]session.ChildRecord)
 	}
@@ -761,10 +774,14 @@ func (m *subagentManager) markChildRunning(childID subagent.NodeID) {
 // Stopped subagents keep their record so read_subagent still works, but accept
 // no future input.
 func (m *subagentManager) stopChild(parentID string, id subagent.NodeID) (string, error) {
-	return m.stopChildContext(m.ctx, parentID, id)
+	return m.stopChildAuthorized(m.ctx, parentID, id, true)
 }
 
 func (m *subagentManager) stopChildContext(ctx context.Context, parentID string, id subagent.NodeID) (string, error) {
+	return m.stopChildAuthorized(ctx, parentID, id, false)
+}
+
+func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID string, id subagent.NodeID, directChild bool) (string, error) {
 	// The manager gate serializes child admission with the canonical stop.
 	// Starting drivers recheck that gate after reserving capacity, so durable
 	// I/O must not hold the registry-wide run admission mutex.
@@ -774,7 +791,7 @@ func (m *subagentManager) stopChildContext(ctx context.Context, parentID string,
 	}
 	m.mu.Lock()
 	rec := m.children[id]
-	if rec == nil || m.rootSessionLocked(rec.sessionID) != m.rootSessionLocked(parentID) {
+	if rec == nil || (directChild && rec.parentSession != parentID) || m.rootSessionLocked(rec.sessionID) != m.rootSessionLocked(parentID) {
 		m.mu.Unlock()
 		transition.Unlock()
 		return "", fmt.Errorf("no owned subagent with id %q", id)
@@ -1173,14 +1190,30 @@ func (m *subagentManager) hasRunningSubagentsLocked(sessionID string) bool {
 // readChild returns a snapshot of a direct subagent of parentID. It errors when
 // the id is unknown or belongs to another session.
 func (m *subagentManager) readChild(parentID string, id subagent.NodeID) (childRead, error) {
-	rec, ok := m.Read(id)
+	return m.readOwnedChild(parentID, id, true)
+}
+
+func (m *subagentManager) readRootChild(parentID string, id subagent.NodeID) (childRead, error) {
+	return m.readOwnedChild(parentID, id, false)
+}
+
+func (m *subagentManager) readOwnedChild(parentID string, id subagent.NodeID, directChild bool) (childRead, error) {
+	m.mu.Lock()
+	rec := m.children[id]
+	if rec == nil {
+		m.mu.Unlock()
+		return childRead{}, fmt.Errorf("no subagent with id %q", id)
+	}
+	if (directChild && rec.parentSession != parentID) || m.rootSessionLocked(rec.sessionID) != m.rootSessionLocked(parentID) {
+		m.mu.Unlock()
+		return childRead{}, fmt.Errorf("subagent %q is not one of yours", id)
+	}
+	m.mu.Unlock()
+	snapshot, ok := m.Read(id)
 	if !ok {
 		return childRead{}, fmt.Errorf("no subagent with id %q", id)
 	}
-	if m.rootSessionLockedSafe(rec.sessionID) != m.rootSessionLockedSafe(parentID) {
-		return childRead{}, fmt.Errorf("subagent %q is not one of yours", id)
-	}
-	return rec, nil
+	return snapshot, nil
 }
 
 func (m *subagentManager) Read(id subagent.NodeID) (childRead, bool) {

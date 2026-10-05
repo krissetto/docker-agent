@@ -116,6 +116,11 @@ func (r *LocalRuntime) dispatchHook(
 		input.RootSessionID = r.todoRootSessionID(input.SessionID)
 	}
 
+	if input != nil && tools.ResourceOwnerFromContext(ctx) == nil {
+		if resident, ok := r.sessionDrivers.Lookup(input.SessionID); ok {
+			ctx = tools.WithResourceOwner(ctx, resident.resourceOwner)
+		}
+	}
 	started := time.Now()
 	if events != nil {
 		events.Emit(HookStarted(event, input.SessionID, a.Name()))

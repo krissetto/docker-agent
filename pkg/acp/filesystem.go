@@ -11,24 +11,10 @@ import (
 
 	"github.com/coder/acp-go-sdk"
 
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 )
-
-type contextKey string
-
-const sessionIDKey contextKey = "acp_session_id"
-
-// withSessionID adds the session ID to the context
-func withSessionID(ctx context.Context, sessionID string) context.Context {
-	return context.WithValue(ctx, sessionIDKey, sessionID)
-}
-
-// getSessionID retrieves the session ID from the context
-func getSessionID(ctx context.Context) (string, bool) {
-	sid, ok := ctx.Value(sessionIDKey).(string)
-	return sid, ok
-}
 
 // FilesystemToolset wraps a standard Tool and overrides read_file, write_file,
 // and edit_file to use the ACP connection for file operations
@@ -79,22 +65,71 @@ func (t *FilesystemToolset) resolvePath(userPath string) (string, error) {
 	return resolvePathInRoots(userPath, t.workingDir, []string{t.workingDir})
 }
 
-func (t *FilesystemToolset) resolvePathForSession(ctx context.Context, userPath string) (string, error) {
-	sessionID, ok := getSessionID(ctx)
-	if !ok {
-		return "", errors.New("session ID not found in context")
+func (t *FilesystemToolset) executionSession(ctx context.Context) (*Session, error) {
+	sessionID := httpclient.SessionIDFromContext(ctx)
+	if sessionID == "" {
+		return nil, errors.New("session ID not found in canonical execution context")
 	}
 	if t.agent == nil {
-		return "", errors.New("ACP agent not configured")
+		return nil, errors.New("ACP agent not configured")
 	}
-
 	t.agent.mu.Lock()
-	acpSess := t.agent.sessions[sessionID]
-	t.agent.mu.Unlock()
-	if acpSess == nil {
-		return "", fmt.Errorf("session %s not found", sessionID)
+	registered := make([]*Session, 0, len(t.agent.sessions))
+	for _, sess := range t.agent.sessions {
+		registered = append(registered, sess)
 	}
+	t.agent.mu.Unlock()
+	for _, owner := range registered {
+		if owner.id != sessionID {
+			continue
+		}
+		owner.mu.Lock()
+		closed := owner.closed
+		owner.mu.Unlock()
+		if !closed {
+			return owner, nil
+		}
+	}
+	for _, owner := range registered {
+		owner.mu.Lock()
+		closed := owner.closed
+		owner.mu.Unlock()
+		if closed {
+			continue
+		}
+		if owner.rt == nil {
+			continue
+		}
+		// Only resident canonical ancestry grants a child the client's workspace.
+		seen := make(map[string]bool)
+		for id := sessionID; id != "" && !seen[id]; {
+			seen[id] = true
+			handle, err := owner.rt.SessionByID(id)
+			if err != nil || handle == nil || handle.ID() != id {
+				break
+			}
+			snapshot, err := handle.Snapshot(ctx)
+			if err != nil || snapshot == nil || snapshot.ID != id {
+				break
+			}
+			if snapshot.ParentID == owner.id {
+				return owner, nil
+			}
+			id = snapshot.ParentID
+		}
+	}
+	return nil, fmt.Errorf("canonical session %s has no registered ACP workspace", sessionID)
+}
 
+func (t *FilesystemToolset) resolvePathForSession(ctx context.Context, userPath string) (string, error) {
+	acpSess, err := t.executionSession(ctx)
+	if err != nil {
+		return "", err
+	}
+	return t.resolvePathForWorkspace(acpSess, userPath)
+}
+
+func (t *FilesystemToolset) resolvePathForWorkspace(acpSess *Session, userPath string) (string, error) {
 	workingDir, roots := acpSess.pathRoots(t.workingDir)
 	resolved, err := resolvePathInRoots(userPath, workingDir, roots)
 	if err != nil {
@@ -195,21 +230,21 @@ func (t *FilesystemToolset) handleReadFile(ctx context.Context, toolCall tools.T
 		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 
-	sessionID, ok := getSessionID(ctx)
-	if !ok {
-		return tools.ResultError("Error: session ID not found in context"), nil
+	workspace, err := t.executionSession(ctx)
+	if err != nil {
+		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 	if !t.agent.supportsClientReadTextFile() {
 		return tools.ResultError("Error: ACP client does not support reading files"), nil
 	}
 
-	resolvedPath, err := t.resolvePathForSession(ctx, args.Path)
+	resolvedPath, err := t.resolvePathForWorkspace(workspace, args.Path)
 	if err != nil {
 		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 
 	resp, err := t.agent.conn.ReadTextFile(ctx, acp.ReadTextFileRequest{
-		SessionId: acp.SessionId(sessionID),
+		SessionId: acp.SessionId(workspace.id),
 		Path:      resolvedPath,
 		Line:      args.Line,
 		Limit:     args.Limit,
@@ -227,21 +262,21 @@ func (t *FilesystemToolset) handleWriteFile(ctx context.Context, toolCall tools.
 		return nil, fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	sessionID, ok := getSessionID(ctx)
-	if !ok {
-		return tools.ResultError("Error: session ID not found in context"), nil
+	workspace, err := t.executionSession(ctx)
+	if err != nil {
+		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 	if !t.agent.supportsClientWriteTextFile() {
 		return tools.ResultError("Error: ACP client does not support writing files"), nil
 	}
 
-	resolvedPath, err := t.resolvePathForSession(ctx, args.Path)
+	resolvedPath, err := t.resolvePathForWorkspace(workspace, args.Path)
 	if err != nil {
 		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 
 	_, err = t.agent.conn.WriteTextFile(ctx, acp.WriteTextFileRequest{
-		SessionId: acp.SessionId(sessionID),
+		SessionId: acp.SessionId(workspace.id),
 		Path:      resolvedPath,
 		Content:   args.Content,
 	})
@@ -262,21 +297,21 @@ func (t *FilesystemToolset) handleEditFile(ctx context.Context, toolCall tools.T
 		return nil, fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	sessionID, ok := getSessionID(ctx)
-	if !ok {
-		return tools.ResultError("Error: session ID not found in context"), nil
+	workspace, err := t.executionSession(ctx)
+	if err != nil {
+		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 	if !t.agent.supportsClientReadTextFile() || !t.agent.supportsClientWriteTextFile() {
 		return tools.ResultError("Error: ACP client does not support editing files"), nil
 	}
 
-	resolvedPath, err := t.resolvePathForSession(ctx, args.Path)
+	resolvedPath, err := t.resolvePathForWorkspace(workspace, args.Path)
 	if err != nil {
 		return tools.ResultError(fmt.Sprintf("Error: %s", err)), nil
 	}
 
 	resp, err := t.agent.conn.ReadTextFile(ctx, acp.ReadTextFileRequest{
-		SessionId: acp.SessionId(sessionID),
+		SessionId: acp.SessionId(workspace.id),
 		Path:      resolvedPath,
 	})
 	if err != nil {
@@ -300,7 +335,7 @@ func (t *FilesystemToolset) handleEditFile(ctx context.Context, toolCall tools.T
 	}
 
 	_, err = t.agent.conn.WriteTextFile(ctx, acp.WriteTextFileRequest{
-		SessionId: acp.SessionId(sessionID),
+		SessionId: acp.SessionId(workspace.id),
 		Path:      resolvedPath,
 		Content:   modifiedContent,
 	})

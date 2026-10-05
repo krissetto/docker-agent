@@ -435,6 +435,9 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 		session.WithWorkingDir(workingDir),
 	)
 	sess.SetTitle("ACP Session " + sess.ID)
+	if a.agentSource != nil {
+		sess.SetAttribute("docker-agent.actor.source", a.agentSource.Name())
+	}
 
 	if err := a.sessionStore.AddSession(ctx, sess); err != nil {
 		_ = supervisor.Shutdown(ctx)
@@ -602,9 +605,6 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	if err := validateWorkingDir(workingDir); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	if workingDir != "" {
-		sess.WorkingDir = workingDir
-	}
 
 	additionalDirs, err := resolveAdditionalDirectories(params.AdditionalDirectories)
 	if err != nil {
@@ -617,29 +617,71 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 	}
 
 	rt := supervisor.Runtime()
-	// Re-adopt any persisted subagent swarm so the resumed session's
-	// send_message / read_subagent keep working.
-	if restorer, ok := rt.(runtime.TreeRestorer); ok {
-		if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
+	var handle runtime.SessionHandle
+	bound := sess.AttributesSnapshot()[runtime.SessionAgentAttribute]
+	if bound == "" {
+		if sess.ParentID != "" || (sess.AgentName != "" && sess.AgentName != defaultAgent.Name()) {
 			_ = supervisor.Shutdown(ctx)
-			return acp.ResumeSessionResponse{}, fmt.Errorf("restore subagent tree for session %s: %w", sid, err)
+			return acp.ResumeSessionResponse{}, runtime.UnsupportedSessionOperation(sid, runtime.SessionOperationRestoreBinding)
+		}
+		if err := a.validateResumeSource(sess); err != nil {
+			_ = supervisor.Shutdown(ctx)
+			return acp.ResumeSessionResponse{}, err
+		}
+		handle, err = rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: defaultAgent.Name()})
+	} else {
+		for _, name := range []string{bound, sess.AgentName} {
+			if name == "" {
+				continue
+			}
+			if _, agentErr := a.team.Agent(name); agentErr != nil {
+				_ = supervisor.Shutdown(ctx)
+				return acp.ResumeSessionResponse{}, &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sid, Operation: runtime.SessionOperationRestoreBinding, Detail: fmt.Sprintf("persisted agent %q is unavailable in the configured ACP team", name)}
+			}
+		}
+		preparer, ok := rt.(runtime.SessionViewPreparer)
+		if !ok {
+			_ = supervisor.Shutdown(ctx)
+			return acp.ResumeSessionResponse{}, runtime.UnsupportedSessionOperation(sid, runtime.SessionOperationAttach)
+		}
+		prepared, prepareErr := preparer.PrepareSessionView(ctx, sid)
+		if prepareErr != nil {
+			_ = supervisor.Shutdown(ctx)
+			return acp.ResumeSessionResponse{}, fmt.Errorf("prepare ACP session %s: %w", sid, prepareErr)
+		}
+		defer prepared.Abort()
+		info := prepared.Info()
+		root, sourceErr := a.sessionStore.GetSession(ctx, info.RootSessionID)
+		if sourceErr == nil {
+			sourceErr = a.validateResumeSource(root)
+		}
+		if sourceErr == nil {
+			sourceErr = a.validateResumeSource(info.Session)
+		}
+		if sourceErr != nil {
+			prepared.Abort()
+			_ = supervisor.Shutdown(ctx)
+			return acp.ResumeSessionResponse{}, sourceErr
+		}
+		committed, commitErr := prepared.Commit(ctx)
+		err = commitErr
+		handle = committed.SessionHandle
+		if err == nil {
+			sess, err = handle.Snapshot(ctx)
 		}
 	}
-
-	handle, err := rt.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: defaultAgent.Name()})
 	if err != nil {
 		_ = supervisor.Shutdown(ctx)
-		return acp.ResumeSessionResponse{}, fmt.Errorf("bind ACP session: %w", err)
+		return acp.ResumeSessionResponse{}, fmt.Errorf("adopt ACP session %s: %w", sid, err)
 	}
-	// the same session id between our initial check and now, drop the
-	// runtime we just built and reuse the existing registration.
+	// Reuse a concurrent registration rather than retaining a duplicate runtime.
 	outcome := a.registerSessionIfAbsent(&Session{
 		id:             sid,
 		sess:           sess,
 		rt:             rt,
 		supervisor:     supervisor,
 		session:        handle,
-		workingDir:     sess.WorkingDir,
+		workingDir:     stringOrDefaultWorkspace(workingDir, sess.WorkingDir),
 		additionalDirs: additionalDirs,
 	})
 	switch outcome {
@@ -653,6 +695,24 @@ func (a *Agent) ResumeSession(ctx context.Context, params acp.ResumeSessionReque
 		_ = supervisor.Shutdown(ctx)
 		return acp.ResumeSessionResponse{}, fmt.Errorf("ACP session resume rejected: %v", outcome)
 	}
+}
+
+func stringOrDefaultWorkspace(requested, persisted string) string {
+	if requested != "" {
+		return requested
+	}
+	return persisted
+}
+
+func (a *Agent) validateResumeSource(sess *session.Session) error {
+	if sess == nil {
+		return errors.New("ACP resume has no confirmed session snapshot")
+	}
+	stored := sess.AttributesSnapshot()["docker-agent.actor.source"]
+	if stored != "" && (a.agentSource == nil || config.StableSourceKey(stored) != config.StableSourceKey(a.agentSource.Name())) {
+		return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: runtime.SessionOperationRestoreSource, Detail: "persisted source is not represented by the configured ACP team"}
+	}
+	return nil
 }
 
 // SetSessionConfigOption implements [acp.Agent] (optional, not advertised in capabilities).
@@ -882,8 +942,6 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 		input = inputs[0]
 	}
 	slog.DebugContext(ctx, "Running agent turn", "session_id", acpSess.id)
-
-	ctx = withSessionID(ctx, acpSess.id)
 
 	if err := a.emitAvailableCommands(ctx, acpSess); err != nil {
 		slog.DebugContext(ctx, "Failed to emit available commands", "error", err)

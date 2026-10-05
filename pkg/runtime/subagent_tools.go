@@ -67,13 +67,17 @@ func (r *LocalRuntime) handleReadSubagent(_ context.Context, sess *session.Sessi
 		return tools.ResultError(err.Error()), nil
 	}
 
+	return readSubagentResult(rec, id, args), nil
+}
+
+func readSubagentResult(rec childRead, id string, args subagent.ReadArgs) *tools.ToolCallResult {
 	header := fmt.Sprintf("Subagent %q (%s) — %s", rec.name, id, rec.state)
 
 	// Transcript modes: full or last-N. Available even while the subagent is
 	// still running (partial transcript so far).
 	if args.Full || args.LastMessages > 0 {
 		if rec.session == nil {
-			return tools.ResultSuccess(header + "\n\n(no transcript available)"), nil
+			return tools.ResultSuccess(header + "\n\n(no transcript available)")
 		}
 		limit := 0
 		if !args.Full {
@@ -83,18 +87,18 @@ func (r *LocalRuntime) handleReadSubagent(_ context.Context, sess *session.Sessi
 		if transcript == "" {
 			transcript = "(no messages yet)"
 		}
-		return tools.ResultSuccess(header + "\n\n" + transcript), nil
+		return tools.ResultSuccess(header + "\n\n" + transcript)
 	}
 
 	// Default: the latest assistant response without tool calls, falling back to
 	// the newest tool-call assistant only when no such response exists.
 	switch {
 	case rec.state == subagent.NodeFailed && rec.errMsg != "":
-		return tools.ResultSuccess(fmt.Sprintf("%s:\n\n%s", header, rec.errMsg)), nil
+		return tools.ResultSuccess(fmt.Sprintf("%s:\n\n%s", header, rec.errMsg))
 	case rec.result != "":
-		return tools.ResultSuccess(fmt.Sprintf("%s:\n\n%s", header, rec.result)), nil
+		return tools.ResultSuccess(fmt.Sprintf("%s:\n\n%s", header, rec.result))
 	default:
-		return tools.ResultSuccess(header + ". No result yet; pass full:true or last_messages:N to see progress."), nil
+		return tools.ResultSuccess(header + ". No result yet; pass full:true or last_messages:N to see progress.")
 	}
 }
 

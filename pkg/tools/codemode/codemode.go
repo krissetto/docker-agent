@@ -72,15 +72,16 @@ type codeModeTool struct {
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet             = (*codeModeTool)(nil)
-	_ tools.Startable           = (*codeModeTool)(nil)
-	_ tools.StartReporter       = (*codeModeTool)(nil)
-	_ tools.Named               = (*codeModeTool)(nil)
-	_ tools.Elicitable          = (*codeModeTool)(nil)
-	_ tools.Sampleable          = (*codeModeTool)(nil)
-	_ tools.SampleableWithTools = (*codeModeTool)(nil)
-	_ tools.OAuthCapable        = (*codeModeTool)(nil)
-	_ tools.ChangeNotifier      = (*codeModeTool)(nil)
+	_ tools.ResourceOwnerStopper = (*codeModeTool)(nil)
+	_ tools.ToolSet              = (*codeModeTool)(nil)
+	_ tools.Startable            = (*codeModeTool)(nil)
+	_ tools.StartReporter        = (*codeModeTool)(nil)
+	_ tools.Named                = (*codeModeTool)(nil)
+	_ tools.Elicitable           = (*codeModeTool)(nil)
+	_ tools.Sampleable           = (*codeModeTool)(nil)
+	_ tools.SampleableWithTools  = (*codeModeTool)(nil)
+	_ tools.OAuthCapable         = (*codeModeTool)(nil)
+	_ tools.ChangeNotifier       = (*codeModeTool)(nil)
 )
 
 // Name implements tools.Named; loader-created, so no registry WithName wrapper.
@@ -311,6 +312,16 @@ func (c *codeModeTool) IsStarted() bool {
 		}
 	}
 	return true
+}
+
+func (c *codeModeTool) StopResourceOwner(ctx context.Context) error {
+	var errs []error
+	for _, t := range c.toolsets {
+		if stopper, ok := tools.As[tools.ResourceOwnerStopper](t); ok {
+			errs = append(errs, stopper.StopResourceOwner(ctx))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *codeModeTool) Stop(ctx context.Context) error {

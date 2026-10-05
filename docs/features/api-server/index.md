@@ -523,8 +523,14 @@ persistence failures are returned as errors and are not acceptance.
 
 The daemon's workspace/source runtimes share one process-local `SessionService`.
 Embedders can attach `embeddedchat.Config.SessionRuntime` plus `SessionID` to an
-existing canonical session; `Close` detaches that embedding without shutting
-down its borrowed authority. Elicitation and iteration-limit interactions are
+existing canonical session. Call `Observe(ctx)` for a snapshot-plus-tail event
+stream of existing work: `Event.Snapshot` is a complete rebaseline barrier,
+including outstanding interactions. Cancelling the observation or calling
+`Close` detaches that view without cancelling another client's execution or
+shutting down the borrowed authority. `Restart` detaches the old view and creates
+a fresh conversation; call `Observe` again to watch it. `Send` retains its own
+exact accepted-turn cancellation and drain lifetime. Interactions are delivered
+once across concurrent `Observe` and `Send` streams. Elicitation and iteration-limit interactions are
 emitted with correlation tokens and answered with `Respond`, or handled by
 `Config.InteractionHandler`; they are not silently declined.
 

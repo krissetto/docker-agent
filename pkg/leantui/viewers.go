@@ -122,6 +122,8 @@ func (m *model) routeViewerEvent(ctx context.Context, event any) {
 }
 
 func (m *model) focusViewer(target *model, remember bool) {
+	m.clearInterruptIntent()
+	target.clearInterruptIntent()
 	m.cancelViewAcquisition()
 	m.stopSpeech()
 	h := m.viewers

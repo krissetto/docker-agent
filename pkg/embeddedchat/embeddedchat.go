@@ -93,6 +93,8 @@ type Event struct {
 	Err error
 	// Done marks a clean end of the reply stream.
 	Done bool
+	// Snapshot marks a complete observation baseline, including outstanding interactions.
+	Snapshot *dagentruntime.SessionSnapshot
 	// RuntimeEvent is the original docker-agent runtime event for projected
 	// events. Not every runtime event is forwarded by this compact API.
 	RuntimeEvent dagentruntime.Event
@@ -144,6 +146,10 @@ type Session struct {
 	pendingConfirmation string
 	pendingHandle       dagentruntime.SessionHandle
 	pendingInteractions map[string]dagentruntime.SessionHandle
+	seenInteractions    map[string]bool
+	observerCancel      context.CancelFunc
+	observerDone        chan struct{}
+	generation          uint64
 }
 
 // New builds the runtime for the configured team (or loads AgentSource) and
@@ -307,10 +313,15 @@ func (s *Session) restart(ctx context.Context) error {
 		return ErrClosed
 	}
 	s.transitioning = true
+	s.generation++
+	if s.observerCancel != nil {
+		s.observerCancel()
+	}
 	s.cancelActiveLocked()
 	handle, active, done := s.handle, s.activeTurn, s.activeDone
 	s.pendingConfirmation, s.pendingHandle = "", nil
 	s.pendingInteractions = nil
+	s.seenInteractions = nil
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -360,9 +371,40 @@ func (s *Session) Close() error {
 	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	s.closed = true
+	s.generation++
+	if s.observerCancel != nil {
+		s.observerCancel()
+	}
 	s.cancelActiveLocked()
 	supervisor := s.supervisor
+	handle, active, done, observerDone := s.handle, s.activeTurn, s.activeDone, s.observerDone
+	s.pendingInteractions = nil
+	s.pendingConfirmation, s.pendingHandle = "", nil
 	s.mu.Unlock()
+	if observerDone != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //rubocop:disable Lint/ContextConnectivity
+		defer cancel()
+		select {
+		case <-observerDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if supervisor == nil && active != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //rubocop:disable Lint/ContextConnectivity
+		defer cancel()
+		if _, err := handle.Cancel(ctx, active.Submission.TurnID); err != nil {
+			return err
+		}
+		if err := handle.AwaitTurn(ctx, active.Submission.TurnID); err != nil {
+			return err
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if supervisor != nil {
 		// Close has no caller context; it must drain even after Send cancellation.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //rubocop:disable Lint/ContextConnectivity
@@ -464,7 +506,7 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.activeRun == runID {
-			if s.pendingHandle == sessionHandle {
+			if s.pendingHandle == sessionHandle && s.observerCancel == nil {
 				s.pendingConfirmation, s.pendingHandle = "", nil
 			}
 			s.activeCancel = nil
@@ -472,7 +514,7 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				s.activeTurn = nil
 			}
 			for id, handle := range s.pendingInteractions {
-				if handle == sessionHandle {
+				if handle == sessionHandle && s.observerCancel == nil {
 					delete(s.pendingInteractions, id)
 				}
 			}
@@ -580,6 +622,14 @@ func (s *Session) forwardInteraction(ctx context.Context, handle dagentruntime.S
 		s.mu.Unlock()
 		return false
 	}
+	if s.seenInteractions == nil {
+		s.seenInteractions = make(map[string]bool)
+	}
+	if s.seenInteractions[interaction.InteractionID] {
+		s.mu.Unlock()
+		return true
+	}
+	s.seenInteractions[interaction.InteractionID] = true
 	if interaction.Kind == dagentruntime.InteractionConfirmation {
 		s.pendingConfirmation, s.pendingHandle = interaction.InteractionID, handle
 	}
@@ -587,16 +637,35 @@ func (s *Session) forwardInteraction(ctx context.Context, handle dagentruntime.S
 		s.pendingInteractions = make(map[string]dagentruntime.SessionHandle)
 	}
 	s.pendingInteractions[interaction.InteractionID] = handle
+	generation := s.generation
 	s.mu.Unlock()
 	if s.cfg.InteractionHandler == nil {
 		event := Event{RuntimeEvent: interaction.Event, Interaction: &interaction}
 		if confirmation, ok := interaction.Event.(*dagentruntime.ToolCallConfirmationEvent); ok {
 			event.Tool = &ToolActivity{Call: confirmation.ToolCall, Def: confirmation.ToolDefinition, NeedsConfirmation: true, RequestID: interaction.InteractionID}
 		}
-		return emit(event)
+		delivered := emit(event)
+		if !delivered {
+			s.mu.Lock()
+			if s.generation == generation && s.pendingInteractions[interaction.InteractionID] == handle {
+				delete(s.pendingInteractions, interaction.InteractionID)
+				delete(s.seenInteractions, interaction.InteractionID)
+				if s.pendingConfirmation == interaction.InteractionID {
+					s.pendingConfirmation, s.pendingHandle = "", nil
+				}
+			}
+			s.mu.Unlock()
+		}
+		return delivered
 	}
 	response, err := s.cfg.InteractionHandler(ctx, interaction)
 	if err == nil {
+		s.mu.Lock()
+		valid := s.generation == generation && s.handle == handle && !s.closed && !s.transitioning && ctx.Err() == nil
+		s.mu.Unlock()
+		if !valid {
+			return false
+		}
 		response.InteractionID, response.Kind = interaction.InteractionID, interaction.Kind
 		response.ElicitationID = interaction.ElicitationID
 		err = s.Respond(ctx, response)

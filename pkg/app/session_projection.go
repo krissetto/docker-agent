@@ -159,6 +159,9 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 	next := *previous
 	switch e := event.(type) {
 	case *SessionResetEvent:
+		a.lifecycleMu.Lock()
+		a.projectedRequestID = e.Snapshot.Status.TurnID
+		a.lifecycleMu.Unlock()
 		head := &PresentationState{
 			Lifecycle:     lifecycle.FromSnapshot(e.Snapshot),
 			Status:        e.Snapshot.Status,

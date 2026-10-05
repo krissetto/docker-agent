@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -367,6 +368,7 @@ type call struct {
 	started   bool           // whether an out-of-band ToolCall event was emitted
 	prompted  bool           // whether an out-of-band confirmation was emitted
 	lastError string         // latest synthesized error response
+	result    *tools.ToolCallResult
 
 	// pre_tool_use preempt-yolo lane result cache. The first
 	// consultPreToolUsePreYolo call dispatches EventPreToolUsePreYolo
@@ -1116,6 +1118,34 @@ type callRuntime struct {
 	c *call
 }
 
+func (r callRuntime) InvokeTool(ctx context.Context, tool tools.Tool, tc tools.ToolCall) (*tools.ToolCallResult, error) {
+	resume := SuspendInvocation(ctx)
+	defer func() { _ = resume(ctx) }()
+	tc.ID = "nested_" + uuid.NewString()
+	tc.Type = "function"
+	c := r.c.d.newCall(r.c.sess, r.c.em, r.c.a, tc, map[string]tools.Tool{tool.Name: tool})
+	c.outOfBand = true
+	// Nested denials are audited too, even without an interactive prompt.
+	c.prompted = true
+	outcome := c.run(ctx)
+	if err := resume(ctx); err != nil {
+		return nil, err
+	}
+	if outcome.StopRun {
+		return nil, &StopRunError{Message: outcome.StopMessage}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.result != nil {
+		return c.result, nil
+	}
+	if c.lastError != "" {
+		return nil, fmt.Errorf("%w: %s", tools.ErrConfirmationDenied, c.lastError)
+	}
+	return nil, tools.ErrConfirmationDenied
+}
+
 func (r callRuntime) EmitOutput(ctx context.Context, output string) {
 	output = r.c.applyToolResponseTransform(ctx, output, false)
 	r.c.em.EmitToolCallOutput(r.c.tc.ID, r.c.tool, output, r.c.a.Name())
@@ -1230,6 +1260,7 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 		span.SetAttributes(attribute.String(genai.AttrToolCallResult, res.Output))
 	}
 
+	c.result = res
 	c.em.EmitToolCallResponse(c.tc.ID, c.tool, res, res.Output, c.a.Name())
 	c.recordToolResponse(res)
 	return res, stop
@@ -1287,6 +1318,9 @@ func (c *call) translateError(ctx context.Context, span trace.Span, err error) *
 // recordToolResponse builds the chat message for a successful (or
 // error-translated) tool result and adds it to the session.
 func (c *call) recordToolResponse(res *tools.ToolCallResult) {
+	if c.outOfBand {
+		return
+	}
 	// Tool response content must not be empty for API compatibility.
 	content := res.Output
 	if strings.TrimSpace(content) == "" {

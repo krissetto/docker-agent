@@ -118,7 +118,7 @@ func Register(r *hooks.Registry, opts ...Option) error {
 		r.RegisterBuiltin(AddRecentCommits, addRecentCommits),
 		r.RegisterBuiltin(MaxIterations, maxIterations),
 		r.RegisterBuiltin(RedactSecrets, redactSecrets),
-		r.RegisterBuiltin(LimitLargeToolResults, limitLargeToolResults),
+		r.RegisterBuiltin(LimitLargeToolResults, newLargeToolResultLimiter().dispatch),
 		r.RegisterBuiltin(SaferShell, saferShell),
 		r.RegisterBuiltin(HTTPPost, newHTTPPost(o.httpPostClient)),
 		r.RegisterBuiltin(Unload, unload),

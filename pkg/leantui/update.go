@@ -46,8 +46,10 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 		if k.Typ == ui.KeyRune && len(k.Runes) > 0 && (k.Runes[0] == 'y' || k.Runes[0] == 'Y') {
 			m.interruptPending = false
 			m.handleInterrupt()
+			m.clearInterruptIntent()
 		} else if k.Typ == ui.KeyEsc || k.Typ == ui.KeyCtrlC || (k.Typ == ui.KeyRune && len(k.Runes) > 0 && (k.Runes[0] == 'n' || k.Runes[0] == 'N')) {
 			m.interruptPending = false
+			m.clearInterruptIntent()
 		}
 		return
 	}
@@ -153,10 +155,26 @@ func (m *model) cancelPendingMessages(ctx context.Context) bool {
 	return true
 }
 
+func (m *model) clearInterruptIntent() {
+	m.interruptPending = false
+	m.interruptCancel, m.interruptApp = nil, nil
+	m.interruptIdentity = app.SessionEventMsg{}
+	m.lastInterrupt = time.Time{}
+}
+
+func (m *model) captureInterruptIntent() {
+	if m.app != nil {
+		m.interruptCancel = m.app.CaptureCancelRun()
+		m.interruptApp = m.app
+		m.interruptIdentity = m.app.CurrentSessionEventIdentity()
+	}
+}
+
 func (m *model) requestInterrupt() {
 	if m.busy() {
 		switch m.interruptMode {
 		case "always":
+			m.captureInterruptIntent()
 			m.interruptPending = true
 			m.reportCapability("Cancel this session's current response? [y] yes [n/Esc] keep running", nil)
 			return
@@ -164,6 +182,7 @@ func (m *model) requestInterrupt() {
 			now := time.Now()
 			if now.Sub(m.lastInterrupt) > time.Second {
 				m.lastInterrupt = now
+				m.captureInterruptIntent()
 				m.reportCapability("Press interrupt again within one second to cancel.", nil)
 				return
 			}
@@ -176,9 +195,14 @@ func (m *model) handleInterrupt() {
 	switch {
 	case m.busy():
 		outcome := runtime.CancelNotActive
-		if m.app != nil {
+		if m.interruptCancel != nil {
+			if m.app == m.interruptApp && m.app.IsCurrentSessionEvent(m.interruptIdentity) {
+				outcome = m.interruptCancel()
+			}
+		} else if m.app != nil {
 			outcome = m.app.CancelRun()
 		}
+		m.clearInterruptIntent()
 		if outcome == runtime.CancelNotActive {
 			m.addNotice("⚠ ", "Could not cancel current response", ui.StWarning())
 		}
@@ -1051,6 +1075,7 @@ func (m *model) resolveConfirm(ctx context.Context, req runtime.ResumeRequest) {
 }
 
 func (m *model) resetConversation() {
+	m.clearInterruptIntent()
 	m.cancelViewAcquisition()
 	m.status.Dormant, m.status.Pending = false, 0
 	m.lifecycle = lifecycle.State{}

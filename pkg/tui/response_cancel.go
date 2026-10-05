@@ -23,6 +23,7 @@ type responseCancelPrompt struct {
 	generation        uint64
 	expiresAt         time.Time
 	noticeToken       messagebar.Token
+	cancel            func() runtime.CancelOutcome
 }
 
 func (m *appModel) responseTurnID() string {
@@ -67,8 +68,9 @@ func (m *appModel) handleResponseEscape() tea.Cmd {
 	}
 	valid := m.responsePrompt.armed && time.Now().Before(m.responsePrompt.expiresAt) && m.responsePrompt.application == m.application && m.responsePrompt.sessionID == m.application.Session().ID && m.responsePrompt.handle == m.application.SessionHandle() && m.responsePrompt.generation == m.responseRunGeneration && m.responsePrompt.turnID == m.responseTurnID()
 	if valid {
+		cancel := m.responsePrompt.cancel
 		clearCmd := m.clearResponsePrompt()
-		cmd, accepted := chat.CancelResponse(m.chatPage)
+		cmd, accepted := chat.CancelResponseIntent(m.chatPage, cancel)
 		if !accepted {
 			return tea.Batch(clearCmd, cmd)
 		}
@@ -78,7 +80,7 @@ func (m *appModel) handleResponseEscape() tea.Cmd {
 	}
 	clearCmd := m.clearResponsePrompt()
 	m.ensureMessageBar()
-	m.responsePrompt = responseCancelPrompt{armed: true, application: m.application, sessionID: m.application.Session().ID, handle: m.application.SessionHandle(), generation: m.responseRunGeneration, turnID: m.responseTurnID(), expiresAt: time.Now().Add(responsePromptLifetime)}
+	m.responsePrompt = responseCancelPrompt{armed: true, application: m.application, sessionID: m.application.Session().ID, handle: m.application.SessionHandle(), generation: m.responseRunGeneration, turnID: m.responseTurnID(), expiresAt: time.Now().Add(responsePromptLifetime), cancel: m.application.CaptureCancelRun()}
 	noticeCmd := m.setResponseNotice("Double Esc within 3s cancels the response.", messagebar.Warning, messagebar.Cancellation)
 	token := m.responsePrompt.noticeToken
 	return tea.Batch(clearCmd, noticeCmd, tea.Tick(responsePromptLifetime, func(time.Time) tea.Msg { return responseArmExpiredMsg{token: token} }))

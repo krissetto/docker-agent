@@ -112,7 +112,7 @@ func TestToolConfirmationRejectReason(t *testing.T) {
 }
 
 func TestInterruptConfirmationDoesNotCancelUntilApproved(t *testing.T) {
-	m, handle := sessionModel(t)
+	m, handle := cancellationModel(t)
 	m.lifecycle.Status = runtime.SessionStateRunning
 	m.interruptMode = "always"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
@@ -123,6 +123,7 @@ func TestInterruptConfirmationDoesNotCancelUntilApproved(t *testing.T) {
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune{'y'}})
 	assert.Equal(t, 1, handle.stops)
+	assert.Equal(t, handle.turnID, handle.cancelledTurn)
 }
 
 func TestBuiltinDescriptorsAreUnique(t *testing.T) {
@@ -175,7 +176,7 @@ func TestBusyTranscriptHasNoGlobalWorkingSpinner(t *testing.T) {
 }
 
 func TestInterruptModesDoubleTapAndNone(t *testing.T) {
-	m, handle := sessionModel(t)
+	m, handle := cancellationModel(t)
 	m.lifecycle.Status = runtime.SessionStateRunning
 	m.interruptMode = "double-tap"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
@@ -188,6 +189,7 @@ func TestInterruptModesDoubleTapAndNone(t *testing.T) {
 	m.interruptMode = "none"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Equal(t, 2, handle.stops)
+	assert.Equal(t, handle.turnID, handle.cancelledTurn)
 }
 
 func TestInteractiveShellUsesHandoffAndKeepsDraftOnFailure(t *testing.T) {

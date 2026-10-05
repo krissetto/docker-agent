@@ -151,7 +151,12 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 	if _, err := r.team.Agent(bound); err != nil {
 		return nil, err
 	}
-	root.AgentName = bound
+	if root.AgentName == "" {
+		root.AgentName = bound
+	}
+	if _, err := r.team.Agent(root.AgentName); err != nil {
+		return nil, err
+	}
 	p := &preparedSessionView{r: r, root: root, existing: make(map[string]*sessionDriver)}
 	var legacy subagent.Snapshot
 	if r.subagentStore != nil {
@@ -182,7 +187,12 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 	if selectedAgent == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_binding"}
 	}
-	selected.AgentName = selectedAgent
+	if selected.AgentName == "" {
+		selected.AgentName = selectedAgent
+	}
+	if _, err := r.team.Agent(selected.AgentName); err != nil {
+		return nil, err
+	}
 	p.info = PreparedSessionViewInfo{SessionID: id, RootSessionID: root.ID, Session: selected, Binding: SessionBinding{AgentName: selectedAgent, Model: selected.AgentModelOverrides[selectedAgent], ParentSessionID: selected.ParentID, Durability: r.sessionDurability()}, WorkingDir: selected.WorkingDir}
 	if selected.ParentID != "" {
 		for _, entry := range p.nodes {
@@ -192,7 +202,7 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 			if entry.childSess == nil || entry.childAgent == nil || entry.parentSessionID != selected.ParentID || entry.snapshot.Node.Agent != selectedAgent {
 				return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
 			}
-			p.info.Attach = &SubagentAttachInfo{NodeID: entry.snapshot.Node.ID, Agent: selectedAgent, Name: entry.snapshot.Node.DisplayName(), Session: selected.Clone(), ParentSessionID: entry.parentSessionID, ParentAgent: entry.parentSess.AgentName}
+			p.info.Attach = &SubagentAttachInfo{NodeID: entry.snapshot.Node.ID, Agent: selected.AgentName, Name: entry.snapshot.Node.DisplayName(), Session: selected.Clone(), ParentSessionID: entry.parentSessionID, ParentAgent: entry.parentSess.AgentName}
 			break
 		}
 		if p.info.Attach == nil {

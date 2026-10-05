@@ -213,13 +213,16 @@ func TestLeanHelpInterruptConditions(t *testing.T) {
 		{"busy escape", "\x1b", "draft", true, "draft", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, handle := sessionModel(t)
+			m, handle := cancellationModel(t)
 			m.screen.Editor.SetText(tc.draft)
 			m.setTestBusy(tc.busy)
 			m.handleKey(t.Context(), leanHelpKey(t, tc.sequence))
 			assert.Equal(t, tc.wantDraft, m.screen.Editor.Text())
 			assert.Equal(t, tc.quit, m.quitting)
 			assert.Equal(t, tc.stops, handle.stops)
+			if tc.stops > 0 {
+				assert.Equal(t, handle.turnID, handle.cancelledTurn)
+			}
 		})
 	}
 }

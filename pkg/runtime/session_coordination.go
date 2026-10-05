@@ -29,18 +29,23 @@ func (m *subagentManager) coordination() session.CoordinationStore {
 
 func (m *subagentManager) admitDurableChild(parent, child *session.Session, record session.ChildRecord) error {
 	store := m.coordination()
+	ctx, cancel := context.WithTimeout(m.r.durabilityContext(), defaultSubagentPersistenceTimeout)
+	defer cancel()
 	if _, native := m.r.sessionStore.(session.CoordinationStore); !native {
 		volatile := store.(session.Store)
-		_ = volatile.AddSession(m.ctx, parent.OwnSnapshot())
+		_ = volatile.AddSession(ctx, parent.OwnSnapshot())
 		if parent.ID != record.RootSessionID {
-			_ = volatile.AddSession(m.ctx, session.New(session.WithID(record.RootSessionID)))
+			_ = volatile.AddSession(ctx, session.New(session.WithID(record.RootSessionID)))
 		}
 	}
-	err := store.AdmitChild(m.ctx, session.ChildAdmission{Child: child, Record: record})
+	err := store.AdmitChild(ctx, session.ChildAdmission{Child: child, Record: record})
 	if err == nil {
 		return nil
 	}
-	records, loadErr := store.LoadChildren(m.ctx, record.RootSessionID)
+	// A lost acknowledgement must not abandon the reserved admission identity.
+	reconcileCtx, reconcileCancel := context.WithTimeout(m.r.durabilityContext(), defaultSubagentPersistenceTimeout)
+	defer reconcileCancel()
+	records, loadErr := store.LoadChildren(reconcileCtx, record.RootSessionID)
 	if loadErr != nil {
 		return err
 	}

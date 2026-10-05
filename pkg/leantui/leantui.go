@@ -278,6 +278,9 @@ type model struct {
 	queueSendMode           bool
 	interruptMode           string
 	interruptPending        bool
+	interruptCancel         func() runtime.CancelOutcome
+	interruptApp            *app.App
+	interruptIdentity       app.SessionEventMsg
 	lastInterrupt           time.Time
 	budgetUsage             *runtime.BudgetUsageEvent
 	subagentSnapshot        *subagent.Snapshot

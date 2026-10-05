@@ -28,9 +28,22 @@ type responseHandle struct {
 	canceledTurn atomic.Value
 }
 
+func (h *responseHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	observation, err := h.lifecycleHandle.Observe(ctx, options)
+	if err == nil && !options.Tree {
+		// The program harness injects stream animation separately; only seed the
+		// canonical cancellation identity here, not a second running spinner.
+		observation.Initial = []runtime.SessionSnapshot{{Status: runtime.SessionStatus{SessionID: h.id, TurnID: "accepted", State: runtime.SessionStateSettled}}}
+	}
+	return observation, err
+}
+
 func (h *responseHandle) Cancel(_ context.Context, turn string) (runtime.CancelResult, error) {
 	h.cancels.Add(1)
 	h.canceledTurn.Store(turn)
+	if h.live != nil {
+		h.live <- runtime.SessionEvent{SessionID: h.id, TurnID: turn, TranscriptPosition: -1, Event: runtime.StreamStopped(h.id, "root", "cancelled")}
+	}
 	return runtime.CancelResult{SessionID: h.id, TurnID: turn, Outcome: runtime.CancelAccepted}, nil
 }
 
@@ -46,11 +59,15 @@ func responseTestRoot(t *testing.T) (*appModel, *responseHandle) {
 	t.Helper()
 	sess := session.New(session.WithID("response-confirm-session"), session.WithAgentName("root"))
 	sess.Title = "Response confirmation test"
-	handle := &responseHandle{lifecycleHandle: &lifecycleHandle{id: sess.ID}}
+	handle := &responseHandle{lifecycleHandle: &lifecycleHandle{id: sess.ID, live: make(chan runtime.SessionEvent, 8)}}
 	application := app.New(t.Context(), &responseSessions{openSubagentSessions: &openSubagentSessions{}, handle: handle}, sess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
-	_, err := application.FollowUpMessage(t.Context(), "active turn", nil)
-	require.NoError(t, err)
 	root := newSidebarProgramRoot(t, application)
+	application.Start(t.Context())
+	t.Cleanup(application.Close)
+	require.Eventually(t, func() bool {
+		projection := application.Presentation()
+		return projection != nil && projection.Status.TurnID == "accepted"
+	}, time.Second, time.Millisecond)
 	root.editor.Blur()
 	root.focusedPanel = PanelContent
 	return root, handle
@@ -93,6 +110,8 @@ func TestActualProgramResponseDoubleEscapeCancelsOnceWithoutDialog(t *testing.T)
 			}, time.Second, time.Millisecond)
 			program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 			require.Equal(t, int32(1), handle.cancels.Load(), "completed cancellation cannot dispatch twice")
+			require.Eventually(t, func() bool { return root.application.Presentation().Status.TurnID == "" }, time.Second, time.Millisecond)
+			program.Send(messages.RoutedMsg{SessionID: root.supervisor.ActiveID(), Inner: messages.SessionRuntimeEventMsg{Event: runtime.StreamStopped("response-confirm-session", "root", "cancelled"), OriginSessionID: "response-confirm-session", TurnID: "accepted", Projection: root.application.Presentation()}})
 			program.Send(tea.KeyPressMsg{Code: 'x', Text: "x"})
 			require.Eventually(t, func() bool {
 				f := model.snapshot()

@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // LimitLargeToolResults is the registered name of the builtin
@@ -56,23 +56,52 @@ const filesystemToolCategory = "filesystem"
 // they keep tail truncation.
 const readFileToolName = "read_file"
 
-func limitLargeToolResults(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+type largeToolResultKey struct {
+	owner     *tools.ResourceOwner
+	sessionID string
+}
+
+type largeToolResultLimiter struct {
+	mu   sync.Mutex
+	dirs map[largeToolResultKey]string
+}
+
+func newLargeToolResultLimiter() *largeToolResultLimiter {
+	return &largeToolResultLimiter{dirs: make(map[largeToolResultKey]string)}
+}
+
+func largeResultKey(ctx context.Context, sessionID string) largeToolResultKey {
+	if owner := tools.ResourceOwnerFromContext(ctx); owner != nil {
+		return largeToolResultKey{owner: owner}
+	}
+	// Unhosted hook users have registry-local ownership, never filesystem IDs.
+	return largeToolResultKey{sessionID: sessionID}
+}
+
+func (l *largeToolResultLimiter) dispatch(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil {
 		return nil, nil
 	}
 
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := largeResultKey(ctx, in.SessionID)
 	switch in.HookEventName {
 	case hooks.EventToolResponseTransform:
-		return limitLargeToolResponse(ctx, in)
+		return l.limitLargeToolResponse(ctx, in, key)
 	case hooks.EventSessionEnd:
-		if err := os.RemoveAll(largeToolResultDir(in.SessionID)); err != nil {
-			slog.WarnContext(ctx, "Failed to clean up large tool result temp directory", "error", err)
+		if dir, allocated := l.dirs[key]; allocated {
+			if err := os.RemoveAll(dir); err != nil {
+				slog.WarnContext(ctx, "Failed to clean up large tool result temp directory", "error", err)
+			} else {
+				delete(l.dirs, key)
+			}
 		}
 	}
 	return nil, nil
 }
 
-func limitLargeToolResponse(ctx context.Context, in *hooks.Input) (*hooks.Output, error) {
+func (l *largeToolResultLimiter) limitLargeToolResponse(ctx context.Context, in *hooks.Input, key largeToolResultKey) (*hooks.Output, error) {
 	if !largeResultCategories[in.ToolCategory] {
 		return nil, nil
 	}
@@ -82,7 +111,7 @@ func limitLargeToolResponse(ctx context.Context, in *hooks.Input) (*hooks.Output
 		return nil, nil
 	}
 
-	path, err := writeLargeToolResult(in.SessionID, payload)
+	path, err := l.writeLargeToolResult(key, payload)
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to write large tool call result to temp file", "error", err)
 		return nil, nil
@@ -159,10 +188,15 @@ func lineCount(payload string) int {
 	return lines
 }
 
-func writeLargeToolResult(sessionID, payload string) (string, error) {
-	dir := largeToolResultDir(sessionID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+func (l *largeToolResultLimiter) writeLargeToolResult(key largeToolResultKey, payload string) (string, error) {
+	dir, allocated := l.dirs[key]
+	if !allocated {
+		var err error
+		dir, err = os.MkdirTemp("", "docker-agent-tool-results-")
+		if err != nil {
+			return "", err
+		}
+		l.dirs[key] = dir
 	}
 
 	file, err := os.CreateTemp(dir, "tool-result-*.txt")
@@ -182,13 +216,6 @@ func writeLargeToolResult(sessionID, payload string) (string, error) {
 		return "", closeErr
 	}
 	return path, nil
-}
-
-func largeToolResultDir(sessionID string) string {
-	if sessionID == "" {
-		sessionID = "unknown"
-	}
-	return filepath.Join(os.TempDir(), "docker-agent-tool-results", url.PathEscape(sessionID))
 }
 
 func tailLargeToolResult(payload string) string {

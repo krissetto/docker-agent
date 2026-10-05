@@ -150,15 +150,31 @@ func (a *App) sendSequencedBridgedEventFrom(ctx context.Context, requestID strin
 	if epoch != 0 && epoch != a.bridgeEpoch.Load() {
 		return false
 	}
-	if event = a.filterBridgedEvent(requestID, event); event == nil {
-		return true
-	}
 	a.projectionMu.Lock()
 	if epoch != 0 && epoch != a.bridgeEpoch.Load() {
 		a.projectionMu.Unlock()
 		return false
 	}
+	if event = a.filterBridgedEvent(requestID, event); event == nil {
+		a.projectionMu.Unlock()
+		return true
+	}
 	projection := a.projectEvent(event)
+	if projection != nil && !seed && requestID != "" {
+		next := *projection
+		switch event.(type) {
+		case *runtime.StreamStartedEvent:
+			next.Status.TurnID = requestID
+		case *runtime.StreamStoppedEvent:
+			if next.Status.TurnID == requestID && next.Lifecycle.Depth() == 0 {
+				next.Status.TurnID = ""
+			}
+		}
+		if next.Status.TurnID != projection.Status.TurnID {
+			projection = &next
+			a.presentation.Store(projection)
+		}
+	}
 	a.projectionMu.Unlock()
 	originSessionID = strings.TrimSpace(originSessionID)
 	select {
