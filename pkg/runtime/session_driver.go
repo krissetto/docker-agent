@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -84,8 +85,13 @@ type sessionDriver struct {
 	r  *LocalRuntime
 	wg *driverWorkGroup
 
-	mu   sync.Mutex
-	sess *session.Session
+	mu            sync.Mutex
+	sess          *session.Session
+	registryState atomic.Pointer[driverRegistryState]
+	ownerCommands chan *sessionOwnerCommand
+	ownerStop     chan struct{}
+	ownerClose    sync.Once
+	ownerDone     chan struct{}
 	// Stable admission topology; readable without waiting for per-session I/O.
 	identityID     string
 	identityParent string
@@ -100,7 +106,8 @@ type sessionDriver struct {
 	completionRunErr   string
 	completionInFlight bool
 
-	startDone chan struct{}
+	startDone     chan struct{}
+	startCanceled bool
 
 	reclaiming         bool
 	maintenanceRetired bool // protected by registry.mu; fences worker reservations on removal
@@ -111,37 +118,39 @@ type sessionDriver struct {
 	consumedSteering   []string
 	recentRetries      map[string]bool
 	pending            []QueuedMessage
-	adoptedInputs      map[string]bool
 	steering           []QueuedMessage
 	interruptRequested bool
 	steeringChanged    chan struct{}
 
-	compactReserved    bool
-	compactCancel      context.CancelFunc
-	compactOperation   uint64
-	switchReserved     bool
-	skillOperationID   string
-	skillCancel        context.CancelFunc
-	skillGeneration    uint64
-	modelRef           string
-	modelProviders     []provider.Provider
-	bindingVersion     uint64
-	pauseCh            chan struct{}
-	pauseGeneration    uint64
-	pausePublished     uint64
-	interactions       map[string]sessionInteraction
-	events             *sessionEventHub
-	lastError          string
-	lastFailureKey     string
-	lastActive         time.Time
-	preStart           sessionStartGate
-	beforePrepareStart func()
-	abortStart         func()
-	onStarted          map[int]func()
-	onSettled          map[int]func()
-	nextHookID         int
-	rootActive         bool
-	settled            chan struct{}
+	compactReserved      bool
+	queuedCompaction     *liveCompactionRequest
+	ioLane               *sessionIOLane
+	editReserved         bool
+	durableStopRequested bool
+	compactCancel        context.CancelFunc
+	compactOperation     uint64
+	switchReserved       bool
+	skillOperationID     string
+	skillCancel          context.CancelFunc
+	skillGeneration      uint64
+	modelRef             string
+	modelProviders       []provider.Provider
+	bindingVersion       uint64
+	pauseCh              chan struct{}
+	pauseGeneration      uint64
+	pausePublished       uint64
+	interactions         map[string]sessionInteraction
+	events               *sessionEventHub
+	lastError            string
+	lastFailureKey       string
+	lastActive           time.Time
+	preStart             sessionStartGate
+	beforePrepareStart   func()
+	abortStart           func()
+	onStarted            map[int]func()
+	onSettled            map[int]func()
+	nextHookID           int
+	settled              chan struct{}
 }
 
 type sessionInteraction struct {
@@ -149,7 +158,9 @@ type sessionInteraction struct {
 	turnID     string
 	generation uint64
 
-	event Event
+	event  Event
+	waiter *elicitationWaiter
+	resume chan ResumeRequest
 }
 
 // admitLocked centralizes lifecycle admission for driver and handle operations.
@@ -207,11 +218,11 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
-	d := &sessionDriver{r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
+	d := &sessionDriver{ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
 		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
 		for position, item := range sess.MessagesSnapshot() {
-			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted {
+			if item.Message == nil || !item.Message.Pending || !item.Message.Accepted || sess.TurnOutcome(item.Message.TurnID) != "" {
 				continue
 			}
 			queued := queuedSessionInput(item.Message, position, r.sessionStore != nil)
@@ -222,43 +233,9 @@ func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 			}
 		}
 	}
+	d.publishRegistryStateLocked()
+	go d.runOwner()
 	return d
-}
-
-// adopt transfers ownership only. Storage is deferred to the driver's admission
-// boundary, never performed while the registry publishes a driver or batch.
-func (d *sessionDriver) adopt(adopted []QueuedMessage) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, msg := range adopted {
-		if found, _, _ := d.existingInputLocked(msg); found {
-			continue
-		}
-		if msg.RequestID != "" {
-			if d.adoptedInputs == nil {
-				d.adoptedInputs = map[string]bool{}
-			}
-			d.adoptedInputs[msg.RequestID] = true
-		}
-		d.pending = append(d.pending, msg)
-	}
-}
-
-// Persist in FIFO order, retaining the failed head and every unaccepted suffix.
-// New input cannot cross this boundary ahead of already acknowledged orphans.
-func (d *sessionDriver) acceptAdoptedLocked() error {
-	for i := range d.pending {
-		msg := &d.pending[i]
-		if !d.adoptedInputs[msg.RequestID] {
-			continue
-		}
-		if err := d.appendInputLocked(msg); err != nil {
-			d.lastError = err.Error()
-			return err
-		}
-		delete(d.adoptedInputs, msg.RequestID)
-	}
-	return nil
 }
 
 func (d *sessionDriver) Subscribe(buffer int) (seed []Event, events <-chan Event, cancel func()) {
@@ -266,7 +243,7 @@ func (d *sessionDriver) Subscribe(buffer int) (seed []Event, events <-chan Event
 }
 
 func (d *sessionDriver) Drive(ctx context.Context, sess *session.Session) <-chan Event {
-	if sess != d.session() {
+	if sess == nil || sess.ID != d.identityID {
 		out := make(chan Event)
 		close(out)
 		return out
@@ -294,60 +271,6 @@ func (d *sessionDriver) Wait() {
 	d.wg.Wait()
 }
 
-func (d *sessionDriver) acceptInputLocked(msg *QueuedMessage) error {
-	if err := d.acceptAdoptedLocked(); err != nil {
-		return err
-	}
-	return d.appendInputLocked(msg)
-}
-
-func (d *sessionDriver) appendInputLocked(msg *QueuedMessage) error {
-	if msg != nil && msg.Retry {
-		if d.recentRetries == nil {
-			d.recentRetries = map[string]bool{}
-		}
-		if len(d.recentRetries) >= defaultMaxSubagentMailbox {
-			for id := range d.recentRetries {
-				if id != d.activeRequestID {
-					delete(d.recentRetries, id)
-					break
-				}
-			}
-		}
-		d.recentRetries[msg.RequestID] = true
-	}
-	if msg == nil || msg.Retry || d.sess == nil {
-		return nil
-	}
-	message := msg.sessionMessage()
-	msg.InputMode = message.InputMode
-	message.Pending = true
-	message.Accepted = true
-	message.TurnID = msg.RequestID
-	// Timestamp is observation metadata, not part of an immutable retry identity.
-	message.Message.CreatedAt = ""
-	if d.r.sessionStore != nil {
-		msg.AcceptedPersisted = true
-		var err error
-		if appender, ok := d.r.sessionStore.(session.ItemAppender); ok {
-			_, err = appender.AppendItem(context.WithoutCancel(d.r.ctx()), d.sess.ID, "input:"+msg.RequestID, session.NewMessageItem(message))
-		} else {
-			_, err = d.r.sessionStore.AddMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, message)
-		}
-		if err != nil {
-			if errors.Is(err, session.ErrNotFound) {
-				msg.AcceptedPersisted = false
-			} else {
-				return err
-			}
-		}
-	}
-	position := d.sess.AddMessageAt(message)
-	msg.AcceptedPosition = position
-	d.events.PublishForRequest(d.sess.ID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, position), *msg))
-	return nil
-}
-
 func promotionFailureKey(turnID string, err error) string {
 	kind := "unknown"
 	if sessionErr, ok := errors.AsType[*SessionError](err); ok {
@@ -367,40 +290,6 @@ func (d *sessionDriver) publishPromotionFailureLocked(turnID string, err error) 
 	d.events.PublishForRequest(d.sessionIDLocked(), turnID, ErrorForSession(d.sessionIDLocked(), err.Error()))
 }
 
-func (d *sessionDriver) promoteInputLocked(msg QueuedMessage) error {
-	if d.adoptedInputs[msg.RequestID] {
-		if err := d.acceptAdoptedLocked(); err != nil {
-			return err
-		}
-		for _, accepted := range d.pending {
-			if accepted.RequestID == msg.RequestID {
-				msg = accepted
-				break
-			}
-		}
-	}
-	if msg.Retry {
-		return nil
-	}
-	if d.sess == nil {
-		return &SessionError{Kind: SessionErrorInvalid, Operation: "promote_input"}
-	}
-	if msg.AcceptedPersisted {
-		if err := d.r.sessionStore.PromotePendingUserMessage(context.WithoutCancel(d.r.ctx()), d.sess.ID, msg.RequestID); err != nil {
-			return err
-		}
-	}
-	if !d.sess.PromotePendingUserMessageByTurnID(msg.RequestID) {
-		return &SessionError{Kind: SessionErrorStale, SessionID: d.sess.ID, RequestID: msg.RequestID, Operation: "promote_input"}
-	}
-	if msg.InputMode == "steer" || msg.trustedSteering() {
-		d.consumedSteering = append(d.consumedSteering, msg.RequestID)
-	}
-	d.lastFailureKey = ""
-	d.events.PublishForRequest(d.sess.ID, msg.RequestID, inputEventMetadata(PendingUserMessagePromoted(d.sess.ID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
-	return nil
-}
-
 func (d *sessionDriver) PostSteer(ctx context.Context, msg QueuedMessage) bool {
 	_, err := d.postSteer(ctx, msg)
 	return err == nil
@@ -408,98 +297,51 @@ func (d *sessionDriver) PostSteer(ctx context.Context, msg QueuedMessage) bool {
 
 // postSteer returns queued when an accepted steer was demoted to the pending
 // turn FIFO by an active compaction reservation or older pending input.
-func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (queued bool, err error) {
+func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (bool, error) {
 	msg.InputMode = "steer"
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if found, queued, err := d.existingInputLocked(msg); found || err != nil {
-		return queued, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if admissionErr := d.admitLocked(SessionOperationSteer); admissionErr != nil {
-		admissionErr.RequestID = msg.RequestID
-		return false, admissionErr
-	}
-	if d.compactReserved || (len(d.pending) != 0 && (!d.running() || d.activeRequestID == "")) {
-		if !limitAllows(len(d.pending), d.pendingLimit()) {
-			return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "steer", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
-		}
-		if err := d.acceptInputLocked(&msg); err != nil {
-			return false, err
-		}
-		d.pending = append(d.pending, msg)
-		return true, nil
-	}
-	if !limitAllows(len(d.steering), d.pendingLimit()) {
-		return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "steer", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
-	}
-	if err := d.acceptInputLocked(&msg); err != nil {
-		return false, err
-	}
-	d.steering = append(d.steering, msg)
-	d.refreshSteeringLocked()
-	return false, nil
+	return d.admitInput(ctx, msg, SessionOperationSteer, true, true)
 }
 
 // DrainSteering promotes accepted guidance through the session-owned durable
 // transition before making it visible to the provider loop. A failed durable
 // promotion and every later FIFO item remain queued for a later boundary.
-func (d *sessionDriver) DrainSteering() []QueuedMessage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	promoted := 0
-	for promoted < len(d.steering) {
-		if err := d.promoteInputLocked(d.steering[promoted]); err != nil {
-			d.lastError = err.Error()
-			break
-		}
-		promoted++
-	}
-	steering := append([]QueuedMessage(nil), d.steering[:promoted]...)
-	d.steering = d.steering[promoted:]
-	d.refreshSteeringLocked()
-	if len(steering) != 0 {
-		d.notifyTurnChangedLocked()
-	}
-	return steering
-}
+func (d *sessionDriver) DrainSteering() []QueuedMessage { return d.drainInputs(d.r.lifetime(), true) }
 
 func (d *sessionDriver) schedulePendingRetry() {
-	d.mu.Lock()
-	if !d.stopped && !d.viewDormant && len(d.pending) != 0 {
-		d.retryRunning = true
-	}
-	d.mu.Unlock()
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		if !d.stopped && !d.viewDormant && len(d.pending) != 0 {
+			d.retryRunning = true
+		}
+		return nil
+	})
 	if d.r.sessionDrivers != nil {
 		d.r.sessionDrivers.signalWork()
 	}
 }
 
 func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
-	if msg.RequestID == "" {
-		return false
-	}
-	if msg.Retry {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		for _, pending := range d.pending {
-			if pending.RequestID == msg.RequestID {
-				return true
+	queued := false
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		if msg.RequestID == "" {
+			return nil
+		}
+		for _, item := range d.pending {
+			if item.RequestID == msg.RequestID {
+				queued = true
+				return nil
 			}
 		}
-		return false
-	}
-	if d.sess == nil {
-		return false
-	}
-	for _, item := range d.sess.MessagesSnapshot() {
-		if item.Message != nil && item.Message.TurnID == msg.RequestID {
-			return item.Message.Pending
+		if d.sess != nil {
+			for _, item := range d.sess.MessagesSnapshot() {
+				if item.Message != nil && item.Message.TurnID == msg.RequestID {
+					queued = item.Message.Pending
+					break
+				}
+			}
 		}
-	}
-	return false
+		return nil
+	})
+	return queued
 }
 
 func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) bool {
@@ -512,147 +354,61 @@ func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) 
 
 // post returns queued when the accepted input remains in the pending FIFO at
 // the admission commit point.
-func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) (queued bool, err error) {
+func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) (bool, error) {
+	var idleAdmission bool
+	var before func()
 	for {
-		d.mu.Lock()
-		if found, queued, err := d.existingInputLocked(msg); found || err != nil {
-			d.mu.Unlock()
-			return queued, err
-		}
-		// Non-waking posts historically classify an idle driver as stopped before
-		// considering reservations; preserve that public ordering.
-		if !d.stopped && !d.running() && !d.starting() && !wake {
-			d.mu.Unlock()
-			return false, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: SessionOperationPost}
-		}
-		if admissionErr := d.admitLocked(SessionOperationPost); admissionErr != nil {
-			admissionErr.RequestID = msg.RequestID
-			d.mu.Unlock()
-			return false, admissionErr
-		}
-		if d.compactReserved {
-			if !limitAllows(len(d.pending), d.pendingLimit()) {
-				d.mu.Unlock()
-				return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "post", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
-			}
-			if msg.RequestID != "" {
-				if err := d.acceptInputLocked(&msg); err != nil {
-					d.mu.Unlock()
-					return false, err
-				}
-			}
-			d.pending = append(d.pending, msg)
-			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
-				d.authorizeViewLocked()
-			}
-			d.mu.Unlock()
-			d.refreshAttention()
-			return true, nil
-		}
-		if d.starting() {
-			done := d.startDone
-			d.mu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
-		}
-		if !limitAllows(len(d.pending), d.pendingLimit()) {
-			d.mu.Unlock()
-			return false, &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "post", Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
-		}
-		if d.running() || d.settling() {
-			if msg.RequestID != "" {
-				if err := d.acceptInputLocked(&msg); err != nil {
-					d.mu.Unlock()
-					return false, err
-				}
-			}
-			d.pending = append(d.pending, msg)
-			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
-				d.authorizeViewLocked()
-			}
-			d.mu.Unlock()
-			d.refreshAttention()
-			return true, nil
-		}
-
-		// A fresh command's durable admission is linearized under the same
-		// lock as the running/starting/compaction checks above. Compaction cannot
-		// reserve between classification and append.
-		if msg.RequestID != "" {
-			if err := d.acceptInputLocked(&msg); err != nil {
-				d.mu.Unlock()
-				return false, err
-			}
-		}
-		d.pending = append(d.pending, msg)
-		if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
-			d.authorizeViewLocked()
-		}
-		// Correlated non-retry input has crossed the durable Session/store commit
-		// point. Retry and empty-ID lifecycle notes exist only in the mailbox.
-		durable := msg.RequestID != "" && !msg.Retry
-		beforePrepareStart := d.beforePrepareStart
-		d.mu.Unlock()
-		if beforePrepareStart != nil {
-			beforePrepareStart()
-		}
-		wakeCtx, generation, callbacks, err := d.prepareStart(d.r.lifetime(), true)
-		if err != nil {
-			// Durable append already committed. Losing a wake to the session's
-			// existing turn is success, not a promotion or mailbox-capacity failure.
-			if startErr, ok := errors.AsType[*SessionError](err); ok && startErr.Operation == SessionOperationStart && startErr.Reason == SessionErrorReasonBusy {
-				d.schedulePendingRetry()
-				return d.inputQueued(msg), nil
-			}
-			d.mu.Lock()
-			stopped := d.stopped
-
-			affectedTurnID := ""
-			if len(d.pending) != 0 {
-				affectedTurnID = d.pending[0].RequestID
-			}
-			stillPending := false
-			for _, pending := range d.pending {
-				if pending.RequestID == msg.RequestID {
-					stillPending = true
-					break
-				}
-			}
-			if stillPending && !stopped {
-				d.lastError = err.Error()
-				d.publishPromotionFailureLocked(affectedTurnID, err)
-			}
-			d.mu.Unlock()
-			if stillPending && !stopped {
-				d.schedulePendingRetry()
-			}
-			// Durable acceptance plus FIFO append is the public commit point.
-			// A competing caller may already have promoted (and even completed)
-			// this turn, while a wake failure leaves it pending for retry. Neither
-			// state permits the caller to infer rejection and resubmit.
-			if durable {
-				return d.inputQueued(msg), nil
-			}
-			if stillPending {
-				return true, nil
-			}
-			if !stopped {
-				// A competing start already consumed this mailbox-only command.
-				return false, nil
-			}
+		var starting bool
+		var done chan struct{}
+		if err := d.ownerCall(ctx, func() error {
+			starting, done = d.starting() && !d.compactReserved && !d.stopped, d.startDone
+			idleAdmission = !d.running() && !d.starting() && !d.settling()
+			before = d.beforePrepareStart
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		for _, fn := range callbacks {
-			fn()
+		if !starting {
+			break
 		}
-		queued := d.inputQueued(msg)
-		d.startWake(wakeCtx, generation)
-		return queued, nil
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
+	_, err := d.admitInput(ctx, msg, SessionOperationPost, wake, false)
+	if err != nil {
+		return false, err
+	}
+	d.refreshAttention()
+	if idleAdmission && wake && before != nil {
+		before()
+	}
+	var idle bool
+	_ = d.ownerCall(ctx, func() error {
+		idle = !d.running() && !d.starting() && !d.settling()
+		return nil
+	})
+	if idle && wake {
+		runCtx, generation, callbacks, startErr := d.prepareStart(d.r.lifetime(), true)
+		if startErr == nil {
+			for _, fn := range callbacks {
+				fn()
+			}
+			d.startWake(runCtx, generation)
+		} else {
+			d.schedulePendingRetry()
+			if msg.Retry || msg.RequestID == "" {
+				var stopped bool
+				_ = d.ownerCall(context.WithoutCancel(ctx), func() error { stopped = d.stopped; return nil })
+				if stopped && !d.inputQueued(msg) {
+					return false, ErrSessionStopped
+				}
+			}
+		}
+	}
+	return d.inputQueued(msg), nil
 }
 
 // PostReliable appends a lifecycle note before attempting admission. Capacity
@@ -704,39 +460,13 @@ func (d *sessionDriver) pendingLimit() int {
 }
 
 func (d *sessionDriver) DrainPending() []QueuedMessage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	pending := d.pending
-	d.pending = nil
+	var pending []QueuedMessage
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error { pending = d.pending; d.pending = nil; return nil })
 	return pending
 }
 
 func (d *sessionDriver) DrainRuntimeNotes() []QueuedMessage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	notes := make([]QueuedMessage, 0, len(d.pending))
-	pending := d.pending[:0]
-	blocked := false
-	for _, message := range d.pending {
-		if !blocked && (message.RequestID == "" || message.trustedSteering()) {
-			if message.RequestID != "" {
-				if err := d.promoteInputLocked(message); err != nil {
-					blocked = true
-					pending = append(pending, message)
-					continue
-				}
-			}
-			notes = append(notes, message)
-		} else {
-			pending = append(pending, message)
-		}
-	}
-	d.pending = pending
-	d.refreshSteeringLocked()
-	if len(notes) != 0 {
-		d.notifyTurnChangedLocked()
-	}
-	return notes
+	return d.drainInputs(d.r.lifetime(), false)
 }
 
 func (d *sessionDriver) HasPending() bool {
@@ -759,51 +489,41 @@ func (d *sessionDriver) SetPreStartGate(fn func() bool, abort func()) {
 }
 
 func (d *sessionDriver) SetPreStartErrorGate(fn sessionStartGate, abort func()) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.preStart = fn
-	d.abortStart = abort
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error { d.preStart = fn; d.abortStart = abort; return nil })
 }
 
-func (d *sessionDriver) OnStarted(fn func()) func() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.onStarted == nil {
-		d.onStarted = map[int]func(){}
-	}
-	d.nextHookID++
-	id := d.nextHookID
-	d.onStarted[id] = fn
+func (d *sessionDriver) OnStarted(fn func()) func() { return d.registerCallback(fn, true) }
+func (d *sessionDriver) OnSettled(fn func()) func() { return d.registerCallback(fn, false) }
+func (d *sessionDriver) registerCallback(fn func(), started bool) func() {
+	id := 0
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		d.nextHookID++
+		id = d.nextHookID
+		if started {
+			if d.onStarted == nil {
+				d.onStarted = map[int]func(){}
+			}
+			d.onStarted[id] = fn
+		} else {
+			if d.onSettled == nil {
+				d.onSettled = map[int]func(){}
+			}
+			d.onSettled[id] = fn
+		}
+		return nil
+	})
 	ref := weak.Make(d)
 	return func() {
-		d := ref.Value()
-		if d == nil {
-			return
+		if owner := ref.Value(); owner != nil {
+			_ = owner.ownerCall(context.WithoutCancel(owner.r.lifetime()), func() error {
+				if started {
+					delete(owner.onStarted, id)
+				} else {
+					delete(owner.onSettled, id)
+				}
+				return nil
+			})
 		}
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		delete(d.onStarted, id)
-	}
-}
-
-func (d *sessionDriver) OnSettled(fn func()) func() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.onSettled == nil {
-		d.onSettled = map[int]func(){}
-	}
-	d.nextHookID++
-	id := d.nextHookID
-	d.onSettled[id] = fn
-	ref := weak.Make(d)
-	return func() {
-		d := ref.Value()
-		if d == nil {
-			return
-		}
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		delete(d.onSettled, id)
 	}
 }
 
@@ -818,53 +538,44 @@ func (d *sessionDriver) authorizeViewLocked() bool {
 }
 
 func (d *sessionDriver) TogglePause(ctx context.Context) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	d.mu.Lock()
-	if admissionErr := d.admitLocked(SessionOperationPause); admissionErr != nil {
-		d.mu.Unlock()
-		return false, admissionErr
-	}
-	d.pauseGeneration++
-	generation := d.pauseGeneration
-
-	if d.pauseCh != nil {
-		close(d.pauseCh)
-		d.pauseCh = nil
-		sessionID := d.sessionIDLocked()
-		agentName := d.AgentNameLocked()
-		d.mu.Unlock()
-		d.events.Publish(sessionID, PauseChanged(sessionID, agentName, false))
-		return false, nil
-	}
-	d.pauseCh = make(chan struct{})
-	idle := d.skillOperationID == "" && !d.running() && !d.starting() && !d.settling() && len(d.pending) == 0
-	sessionID := d.sessionIDLocked()
-	agentName := d.AgentNameLocked()
-	if idle {
-		d.pausePublished = generation
-	}
-	d.mu.Unlock()
-	d.events.Publish(sessionID, PauseChanged(sessionID, agentName, true))
-	if idle {
-		d.events.Publish(sessionID, Paused(sessionID, agentName))
-	}
-	return true, nil
+	paused := false
+	err := d.ownerCall(ctx, func() error {
+		if err := d.admitLocked(SessionOperationPause); err != nil {
+			return err
+		}
+		d.pauseGeneration++
+		if d.pauseCh != nil {
+			close(d.pauseCh)
+			d.pauseCh = nil
+		} else {
+			d.pauseCh = make(chan struct{})
+			paused = true
+		}
+		d.events.Publish(d.identityID, PauseChanged(d.identityID, d.AgentNameLocked(), paused))
+		if paused && d.skillOperationID == "" && !d.running() && !d.starting() && !d.settling() && len(d.pending) == 0 {
+			d.pausePublished = d.pauseGeneration
+			d.events.Publish(d.identityID, Paused(d.identityID, d.AgentNameLocked()))
+		}
+		return nil
+	})
+	return paused, err
 }
 
 func (d *sessionDriver) waitIfPaused(ctx context.Context, reached func()) (bool, error) {
 	blocked := false
 	for {
-		d.mu.Lock()
-		ch := d.pauseCh
-		generation := d.pauseGeneration
-
-		publish := ch != nil && d.pausePublished != generation
-		if publish {
-			d.pausePublished = generation
+		var ch chan struct{}
+		publish := false
+		if err := d.ownerCall(ctx, func() error {
+			ch = d.pauseCh
+			publish = ch != nil && d.pausePublished != d.pauseGeneration
+			if publish {
+				d.pausePublished = d.pauseGeneration
+			}
+			return nil
+		}); err != nil {
+			return blocked, err
 		}
-		d.mu.Unlock()
 		if ch == nil {
 			return blocked, nil
 		}
@@ -884,20 +595,18 @@ func (d *sessionDriver) waitIfPaused(ctx context.Context, reached func()) (bool,
 }
 
 func (d *sessionDriver) cloneForAgentSwitch(ctx context.Context) (*session.Session, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if admissionErr := d.admitLocked(SessionOperationSwitchAgent); admissionErr != nil {
-		return nil, admissionErr
-	}
-	d.switchReserved = true
-	defer func() { d.switchReserved = false }()
-	if d.sess == nil || d.sess.ParentID != "" {
-		return nil, &SessionError{Kind: SessionErrorUnsupported, SessionID: d.sessionIDLocked(), Operation: "switch_agent", Reason: SessionErrorReasonBusy}
-	}
-	return d.sess.Clone(), nil
+	var snapshot *session.Session
+	err := d.ownerCall(ctx, func() error {
+		if err := d.admitLocked(SessionOperationSwitchAgent); err != nil {
+			return err
+		}
+		if d.sess == nil || d.identityParent != "" {
+			return &SessionError{Kind: SessionErrorUnsupported, SessionID: d.identityID, Operation: "switch_agent", Reason: SessionErrorReasonBusy}
+		}
+		snapshot = d.sess.Clone()
+		return nil
+	})
+	return snapshot, err
 }
 
 func (d *sessionDriver) ModelProvidersEmpty() bool {
@@ -934,98 +643,115 @@ func (d *sessionDriver) scopeModels(ctx context.Context) context.Context {
 }
 
 func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Provider) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.modelRef = modelRef
-	d.modelProviders = slices.Clone(providers)
-	d.bindingVersion++
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		d.modelRef = modelRef
+		d.modelProviders = slices.Clone(providers)
+		d.bindingVersion++
+		return nil
+	})
 }
 
 func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRef string, providers []provider.Provider) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopped || d.sess == nil {
-		return &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "set_model"}
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	unlockMetadata := d.sess.LockMetadata()
-	defer unlockMetadata()
-	previous, previousCustom := d.sess.ModelStateSnapshot()
-	d.sess.SetAgentModelOverride(agentName, modelRef)
-	if d.r.sessionStore != nil {
-		if err := d.r.sessionStore.UpdateSession(ctx, d.sess); err != nil {
-			d.sess.ReplaceModelState(previous, previousCustom)
-			return err
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped || d.sess == nil {
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-	}
-	d.modelRef = modelRef
-	d.modelProviders = slices.Clone(providers)
-	d.bindingVersion++
-	return nil
+		next := d.sess.OwnSnapshot()
+		next.SetAgentModelOverride(agentName, modelRef)
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				if d.r.sessionStore != nil {
+					return d.r.sessionStore.UpdateSession(ctx, next)
+				}
+				return nil
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				d.sess.SetAgentModelOverride(agentName, modelRef)
+				d.modelRef = modelRef
+				d.modelProviders = slices.Clone(providers)
+				d.bindingVersion++
+				return nil
+			},
+		}, nil
+	})
 }
 
 func (d *sessionDriver) SetStarred(ctx context.Context, starred bool) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopped || d.sess == nil {
-		return &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "set_starred"}
-	}
-	unlockMetadata := d.sess.LockMetadata()
-	defer unlockMetadata()
-	previous := d.sess.Starred
-	d.sess.Starred = starred
-	if d.r.sessionStore != nil {
-		if err := d.r.sessionStore.SetSessionStarred(ctx, d.sess.ID, starred); err != nil {
-			d.sess.Starred = previous
-			return err
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped || d.sess == nil {
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-	}
-	return nil
+		id := d.identityID
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				if d.r.sessionStore != nil {
+					return d.r.sessionStore.SetSessionStarred(ctx, id, starred)
+				}
+				return nil
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				d.sess.Starred = starred
+				return nil
+			},
+		}, nil
+	})
 }
 
 func (d *sessionDriver) RemoveAttachment(ctx context.Context, path string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopped || d.sess == nil {
-		return &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "remove_attachment"}
-	}
-	unlockMetadata := d.sess.LockMetadata()
-	defer unlockMetadata()
-	if !d.sess.RemoveAttachedFile(path) {
-		return &SessionError{Kind: SessionErrorNotFound, SessionID: d.sess.ID, Operation: "remove_attachment"}
-	}
-	if d.r.sessionStore != nil {
-		if err := d.r.sessionStore.UpdateSession(ctx, d.sess); err != nil {
-			d.sess.AddAttachedFile(path)
-			return err
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped || d.sess == nil {
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-	}
-	return nil
+		next := d.sess.OwnSnapshot()
+		if !next.RemoveAttachedFile(path) {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorNotFound, SessionID: d.identityID, Operation: "remove_attachment"}
+		}
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				if d.r.sessionStore != nil {
+					return d.r.sessionStore.UpdateSession(ctx, next)
+				}
+				return nil
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				d.sess.RemoveAttachedFile(path)
+				return nil
+			},
+		}, nil
+	})
 }
 
 func (d *sessionDriver) UpdateTitle(ctx context.Context, title string) error {
-	d.mu.Lock()
-	if d.stopped || d.sess == nil {
-		sessionID := d.sessionIDLocked()
-		d.mu.Unlock()
-		return &SessionError{Kind: SessionErrorStopped, SessionID: sessionID, Operation: "update_title"}
-	}
-	unlockMetadata := d.sess.LockMetadata()
-	defer unlockMetadata()
-	previous := d.sess.TitleSnapshot()
-	d.sess.SetTitle(title)
-	if d.r.sessionStore != nil {
-		if err := d.r.sessionStore.UpdateSessionTitle(ctx, d.sess.ID, title); err != nil {
-			d.sess.SetTitle(previous)
-			d.mu.Unlock()
-			return err
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped || d.sess == nil {
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-	}
-	d.events.Publish(d.sess.ID, SessionTitle(d.sess.ID, title))
-	d.mu.Unlock()
-	return nil
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				if d.r.sessionStore != nil {
+					return d.r.sessionStore.UpdateSessionTitle(ctx, d.identityID, title)
+				}
+				return nil
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				d.sess.SetTitle(title)
+				d.events.Publish(d.identityID, SessionTitle(d.identityID, title))
+				return nil
+			},
+		}, nil
+	})
 }
 
 type driverObservation struct {
@@ -1072,22 +798,26 @@ func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
 }
 
 func (d *sessionDriver) Cancel(turnID string) CancelOutcome {
-	d.mu.Lock()
-	if !d.running() || d.cancel == nil || turnID == "" || d.activeRequestID != turnID {
-		d.mu.Unlock()
-		return CancelNotActive
+	outcome := CancelNotActive
+	var cancel context.CancelFunc
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		if !d.running() || d.cancel == nil || turnID == "" || d.activeRequestID != turnID {
+			return nil
+		}
+		if d.cancelling() {
+			outcome = CancelAlreadyCancelling
+			return nil
+		}
+		d.phase = sessionCancelling
+		d.resolveInteractionsLocked()
+		cancel = d.cancel
+		outcome = CancelAccepted
+		return nil
+	})
+	if cancel != nil {
+		cancel()
 	}
-	if d.cancelling() {
-		d.mu.Unlock()
-		return CancelAlreadyCancelling
-	}
-	d.phase = sessionCancelling
-	d.resolveInteractionsLocked()
-	cancel := d.cancel
-
-	d.mu.Unlock()
-	cancel()
-	return CancelAccepted
+	return outcome
 }
 
 func (d *sessionDriver) StopAll() bool {
@@ -1099,26 +829,29 @@ func (d *sessionDriver) StopAllForDelete() bool {
 }
 
 func (d *sessionDriver) stopAll(deleting bool) bool {
-	d.mu.Lock()
-	if deleting {
-		d.events.FenceDelete(d.sessionIDLocked())
-	}
-	cancel := d.cancel
+	var cancel, compactCancel, skillCancel context.CancelFunc
+	var pauseCh chan struct{}
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		if deleting {
+			d.events.FenceDelete(d.sessionIDLocked())
+		}
+		cancel = d.cancel
 
-	compactCancel := d.compactCancel
-	skillCancel := d.skillCancel
-	pauseCh := d.pauseCh
-	d.pauseCh = nil
-	d.pending = nil
-	d.stopped = true
-	d.stoppedView = false
-	d.resolveInteractionsLocked()
-	d.notifyTurnChangedLocked()
-	d.skillGeneration++
-	d.skillOperationID = ""
-	d.skillCancel = nil
-	d.signalStartDoneLocked()
-	d.mu.Unlock()
+		compactCancel = d.compactCancel
+		skillCancel = d.skillCancel
+		pauseCh = d.pauseCh
+		d.pauseCh = nil
+		d.pending = nil
+		d.stopped = true
+		d.stoppedView = false
+		d.resolveInteractionsLocked()
+		d.notifyTurnChangedLocked()
+		d.skillGeneration++
+		d.skillOperationID = ""
+		d.skillCancel = nil
+		d.signalStartDoneLocked()
+		return nil
+	})
 	if pauseCh != nil {
 		close(pauseCh)
 	}
@@ -1147,20 +880,6 @@ func (d *sessionDriver) stoppedAndSettled() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.stopped && !d.running() && !d.starting() && !d.settling()
-}
-
-func (d *sessionDriver) stoppedViewReplaceable() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if !d.stopped || d.running() || d.starting() || d.settling() || d.compactReserved || d.switchReserved || d.retryRunning || d.completionInFlight {
-		return false
-	}
-	select {
-	case <-d.Done():
-		return true
-	default:
-		return false
-	}
 }
 
 func (d *sessionDriver) Settled() bool {
@@ -1199,10 +918,21 @@ func (d *sessionDriver) RegisterInteraction(requestID string, kind InteractionKi
 	var payload Event
 	if len(event) != 0 {
 		payload = event[0]
+		if detached, err := observerEventSnapshot(payload); err == nil {
+			payload = detached
+		} else {
+			return
+		}
 	}
-	d.mu.Lock()
-	d.interactions[requestID] = sessionInteraction{kind: kind, turnID: d.activeRequestID, generation: d.generation, event: payload}
-	d.mu.Unlock()
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		interaction := d.interactions[requestID]
+		if interaction.generation != 0 && (interaction.generation != d.generation || interaction.turnID != d.activeRequestID) {
+			return nil
+		}
+		interaction.kind, interaction.turnID, interaction.generation, interaction.event = kind, d.activeRequestID, d.generation, payload
+		d.interactions[requestID] = interaction
+		return nil
+	})
 	if d.r != nil && d.r.subagents != nil {
 		d.refreshAttention()
 	}
@@ -1212,55 +942,57 @@ func (d *sessionDriver) Respond(response InteractionResponse) error {
 	if response.InteractionID == "" {
 		return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), Operation: "respond"}
 	}
-	d.mu.Lock()
-	interaction, pending := d.interactions[response.InteractionID]
-	if !pending {
-		d.mu.Unlock()
-		return &SessionError{Kind: SessionErrorStale, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond"}
-	}
-	if interaction.turnID != d.activeRequestID || interaction.generation != d.generation {
+	err := d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		id := d.sessionIDLocked()
+		fail := func(kind SessionErrorKind, operation string) error {
+			return &SessionError{Kind: kind, SessionID: id, RequestID: response.InteractionID, Operation: SessionOperation(operation)}
+		}
+		interaction, pending := d.interactions[response.InteractionID]
+		if !pending || d.stopped || interaction.turnID != d.activeRequestID || interaction.generation != d.generation {
+			return fail(SessionErrorStale, "respond_generation")
+		}
+		if interaction.kind != response.Kind {
+			return fail(SessionErrorInvalid, "respond_kind")
+		}
+		if d.r == nil {
+			return fail(SessionErrorNotFound, "respond")
+		}
+		var delivered bool
+		switch response.Kind {
+		case InteractionConfirmation, InteractionMaxIterations:
+			if !IsValidResumeType(response.Resume.Type) {
+				return fail(SessionErrorInvalid, "respond_resume")
+			}
+			response.Resume.Type = NormalizeResumeType(response.Resume.Type)
+			response.Resume.SessionID = id
+			response.Resume.RequestID = response.InteractionID
+			if interaction.resume != nil {
+				select {
+				case interaction.resume <- response.Resume:
+					delivered = true
+				default:
+				}
+			}
+		case InteractionElicitation:
+			event, ok := interaction.event.(*ElicitationRequestEvent)
+			if !ok || response.ElicitationID == "" || event.ElicitationID != response.ElicitationID {
+				return fail(SessionErrorInvalid, "respond_elicitation")
+			}
+			if interaction.waiter != nil {
+				delivered = interaction.waiter.tryResolve(response.Elicitation)
+			}
+		default:
+			return fail(SessionErrorInvalid, "respond")
+		}
+		if !delivered {
+			return fail(SessionErrorStale, "respond")
+		}
+		// Claim and channel delivery are one transition, even if the receiver drains immediately.
 		d.resolveInteractionLocked(response.InteractionID)
-		d.mu.Unlock()
-		d.refreshAttention()
-		return &SessionError{Kind: SessionErrorStale, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond_generation"}
-	}
-	d.mu.Unlock()
-	if interaction.kind != response.Kind {
-		return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond_kind"}
-	}
-	if d.r == nil || d.r.interactions == nil {
-		return &SessionError{Kind: SessionErrorNotFound, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond"}
-	}
-	switch response.Kind {
-	case InteractionConfirmation, InteractionMaxIterations:
-		if !IsValidResumeType(response.Resume.Type) {
-			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond_resume"}
-		}
-		response.Resume.Type = NormalizeResumeType(response.Resume.Type)
-		response.Resume.SessionID = d.sessionID()
-		response.Resume.RequestID = response.InteractionID
-		if d.r.interactions.sendResume(d.sessionID(), response.Resume) {
-			d.mu.Lock()
-			d.resolveInteractionLocked(response.InteractionID)
-			d.mu.Unlock()
-			d.refreshAttention()
-			return nil
-		}
-	case InteractionElicitation:
-		if response.ElicitationID == "" {
-			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond_elicitation"}
-		}
-		if d.r.elicitationWaiters.resolve(response.ElicitationID, response.Elicitation) {
-			d.mu.Lock()
-			d.resolveInteractionLocked(response.InteractionID)
-			d.mu.Unlock()
-			d.refreshAttention()
-			return nil
-		}
-	default:
-		return &SessionError{Kind: SessionErrorInvalid, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond"}
-	}
-	return &SessionError{Kind: SessionErrorStale, SessionID: d.sessionID(), RequestID: response.InteractionID, Operation: "respond"}
+		return nil
+	})
+	d.refreshAttention()
+	return err
 }
 
 func (d *sessionDriver) LastError() string {
@@ -1287,7 +1019,11 @@ func (d *sessionDriver) snapshotLocked() (*session.Session, SessionStatus, []Int
 	}
 	interactions := make([]InteractionSnapshot, 0, len(d.interactions))
 	for requestID, interaction := range d.interactions {
-		item := InteractionSnapshot{SessionID: d.sessionIDLocked(), InteractionID: requestID, Kind: interaction.kind, Event: interaction.event}
+		payload := interaction.event
+		if detached, err := observerEventSnapshot(payload); err == nil {
+			payload = detached
+		}
+		item := InteractionSnapshot{SessionID: d.sessionIDLocked(), InteractionID: requestID, Kind: interaction.kind, Event: payload}
 		if elicitation, ok := interaction.event.(*ElicitationRequestEvent); ok {
 			item.ElicitationID = elicitation.ElicitationID
 		}
@@ -1332,75 +1068,72 @@ func (d *sessionDriver) Status() SessionStatus {
 // start against the same mutable session snapshot. Accepted session input is a
 // separate state and is never overtaken by compaction.
 func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, sink EventSink) error {
-	d.mu.Lock()
-	sessionID := d.sessionIDLocked()
-	if admissionErr := d.admitLocked(SessionOperationCompact); admissionErr != nil {
-		d.mu.Unlock()
-		return admissionErr
-	}
-	d.compactReserved = true
-	d.compactOperation++
-	operation := d.compactOperation
-	if sink == nil {
-		sink = EventSinkFunc(func(Event) {})
-	}
-	reservedSink := EventSinkFunc(func(event Event) {
-		sink.Emit(event)
+	var operation uint64
+	var running bool
+	var scratch *session.Session
+	var operationCtx context.Context
+	var cancel context.CancelFunc
+	err := d.ownerCall(ctx, func() error {
+		if err := d.admitLocked(SessionOperationCompact); err != nil {
+			return err
+		}
+		d.compactReserved = true
+		d.compactOperation++
+		operation = d.compactOperation
+		running = d.running()
+		if running {
+			if sink == nil {
+				sink = EventSinkFunc(func(Event) {})
+			}
+			d.queuedCompaction = &liveCompactionRequest{additionalPrompt: additionalPrompt, events: sink}
+		}
+		if !running {
+			scratch = d.sess.Clone()
+			operationCtx, cancel = context.WithCancel(ctx) //nolint:gosec,fatcontext // owner retains cancel; worker defers it and stop fences it
+			d.compactCancel = cancel
+			d.phase = sessionStarting
+			d.startDone = make(chan struct{})
+			d.lastActive = time.Now()
+			d.openSettledLocked()
+			d.wg.Add(1)
+		}
+		return nil
 	})
-	completeReservation := func() {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		if d.compactOperation == operation {
-			d.compactReserved = false
-		}
-	}
-	if d.running() {
-		d.mu.Unlock()
-		err := d.r.compactLiveSession(ctx, sessionID, additionalPrompt, reservedSink, completeReservation)
-		if err != nil {
-			completeReservation()
-		}
+	if err != nil {
 		return err
 	}
-	sess := d.sess
-	if sess == nil {
-		d.compactReserved = false
-		d.mu.Unlock()
-		return &SessionError{Kind: SessionErrorInvalid, Operation: "compact"}
-	}
+
 	if sink == nil {
 		sink = EventSinkFunc(func(Event) {})
 	}
-	operationCtx, cancel := context.WithCancel(ctx)
-	d.compactCancel = cancel
-	d.phase = sessionStarting
-	d.startDone = make(chan struct{})
-	d.lastActive = time.Now()
-	d.openSettledLocked()
-	d.wg.Add(1)
-	d.mu.Unlock()
-
+	if running {
+		return nil
+	}
 	go func() {
 		defer d.wg.Done()
-		d.r.runLiveCompactionRequest(d.scopeModels(operationCtx), sess, liveCompactionRequest{additionalPrompt: additionalPrompt, events: reservedSink})
-
-		d.mu.Lock()
-		if d.compactOperation == operation {
+		defer cancel()
+		workerCtx := context.WithValue(operationCtx, compactionIdentityKey{}, compactionIdentity{d, operation})
+		d.r.runLiveCompactionRequest(d.scopeModels(workerCtx), scratch, liveCompactionRequest{additionalPrompt: additionalPrompt, events: sink})
+		var callbacks []func()
+		wake := false
+		_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+			if d.compactOperation != operation {
+				return nil
+			}
 			d.compactReserved = false
 			d.compactCancel = nil
-		}
-		d.leave(sessionStarting)
-		d.lastActive = time.Now()
-		d.signalStartDoneLocked()
-		d.closeSettledLocked()
-		wakePending := !d.stopped && len(d.pending) != 0
-		callbacks := d.settledCallbacksLocked()
-		d.mu.Unlock()
-		cancel()
+			d.leave(sessionStarting)
+			d.lastActive = time.Now()
+			d.signalStartDoneLocked()
+			d.closeSettledLocked()
+			wake = !d.stopped && len(d.pending) != 0
+			callbacks = d.settledCallbacksLocked()
+			return nil
+		})
 		for _, fn := range callbacks {
 			fn()
 		}
-		if wakePending {
+		if wake {
 			d.WakePending()
 		}
 	}()
@@ -1511,135 +1244,153 @@ func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Co
 }
 
 func (d *sessionDriver) prepareStartAdmissionLocked(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
-	if d.r.sessionDrivers != nil {
-		d.r.sessionDrivers.runMu.Lock()
-	}
-	admissionLocked := true
-	unlockAdmission := func() {
-		if admissionLocked && d.r.sessionDrivers != nil {
-			d.r.sessionDrivers.runMu.Unlock()
-		}
-		admissionLocked = false
-	}
-	defer unlockAdmission()
+	return d.prepareStartReservation(ctx, wake, false)
+}
 
+var errSessionAdmissionContended = errors.New("session admission is contended")
+
+func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, continuation bool) (context.Context, uint64, []func(), error) {
+	var gate sessionStartGate
+	var abort func()
+	var err error
 	for {
-		if d.r.sessionDrivers != nil {
-			if err := d.r.sessionDrivers.admitRun(d); err != nil {
-				return nil, 0, nil, err
+		err = d.ownerCall(ctx, func() error {
+			if d.viewDormant {
+				return &SessionError{Kind: SessionErrorInvalid, Operation: "view_dormant"}
 			}
-		}
-		if d.mu.TryLock() {
+			if d.stopped || d.r.lifetime().Err() != nil {
+				return ErrSessionStopped
+			}
+			if (!continuation && (d.running() || d.starting() || d.settling())) || d.switchReserved || d.compactReserved {
+				return &SessionError{Kind: SessionErrorCapacity, Operation: SessionOperationStart, Reason: SessionErrorReasonBusy}
+			}
+			if !continuation && d.r.sessionDrivers != nil {
+				if !d.r.sessionDrivers.runMu.TryLock() {
+					return errSessionAdmissionContended
+				}
+				defer d.r.sessionDrivers.runMu.Unlock()
+				if err := d.r.sessionDrivers.admitRun(d); err != nil {
+					return err
+				}
+			}
+			d.phase, d.startDone = sessionStarting, make(chan struct{})
+			d.startCanceled = false
+			if len(d.pending) > 0 {
+				d.activeRequestID = d.pending[0].RequestID
+			}
+			d.publishRegistryStateLocked()
+			if !continuation {
+				gate, abort = d.preStart, d.abortStart
+			}
+			return nil
+		})
+		if !errors.Is(err, errSessionAdmissionContended) {
 			break
 		}
-		// Same-session edits and appends linearize before start, rather than
-		// becoming spurious capacity failures. Wait without global admission
-		// ownership, then recheck capacity before reserving the starting phase.
-		unlockAdmission()
-		d.mu.Lock()
-		d.mu.Unlock()
-		if err := ctx.Err(); err != nil {
-			return nil, 0, nil, err
+		timer := time.NewTimer(subagentPersistenceRetryBase)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, 0, nil, ctx.Err()
 		}
-		if d.r.sessionDrivers != nil {
-			d.r.sessionDrivers.runMu.Lock()
+	}
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	fail := func(err error) (context.Context, uint64, []func(), error) {
+		if d.finishCanceledStart() {
+			return nil, 0, nil, context.Canceled
 		}
-		admissionLocked = true
+		_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+			if len(d.pending) > 0 {
+				d.lastError = err.Error()
+				d.publishPromotionFailureLocked(d.pending[0].RequestID, err)
+			}
+			d.leave(sessionStarting)
+			d.activeRequestID = ""
+			d.startCanceled = false
+			d.signalStartDoneLocked()
+			return nil
+		})
+		if abort != nil {
+			abort()
+		}
+		return nil, 0, nil, err
 	}
-
-	if d.viewDormant {
-		d.mu.Unlock()
-		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "view_dormant"}
-	}
-	if d.stopped || d.r.lifetime().Err() != nil {
-		id := d.sessionIDLocked()
-		d.mu.Unlock()
-		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: id, Operation: SessionOperationStart}
-	}
-	if d.running() || d.starting() || d.settling() || d.switchReserved || d.compactReserved {
-		id := d.sessionIDLocked()
-		d.mu.Unlock()
-		return nil, 0, nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: SessionOperationStart, Reason: SessionErrorReasonBusy}
-	}
-	d.phase = sessionStarting
-	d.startDone = make(chan struct{})
-	gate := d.preStart
-	abort := d.abortStart
-	d.mu.Unlock()
-	// Starting is the capacity reservation. No storage or manager gate may hold runMu.
-	unlockAdmission()
-
-	// The manager gate may take the manager mutex. Invoke it without d.mu so
-	// manager stop/settle paths can never invert manager and driver locks.
 	if gate != nil {
 		if err := gate(); err != nil {
-			d.mu.Lock()
-			d.leave(sessionStarting)
-			d.signalStartDoneLocked()
-			d.mu.Unlock()
-			return nil, 0, nil, err
-		}
-	}
-
-	d.mu.Lock()
-	if d.stopped || d.running() || !d.starting() {
-		d.leave(sessionStarting)
-		d.signalStartDoneLocked()
-		d.mu.Unlock()
-		if abort != nil {
-			abort()
-		}
-		return nil, 0, nil, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), Operation: "start"}
-	}
-	if wake && len(d.pending) == 0 {
-		id := d.sessionIDLocked()
-		d.leave(sessionStarting)
-		d.signalStartDoneLocked()
-		d.mu.Unlock()
-		if abort != nil {
-			abort()
-		}
-		return nil, 0, nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: SessionOperationWakePending}
-	}
-	if len(d.pending) > 0 {
-		next := d.pending[0]
-		if next.RequestID != "" {
-			if err := d.promoteInputLocked(next); err != nil {
-				d.lastError = err.Error()
-				d.publishPromotionFailureLocked(next.RequestID, err)
-				d.leave(sessionStarting)
-				d.signalStartDoneLocked()
-				d.mu.Unlock()
-				if abort != nil {
-					abort()
-				}
-				return nil, 0, nil, err
+			if d.finishCanceledStart() {
+				return nil, 0, nil, context.Canceled
 			}
-			d.pending = d.pending[1:]
-			d.activeRequestID = next.RequestID
+			return fail(err)
 		}
 	}
-	d.events.SetRequest(d.sess.ID, d.activeRequestID, d.generation+1)
-	d.leave(sessionStarting)
-	d.beginRun()
-	d.generationResult = ""
-	d.lastActive = time.Now()
-
-	d.rootActive = d.sess != nil && !d.sess.IsSubSession()
-	if d.rootActive {
-		d.r.activeRootStreams.Add(1)
+	var next QueuedMessage
+	err = d.ownerCall(ctx, func() error {
+		if d.stopped || !d.starting() {
+			return ErrSessionStopped
+		}
+		if wake && len(d.pending) == 0 {
+			return &SessionError{Kind: SessionErrorInvalid, Operation: SessionOperationWakePending}
+		}
+		if len(d.pending) > 0 {
+			next = d.pending[0]
+		}
+		return nil
+	})
+	if err != nil {
+		return fail(err)
 	}
-	d.openSettledLocked()
-	d.wg.Add(1)
-	d.generation++
-	generation := d.generation
-
-	runCtx, cancel := context.WithCancel(ctx)
-	stopLifetime := context.AfterFunc(d.r.lifetime(), cancel)
-	d.cancel = func() { stopLifetime(); cancel() }
-	callbacks := d.startedCallbacksLocked()
-	d.signalStartDoneLocked()
-	d.mu.Unlock()
+	if next.RequestID != "" {
+		if err := d.promoteInput(ctx, next.RequestID, func(msg QueuedMessage) {
+			d.pending = slices.DeleteFunc(d.pending, func(value QueuedMessage) bool { return value.RequestID == msg.RequestID })
+			d.activeRequestID = msg.RequestID
+		}); err != nil {
+			if d.finishCanceledStart() {
+				return nil, 0, nil, context.Canceled
+			}
+			return fail(err)
+		}
+	}
+	if d.finishCanceledStart() {
+		return nil, 0, nil, context.Canceled
+	}
+	var runCtx context.Context
+	var generation uint64
+	var callbacks []func()
+	err = d.ownerCall(ctx, func() error {
+		if d.stopped || !d.starting() {
+			return ErrSessionStopped
+		}
+		if d.startCanceled {
+			return context.Canceled
+		}
+		d.events.SetRequest(d.identityID, d.activeRequestID, d.generation+1)
+		d.beginRun()
+		d.generationResult, d.lastActive = "", time.Now()
+		d.openSettledLocked()
+		if !continuation {
+			d.wg.Add(1)
+		}
+		d.generation++
+		generation = d.generation
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithCancel(ctx) //nolint:fatcontext // owner transfers generation cancellation to execution worker
+		stopLifetime := context.AfterFunc(d.r.lifetime(), cancel)
+		d.cancel = func() { stopLifetime(); cancel() }
+		if !continuation {
+			callbacks = d.startedCallbacksLocked()
+		}
+		d.signalStartDoneLocked()
+		return nil
+	})
+	if err != nil {
+		if d.finishCanceledStart() {
+			return nil, 0, nil, context.Canceled
+		}
+		return fail(err)
+	}
 	return runCtx, generation, callbacks, nil
 }
 
@@ -1663,7 +1414,18 @@ func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uin
 	var runErr string
 	cancelled := false
 	ctx = d.scopeModels(ctx)
-	run := d.r.runStreamRaw(ctx, d.session())
+	ctx, scratch, err := d.executionContext(ctx, generation)
+	if err != nil {
+		return d.finishRun(generation, err.Error())
+	}
+	release, err := d.r.acquireExecution(ctx, d.identityID)
+	if err != nil {
+		return d.finishRun(generation, err.Error())
+	}
+	defer release()
+	ctx, cancelBudget := d.r.budgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
+	defer cancelBudget()
+	run := d.r.runStreamRaw(ctx, scratch)
 	for event := range run {
 		if errEvent, ok := event.(*ErrorEvent); ok && runErr == "" {
 			runErr = errEvent.Error
@@ -1697,7 +1459,18 @@ func (d *sessionDriver) driveWake(ctx context.Context, generation uint64) {
 func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint64) (context.Context, uint64, bool) {
 	var runErr string
 	ctx = d.scopeModels(ctx)
-	for event := range d.r.runStreamRaw(ctx, d.session()) {
+	ctx, scratch, err := d.executionContext(ctx, generation)
+	if err != nil {
+		return d.finishRun(generation, err.Error())
+	}
+	release, err := d.r.acquireExecution(ctx, d.identityID)
+	if err != nil {
+		return d.finishRun(generation, err.Error())
+	}
+	defer release()
+	ctx, cancelBudget := d.r.budgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
+	defer cancelBudget()
+	for event := range d.r.runStreamRaw(ctx, scratch) {
 		if errEvent, ok := event.(*ErrorEvent); ok && runErr == "" {
 			runErr = errEvent.Error
 		}
@@ -1712,33 +1485,48 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 }
 
 func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64, runErr string) (context.Context, uint64, bool) {
-	d.mu.Lock()
-	if generation != d.generation || generation <= d.settledGeneration || d.completionInFlight {
-		d.mu.Unlock()
+	var turnID string
+	var outcome TurnOutcome
+	var continuation context.Context
+	var previousCancel context.CancelFunc
+	proceed := false
+	err := d.ownerCall(ctx, func() error {
+		if generation != d.generation || generation <= d.settledGeneration || d.completionInFlight {
+			return nil
+		}
+		if runErr == "" && !d.cancelling() && !d.stopped && !d.settling() && d.hasSteeringLocked() {
+			previousCancel = d.cancel
+			continuation, d.cancel = context.WithCancel(d.r.lifetime()) //nolint:fatcontext // independently rooted successor generation
+			return nil
+		}
+		proceed = true
+		d.lastError, d.completionInFlight = runErr, true
+		if !d.settling() {
+			d.canceledOutcome = d.cancelling()
+		}
+		d.phase = sessionSettling
+		turnID = d.activeRequestID
+		outcome = TurnCompleted
+		if d.canceledOutcome || d.stopped || d.r.lifetime().Err() != nil {
+			outcome = TurnCanceled
+		} else if runErr != "" {
+			outcome = TurnFailed
+		}
+		return nil
+	})
+	if err != nil || !proceed {
+		if continuation != nil {
+			if previousCancel != nil {
+				previousCancel()
+			}
+			return continuation, generation, true
+		}
 		return nil, 0, false
 	}
-	if runErr == "" && !d.cancelling() && !d.stopped && !d.settling() && d.hasSteeringLocked() {
-		nextCtx, cancel := context.WithCancel(d.r.lifetime())
-		previousCancel := d.cancel
-		d.cancel = cancel
-		d.mu.Unlock()
-		if previousCancel != nil {
-			previousCancel()
-		}
-		return nextCtx, generation, true
-	}
-	d.lastError = runErr
-	d.completionInFlight = true
-	if !d.settling() {
-		d.canceledOutcome = d.cancelling()
-	}
-	d.phase = sessionSettling
-	turnID := d.activeRequestID
-	d.mu.Unlock()
 	var completionErr error
 	for _, observer := range d.r.observers {
 		if p, ok := observer.(*PersistenceObserver); ok {
-			if err := p.completionErrorContext(ctx, d.sessionID()); err != nil {
+			if err := p.completionErrorContext(ctx, d.identityID); err != nil {
 				completionErr = err
 				break
 			}
@@ -1748,145 +1536,73 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 		completionErr = d.r.subagents.completeSessionTurnContext(ctx, d, turnID, runErr)
 	}
 	if completionErr == nil && turnID != "" {
-		d.mu.Lock()
-		outcome := TurnCompleted
-		if d.canceledOutcome || d.stopped || d.r.lifetime().Err() != nil {
-			outcome = TurnCanceled
-		} else if runErr != "" {
-			outcome = TurnFailed
+		completionErr = d.persistTurnOutcome(ctx, turnID, outcome)
+	}
+	var completedCancel context.CancelFunc
+	var firstCompletionFailure bool
+	var callbacks []func()
+	var successor bool
+	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+		d.completionInFlight = false
+		if completionErr != nil {
+			firstCompletionFailure = d.completionErr == nil
+			d.completionErr, d.completionRunErr = completionErr, runErr
+			d.lastError, d.persistenceFailure = completionErr.Error(), completionErr
+			d.publishPersistenceFailureLocked(completionErr)
+			d.notifyTurnChangedLocked()
+			return nil
 		}
-		completionErr = d.persistTurnOutcomeLocked(ctx, turnID, outcome)
-		d.mu.Unlock()
+		completedCancel = d.cancel
+		d.phase = sessionIdle
+		d.settledGeneration, d.completionErr, d.persistenceFailure, d.lastFailureKey = generation, nil, nil, ""
+		d.resolveInteractionsLocked()
+		if turnID != "" {
+			d.events.PublishForRequest(d.identityID, turnID, &TurnSettledEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "turn_settled", SessionID: d.identityID, TurnID: turnID, Outcome: outcome})
+		}
+		d.completeTurnLocked(turnID)
+		if len(d.steering) != 0 {
+			d.pending = append(d.steering, d.pending...)
+			d.steering = nil
+			d.refreshSteeringLocked()
+		}
+		successor = !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0
+		if successor {
+			d.phase = sessionStarting
+		}
+		d.cancel, d.activeRequestID = nil, ""
+		d.events.SetRequest(d.identityID, "", 0)
+		if !successor {
+			d.closeSettledLocked()
+			callbacks = d.settledCallbacksLocked()
+		}
+		return nil
+	})
+	if completedCancel != nil {
+		completedCancel()
+	}
+	for _, fn := range callbacks {
+		fn()
 	}
 	if completionErr != nil {
-		d.mu.Lock()
-		d.completionInFlight = false
-		firstFailure := d.completionErr == nil
-		d.completionErr, d.completionRunErr = completionErr, runErr
-		d.lastError = completionErr.Error()
-		d.persistenceFailure = completionErr
-		d.publishPersistenceFailureLocked(completionErr)
-		d.notifyTurnChangedLocked()
-		d.mu.Unlock()
-		if firstFailure {
+		if firstCompletionFailure && d.r.sessionDrivers != nil {
 			d.r.sessionDrivers.signalWork()
 		}
 		return nil, 0, false
 	}
-
-	d.mu.Lock()
-	completedCancel := d.cancel
-	d.leave(sessionSettling)
-	d.completionInFlight = false
-	d.settledGeneration = generation
-	d.completionErr = nil
-	d.persistenceFailure = nil
-	d.lastFailureKey = ""
-	d.resolveInteractionsLocked()
-	// Publication shares the durable settlement guard and precedes waiter release
-	// and successor promotion. The journal only queues events; it invokes no callbacks.
-	if turnID != "" {
-		outcome := TurnCompleted
-		if d.canceledOutcome || d.stopped || d.r.lifetime().Err() != nil {
-			outcome = TurnCanceled
-		} else if runErr != "" {
-			outcome = TurnFailed
-		}
-		d.events.PublishForRequest(d.sessionIDLocked(), turnID, &TurnSettledEvent{
-			AgentContext: newAgentContext(d.AgentNameLocked()),
-			Type:         "turn_settled", SessionID: d.sessionIDLocked(), TurnID: turnID, Outcome: outcome,
-		})
-	}
-	d.completeTurnLocked(turnID)
-	if len(d.steering) != 0 {
-		d.pending = append(d.steering, d.pending...)
-		d.steering = nil
-		d.refreshSteeringLocked()
-	}
-	if !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0 {
-		// Promote the oldest accepted request before the successor starts. This
-		// is one atomic handoff: events from the next turn are correlated to the
-		// request that caused it, and the old generation can no longer settle or
-		// cancel the promoted generation.
-		d.lastError = runErr
-		d.generation++
-		nextGeneration := d.generation
-		next := d.pending[0]
-		if d.sess != nil && next.RequestID != "" {
-			if err := d.promoteInputLocked(next); err != nil {
-				d.lastError = err.Error()
-				d.publishPromotionFailureLocked(next.RequestID, err)
-				failedRootActive := d.rootActive
-				d.leave(sessionRunning)
-				d.lastActive = time.Now()
-
-				d.rootActive = false
-				d.leave(sessionCancelling)
-				d.cancel = nil
-				d.activeRequestID = ""
-				d.events.SetRequest(d.sess.ID, "", 0)
-				d.closeSettledLocked()
-				callbacks := d.settledCallbacksLocked()
-				d.mu.Unlock()
-				if completedCancel != nil {
-					completedCancel()
-				}
-				if failedRootActive {
-					d.r.activeRootStreams.Add(-1)
-				}
-				for _, fn := range callbacks {
-					fn()
-				}
-				if isRetryableSessionError(err) {
-					d.schedulePendingRetry()
-				}
-				return nil, 0, false
+	if successor {
+		nextCtx, nextGeneration, started, err := d.prepareStartReservation(d.r.lifetime(), true, true)
+		if err == nil {
+			// The existing execution worker carries the successor generation.
+			for _, fn := range started {
+				fn()
 			}
+			return nextCtx, nextGeneration, true
 		}
-		d.pending = d.pending[1:]
-		d.activeRequestID = next.RequestID
-		d.beginRun()
-		d.generationResult = ""
-		if d.sess != nil {
-			d.events.SetRequest(d.sess.ID, d.activeRequestID, nextGeneration)
+		_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error { d.closeSettledLocked(); callbacks = d.settledCallbacksLocked(); return nil })
+		for _, fn := range callbacks {
+			fn()
 		}
-		nextCtx, cancel := context.WithCancel(d.r.lifetime())
-		d.cancel = cancel
-
-		d.leave(sessionCancelling)
-		d.mu.Unlock()
-		if completedCancel != nil {
-			completedCancel()
-		}
-		return nextCtx, nextGeneration, true
-	}
-	pending := len(d.pending) > 0
-	rootActive := d.rootActive
-	var callbacks []func()
-	d.lastError = runErr
-	d.leave(sessionRunning)
-	d.lastActive = time.Now()
-
-	d.rootActive = false
-	d.leave(sessionCancelling)
-	d.cancel = nil
-	d.activeRequestID = ""
-	if d.sess != nil {
-		d.events.SetRequest(d.sess.ID, "", 0)
-	}
-	d.closeSettledLocked()
-	if !pending {
-		callbacks = d.settledCallbacksLocked()
-	}
-	d.mu.Unlock()
-	if completedCancel != nil {
-		completedCancel()
-	}
-	if rootActive {
-		d.r.activeRootStreams.Add(-1)
-	}
-	for _, fn := range callbacks {
-		fn()
+		d.schedulePendingRetry()
 	}
 	if d.r.sessionDrivers != nil {
 		d.r.sessionDrivers.signalWork()
@@ -1928,9 +1644,10 @@ func (d *sessionDriver) settledCallbacksLocked() []func() {
 }
 
 func (d *sessionDriver) replaceSession(sess *session.Session) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sess = sess
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		d.sess = sess.Clone()
+		return nil
+	})
 }
 
 func (d *sessionDriver) AgentNameLocked() string {
@@ -1949,7 +1666,10 @@ func (d *sessionDriver) AgentName() string {
 func (d *sessionDriver) session() *session.Session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.sess
+	if d.sess == nil {
+		return nil
+	}
+	return d.sess.Clone()
 }
 
 func (d *sessionDriver) sessionIDLocked() string {
@@ -2023,13 +1743,15 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 }
 
 func (d *sessionDriver) cancelForPersistence(err error) {
-	d.mu.Lock()
-	cancel := d.cancel
+	var cancel context.CancelFunc
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		cancel = d.cancel
 
-	d.lastError = err.Error()
-	d.persistenceFailure = err
-	d.publishPersistenceFailureLocked(err)
-	d.mu.Unlock()
+		d.lastError = err.Error()
+		d.persistenceFailure = err
+		d.publishPersistenceFailureLocked(err)
+		return nil
+	})
 	if cancel != nil && !session.IsTemporary(err) {
 		cancel()
 	}

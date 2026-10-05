@@ -94,9 +94,10 @@ func TestSessionDormancyProtectsEmptyOwnerFromPruneAndCapacityEviction(t *testin
 	committed, err := prepared.Commit(t.Context())
 	require.NoError(t, err)
 	driver := committed.SessionHandle.(*sessionHandle).driver
-	driver.mu.Lock()
-	driver.lastActive = time.Time{}
-	driver.mu.Unlock()
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.lastActive = time.Time{}
+		return nil
+	}))
 	rt.idleRetention = time.Nanosecond
 	func() {
 		rt.sessionDrivers.mu.Lock()
@@ -110,11 +111,15 @@ func TestSessionDormancyProtectsEmptyOwnerFromPruneAndCapacityEviction(t *testin
 	assert.True(t, driver.Status().Dormant)
 	_, err = committed.SessionHandle.Edit(t.Context(), SessionEdit{Kind: SessionEditResume})
 	require.NoError(t, err)
-	func() {
+	require.Eventually(t, func() bool {
 		rt.sessionDrivers.mu.Lock()
 		defer rt.sessionDrivers.mu.Unlock()
-		assert.True(t, rt.sessionDrivers.evictSettledForCapacityLocked(), "explicitly authorized empty session reuses ordinary reclaim policy")
-	}()
+		return rt.sessionDrivers.evictSettledForCapacityLocked()
+	}, time.Second, time.Millisecond, "authorized empty session becomes reclaimable after maintenance drains")
+	_, resident := rt.sessionDrivers.Lookup(archived.ID)
+	assert.False(t, resident)
+	assert.Zero(t, driver.Status().Pending)
+	assert.Empty(t, canonicalSettlements(canonicalReplay(driver)))
 }
 
 func TestSessionDormancyProtectsReportOnlyOwnerAndAncestorPin(t *testing.T) {

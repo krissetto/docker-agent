@@ -597,6 +597,8 @@ type ObserveOptions struct {
 	Since      *uint64
 	Buffer     int
 	Tree       bool
+	// OrderedTree selects atomic descendant baselines and an ordered tree tail.
+	OrderedTree bool
 }
 
 // InteractionSnapshot is an immutable outstanding interaction. Event is
@@ -675,12 +677,23 @@ func (envelope SessionEvent) IsLiveSeed() bool {
 	}
 }
 
+// TreeUpdate admits a descendant baseline and its live seeds atomically, or
+// carries one later event. Exactly one of Snapshot and Event is set.
+type TreeUpdate struct {
+	Snapshot *SessionSnapshot
+	Replay   []SessionEvent
+	Event    *SessionEvent
+}
+
 // Observation contains an initial snapshot, ordered replay, and a live
 // tail. Cancel is idempotent and does not stop the session. A Gap envelope is a
 // resnapshot barrier: consumers must discard their projection and re-observe
 // without a cursor; no later tail may be applied to stale projected state.
+// OrderedTree observations use TreeUpdates instead of SessionsAdded and Events.
+// Legacy tree channels remain available when OrderedTree is false.
 type Observation struct {
 	Initial       []SessionSnapshot
+	TreeUpdates   <-chan TreeUpdate
 	SessionsAdded <-chan SessionSnapshot
 	Replay        []SessionEvent
 	Events        <-chan SessionEvent

@@ -144,7 +144,7 @@ func TestSessionHandleConformance(t *testing.T) {
 				defer fixture.close()
 				handle := fixture.handle
 				err := handle.Respond(t.Context(), InteractionResponse{InteractionID: "stale", Kind: InteractionConfirmation, Resume: ResumeApprove()})
-				assertSessionContractError(t, err, SessionErrorStale, SessionOperationRespond)
+				assertSessionContractError(t, err, SessionErrorStale, SessionOperationRespondGeneration)
 				require.NoError(t, handle.Release(t.Context()))
 				assert.Equal(t, handle.ID(), fixture.afterRelease().ID(), "release relinquishes this handle generation, not durable identity")
 			})
@@ -400,7 +400,7 @@ func (s *remoteContractServer) serveHTTP(w http.ResponseWriter, r *http.Request)
 		fmt.Fprintf(w, `{"session_id":"contract-session","turn_id":%q,"outcome":%q}`, request.TurnID, outcome)
 	case "responses":
 		w.WriteHeader(http.StatusPreconditionFailed)
-		fmt.Fprint(w, `{"error":"stale","operation":"respond","session_id":"contract-session"}`)
+		fmt.Fprint(w, `{"error":"stale","operation":"respond_generation","session_id":"contract-session"}`)
 	case "events":
 		s.writeEvents(w, r)
 	default:

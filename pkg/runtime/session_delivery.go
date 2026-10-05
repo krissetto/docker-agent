@@ -2,10 +2,9 @@ package runtime
 
 import "context"
 
-// Detached message delivery is owned by per-session drivers: a live session
-// buffers input for its next steering drain; an idle known session can be
-// woken by runtime-authored notes; unknown sessions keep wakeable notes until
-// their session object is seen.
+// Detached notes are addressed only to known session drivers. Idle sessions
+// retain runtime-authored notes for their next execution; absent inboxes reject
+// delivery rather than acknowledging volatile future-session buffering.
 
 func (r *LocalRuntime) deliverOrBuffer(ctx context.Context, sessionID, content string) {
 	r.sessionDrivers.PostReliable(ctx, sessionID, QueuedMessage{Content: content})

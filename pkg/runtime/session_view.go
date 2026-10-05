@@ -233,10 +233,12 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 		}
 	}
 	m, g := p.r.subagents, p.r.sessionDrivers
-	m.restoreMu.Lock()
-	defer m.restoreMu.Unlock()
-	m.transitionMu.Lock()
-	defer m.transitionMu.Unlock()
+	restore := m.transition("restore:" + p.root.ID)
+	restore.Lock()
+	defer restore.Unlock()
+	transition := m.transition(p.root.ID)
+	transition.Lock()
+	defer transition.Unlock()
 	stopped := make(map[string]bool)
 	candidates := []*session.Session{p.root}
 	for _, entry := range p.nodes {
@@ -252,11 +254,10 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 		}
 		var replaces *sessionDriver
 		if existing, ok := g.Lookup(candidate.ID); ok {
-			existing.mu.Lock()
-			identityMatches := existing.sess != nil && existing.sess.ParentID == candidate.ParentID && existing.AgentNameLocked() == candidate.AgentName
-			valid := identityMatches && (!existing.stopped || (stopped[candidate.ID] && existing.stoppedView))
-			existing.mu.Unlock()
-			if !valid && identityMatches && stopped[candidate.ID] && existing.stoppedViewReplaceable() {
+			projection := existing.registrySnapshot()
+			identityMatches := existing.identityParent == candidate.ParentID && projection.agentName == candidate.AgentName
+			valid := identityMatches && (!projection.stopped || (stopped[candidate.ID] && projection.stoppedView))
+			if !valid && identityMatches && stopped[candidate.ID] && projection.replaceable && driverDrained(existing) {
 				replaces = existing
 			} else if !valid {
 				p.discard()
@@ -272,14 +273,19 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 			p.discard()
 			return nil, err
 		}
-		reservation.driver.mu.Lock()
-		reservation.driver.viewDormant = true
-		if stopped[candidate.ID] {
-			reservation.driver.stopped = true
-			reservation.driver.stoppedView = true
-			reservation.driver.pending = nil
+		if err := reservation.driver.ownerCall(p.ctx(), func() error {
+			reservation.driver.viewDormant = true
+			if stopped[candidate.ID] {
+				reservation.driver.stopped = true
+				reservation.driver.stoppedView = true
+				reservation.driver.pending = nil
+			}
+			return nil
+		}); err != nil {
+			reservation.Discard()
+			p.discard()
+			return nil, err
 		}
-		reservation.driver.mu.Unlock()
 		p.reservations = append(p.reservations, reservation)
 	}
 	context.AfterFunc(preparationCtx, func() {
@@ -307,10 +313,8 @@ func (p *preparedSessionView) validateRegistryLocked() error {
 		if g.drivers[id] != expected {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: id, Operation: "commit_view"}
 		}
-		expected.mu.Lock()
-		invalidated := expected.stopped && !expected.stoppedView
-		expected.mu.Unlock()
-		if invalidated {
+		projection := expected.registrySnapshot()
+		if projection.stopped && !projection.stoppedView {
 			return ErrSessionStopped
 		}
 	}
@@ -322,16 +326,6 @@ func (p *preparedSessionView) validateRegistryLocked() error {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: reservation.id, Operation: "commit_view"}
 		}
 	}
-	additional := 0
-	for _, reservation := range p.reservations {
-		if reservation.replaces == nil {
-			additional++
-		}
-	}
-	limit := g.maxSessionsLocked()
-	if limit == 0 || (limit > 0 && len(g.drivers)+additional > limit) {
-		return &SessionError{Kind: SessionErrorCapacity, Operation: "commit_view", Reason: SessionErrorReasonLimit, Limit: limit}
-	}
 	return nil
 }
 
@@ -341,15 +335,21 @@ func (p *preparedSessionView) canonicalResult() (CommittedSessionView, error) {
 		return CommittedSessionView{}, err
 	}
 	driver := handle.(*sessionHandle).driver
-	driver.mu.Lock()
+	projection := driver.registrySnapshot()
+	if projection.stopped && !projection.stoppedView {
+		return CommittedSessionView{}, ErrSessionStopped
+	}
 	info := p.info
-	info.Session = driver.sess.Clone()
+	info.Session = driver.session()
+	if info.Session == nil {
+		return CommittedSessionView{}, ErrSessionClosed
+	}
+	_, modelRef, _ := driver.ModelBindingSnapshot()
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
 	}
-	info.Binding.AgentName, info.Binding.Model = driver.AgentNameLocked(), driver.modelRef
-	info.WorkingDir = driver.sess.WorkingDir
-	driver.mu.Unlock()
+	info.Binding.AgentName, info.Binding.Model = info.Session.AgentName, modelRef
+	info.WorkingDir = info.Session.WorkingDir
 	if info.Attach != nil {
 		// Copy attach metadata without cloning the stale session it replaces.
 		attach := *info.Attach
@@ -378,10 +378,12 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		return CommittedSessionView{}, err
 	}
 	m, g := p.r.subagents, p.r.sessionDrivers
-	m.restoreMu.Lock()
-	defer m.restoreMu.Unlock()
-	m.transitionMu.Lock()
-	defer m.transitionMu.Unlock()
+	restore := m.transition("restore:" + p.root.ID)
+	restore.Lock()
+	defer restore.Unlock()
+	transition := m.transition(p.root.ID)
+	transition.Lock()
+	defer transition.Unlock()
 	m.mu.Lock()
 	for _, record := range p.records {
 		if current := m.children[record.Node.ID]; current != nil && current.durable.Revision != record.Revision {
@@ -541,25 +543,27 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		record := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, parentAgentName: parentAgent, sessionID: node.SessionID, agent: entry.childAgent, durable: known[node.ID]}
 		if driver := byID[node.SessionID]; driver != nil {
 			id := node.ID
+			g.mu.Unlock()
 			driver.SetPreStartErrorGate(func() error { return m.admitChildRun(id) }, func() { m.abortChildStart(id) })
 			record.unwatch = driver.OnStarted(func() { m.markChildRunning(id) })
+			g.mu.Lock()
 			m.sessions[node.SessionID] = &sessionSubagents{node: node.ID}
 		}
 		if old := m.children[node.ID]; old != nil && old.unwatch != nil {
+			g.mu.Unlock()
 			old.unwatch()
+			g.mu.Lock()
 		}
 		m.children[node.ID] = record
 	}
 	for _, reservation := range p.reservations {
-		if !reservation.driver.stoppedView {
-			reservation.driver.adopt(g.orphans[reservation.id])
-		}
 		g.drivers[reservation.id] = reservation.driver
-		delete(g.orphans, reservation.id)
 		delete(g.reservations, reservation.id)
 	}
 	if rootDriver := g.drivers[p.root.ID]; rootDriver != nil {
+		g.mu.Unlock()
 		m.bindRootDriverLocked(p.root.ID, m.sessions[p.root.ID], rootDriver)
+		g.mu.Lock()
 	}
 	// Build the response directly while registry publication is locked: calling
 	// SessionByID here would reenter registry.mu.
@@ -567,15 +571,20 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	if driver == nil {
 		return CommittedSessionView{}, errors.New("selected view driver was not published")
 	}
-	driver.mu.Lock()
+	g.mu.Unlock()
 	info := p.info
-	info.Session = driver.sess.Clone()
+	info.Session = driver.session()
+	if info.Session == nil {
+		g.mu.Lock()
+		return CommittedSessionView{}, ErrSessionClosed
+	}
+	_, modelRef, _ := driver.ModelBindingSnapshot()
+	g.mu.Lock()
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
 	}
-	info.Binding.AgentName, info.Binding.Model = driver.AgentNameLocked(), driver.modelRef
-	info.WorkingDir = driver.sess.WorkingDir
-	driver.mu.Unlock()
+	info.Binding.AgentName, info.Binding.Model = info.Session.AgentName, modelRef
+	info.WorkingDir = info.Session.WorkingDir
 	if info.Attach != nil {
 		// Copy attach metadata without cloning the stale session it replaces.
 		attach := *info.Attach

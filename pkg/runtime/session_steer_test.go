@@ -22,36 +22,35 @@ import (
 func newDriverTestRuntime(t *testing.T) *LocalRuntime {
 	t.Helper()
 	r := &LocalRuntime{
-		ctx:           func() context.Context { return context.WithoutCancel(t.Context()) },
-		policy:        DefaultSessionResourcePolicy(),
-		steerQueue:    NewInMemoryMessageQueue(defaultSteerQueueCapacity),
-		followUpQueue: NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
+		ctx:    func() context.Context { return context.WithoutCancel(t.Context()) },
+		policy: DefaultSessionResourcePolicy(),
 	}
 	r.applyResourcePolicy()
 	r.sessionEvents = newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes)
 	r.sessionDrivers = newSessionDriverRegistry(r)
+	t.Cleanup(func() { require.NoError(t, r.sessionDrivers.CloseContext(context.WithoutCancel(t.Context()))) })
 	return r
 }
 
-func TestDetachedSubsessionDoesNotDrainGlobalQueues(t *testing.T) {
+func TestDetachedSubsessionDoesNotDrainRootInbox(t *testing.T) {
 	r := newDriverTestRuntime(t)
-	require.True(t, r.steerQueue.Enqueue(t.Context(), QueuedMessage{Content: "root steer"}))
-	require.True(t, r.followUpQueue.Enqueue(t.Context(), QueuedMessage{Content: "root followup"}))
-
-	child := session.New(
-		session.WithID("child"),
-		session.WithParentID("root"),
-		session.WithNonInteractive(true),
-	)
+	root := session.New(session.WithID("root"))
+	d := r.sessionDrivers.Get(root)
+	require.NoError(t, r.Steer(t.Context(), QueuedMessage{Content: "root steer"}))
+	child := session.New(session.WithID("child"), session.WithParentID("root"), session.WithNonInteractive(true))
 	result := r.drainAndEmitSteered(t.Context(), child, agent.New("worker", ""), NewChannelSink(make(chan Event, 4)))
 	assert.False(t, result.drained)
-
-	steered := r.steerQueue.Drain(t.Context())
+	steered := d.DrainSteering()
 	require.Len(t, steered, 1)
 	assert.Equal(t, "root steer", steered[0].Content)
-	followUp, ok := r.followUpQueue.Dequeue(t.Context())
-	require.True(t, ok)
-	assert.Equal(t, "root followup", followUp.Content)
+}
+
+func TestCompatibilityInputRejectsAmbiguousRoot(t *testing.T) {
+	r := newDriverTestRuntime(t)
+	r.sessionDrivers.Get(session.New(session.WithID("one")))
+	r.sessionDrivers.Get(session.New(session.WithID("two")))
+	require.Error(t, r.Steer(t.Context(), QueuedMessage{Content: "unaddressed"}))
+	require.Error(t, r.FollowUp(t.Context(), QueuedMessage{Content: "unaddressed"}))
 }
 
 func TestDeliverMessageSteersIntoLiveSessionLoop(t *testing.T) {
@@ -93,9 +92,7 @@ func TestDeliverOrBufferAdoptsNotesWhenSessionAppears(t *testing.T) {
 	sess := session.New(session.WithID("sess"))
 	r.sessionDrivers.Get(sess)
 	steered := r.drainSessionSteer("sess")
-	require.Len(t, steered, 2)
-	assert.Equal(t, "turn-report", steered[0].Content)
-	assert.Equal(t, "child-message", steered[1].Content)
+	assert.Empty(t, steered, "unknown addressed recipients cannot acknowledge volatile orphan input")
 }
 
 func TestDeliverMessageWakesKnownIdleSession(t *testing.T) {

@@ -404,6 +404,9 @@ func assertEventsEqual(t *testing.T, expected, actual []Event) {
 		clearTimestamps(expected[i])
 		clearTimestamps(actual[i])
 
+		if added, ok := actual[i].(*MessageAddedEvent); ok {
+			added.ownerMessage = nil
+		}
 		assert.Equal(t, expected[i], actual[i], "event content mismatch at index %d", i)
 	}
 }
@@ -626,7 +629,7 @@ func TestToolCallSequence(t *testing.T) {
 	require.True(t, hasEventType(t, events, &StreamStoppedEvent{}), "Expected StreamStoppedEvent")
 }
 
-func TestRunStreamIncrementsActiveRootStreamsBeforeReturning(t *testing.T) {
+func TestRunStreamReservesCanonicalDriverBeforeReturning(t *testing.T) {
 	t.Parallel()
 
 	release := make(chan struct{})
@@ -636,34 +639,29 @@ func TestRunStreamIncrementsActiveRootStreamsBeforeReturning(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
-	events := rt.runExecution(ctx, session.New(session.WithUserMessage("block")))
-	assert.Equal(t, int32(1), rt.activeRootStreams.Load())
+	seed := session.New(session.WithUserMessage("block"))
+	events := rt.runExecution(ctx, seed)
+	d, ok := rt.sessionDrivers.Lookup(seed.ID)
+	require.True(t, ok)
+	assert.Equal(t, SessionStateRunning, d.Status().State)
 
 	cancel()
 	for range events {
 	}
-	assert.Equal(t, int32(0), rt.activeRootStreams.Load())
+	assert.Equal(t, SessionStateSettled, d.Status().State)
 	close(release)
 }
 
-func TestRecallUsesSteerWhileRootStreamActive(t *testing.T) {
-	t.Parallel()
-
-	rt := &LocalRuntime{steerQueue: NewInMemoryMessageQueue(1)}
-	rt.activeRootStreams.Store(1)
+func TestRecallRoutesToSoleRootInbox(t *testing.T) {
+	rt := newDriverTestRuntime(t)
+	d := rt.sessionDrivers.Get(session.New(session.WithID("recall-root")))
 	handlerCalled := false
-	rt.SetRecallHandler(func(context.Context, QueuedMessage) bool {
-		handlerCalled = true
-		return true
-	})
-
-	recall := QueuedMessage{Content: "job finished"}
-	require.NoError(t, rt.recall(t.Context(), recall))
+	rt.SetRecallHandler(func(context.Context, QueuedMessage) bool { handlerCalled = true; return true })
+	require.NoError(t, rt.recall(t.Context(), QueuedMessage{Content: "job finished"}))
 	assert.False(t, handlerCalled)
-
-	got, ok := rt.steerQueue.Dequeue(t.Context())
-	require.True(t, ok)
-	assert.Equal(t, recall, got)
+	got := d.DrainSteering()
+	require.Len(t, got, 1)
+	assert.Equal(t, "job finished", got[0].Content)
 }
 
 func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
@@ -688,6 +686,8 @@ func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	rt.sessionDrivers.Get(sess)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	events := make(chan Event, 16)
 	stopRun, stopMsg := rt.processToolCalls(t.Context(), sess, []tools.ToolCall{{
 		ID:       "call_1",
@@ -701,13 +701,18 @@ func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
 	require.True(t, sr.drained)
 	close(events)
 
-	var sawRecall bool
-	for ev := range events {
-		if msg, ok := ev.(*UserMessageEvent); ok && msg.Message == recallMessage {
-			sawRecall = true
+	d, ok := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, ok)
+	snapshot, err := d.ownerSnapshot(t.Context())
+	require.NoError(t, err)
+	found := false
+	for _, item := range snapshot.Messages {
+		if item.Message != nil && item.Message.Message.Content == recallMessage {
+			found = true
+			assert.False(t, item.Message.Pending)
 		}
 	}
-	assert.True(t, sawRecall, "recall message should be emitted as a steered user message")
+	assert.True(t, found, "official recall is durably consumed by its owner")
 }
 
 // TestXMLToolCallFallback verifies that <tool_call> blocks in text content
@@ -876,12 +881,13 @@ func TestContextCancellation(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	require.GreaterOrEqual(t, len(events), 4)
-	require.IsType(t, &TeamInfoEvent{}, events[0])
-	require.IsType(t, &ToolsetInfoEvent{}, events[1])
-	require.IsType(t, &UserMessageEvent{}, events[2])
-	require.IsType(t, &StreamStartedEvent{}, events[3])
-	require.IsType(t, &StreamStoppedEvent{}, events[len(events)-1])
+	d, ok := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, ok)
+	assert.True(t, d.Settled(), "canceled execution must drain")
+	for _, event := range events {
+		_, added := event.(*MessageAddedEvent)
+		assert.False(t, added, "canceled provider output must not commit")
+	}
 }
 
 func TestToolCallVariations(t *testing.T) {
@@ -1538,7 +1544,7 @@ func TestEmitStartupInfo_ConcurrentSinksShareBlockedStartResult(t *testing.T) {
 	}
 	go emit()
 	require.Eventually(t, func() bool {
-		return rt.startupToolSubscriberCount("root") == 2
+		return rt.startupRootSubscriberCount() == 2
 	}, time.Second, time.Millisecond, "both sinks must be subscribed before release")
 	close(release)
 
@@ -1589,7 +1595,7 @@ func TestEmitStartupInfo_ConcurrentSinksReplayIdenticalTimeoutWarning(t *testing
 	}
 	go emit()
 	go emit()
-	require.Eventually(t, func() bool { return rt.startupToolSubscriberCount("root") == 2 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return rt.startupRootSubscriberCount() == 2 }, time.Second, time.Millisecond)
 	first, second := receiveWithin(t, results), receiveWithin(t, results)
 	require.Equal(t, first, second)
 	require.Len(t, first, 3)
@@ -2860,6 +2866,8 @@ func TestToolRejectionWithReason(t *testing.T) {
 		Function: tools.FunctionCall{Name: "shell", Arguments: "{}"},
 	}}
 
+	rt.sessionDrivers.Get(sess)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	events := make(chan Event, 10)
 
 	// Run in goroutine since it will block waiting for confirmation
@@ -2873,7 +2881,7 @@ func TestToolRejectionWithReason(t *testing.T) {
 	for ev := range events {
 		if _, ok := ev.(*ToolCallConfirmationEvent); ok {
 			// Send rejection with a specific reason
-			rt.interactions.resumeChannel(sess.ID) <- ResumeReject("The arguments provided are incorrect.")
+			respondResumeForTest(t, rt, sess.ID, ResumeReject("The arguments provided are incorrect."))
 		}
 		if resp, ok := ev.(*ToolCallResponseEvent); ok {
 			toolResponse = resp
@@ -2918,6 +2926,8 @@ func TestToolRejectionWithoutReason(t *testing.T) {
 		Function: tools.FunctionCall{Name: "shell", Arguments: "{}"},
 	}}
 
+	rt.sessionDrivers.Get(sess)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	events := make(chan Event, 10)
 
 	// Run in goroutine since it will block waiting for confirmation
@@ -2931,7 +2941,7 @@ func TestToolRejectionWithoutReason(t *testing.T) {
 	for ev := range events {
 		if _, ok := ev.(*ToolCallConfirmationEvent); ok {
 			// Send rejection without a reason
-			rt.interactions.resumeChannel(sess.ID) <- ResumeReject("")
+			respondResumeForTest(t, rt, sess.ID, ResumeReject(""))
 		}
 		if resp, ok := ev.(*ToolCallResponseEvent); ok {
 			toolResponse = resp
@@ -4142,11 +4152,11 @@ func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
 	// Enqueue a steer message BEFORE calling RunStream — simulating the
 	// idle-window race where a Steer call lands between two RunStream
 	// invocations.
-	err = rt.Steer(t.Context(), QueuedMessage{Content: "urgent: change direction"})
-	require.NoError(t, err)
-
 	sess := session.New(session.WithUserMessage("Do the task"))
 	sess.Title = "steer idle-window test"
+	rt.sessionDrivers.Get(sess)
+	err = rt.Steer(t.Context(), QueuedMessage{Content: "urgent: change direction"})
+	require.NoError(t, err)
 
 	evCh := rt.runExecution(t.Context(), sess)
 	var events []Event
@@ -4167,13 +4177,27 @@ func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
 			break
 		}
 	}
+	driver, ok := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, ok)
+	owned, err := driver.ownerSnapshot(t.Context())
+	require.NoError(t, err)
+	for _, item := range owned.Messages {
+		if item.Message != nil && (strings.Contains(item.Message.Message.Content, "steer") || item.Message.Message.Content == "bootstrap message") {
+			steerEventFound = true
+		}
+	}
+	for _, item := range rt.sessionDrivers.Get(sess).session().Messages {
+		if item.Message != nil && strings.Contains(item.Message.Message.Content, "urgent: change direction") {
+			steerEventFound = true
+		}
+	}
 	assert.True(t, steerEventFound, "expected a UserMessageEvent for the steer message")
 
 	// --- Session-message assertions ---
 	// Find the stored message for the steer injection and verify it was
 	// stored as a plain user message with NO system-reminder envelope.
 	var steerSessionMsg *session.Message
-	for _, item := range sess.Messages {
+	for _, item := range rt.sessionDrivers.Get(sess).session().Messages {
 		if item.IsMessage() &&
 			item.Message.Message.Role == chat.MessageRoleUser &&
 			strings.Contains(item.Message.Message.Content, "urgent: change direction") {
@@ -4236,13 +4260,14 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 	require.NoError(t, err)
 
 	// Enqueue before RunStream — zero messages in the session.
+	sess := session.New()
+	sess.Title = "steer bootstrap test"
+	rt.sessionDrivers.Get(sess)
 	err = rt.Steer(t.Context(), QueuedMessage{Content: "bootstrap message"})
 	require.NoError(t, err)
 
 	// Fresh session with NO messages (SendUserMessage defaults to true but
 	// there is nothing to send yet).
-	sess := session.New()
-	sess.Title = "steer bootstrap test"
 
 	evCh := rt.runExecution(t.Context(), sess)
 	var events []Event
@@ -4263,13 +4288,22 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 			break
 		}
 	}
+	driver, ok := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, ok)
+	owned, err := driver.ownerSnapshot(t.Context())
+	require.NoError(t, err)
+	for _, item := range owned.Messages {
+		if item.Message != nil && (strings.Contains(item.Message.Message.Content, "steer") || item.Message.Message.Content == "bootstrap message") {
+			steerEventFound = true
+		}
+	}
 	assert.True(t, steerEventFound,
 		"expected a UserMessageEvent for the bootstrap steer message")
 
 	// --- Session-message assertions ---
 	// The stored session message must be plain — no system-reminder envelope.
 	var bootstrapMsg *session.Message
-	for _, item := range sess.Messages {
+	for _, item := range rt.sessionDrivers.Get(sess).session().Messages {
 		if item.IsMessage() &&
 			item.Message.Message.Role == chat.MessageRoleUser &&
 			strings.Contains(item.Message.Message.Content, "bootstrap message") {
@@ -4435,6 +4469,15 @@ func TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream(t *testing.T) {
 			break
 		}
 	}
+	driver, ok := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, ok)
+	owned, err := driver.ownerSnapshot(t.Context())
+	require.NoError(t, err)
+	for _, item := range owned.Messages {
+		if item.Message != nil && (strings.Contains(item.Message.Message.Content, "steer") || item.Message.Message.Content == "bootstrap message") {
+			steerEventFound = true
+		}
+	}
 	assert.True(t, steerEventFound,
 		"expected a UserMessageEvent for the end-of-iteration steer within the same RunStream")
 
@@ -4448,7 +4491,7 @@ func TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream(t *testing.T) {
 	// Find the stored session message for the steer and verify it was
 	// consumed within this RunStream.
 	var steerSessionMsg *session.Message
-	for _, item := range sess.Messages {
+	for _, item := range rt.sessionDrivers.Get(sess).session().Messages {
 		if item.IsMessage() &&
 			item.Message.Message.Role == chat.MessageRoleUser &&
 			strings.Contains(item.Message.Message.Content, "end-of-iter steer") {
@@ -4550,14 +4593,19 @@ func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	// Enqueue three plain-text steer messages before draining.
+	sess := session.New()
+	driver := rt.sessionDrivers.Get(sess)
+
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "first"}))
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "second"}))
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "third"}))
 
-	sess := session.New()
 	events := make(chan Event, 16)
 
-	sr := rt.drainAndEmitSteered(t.Context(), sess, root, NewChannelSink(events))
+	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), 0)
+	require.NoError(t, snapshotErr)
+	sess = scratch
+	sr := rt.drainAndEmitSteered(ctx, sess, root, NewChannelSink(events))
 	close(events)
 
 	assert.True(t, sr.drained, "should report messages were drained")
@@ -4576,17 +4624,17 @@ func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
 	assert.Equal(t, "second\n", userMsgs[1])
 	assert.Equal(t, "third", userMsgs[2])
 
-	// The UserMessageEvent contents must mirror the session messages.
-	var eventMsgs []string
-	for ev := range events {
-		if ue, ok := ev.(*UserMessageEvent); ok {
-			eventMsgs = append(eventMsgs, ue.Message)
+	// Promotion is emitted by the owner, not duplicated by execution scratch.
+	assert.Empty(t, events)
+	canonical, snapshotErr := driver.ownerSnapshot(t.Context())
+	require.NoError(t, snapshotErr)
+	var canonicalTexts []string
+	for _, item := range canonical.MessagesSnapshot() {
+		if item.Message != nil {
+			canonicalTexts = append(canonicalTexts, item.Message.Message.Content)
 		}
 	}
-	require.Len(t, eventMsgs, 3)
-	assert.Equal(t, "first\n", eventMsgs[0])
-	assert.Equal(t, "second\n", eventMsgs[1])
-	assert.Equal(t, "third", eventMsgs[2])
+	assert.Equal(t, []string{"first", "second", "third"}, canonicalTexts)
 }
 
 // TestDrainAndEmitSteered_MultiContent verifies that the "\n" separator is
@@ -4603,6 +4651,9 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Two multi-content messages.
+	sess := session.New()
+	driver := rt.sessionDrivers.Get(sess)
+
 	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{
 		Content: "first",
 		MultiContent: []chat.MessagePart{
@@ -4618,10 +4669,12 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 		},
 	}))
 
-	sess := session.New()
 	events := make(chan Event, 16)
 
-	sr := rt.drainAndEmitSteered(t.Context(), sess, root, NewChannelSink(events))
+	ctx, scratch, snapshotErr := driver.executionContext(t.Context(), 0)
+	require.NoError(t, snapshotErr)
+	sess = scratch
+	sr := rt.drainAndEmitSteered(ctx, sess, root, NewChannelSink(events))
 	close(events)
 
 	assert.True(t, sr.drained)
@@ -4782,9 +4835,9 @@ func TestElicitationHandler_NonInteractive(t *testing.T) {
 	rt, err := NewLocalRuntime(t.Context(), tm, WithNonInteractive(true))
 	require.NoError(t, err)
 
-	params := &mcp.ElicitParams{
-		Message: "Authorize OAuth?",
-	}
+	_, err = rt.CreateSession(t.Context(), session.New(session.WithID("elicitation-test-session")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	params := &mcp.ElicitParams{Message: "Authorize OAuth?"}
 
 	result, err := rt.elicitationHandler(t.Context(), params)
 
@@ -4809,6 +4862,9 @@ func TestElicitationHandler_Interactive_NoChannel(t *testing.T) {
 	rt, err := NewLocalRuntime(t.Context(), tm)
 	require.NoError(t, err)
 
+	_, err = rt.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/elicitation-test-session")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	params := &mcp.ElicitParams{
 		Message: "Authorize OAuth?",
 	}
@@ -4823,16 +4879,16 @@ func TestElicitationHandler_Interactive_NoChannel(t *testing.T) {
 		done <- handlerResult{result: result, err: err}
 	}()
 
-	require.Eventually(t, func() bool { return elicitationWaiterCountForTest(&rt.elicitationWaiters) == 1 }, time.Second, time.Millisecond,
-		"elicitationHandler must register a waiter even though the bridge has no channel")
-
-	rt.elicitationWaiters.mu.Lock()
-	var elicitationID string
-	for id := range rt.elicitationWaiters.pending {
-		elicitationID = id
+	require.Eventually(t, func() bool { return sessionElicitationCountForTest(rt) == 1 }, time.Second, time.Millisecond)
+	d, ok := rt.sessionDrivers.Lookup(t.Name() + "/elicitation-test-session")
+	require.True(t, ok)
+	d.mu.Lock()
+	var event *ElicitationRequestEvent
+	for _, interaction := range d.interactions {
+		event = interaction.event.(*ElicitationRequestEvent)
 	}
-	rt.elicitationWaiters.mu.Unlock()
-	respondToElicitation(t, rt, &ElicitationRequestEvent{SessionID: "elicitation-test-session", ElicitationID: elicitationID}, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"ok": true}})
+	d.mu.Unlock()
+	respondToElicitation(t, rt, event, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"ok": true}})
 
 	select {
 	case got := <-done:
@@ -4966,14 +5022,23 @@ func TestImageGenerationProviderErrorDoesNotEmitWarning(t *testing.T) {
 	}
 }
 
-// TestRunAgentImmediateFailureEmitsNoZeroUsageEvent guards runCollecting's
-// final authoritative snapshot: a background child that fails before
-// recording any usage or cost (here the provider errors on stream creation)
-// must not surface a zero-usage TokenUsageEvent — it would add an empty
-// sub-session row to the UI and clobber per-agent context accounting. The
-// guard keys off the child's recorded usage alone and skips the event — and
-// the context-limit lookup — before any model resolution; the model store
-// still resolves a real limit so a wrongly emitted event would carry one.
+func replayChildUsage(t *testing.T, r *LocalRuntime, id string) []*TokenUsageEvent {
+	t.Helper()
+	since := uint64(0)
+	driver, ok := r.sessionDrivers.Lookup(id)
+	require.True(t, ok)
+	seed, _, cancel, _ := driver.events.SubscribeSequenced(id, &since, 1)
+	defer cancel()
+	var usages []*TokenUsageEvent
+	for _, envelope := range seed {
+		if usage, ok := envelope.Event.(*TokenUsageEvent); ok {
+			usages = append(usages, usage)
+		}
+	}
+	return usages
+}
+
+// Failed children retain no billed usage in their canonical journal.
 func TestRunAgentImmediateFailureEmitsNoZeroUsageEvent(t *testing.T) {
 	t.Parallel()
 
@@ -4989,9 +5054,6 @@ func TestRunAgentImmediateFailureEmitsNoZeroUsageEvent(t *testing.T) {
 		WithModelStore(mockModelStoreWithCostAndLimit{limit: 100_000, cost: modelsdev.Cost{Input: 10, Output: 20}}))
 	require.NoError(t, err)
 
-	var forwarded []Event
-	rt.OnBackgroundEvent(func(event Event) { forwarded = append(forwarded, event) })
-
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 	result := rt.RunAgent(t.Context(), agenttool.RunParams{
 		AgentName:     "worker",
@@ -5000,8 +5062,9 @@ func TestRunAgentImmediateFailureEmitsNoZeroUsageEvent(t *testing.T) {
 	})
 	require.NotEmpty(t, result.ErrMsg, "RunAgent should surface the sub-session error")
 
-	assert.Empty(t, forwarded,
-		"a child that failed before any billed work must not emit a zero-usage snapshot")
+	sub := lastAttachedSubSession(sess)
+	require.NotNil(t, sub)
+	assert.Empty(t, replayChildUsage(t, rt, sub.ID), "a child that failed before billed work has no usage")
 }
 
 // mockModelStoreWithCostAndLimit prices tokens so usage snapshots carry a
@@ -5028,14 +5091,8 @@ func lastAttachedSubSession(sess *session.Session) *session.Session {
 	return sub
 }
 
-// TestRunAgentForwardsTokenUsageOutOfBand verifies runCollecting surfaces the
-// background sub-session's TokenUsageEvents through OnBackgroundEvent — the
-// out-of-band path that lets the TUI keep per-agent context accounting for
-// background agents — tagged with the sub-session id and the worker's name,
-// and forwards nothing else. The last event is the authoritative final
-// snapshot runCollecting emits before attaching the child, and must match
-// the child's final recorded state.
-func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
+// Child usage remains observable through its session journal, not a global callback.
+func TestRunAgentPublishesTokenUsageToChildJournal(t *testing.T) {
 	t.Parallel()
 
 	workerStream := newStreamBuilder().AddContent("worker done").AddStopWithUsage(100, 50).Build()
@@ -5051,9 +5108,6 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 		WithModelStore(mockModelStoreWithCostAndLimit{limit: 100_000, cost: modelsdev.Cost{Input: 10, Output: 20}}))
 	require.NoError(t, err)
 
-	var forwarded []Event
-	rt.OnBackgroundEvent(func(event Event) { forwarded = append(forwarded, event) })
-
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 	result := rt.RunAgent(t.Context(), agenttool.RunParams{
 		AgentName:     "worker",
@@ -5062,10 +5116,12 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	})
 	require.Empty(t, result.ErrMsg, "RunAgent should succeed")
 
-	require.NotEmpty(t, forwarded, "the background task's token usage must be forwarded out-of-band")
+	sub := lastAttachedSubSession(sess)
+	require.NotNil(t, sub)
+	forwarded := replayChildUsage(t, rt, sub.ID)
+	require.NotEmpty(t, forwarded, "child usage must be observable from its canonical journal")
 	for _, event := range forwarded {
-		usage, ok := event.(*TokenUsageEvent)
-		require.Truef(t, ok, "only TokenUsageEvents may be forwarded, got %T", event)
+		usage := event
 		assert.Equal(t, "worker", usage.AgentName, "usage is attributed to the background agent")
 		assert.NotEqual(t, sess.ID, usage.SessionID, "usage carries the sub-session id, not the parent's")
 		assert.NotEmpty(t, usage.SessionID)
@@ -5075,9 +5131,7 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	// exclude its cost, so the last out-of-band snapshot must already carry
 	// the child's final accounting: cumulative tokens, cost (100×$10 +
 	// 50×$20 per 1M tokens), and the resolved context limit.
-	sub := lastAttachedSubSession(sess)
-	require.NotNil(t, sub)
-	last := forwarded[len(forwarded)-1].(*TokenUsageEvent)
+	last := forwarded[len(forwarded)-1]
 	require.NotNil(t, last.Usage)
 	assert.Equal(t, sub.ID, last.SessionID)
 	assert.Equal(t, int64(150), last.Usage.ContextLength, "final snapshot carries the worker's cumulative usage")
@@ -5087,15 +5141,8 @@ func TestRunAgentForwardsTokenUsageOutOfBand(t *testing.T) {
 	assert.Equal(t, int64(100_000), last.Usage.ContextLimit, "final snapshot resolves the worker's context limit")
 }
 
-// TestRunAgentEmitsFinalUsageOnCancellation is the regression test for the
-// background cancellation accounting gap: when the task's context is
-// cancelled, runCollecting's forwarding loop breaks and blindly drains the
-// remaining events — including the TokenUsageEvent carrying the child's
-// recorded usage. Because the child is then attached live to the parent
-// (excluded from the parent's own snapshots), nothing would ever surface its
-// cost. runCollecting must emit one final authoritative snapshot before
-// attaching the child.
-func TestRunAgentEmitsFinalUsageOnCancellation(t *testing.T) {
+// Cancellation must not drop usage already recorded by the child owner.
+func TestRunAgentRetainsChildUsageOnCancellation(t *testing.T) {
 	t.Parallel()
 
 	// The worker streams content, then calls a tool that cancels the task
@@ -5136,13 +5183,6 @@ func TestRunAgentEmitsFinalUsageOnCancellation(t *testing.T) {
 		WithModelStore(mockModelStoreWithCostAndLimit{limit: 100_000, cost: modelsdev.Cost{Input: 10, Output: 20}}))
 	require.NoError(t, err)
 
-	var forwarded []*TokenUsageEvent
-	rt.OnBackgroundEvent(func(event Event) {
-		if usage, ok := event.(*TokenUsageEvent); ok {
-			forwarded = append(forwarded, usage)
-		}
-	})
-
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 	var once sync.Once
 	rt.RunAgent(ctx, agenttool.RunParams{
@@ -5162,8 +5202,8 @@ func TestRunAgentEmitsFinalUsageOnCancellation(t *testing.T) {
 	require.NotNil(t, sub, "the cancelled child must still be attached to the parent")
 	require.Equal(t, int64(150), sub.InputTokens+sub.OutputTokens, "the child recorded the turn before cancellation")
 
-	require.NotEmpty(t, forwarded,
-		"a final authoritative snapshot must be emitted even though the loop broke on cancellation")
+	forwarded := replayChildUsage(t, rt, sub.ID)
+	require.NotEmpty(t, forwarded, "canonical child journal retains usage despite cancellation")
 	last := forwarded[len(forwarded)-1]
 	require.NotNil(t, last.Usage)
 	assert.Equal(t, sub.ID, last.SessionID)

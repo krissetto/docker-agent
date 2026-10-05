@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -38,102 +37,6 @@ func (e *ElicitationError) Error() string {
 // ElicitationRequestHandler is the callback signature an embedder can supply
 // to handle inbound elicitation requests directly (e.g. an HTTP server).
 type ElicitationRequestHandler func(ctx context.Context, message string, schema map[string]any) (map[string]any, error)
-
-// errNoElicitationChannel is returned when the bridge has no channel
-// configured (no RunStream is active).
-var errNoElicitationChannel = errors.New("no events channel available for elicitation")
-
-// elicitationBridge owns the events channel that the runtime's MCP
-// elicitation handler sends requests to. Each RunStream call swaps in its
-// own channel on entry and the previous one back on exit, so nested
-// sub-session streams don't lose the parent's elicitation pipe.
-//
-// The bridge encapsulates a non-trivial concurrency contract: while a
-// caller holds a reference to the current channel and is in the middle
-// of sending an elicitation request, stream teardown must not race with
-// close(channel) on the inner stream. We achieve this by serializing
-// send, swap, and close with an RWMutex held across the channel
-// operation. Pushing this into a small standalone type keeps the
-// contract testable in isolation (with the race detector) without
-// spinning up a runtime, and keeps LocalRuntime free of the two raw
-// fields it used to expose.
-//
-// Concurrent (non-nested) RunStreams — most notably background jobs
-// started via run_background_agent — can swap this single slot out from
-// under each other; see elicitationWaiters and OnElicitationRequest for
-// the routing/delivery fix (#3584). The bridge itself is kept only as a
-// best-effort secondary delivery path for remote/SSE consumers that read
-// events directly off a RunStream channel (see remote_runtime.go). It is
-// never allowed to hold up the reliable sink or response processing: send
-// is bounded by the caller's ctx (see elicitationHandler), and callers
-// invoke it from a detached goroutine so a wedged or abandoned channel
-// cannot block the request/response path at all (#3584 review item 1).
-type elicitationBridge struct {
-	mu sync.RWMutex
-	ch chan Event
-}
-
-// swap atomically replaces the bridge's channel and returns the previous
-// value. RunStream calls swap(events) on entry and swap(prev) on exit.
-func (b *elicitationBridge) swap(ch chan Event) chan Event {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	prev := b.ch
-	b.ch = ch
-	return prev
-}
-
-// send delivers ev to the current channel, holding the read lock across
-// the send so a concurrent restoreAndClose cannot close the channel out
-// from under an in-flight send without going through recover() below. The
-// send itself is bounded by ctx: if ctx is done before the channel accepts
-// the event, send returns ctx.Err() instead of blocking forever. Combined
-// with callers invoking send from a detached goroutine (see
-// elicitationHandler), a full or abandoned channel can no longer delay —
-// let alone indefinitely block — the reliable sink delivery or response
-// handling that used to be sequenced before this call (#3584 item 1).
-//
-// Returns errNoElicitationChannel when no channel is configured or when a
-// defensive recover catches an externally closed channel.
-func (b *elicitationBridge) send(ctx context.Context, ev Event) (err error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	defer func() {
-		if recover() != nil {
-			err = errNoElicitationChannel
-		}
-	}()
-	if b.ch == nil {
-		return errNoElicitationChannel
-	}
-	select {
-	case b.ch <- ev:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// restoreAndClose restores the previous stream channel and closes the current
-// stream channel under the bridge write lock, so the close is mutually
-// exclusive with an in-flight send. This is the #3069 fix: close can no longer
-// race a parked sender and panic with "send on closed channel".
-//
-// Accepted trade-off (do not "fix" by dropping the lock): holding the write
-// lock makes restoreAndClose wait for any in-flight send to finish, because
-// send holds the read lock across "b.ch <- ev". If the stream consumer has
-// gone away and current is full (or unbuffered), that parked send never
-// drains until its own ctx is done, so this call blocks on Lock until then. A
-// bounded wait is the deliberate, accepted alternative to crashing the whole
-// process with a send-on-closed-channel panic; #3584 bounded the wait (send
-// used to have no ctx at all and could block indefinitely) and moved the
-// caller onto a detached goroutine so this can never stall the request path.
-func (b *elicitationBridge) restoreAndClose(current, previous chan Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.ch = previous
-	close(current)
-}
 
 // waiterState is the terminal-state machine for a single elicitationWaiter.
 // Exactly one of resolve/cancel ever wins the transition out of pending,
@@ -178,92 +81,8 @@ func (w *elicitationWaiter) tryCancel() bool {
 	return w.state.CompareAndSwap(int32(waiterPending), int32(waiterCanceled))
 }
 
-// elicitationWaiters routes an elicitation response to the specific request
-// that is waiting for it, keyed by a correlation ID that is unique per
-// request (see elicitationHandler). This replaces the single shared
-// elicitationRequestCh, which could only ever have one request in flight:
-// with concurrent (background-job) elicitations, a response arriving on
-// that shared channel could be delivered to an arbitrary waiter, and
-// ResumeElicitation had no way to tell "no request in flight" from "the
-// request hasn't parked on the channel yet" (a TOCTOU race).
-//
-// Each waiter is registered BEFORE the corresponding request event is
-// emitted, so a response that arrives immediately after — even before the
-// handler reaches its receive — is never lost. The registry key is always an
-// internally-generated ID (never the MCP wire ElicitationID, which two
-// different MCP servers can coincidentally reuse): see elicitationHandler.
-type elicitationWaiters struct {
-	mu      sync.Mutex
-	pending map[string]*elicitationWaiter
-}
-
-// register creates a waiter for id and stores it. The channel is buffered
-// (capacity 1), so resolve never blocks even if the registrant hasn't
-// reached its receive yet.
-func (w *elicitationWaiters) register(id string) *elicitationWaiter {
-	wt := newElicitationWaiter()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.pending == nil {
-		w.pending = make(map[string]*elicitationWaiter)
-	}
-	w.pending[id] = wt
-	return wt
-}
-
-// abandon removes id's waiter from the registry, if it is still the one
-// registered (defends against a hypothetical ID reuse racing a fresh
-// register call), without touching its terminal state. Called once a waiter
-// is done being awaited via any path, so a later resolve() for a reused ID
-// cannot be confused with this one.
-func (w *elicitationWaiters) abandon(id string, wt *elicitationWaiter) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.pending[id] == wt {
-		delete(w.pending, id)
-	}
-}
-
-// cancel marks wt cancelled if it is still pending and removes it from the
-// registry. Returns true when this call won the cancel-vs-resolve race — the
-// caller (elicitationHandler's ctx.Done() branch) should then return ctx.Err().
-// Returns false when resolve() already won: the caller must receive from
-// wt.ch instead, since a result is already there (or is about to land — the
-// buffered send in tryResolve never blocks).
-func (w *elicitationWaiters) cancel(id string, wt *elicitationWaiter) bool {
-	won := wt.tryCancel()
-	if won {
-		w.abandon(id, wt)
-	}
-	return won
-}
-
-// resolve delivers result to the waiter registered for id and returns true.
-// Returns false without side effects when no waiter is currently registered
-// for that ID, or when it was already resolved/cancelled — already
-// answered, timed out, or unknown.
-func (w *elicitationWaiters) resolve(id string, result ElicitationResult) bool {
-	w.mu.Lock()
-	wt, ok := w.pending[id]
-	if ok {
-		delete(w.pending, id)
-	}
-	w.mu.Unlock()
-	if !ok {
-		return false
-	}
-	return wt.tryResolve(result)
-}
-
-// OnElicitationRequest registers a handler invoked whenever an MCP toolset
-// raises an elicitation request. This is the reliable route for
-// background-job elicitations (run_background_agent): their RunStream runs
-// on a detached goroutine and can race concurrent streams for the bridge's
-// single channel slot (#3584), so elicitationHandler calls this sink
-// directly, synchronously, and unconditionally — before it ever touches the
-// best-effort bridge — as the single, exactly-once delivery point. Embedders
-// (e.g. the TUI's App, or the API server for session-scoped SSE delivery)
-// register a handler here that forwards the event to their UI/transport.
+// OnElicitationRequest installs a transport subscription. Requests carry the
+// resolved session identity; responses are accepted only by that session owner.
 func (r *LocalRuntime) OnElicitationRequest(handler func(Event)) {
 	r.elicitationSinkMu.Lock()
 	defer r.elicitationSinkMu.Unlock()
@@ -342,30 +161,12 @@ func (r *LocalRuntime) SubscribeSessionElicitations(sessionID, parentID string, 
 	}, true
 }
 
-// MirrorsElicitationOnRunStream marks LocalRuntime as a runtime whose
-// OnElicitationRequest sink is the single, exactly-once delivery point for
-// an elicitation request even though elicitationHandler ALSO best-effort-
-// sends the very same event on the RunStream channel, for the benefit of
-// out-of-process consumers reading RunStream directly (see
-// elicitationBridge). Embedders that forward RunStream events verbatim into
-// their own event bus (e.g. pkg/app.App) use this marker — via an optional
-// capability check, since it is not part of the Runtime interface — to know
-// they must skip *ElicitationRequestEvent to avoid delivering the same
-// request twice.
-//
-// RemoteRuntime deliberately does NOT implement this: its
-// OnElicitationRequest is a no-op, so the copy on its RunStream is the ONLY
-// delivery and callers must not skip it (#3584 review — an earlier fix
-// skipped unconditionally and silently dropped every remote elicitation).
+// MirrorsElicitationOnRunStream tells embedders that transport callbacks and
+// the addressed execution stream project the same interaction. An embedder
+// using the callback must not forward the stream copy a second time.
 func (r *LocalRuntime) MirrorsElicitationOnRunStream() {}
 
-// emitElicitationRequest forwards an elicitation request event to the
-// registered sink, if any. Besides [LocalRuntime.EmitElicitationRequestForTesting],
-// this is the ONLY call site that invokes the sink (see elicitationHandler):
-// production callers must not add a second delivery path (e.g. re-forwarding
-// an event observed on a RunStream channel), or the exactly-once guarantee
-// this type documents no longer holds (#3584 item 5 — dual delivery
-// previously required a stateful App-side dedupe to paper over).
+// elicitationRoute follows canonical immutable ancestry for transport routing.
 func (r *LocalRuntime) elicitationRoute(sessionID string) []string {
 	parents := make(map[string]string)
 	if r.sessionDrivers != nil {
@@ -378,13 +179,6 @@ func (r *LocalRuntime) elicitationRoute(sessionID string) []string {
 			parents[id] = parent
 		}
 	}
-	r.liveSessionsMu.Lock()
-	for id, entry := range r.liveSessions {
-		if entry != nil && entry.sess != nil {
-			parents[id] = entry.sess.ParentID
-		}
-	}
-	r.liveSessionsMu.Unlock()
 
 	r.elicitationSinkMu.RLock()
 	for id, sink := range r.elicitationSessionSinks {
@@ -470,38 +264,6 @@ func (r *LocalRuntime) hasElicitationSink(sessionID string) bool {
 	return false
 }
 
-// elicitationDeclineNotes accumulates model-readable notes for elicitations
-// that were auto-declined because a background session had no UI available
-// to answer them (see elicitationHandler). runCollecting drains these after
-// the sub-session completes and prepends them to the tool result, mirroring
-// backgroundAuthRequiredNote's #3200 pattern for OAuth-at-Start failures.
-type elicitationDeclineNotes struct {
-	mu        sync.Mutex
-	bySession map[string][]string
-}
-
-// record appends note under sessionID. No-op when either is empty.
-func (n *elicitationDeclineNotes) record(sessionID, note string) {
-	if sessionID == "" || note == "" {
-		return
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.bySession == nil {
-		n.bySession = make(map[string][]string)
-	}
-	n.bySession[sessionID] = append(n.bySession[sessionID], note)
-}
-
-// drain returns and clears the notes recorded for sessionID.
-func (n *elicitationDeclineNotes) drain(sessionID string) []string {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	notes := n.bySession[sessionID]
-	delete(n.bySession, sessionID)
-	return notes
-}
-
 // backgroundElicitationDeclinedNote returns a model-readable explanation for
 // an elicitation that was auto-declined because it originated from a
 // background (non-interactive) session with no UI available to answer it.
@@ -526,7 +288,7 @@ type elicitationSpec struct {
 	serverElicitationID string
 	meta                map[string]any
 	// agentName and sessionID override the runtime-derived defaults (the
-	// shared current-agent slot and the ctx conversation ID) when the caller
+	// owner-pinned agent and the ctx conversation ID) when the caller
 	// knows the owning agent/session more precisely.
 	agentName string
 	sessionID string
@@ -586,20 +348,28 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	backgroundWithoutPrompts := isNonInteractiveSession(ctx) || !tools.InteractivePromptsAllowed(ctx)
 	if backgroundWithoutPrompts && !r.hasElicitationSink(sessionID) {
 		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
-		r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
+		r.recordElicitationDecline(ctx, sessionID, spec.message)
 		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
 	}
 
+	owner, canonical := r.sessionDrivers.Lookup(sessionID)
+	if !canonical && sessionID == "" {
+		var err error
+		owner, err = r.compatibilityInputTarget(ctx)
+		if err != nil {
+			return tools.ElicitationResult{}, err
+		}
+		sessionID, canonical = owner.identityID, true
+	}
+	if !canonical {
+		return tools.ElicitationResult{}, &SessionError{Kind: SessionErrorNotFound, SessionID: sessionID, Operation: "elicitation_route"}
+	}
 	agentName := spec.agentName
 	if agentName == "" {
-		agentName = r.currentAgentName()
+		agentName = owner.AgentName()
 	}
 
-	// No *agent.Agent is threaded into MCP handler callbacks, so fall back
-	// to the current agent here. The session ID is the conversation ID the
-	// run loop seeded into ctx (empty for elicitations outside a run, e.g.
-	// startup OAuth probes).
-	r.executeOnUserInputHooks(ctx, r.agentForContext(ctx), genai.ConversationIDFromContext(ctx), "elicitation")
+	r.executeOnUserInputHooks(ctx, r.resolveSessionAgent(owner.session()), sessionID, "elicitation")
 
 	// The registry key (and the ElicitationID surfaced to clients for
 	// ResumeElicitation routing) is always a freshly generated, internal
@@ -618,8 +388,8 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	// #3584 TOCTOU fix: previously a response that arrived before the
 	// handler reached its receive on the shared channel was lost because
 	// there was nothing to receive it into yet.
-	wt := r.elicitationWaiters.register(correlationID)
-	defer r.elicitationWaiters.abandon(correlationID, wt)
+	wt := newElicitationWaiter()
+	defer owner.abandonElicitation(correlationID, wt)
 
 	slog.DebugContext(ctx, "Sending elicitation request event to client",
 		"message", spec.message,
@@ -632,44 +402,28 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 
 	ev := ElicitationRequest(spec.message, spec.mode, spec.schema, spec.url, correlationID, spec.serverElicitationID, sessionID, spec.meta, agentName)
 	if elicitation, ok := ev.(*ElicitationRequestEvent); ok {
-		if d, exists := r.sessionDrivers.Lookup(sessionID); exists {
-			// Each elicitation is independently addressable; the turn remains
-			// recorded separately in sessionInteraction.turnID.
-			elicitation.RequestID = correlationID
-			if elicitation.RequestID == "" {
-				elicitation.RequestID = spec.serverElicitationID
-			}
-			if elicitation.RequestID != "" {
-				d.RegisterInteraction(elicitation.RequestID, InteractionElicitation, elicitation)
-			}
+		elicitation.RequestID = correlationID
+		if err := owner.registerElicitation(ctx, correlationID, elicitation, wt); err != nil {
+			return tools.ElicitationResult{}, err
 		}
 	}
 
 	// Acquire and invoke a reliable route as one operation. For background /
 	// prompt-disabled sessions, failure means the last subscriber disappeared
 	// before delivery; abandon the waiter and fast-decline instead of waiting
-	// forever. Interactive streams still retain their best-effort bridge path.
+	// forever. Interactive requests also project onto the addressed execution stream.
 	delivered := r.emitElicitationRequest(ev)
 	if backgroundWithoutPrompts && !delivered {
 		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
-		r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
+		r.recordElicitationDecline(ctx, sessionID, spec.message)
 		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
 	}
 
-	// Best-effort secondary delivery on the owning stream's events channel,
-	// kept for remote/SSE consumers that read directly off RunStream
-	// (remote_runtime.go depends on it). Dispatched on a detached goroutine,
-	// bounded by ctx, so a wedged or abandoned bridge channel (concurrent
-	// RunStreams racing the swap-based single slot, or a dead consumer) can
-	// never delay — let alone block — sink delivery or the response wait
-	// below (#3584 review item 1). runCollecting no longer treats a bridge
-	// delivery as a second source of truth (#3584 review item 5): this send
-	// exists solely for out-of-process consumers.
-	go func() {
-		if err := r.elicitation.send(ctx, ev); err != nil {
-			slog.DebugContext(ctx, "Elicitation bridge send failed or abandoned; relying on the registered sink", "error", err)
-		}
-	}()
+	if sink, ok := ctx.Value(executionEventSinkKey{}).(EventSink); ok {
+		sink.Emit(ev)
+	} else {
+		owner.events.Publish(sessionID, ev)
+	}
 
 	// Wait for the response addressed to this specific request. The
 	// ctx.Done() branch cannot simply return ctx.Err(): resolve() may have
@@ -686,7 +440,7 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 		}, nil
 	case <-ctx.Done():
 		slog.DebugContext(ctx, "Context cancelled while waiting for elicitation response")
-		if r.elicitationWaiters.cancel(correlationID, wt) {
+		if wt.tryCancel() {
 			return tools.ElicitationResult{}, ctx.Err()
 		}
 		result := <-wt.ch

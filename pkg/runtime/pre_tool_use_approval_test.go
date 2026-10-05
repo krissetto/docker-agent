@@ -124,6 +124,7 @@ func makeJudgedRuntime(
 	}))
 
 	sess = session.New(session.WithUserMessage("test"))
+	rt.sessionDrivers.Get(sess)
 	require.False(t, sess.ToolsApproved, "fixture must not use --yolo")
 	return rt, sess, executed, agentTools
 }

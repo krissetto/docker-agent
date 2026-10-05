@@ -61,10 +61,12 @@ func normalizeRestoredSnapshot(snapshot subagent.Snapshot, durability subagent.D
 // Returns the live snapshot after adoption, or a normalization error without
 // mutating runtime state.
 func (m *subagentManager) Restore(ctx context.Context, sess *session.Session, snapshot subagent.Snapshot) (subagent.Snapshot, error) {
-	m.restoreMu.Lock()
-	defer m.restoreMu.Unlock()
-	m.transitionMu.Lock()
-	defer m.transitionMu.Unlock()
+	restore := m.transition("restore:" + sess.ID)
+	restore.Lock()
+	defer restore.Unlock()
+	transition := m.transition(sess.ID)
+	transition.Lock()
+	defer transition.Unlock()
 	canonical, records, err := m.canonicalSnapshot(ctx, sess, snapshot)
 	if err != nil {
 		return subagent.Snapshot{}, err

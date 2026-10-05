@@ -1512,7 +1512,7 @@ func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string
 	}
 
 	result, err := execSQLiteWrite(ctx, s.db,
-		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ?, report_outcome = ? WHERE session_id = ? AND id = ?`,
+		`UPDATE session_items SET message_json = ?, implicit = ?, actor_pending = ?, actor_accepted = ?, actor_turn_id = ?, actor_input_mode = ?, input_origin = ?, sender_id = ?, sender_name = ?, report_outcome = ? WHERE session_id = ? AND id = ? AND item_type = 'message'`,
 		string(msgJSON), msg.Implicit, msg.Pending, msg.Accepted, msg.TurnID, msg.InputMode, msg.InputOrigin, msg.SenderID, msg.SenderName, msg.ReportOutcome, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", classifySQLiteContextError(ctx, err))

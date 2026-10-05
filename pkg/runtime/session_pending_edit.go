@@ -8,8 +8,18 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 )
 
-// The owner lock linearizes edits with steering drain, start, handoff and recall.
-func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *PendingMessageEdit) (*session.Session, error) {
+func (h *sessionHandle) editPendingMessage(ctx context.Context, edit *PendingMessageEdit) (*session.Session, error) {
+	var snapshot *session.Session
+	err := h.driver.durableIO(ctx, func() (sessionIOReservation, error) {
+		return h.reservePendingMessageEdit(edit, &snapshot)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func (h *sessionHandle) reservePendingMessageEdit(edit *PendingMessageEdit, snapshot **session.Session) (sessionIOReservation, error) {
 	d := h.driver
 	failure := func(kind SessionErrorKind, detail string) error {
 		turnID := ""
@@ -22,10 +32,10 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		return failure(SessionErrorStale, session.ErrPendingMessageStale.Error())
 	}
 	if edit == nil || edit.TurnID == "" {
-		return nil, failure(SessionErrorInvalid, "turn_id is required")
+		return sessionIOReservation{}, failure(SessionErrorInvalid, "turn_id is required")
 	}
 	if d.sess == nil || d.sess.ID != h.sessionID || edit.TurnID == d.activeRequestID {
-		return nil, stale()
+		return sessionIOReservation{}, stale()
 	}
 	queue := &d.pending
 	index := slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == edit.TurnID })
@@ -34,7 +44,7 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == edit.TurnID })
 	}
 	if index < 0 || (*queue)[index].Retry || (*queue)[index].InputOrigin != session.InputOriginUser {
-		return nil, stale()
+		return sessionIOReservation{}, stale()
 	}
 	position := -1
 	var current *session.Message
@@ -44,7 +54,7 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		}
 		// Any consumed prefix or duplicate identity makes the whole turn immutable.
 		if current != nil || !item.Message.Pending {
-			return nil, stale()
+			return sessionIOReservation{}, stale()
 		}
 		current, position = item.Message, i
 	}
@@ -68,25 +78,37 @@ func (h *sessionHandle) editPendingMessageLocked(ctx context.Context, edit *Pend
 		}
 	}
 	if err != nil {
-		return nil, classify(err)
+		return sessionIOReservation{}, classify(err)
 	}
+	var write func(context.Context) error
 	if (*queue)[index].AcceptedPersisted {
 		store, ok := d.r.sessionStore.(session.PendingMessageEditor)
 		if !ok {
-			return nil, failure(SessionErrorUnsupported, "store does not support pending message edits")
+			return sessionIOReservation{}, failure(SessionErrorUnsupported, "store does not support pending message edits")
 		}
-		if err := store.EditPendingUserMessage(ctx, h.sessionID, edit.TurnID, edit.Content, expectedContent...); err != nil {
-			return nil, classify(err)
+		// CAS always uses the reserved payload, including callers that omit a CAS.
+		expected := current.Message.Content
+		write = func(ctx context.Context) error {
+			return store.EditPendingUserMessage(ctx, h.sessionID, edit.TurnID, edit.Content, expected)
 		}
-	} else if err := ctx.Err(); err != nil {
-		return nil, err
 	}
-	// Persistence has committed. These replacements cannot fail under d.mu;
-	// the memory store may already have replaced the same live slot.
-	d.sess.ReplacePendingUserMessagePayload(edit.TurnID, next.Message.Content, next.Message.MultiContent)
-	msg := &(*queue)[index]
-	msg.Content, msg.MultiContent = next.Message.Content, next.Message.MultiContent
-	eventPayload := d.sess.MessagesSnapshot()[position].Message.Message
-	d.events.PublishForRequest(h.sessionID, edit.TurnID, inputEventMetadata(PendingUserMessageEdited(h.sessionID, edit.TurnID, eventPayload.Content, eventPayload.MultiContent, position), *msg))
-	return d.sess.Clone(), nil
+	d.editReserved = true
+	return sessionIOReservation{write: write, commit: func(err error) error {
+		d.editReserved = false
+		if err != nil {
+			return classify(err)
+		}
+		// Promotion and recall cannot consume the reserved slot before publication.
+		if index >= len(*queue) || (*queue)[index].RequestID != edit.TurnID {
+			return stale()
+		}
+		d.sess.ReplacePendingUserMessagePayload(edit.TurnID, next.Message.Content, next.Message.MultiContent)
+		msg := &(*queue)[index]
+		msg.Content, msg.MultiContent = next.Message.Content, next.Message.MultiContent
+		eventPayload := d.sess.MessagesSnapshot()[position].Message.Message
+		d.events.PublishForRequest(h.sessionID, edit.TurnID, inputEventMetadata(PendingUserMessageEdited(h.sessionID, edit.TurnID, eventPayload.Content, eventPayload.MultiContent, position), *msg))
+		*snapshot = d.sess.Clone()
+		d.r.sessionDrivers.signalWork()
+		return nil
+	}}, nil
 }

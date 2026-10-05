@@ -69,7 +69,7 @@ func TestCanonicalSettlementOutcomesAndSingleFlight(t *testing.T) {
 			assert.Empty(t, canonicalSettlements(canonicalReplay(d)), "stream stop is not settlement")
 			var group sync.WaitGroup
 			for range 8 {
-				group.Go(func() { d.finishRun(1, tc.runErr) })
+				group.Go(func() { d.finishRunContext(t.Context(), 1, tc.runErr) })
 			}
 			group.Wait()
 			events := canonicalSettlements(canonicalReplay(d))

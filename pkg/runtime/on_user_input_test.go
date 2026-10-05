@@ -142,7 +142,8 @@ func TestEnforceMaxIterations_Interactive_FiresOnUserInput(t *testing.T) {
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { r.interactions.resumeChannel(sess.ID) <- ResumeReject("stop") }()
+	r.sessionDrivers.Get(sess)
+	go func() { assert.NoError(t, respondResume(r, sess.ID, ResumeReject("stop"))) }()
 	_, decision := r.enforceMaxIterations(t.Context(), sess, a, 10, 10, NewChannelSink(events))
 
 	assert.Equal(t, iterationStop, decision)
@@ -224,7 +225,8 @@ func TestEnforceMaxIterations_PinnedSessionAgent_AttributesHookToThatAgent(t *te
 	sess := session.New()
 	events := make(chan Event, 8)
 
-	go func() { r.interactions.resumeChannel(sess.ID) <- ResumeReject("stop") }()
+	r.sessionDrivers.Get(sess)
+	go func() { assert.NoError(t, respondResume(r, sess.ID, ResumeReject("stop"))) }()
 	_, decision := r.enforceMaxIterations(t.Context(), sess, worker, 10, 10, NewChannelSink(events))
 
 	assert.Equal(t, iterationStop, decision)
@@ -247,7 +249,9 @@ func TestOnUserInputHooks_Elicitation_CarriesConversationID(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	ctx = genai.WithConversationID(ctx, "elicit-sess-1")
+	sess := session.New(session.WithID(t.Name()+"/elicit"), session.WithAgentName("root"))
+	r.sessionDrivers.Get(sess)
+	ctx = genai.WithConversationID(ctx, sess.ID)
 
 	done := make(chan error, 1)
 	go func() {
@@ -267,6 +271,6 @@ func TestOnUserInputHooks_Elicitation_CarriesConversationID(t *testing.T) {
 
 	got := rb.snapshot()
 	require.Len(t, got, 1, "elicitation wait must fire on_user_input once")
-	assert.Equal(t, "elicit-sess-1", got[0].SessionID,
+	assert.Equal(t, sess.ID, got[0].SessionID,
 		"on_user_input must carry the conversation id from ctx, not an empty session id")
 }

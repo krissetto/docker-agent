@@ -260,6 +260,7 @@ var EventPreToolUsePreYolo EventType = "pre_tool_use_pre_yolo"
 // Input is the JSON-serializable payload passed to hooks via stdin.
 type Input struct {
 	SessionID     string    `json:"session_id"`
+	RootSessionID string    `json:"root_session_id,omitempty"`
 	Cwd           string    `json:"cwd"`
 	HookEventName EventType `json:"hook_event_name"`
 

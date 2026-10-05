@@ -30,6 +30,7 @@ type budgetTracker struct {
 	cost      float64
 	tokens    int64
 	active    time.Duration
+	started   time.Time
 	unpriced  bool
 	perAgent  map[string]*agentSpend
 }
@@ -61,7 +62,7 @@ func (b *budgetTracker) record(agentName string, usage *chat.Usage, cost *float6
 
 	var addTokens int64
 	if usage != nil {
-		addTokens = usage.InputTokens + usage.OutputTokens
+		addTokens = usage.PromptTokens() + usage.OutputTokens
 		b.tokens += addTokens
 	}
 	var addCost float64
@@ -118,11 +119,18 @@ func (b *budgetTracker) snapshot() budgetSnapshot {
 		MaxCost:   b.maxCost,
 		Tokens:    b.tokens,
 		MaxTokens: b.maxTokens,
-		Elapsed:   b.active,
+		Elapsed:   b.elapsedLocked(),
 		MaxTime:   b.maxTime,
 		Unpriced:  b.unpriced,
 		PerAgent:  b.perAgentSpendLocked(),
 	}
+}
+
+func (b *budgetTracker) elapsedLocked() time.Duration {
+	if !b.started.IsZero() {
+		return time.Since(b.started)
+	}
+	return b.active
 }
 
 func (b *budgetTracker) perAgentSpendLocked() []agentBudgetSpend {
@@ -159,7 +167,7 @@ type budgetBreach struct {
 
 func (br budgetBreach) Message() string {
 	return fmt.Sprintf(
-		"Execution stopped after reaching the configured %s limit (used %s of %s).",
+		"Execution stopped after reaching the configured %s limit (used %s of %s). Metered usage is reported after calls complete and can exceed the configured limit.",
 		br.configPath(), br.Used, br.Max,
 	)
 }
@@ -192,10 +200,10 @@ func (b *budgetTracker) exceeded() *budgetBreach {
 			Max:   fmt.Sprintf("%d tokens", b.maxTokens),
 		}
 	}
-	if b.maxTime > 0 && b.active >= b.maxTime {
+	if b.maxTime > 0 && b.elapsedLocked() >= b.maxTime {
 		return &budgetBreach{
 			Limit: budgetLimitTime,
-			Used:  b.active.Round(time.Second).String(),
+			Used:  b.elapsedLocked().Round(time.Second).String(),
 			Max:   b.maxTime.String(),
 		}
 	}
@@ -230,6 +238,8 @@ type budgetSet struct {
 	trackers     map[string]*budgetTracker
 	agentBudgets map[string][]string
 	order        []string
+	contextMu    sync.Mutex
+	contexts     map[*context.CancelFunc]string
 }
 
 func (s *budgetSet) budgetsFor(agentName string) []namedTracker {
@@ -319,20 +329,90 @@ func newBudgetSet(runBudget *latest.BudgetConfig, named map[string]latest.Budget
 	return s
 }
 
-func (r *LocalRuntime) ensureBudget() {
-	r.budgetMu.Lock()
-	defer r.budgetMu.Unlock()
-	if r.budgetStarted {
-		return
+func (r *LocalRuntime) budgetRoot(sess *session.Session) string {
+	if r.subagents != nil {
+		return r.subagents.rootSessionLockedSafe(sess.ID)
 	}
-	r.budgetStarted = true
-	r.budget = newBudgetSet(r.budgetCfg, r.budgetsCfg, r.agentBudgets)
+	if sess.ParentID != "" {
+		return sess.ParentID
+	}
+	return sess.ID
 }
 
-func (r *LocalRuntime) currentBudget() *budgetSet {
+func (r *LocalRuntime) rootBudget(sess *session.Session) *budgetSet {
+	if sess == nil || (r.budgetCfg.IsZero() && len(r.budgetsCfg) == 0) {
+		return nil
+	}
+	root := r.budgetRoot(sess)
 	r.budgetMu.Lock()
 	defer r.budgetMu.Unlock()
-	return r.budget
+	if r.rootBudgets == nil {
+		r.rootBudgets = make(map[string]*budgetSet)
+	}
+	b, exists := r.rootBudgets[root]
+	if !exists {
+		b = newBudgetSet(r.budgetCfg, r.budgetsCfg, r.agentBudgets)
+		r.rootBudgets[root] = b
+	}
+	return b
+}
+
+// budgetContext bounds the whole execution, including provider and tool waits.
+func (r *LocalRuntime) budgetContext(ctx context.Context, sess *session.Session, a *agent.Agent) (context.Context, context.CancelFunc) {
+	wallet := r.rootBudget(sess)
+	if a == nil || wallet == nil {
+		return context.WithCancel(ctx)
+	}
+	now := time.Now()
+	var deadline time.Time
+	for _, nt := range wallet.budgetsFor(a.Name()) {
+		b := nt.Tracker
+		b.mu.Lock()
+		if b.started.IsZero() {
+			b.started = now
+		}
+		if b.maxTime > 0 {
+			end := b.started.Add(b.maxTime)
+			if deadline.IsZero() || end.Before(deadline) {
+				deadline = end
+			}
+		}
+		b.mu.Unlock()
+	}
+	var bounded context.Context
+	var cancel context.CancelFunc
+	if deadline.IsZero() {
+		bounded, cancel = context.WithCancel(ctx)
+	} else {
+		bounded, cancel = context.WithDeadline(ctx, deadline)
+	}
+	wallet.contextMu.Lock()
+	if wallet.contexts == nil {
+		wallet.contexts = make(map[*context.CancelFunc]string)
+	}
+	wallet.contexts[&cancel] = a.Name()
+	wallet.contextMu.Unlock()
+	context.AfterFunc(bounded, func() {
+		wallet.contextMu.Lock()
+		defer wallet.contextMu.Unlock()
+		delete(wallet.contexts, &cancel)
+	})
+	wallet.cancelExceeded()
+	return bounded, cancel
+}
+
+func (s *budgetSet) cancelExceeded() {
+	s.contextMu.Lock()
+	var cancels []context.CancelFunc
+	for cancel, agentName := range s.contexts {
+		if s.exceededFor(agentName) != nil {
+			cancels = append(cancels, *cancel)
+		}
+	}
+	s.contextMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (r *LocalRuntime) enforceBudget(
@@ -341,7 +421,7 @@ func (r *LocalRuntime) enforceBudget(
 	a *agent.Agent,
 	events EventSink,
 ) iterationDecision {
-	breach := r.currentBudget().exceededFor(a.Name())
+	breach := r.rootBudget(sess).exceededFor(a.Name())
 	if breach == nil {
 		return iterationContinue
 	}
@@ -383,7 +463,7 @@ func (s *budgetSet) exceededFor(agentName string) *budgetBreach {
 }
 
 func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
-	s := r.currentBudget()
+	s := r.rootBudget(sess)
 	if s == nil {
 		return
 	}
@@ -404,6 +484,7 @@ func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage
 		))
 	}
 	events.Emit(BudgetUsage(sess.ID, a.Name(), s.snapshot()))
+	s.cancelExceeded()
 }
 
 func (s *budgetSet) unpricedSpend() bool {

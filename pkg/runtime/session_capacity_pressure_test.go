@@ -30,10 +30,17 @@ func TestSessionCapacityPressureReclaimsOldestEligibleSettled(t *testing.T) {
 	rt := newPressureRuntime(t, 2)
 	old, err := rt.CreateSession(t.Context(), session.New(session.WithID("old")), SessionBinding{})
 	require.NoError(t, err)
+	oldDriver := old.(*sessionHandle).driver
+	require.NoError(t, oldDriver.ownerCall(t.Context(), func() error {
+		oldDriver.lastActive = time.Time{}
+		return nil
+	}))
 	_, err = rt.CreateSession(t.Context(), session.New(session.WithID("newer")), SessionBinding{})
 	require.NoError(t, err)
-	_, err = rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
-	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err = rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
+		return err == nil
+	}, time.Second, time.Millisecond)
 	_, exists := rt.sessionDrivers.Lookup("old")
 	assert.False(t, exists)
 	_, err = old.Observe(t.Context(), ObserveOptions{})

@@ -45,7 +45,6 @@ const (
 	defaultMaxActiveDescendantsRoot = 100
 	defaultMaxSubagentDepth         = 3
 	defaultMaxSubagentMailbox       = 64
-	defaultMaxOrphanMailbox         = 64
 )
 
 // toolsChangedTimeout bounds how long a single MCP-tool-change refresh

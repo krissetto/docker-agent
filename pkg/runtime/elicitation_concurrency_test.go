@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,265 +23,39 @@ import (
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
-// --- elicitationWaiters: unit + concurrency regression tests (#3584) ---
-
-func TestElicitationWaiters_ResolveRoutesToCorrectID(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	wtA := w.register("a")
-	wtB := w.register("b")
-
-	require.True(t, w.resolve("b", ElicitationResult{Action: tools.ElicitationActionDecline}))
-	require.True(t, w.resolve("a", ElicitationResult{Action: tools.ElicitationActionAccept}))
-
-	select {
-	case result := <-wtA.ch:
-		assert.Equal(t, tools.ElicitationActionAccept, result.Action, "waiter a must receive a's response, not b's")
-	default:
-		t.Fatal("waiter a never received its response")
-	}
-	select {
-	case result := <-wtB.ch:
-		assert.Equal(t, tools.ElicitationActionDecline, result.Action, "waiter b must receive b's response, not a's")
-	default:
-		t.Fatal("waiter b never received its response")
-	}
+func TestElicitationWaiter_ResolveBeforeReceiveIsNotLost(t *testing.T) {
+	waiter := newElicitationWaiter()
+	require.True(t, waiter.tryResolve(ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"k": "v"}}))
+	assert.Equal(t, map[string]any{"k": "v"}, (<-waiter.ch).Content)
+	assert.False(t, waiter.tryResolve(ElicitationResult{}), "duplicate response cannot win")
 }
 
-// TestElicitationWaiters_ResolveBeforeReceiveIsNotLost pins the TOCTOU fix:
-// registering the waiter before the request event is emitted means a
-// response that arrives before anyone has read from the channel is still
-// captured (the channel is buffered), instead of the old shared unbuffered
-// elicitationRequestCh's `default:` branch reporting "no elicitation request
-// in progress". See TestElicitationHandler_TOCTOU_ResolveImmediatelyAfterRegister
-// below for the same pin exercised through the real handler path.
-func TestElicitationWaiters_ResolveBeforeReceiveIsNotLost(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	wt := w.register("id-1")
-
-	ok := w.resolve("id-1", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"k": "v"}})
-	require.True(t, ok, "resolve must succeed even though nothing has received from the channel yet")
-
-	select {
-	case result := <-wt.ch:
-		assert.Equal(t, tools.ElicitationActionAccept, result.Action)
-		assert.Equal(t, map[string]any{"k": "v"}, result.Content)
-	default:
-		t.Fatal("the buffered waiter channel should already hold the resolved result")
-	}
-}
-
-func TestElicitationWaiters_ResolveUnknownIDReturnsFalse(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	assert.False(t, w.resolve("missing", ElicitationResult{}))
-}
-
-// TestElicitationWaiters_ResolveSingle_AmbiguousWithMultiplePending verifies
-
-func TestElicitationWaiters_Abandon(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	wt := w.register("a")
-	require.Equal(t, 1, elicitationWaiterCountForTest(&w))
-
-	w.abandon("a", wt)
-	assert.Equal(t, 0, elicitationWaiterCountForTest(&w))
-	assert.False(t, w.resolve("a", ElicitationResult{}), "abandoned waiter must not be resolvable")
-}
-
-// TestElicitationWaiters_DuplicateWireIDsDoNotCollide pins #3584 review item
-// 2a: registry keys are always internally-generated IDs, never the MCP wire
-// ElicitationID, precisely because two independent MCP servers (e.g. two
-// concurrent background jobs, each talking to their own server) can
-// legitimately reuse the same wire ID. Registering two waiters under
-// different (internal) IDs — even when both requests logically share one
-// wire ID — must never let the second registration evict the first's
-// channel.
-func TestElicitationWaiters_DuplicateWireIDsDoNotCollide(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	// Simulates two servers both using wire ID "1": elicitationHandler
-	// always mints a fresh internal correlation ID regardless, so the two
-	// registrations land under distinct keys.
-	wtServerA := w.register("internal-a")
-	wtServerB := w.register("internal-b")
-
-	require.Equal(t, 2, elicitationWaiterCountForTest(&w), "distinct internal IDs must not collide even if the wire IDs would have")
-
-	require.True(t, w.resolve("internal-a", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"who": "a"}}))
-	require.True(t, w.resolve("internal-b", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"who": "b"}}))
-
-	select {
-	case result := <-wtServerA.ch:
-		assert.Equal(t, map[string]any{"who": "a"}, result.Content, "server A's waiter must not have been evicted or overwritten")
-	default:
-		t.Fatal("server A's waiter never received its response")
-	}
-	select {
-	case result := <-wtServerB.ch:
-		assert.Equal(t, map[string]any{"who": "b"}, result.Content, "server B's waiter must not have been evicted or overwritten")
-	default:
-		t.Fatal("server B's waiter never received its response")
-	}
-}
-
-// TestElicitationWaiter_CancelWinsWhenFirst pins the #3584 review item 2b
-// cancellation-vs-response race: when the handler's ctx.Done() branch wins
-// the terminal-state CAS first, a subsequent resolve() must be told it lost
-// (return false) instead of silently succeeding into a channel nobody will
-// ever read again.
 func TestElicitationWaiter_CancelWinsWhenFirst(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	wt := w.register("a")
-
-	require.True(t, w.cancel("a", wt), "cancel must win when nothing resolved yet")
-	assert.False(t, w.resolve("a", ElicitationResult{Action: tools.ElicitationActionAccept}),
-		"a resolve racing after cancel already won must not report success")
-	assert.Equal(t, 0, elicitationWaiterCountForTest(&w), "cancel must remove the waiter from the registry")
+	waiter := newElicitationWaiter()
+	require.True(t, waiter.tryCancel())
+	assert.False(t, waiter.tryResolve(ElicitationResult{Action: tools.ElicitationActionAccept}))
 }
 
-// TestElicitationWaiter_ResolveWinsWhenFirst is the mirror image: resolve()
-// wins the race first, so the handler's cancel() call must lose and report
-// false, telling the handler to drain the value from the channel instead of
-// discarding a response ResumeElicitation already reported as delivered.
 func TestElicitationWaiter_ResolveWinsWhenFirst(t *testing.T) {
-	t.Parallel()
+	waiter := newElicitationWaiter()
+	require.True(t, waiter.tryResolve(ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"k": "v"}}))
+	assert.False(t, waiter.tryCancel())
+	assert.Equal(t, map[string]any{"k": "v"}, (<-waiter.ch).Content)
+}
 
-	var w elicitationWaiters
-	wt := w.register("a")
-
-	require.True(t, w.resolve("a", ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"k": "v"}}))
-	assert.False(t, w.cancel("a", wt), "cancel must lose once resolve already won the terminal-state race")
-
-	select {
-	case result := <-wt.ch:
-		assert.Equal(t, map[string]any{"k": "v"}, result.Content, "the resolved value must still be retrievable by the loser of the race")
-	default:
-		t.Fatal("resolve's value must be in the channel even though cancel lost the race")
+func TestElicitationWaiter_ConcurrentResolveCancelRace(t *testing.T) {
+	for range 300 {
+		waiter := newElicitationWaiter()
+		var resolveWon, cancelWon atomic.Bool
+		var workers sync.WaitGroup
+		workers.Go(func() { resolveWon.Store(waiter.tryResolve(ElicitationResult{Action: tools.ElicitationActionAccept})) })
+		workers.Go(func() { cancelWon.Store(waiter.tryCancel()) })
+		workers.Wait()
+		require.NotEqual(t, resolveWon.Load(), cancelWon.Load(), "exactly one terminal transition wins")
+		if resolveWon.Load() {
+			assert.Equal(t, tools.ElicitationActionAccept, (<-waiter.ch).Action)
+		}
 	}
-}
-
-// TestElicitationWaiters_ConcurrentRegisterResolveDeregister runs many
-// concurrent request/response pairs through the registry to catch data races
-// (run with -race) and confirm no response is ever misdelivered under
-// concurrent load, mirroring the concurrent background-job scenario from
-// the audit.
-func TestElicitationWaiters_ConcurrentRegisterResolveDeregister(t *testing.T) {
-	t.Parallel()
-
-	var w elicitationWaiters
-	const n = 200
-
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Go(func() {
-			id := fmt.Sprintf("req-%d", i)
-			wt := w.register(id)
-			defer w.abandon(id, wt)
-
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				ok := w.resolve(id, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"i": i}})
-				assert.True(t, ok)
-			}()
-
-			select {
-			case result := <-wt.ch:
-				assert.Equal(t, map[string]any{"i": i}, result.Content, "response must route back to its own request")
-			case <-time.After(2 * time.Second):
-				t.Errorf("waiter %s never received its response", id)
-			}
-			<-done
-		})
-	}
-	wg.Wait()
-}
-
-// TestElicitationWaiters_ConcurrentResolveCancelRace hammers a single waiter
-// with concurrent resolve/cancel attempts (run with -race) to confirm the
-// terminal-state CAS lets exactly one of them win, never both and never
-// neither.
-func TestElicitationWaiters_ConcurrentResolveCancelRace(t *testing.T) {
-	t.Parallel()
-
-	const n = 300
-	for i := range n {
-		var w elicitationWaiters
-		id := fmt.Sprintf("race-%d", i)
-		wt := w.register(id)
-
-		var wg sync.WaitGroup
-		var resolveWon, cancelWon atomicBool
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			if w.resolve(id, ElicitationResult{Action: tools.ElicitationActionAccept}) {
-				resolveWon.set(true)
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			if w.cancel(id, wt) {
-				cancelWon.set(true)
-			}
-		}()
-		wg.Wait()
-
-		require.NotEqual(t, resolveWon.get(), cancelWon.get(), "exactly one of resolve/cancel must win, never both or neither")
-	}
-}
-
-// atomicBool is a tiny test-local helper; sync/atomic.Bool is available but
-// spelling out set/get keeps the race-loop above terse.
-type atomicBool struct {
-	mu sync.Mutex
-	v  bool
-}
-
-func (a *atomicBool) set(v bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.v = v
-}
-
-func (a *atomicBool) get() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.v
-}
-
-// --- elicitationBridge: bounded/non-blocking send (#3584 review item 1) ---
-
-// TestElicitationBridge_SendBlocksUntilCtxDone pins the review-item-1 fix: an
-// unbuffered, unconsumed bridge channel used to block send() forever with no
-// way out. send() must now be bounded by ctx and release with ctx.Err()
-// instead of hanging, and must never panic.
-func TestElicitationBridge_SendBlocksUntilCtxDone(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	ch := make(chan Event) // unbuffered, nobody ever reads it
-	b.swap(ch)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	err := b.send(ctx, Warning("hello", "agent"))
-	elapsed := time.Since(start)
-
-	require.ErrorIs(t, err, context.DeadlineExceeded, "send on a full/abandoned channel must release via ctx, not block forever")
-	assert.Less(t, elapsed, 2*time.Second, "send must not block substantially past the ctx deadline")
 }
 
 func TestSessionElicitationSubscribersRouteToNearestOpenAncestor(t *testing.T) {
@@ -466,7 +241,11 @@ func TestElicitationHandler_RejectedScopedDeliveryFastDeclinesThenHandsOff(t *te
 	cancelParent, _ := rt.SubscribeSessionElicitations(parent.ID, "", func(event Event) bool {
 		parentEvents <- event
 		req := event.(*ElicitationRequestEvent)
-		return rt.elicitationWaiters.resolve(req.ElicitationID, ElicitationResult{Action: tools.ElicitationActionAccept})
+		handle, err := rt.SessionByID(req.SessionID)
+		if err != nil {
+			return false
+		}
+		return handle.Respond(t.Context(), InteractionResponse{InteractionID: req.RequestID, Kind: InteractionElicitation, ElicitationID: req.ElicitationID, Elicitation: ElicitationResult{Action: tools.ElicitationActionAccept}}) == nil
 	})
 	defer cancelParent()
 	childAttempts := make(chan Event, 1)
@@ -483,7 +262,7 @@ func TestElicitationHandler_RejectedScopedDeliveryFastDeclinesThenHandsOff(t *te
 	require.Len(t, childAttempts, 1, "the stale child lease rejected actual delivery")
 	<-childAttempts
 	assert.Empty(t, parentEvents, "a rejected selected callback must not cross-deliver in the same emission")
-	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters), "rejected background delivery must not leave a waiter")
+	assert.Zero(t, sessionElicitationCountForTest(rt), "rejected background delivery must not leave a waiter")
 
 	cancelChild()
 	result, err = rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "second"})
@@ -491,7 +270,7 @@ func TestElicitationHandler_RejectedScopedDeliveryFastDeclinesThenHandsOff(t *te
 	assert.Equal(t, tools.ElicitationActionAccept, result.Action)
 	require.Len(t, parentEvents, 1, "after child removal, the next request hands off to its ancestor")
 	assert.Empty(t, childAttempts)
-	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters))
+	assert.Zero(t, sessionElicitationCountForTest(rt))
 }
 
 func TestElicitationHandler_BackgroundUnregisterAfterAvailabilityFastDeclines(t *testing.T) {
@@ -510,7 +289,7 @@ func TestElicitationHandler_BackgroundUnregisterAfterAvailabilityFastDeclines(t 
 	require.NoError(t, err)
 	assert.Equal(t, tools.ElicitationActionDecline, result.Action,
 		"atomic route acquisition must detect that the previously observed route is gone")
-	assert.Zero(t, elicitationWaiterCountForTest(&rt.elicitationWaiters), "fast decline must abandon its waiter")
+	assert.Zero(t, sessionElicitationCountForTest(rt), "fast decline must abandon its waiter")
 }
 
 func TestSessionElicitationSubscribersConcurrentLifecycle(t *testing.T) {
@@ -537,21 +316,10 @@ func TestSessionElicitationSubscribersConcurrentLifecycle(t *testing.T) {
 	wg.Wait()
 }
 
-// TestElicitationBridge_SendNeverBlocksReliableSink is the end-to-end version
-// of the review-item-1 fix: a wedged bridge channel must not delay — let
-// alone block — elicitationHandler's reliable OnElicitationRequest sink
-// delivery or its subsequent wait for a response. Before the fix, the bridge
-// send was awaited synchronously and BEFORE the sink call, so an abandoned
-// channel meant the sink (and thus the whole request) never even started.
-func TestElicitationBridge_SendNeverBlocksReliableSink(t *testing.T) {
+func TestElicitationHandler_ScopedSinkReceivesAndResponds(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
-
-	// Wedge the bridge: swap in an unbuffered channel with no reader, as if
-	// a concurrent RunStream's swap left a dead consumer behind.
-	wedged := make(chan Event)
-	rt.elicitation.swap(wedged)
 
 	sinkCalled := make(chan Event, 1)
 	rt.OnElicitationRequest(func(ev Event) { sinkCalled <- ev })
@@ -569,13 +337,13 @@ func TestElicitationBridge_SendNeverBlocksReliableSink(t *testing.T) {
 		done <- handlerResult{result, err}
 	}()
 
-	// The sink must fire almost immediately, regardless of the wedged bridge.
+	// The transport subscription receives an addressable owner interaction.
 	var ev *ElicitationRequestEvent
 	select {
 	case e := <-sinkCalled:
 		ev = e.(*ElicitationRequestEvent)
 	case <-time.After(1 * time.Second):
-		t.Fatal("the reliable sink must not be blocked by a wedged bridge channel")
+		t.Fatal("the scoped subscription must receive the request")
 	}
 
 	respondToElicitation(t, rt, ev, ElicitationResult{Action: tools.ElicitationActionAccept, Content: nil})
@@ -585,7 +353,7 @@ func TestElicitationBridge_SendNeverBlocksReliableSink(t *testing.T) {
 		require.NoError(t, got.err)
 		assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
 	case <-time.After(1 * time.Second):
-		t.Fatal("elicitationHandler must not be blocked by a wedged bridge channel")
+		t.Fatal("the handler must complete after its scoped response")
 	}
 }
 
@@ -600,14 +368,16 @@ func TestElicitationHandler_HeadlessBackgroundFastDeclines(t *testing.T) {
 	// non-interactive the way runStreamLoop marks a background
 	// (run_background_agent) session's context (#3200).
 	ctx := mcptools.WithoutInteractivePrompts(t.Context())
-	ctx = genai.WithConversationID(ctx, "bg-sess-1")
+	_, err := rt.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/bg-sess-1")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	ctx = genai.WithConversationID(ctx, t.Name()+"/bg-sess-1")
 
 	result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "need sudo password"})
 	require.NoError(t, err)
 	assert.Equal(t, tools.ElicitationActionDecline, result.Action,
 		"a background session with no UI sink must fast-decline instead of blocking forever")
 
-	notes := rt.elicitationDeclines.drain("bg-sess-1")
+	notes := elicitationDeclineNotesForTest(t, rt, t.Name()+"/bg-sess-1")
 	require.Len(t, notes, 1)
 	assert.Contains(t, notes[0], "need sudo password")
 }
@@ -625,6 +395,8 @@ func TestElicitationHandler_BackgroundWithSinkStillWaitsForResponse(t *testing.T
 	rt.OnElicitationRequest(func(ev Event) { received <- ev })
 
 	ctx := mcptools.WithoutInteractivePrompts(t.Context())
+	_, err := rt.CreateSession(t.Context(), session.New(session.WithID("bg-sess-2")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
 	ctx = genai.WithConversationID(ctx, "bg-sess-2")
 
 	type handlerResult struct {
@@ -655,7 +427,7 @@ func TestElicitationHandler_BackgroundWithSinkStillWaitsForResponse(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("elicitationHandler never returned")
 	}
-	assert.Empty(t, rt.elicitationDeclines.drain("bg-sess-2"), "must not fast-decline once a sink is registered")
+	assert.Empty(t, elicitationDeclineNotesForTest(t, rt, "bg-sess-2"), "must not fast-decline once a sink is registered")
 }
 
 // TestElicitationHandler_TOCTOU_ResolveImmediatelyAfterRegister promotes the
@@ -677,7 +449,9 @@ func TestElicitationHandler_TOCTOU_ResolveImmediatelyAfterRegister(t *testing.T)
 		// `select` on the waiter channel. This is the tightest possible
 		// version of the TOCTOU window.
 		e := ev.(*ElicitationRequestEvent)
-		ok := rt.elicitationWaiters.resolve(e.ElicitationID, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"answered": true}})
+		handle, err := rt.SessionByID(e.SessionID)
+		require.NoError(t, err)
+		ok := handle.Respond(t.Context(), InteractionResponse{InteractionID: e.RequestID, Kind: InteractionElicitation, ElicitationID: e.ElicitationID, Elicitation: ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"answered": true}}}) == nil
 		assert.True(t, ok, "resolve issued synchronously from the sink callback must still find the just-registered waiter")
 		close(sinkDone)
 	})

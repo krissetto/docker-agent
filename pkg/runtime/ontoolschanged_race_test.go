@@ -37,7 +37,7 @@ func TestOnToolsChangedConcurrentRegisterAndEmit(t *testing.T) {
 			})
 		})
 		wg.Go(func() {
-			rt.emitToolsChanged()
+			rt.emitToolsChanged(root)
 		})
 	}
 	wg.Wait()

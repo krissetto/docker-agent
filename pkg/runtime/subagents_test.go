@@ -40,8 +40,6 @@ func newTestSubagentManager(t *testing.T) *subagentManager {
 		children: map[subagent.NodeID]*childRecord{},
 	}
 	r.subagents = m
-	r.interactions = newSessionInteractions()
-	r.elicitationWaiters = elicitationWaiters{}
 	r.sessionDrivers = newSessionDriverRegistry(r)
 	return m
 }
@@ -78,7 +76,16 @@ func (m *subagentManager) registerChild(parent *session.Session, parentAgent str
 }
 
 func drainDriverMessages(r *LocalRuntime, sess *session.Session) []QueuedMessage {
-	return r.sessionDrivers.Get(sess).DrainPending()
+	driver := r.sessionDrivers.Get(sess)
+	var messages []QueuedMessage
+	_ = driver.ownerCall(r.lifetime(), func() error {
+		messages = append(messages, driver.pending...)
+		messages = append(messages, driver.steering...)
+		driver.pending, driver.steering = nil, nil
+		driver.refreshSteeringLocked()
+		return nil
+	})
+	return messages
 }
 
 func requireOneDriverMessage(t *testing.T, r *LocalRuntime, sess *session.Session) string {
@@ -116,7 +123,8 @@ func TestSubagentManagerDeliversTurnReportToParentReceiver(t *testing.T) {
 	assert.True(t, strings.HasPrefix(projected.Message.Content, "<system_info>"), "model-only attribution wrapper")
 	assert.Equal(t, env, parent.MessagesSnapshot()[len(items)-1].Message.Message.Content, "projection must not mutate transcript")
 
-	require.NotNil(t, parent.SubagentTree, "tree snapshot mirrored onto the top-level session for live access")
+	canonicalParent := m.r.sessionDrivers.Get(parent).session()
+	require.NotNil(t, canonicalParent.SubagentTree, "tree snapshot mirrored onto the canonical top-level session")
 	stored, err := m.r.subagentStore.LoadTree(t.Context(), "parent")
 	require.NoError(t, err)
 	require.NotNil(t, stored, "snapshot written to the subagent store on state change")
@@ -437,7 +445,7 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 		m, parent, grand := setup()
 		leaf := session.New(session.WithID("leaf-sess"))
 		m.registerChild(grand, "helper", "ccccc", "leaf", leaf)
-		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
+		setAdmissionTestState(t, m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
 		m.children["aaaaa"].durable.Node.State = subagent.NodeIdle
 		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
 		assert.Empty(t, drainDriverMessages(m.r, parent))
@@ -445,7 +453,7 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 
 	t.Run("delivered once the subtree is quiet", func(t *testing.T) {
 		m, parent, _ := setup()
-		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false) // helper settled
+		setAdmissionTestState(t, m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false) // helper settled
 		m.children["aaaaa"].durable.Node.State = subagent.NodeIdle
 		m.children["aaaaa"].durable.Result = "all done"
 		m.reportTurn(t, "aaaaa", subagent.NodeIdle, "")
@@ -463,7 +471,7 @@ func TestReportTurnQuiescenceGating(t *testing.T) {
 
 	t.Run("failed turn reports once subtree is quiet", func(t *testing.T) {
 		m, parent, _ := setup()
-		setAdmissionTestState(m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
+		setAdmissionTestState(t, m.r.sessionDrivers.Get(m.children["bbbbb"].session), false, false, false)
 		m.children["aaaaa"].durable.Node.State = subagent.NodeFailed
 		m.reportTurn(t, "aaaaa", subagent.NodeFailed, "model exploded")
 		env := requireOneDriverMessage(t, m.r, parent)

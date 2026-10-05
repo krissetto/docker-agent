@@ -68,20 +68,27 @@ func (r *LocalRuntime) enforceMaxIterations(
 	// observer may answer immediately after seeing the event; publishing first
 	// creates a real window where SessionHandle.Respond cannot deliver and
 	// incorrectly reports the freshly observed interaction as stale.
-	var resume chan ResumeRequest
-	if !sess.NonInteractive && ctx.Err() == nil {
-		resume = r.interactions.resumeChannel(sess.ID)
-		defer r.interactions.removeResume(sess.ID, resume)
-	}
+	var resume <-chan ResumeRequest
+
 	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
 		if active := d.ActiveRequestID(); active != "" {
 			requestID = active
+		}
+		if !sess.NonInteractive && ctx.Err() == nil {
+			var err error
+			resume, err = d.registerResume(ctx, requestID, InteractionMaxIterations)
+			if err != nil {
+				return runtimeMaxIterations, iterationStop
+			}
 		}
 		event := MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID)
 		d.RegisterInteraction(requestID, InteractionMaxIterations, event)
 		events.Emit(event)
 	} else {
 		events.Emit(MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID))
+		if !sess.NonInteractive {
+			return runtimeMaxIterations, iterationStop
+		}
 	}
 
 	maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)

@@ -116,18 +116,23 @@ func TestPortableBranchExactCutsAndPrecondition(t *testing.T) {
 	_, full, err := r.BranchSession(t.Context(), h.ID(), BranchOptions{})
 	require.NoError(t, err)
 	require.Len(t, full.Messages, 4)
-	h.(*sessionHandle).driver.session().AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "changed"}})
+	driver := h.(*sessionHandle).driver
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.sess.AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "changed"}})
+		return nil
+	}))
 	_, _, err = r.BranchSession(t.Context(), h.ID(), BranchOptions{Position: &pos, ExpectedSnapshot: SnapshotProof(snapshot)})
 	require.ErrorAs(t, err, &typed)
 	require.Equal(t, SessionErrorStale, typed.Kind)
-	driver := h.(*sessionHandle).driver
-	driver.mu.Lock()
-	driver.phase = sessionRunning
-	driver.mu.Unlock()
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.phase = sessionRunning
+		return nil
+	}))
 	_, _, err = r.BranchSession(t.Context(), h.ID(), BranchOptions{})
 	require.ErrorAs(t, err, &typed)
 	require.Equal(t, SessionErrorCapacity, typed.Kind)
-	driver.mu.Lock()
-	driver.phase = sessionIdle
-	driver.mu.Unlock()
+	require.NoError(t, driver.ownerCall(t.Context(), func() error {
+		driver.phase = sessionIdle
+		return nil
+	}))
 }

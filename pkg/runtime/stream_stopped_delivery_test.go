@@ -85,13 +85,11 @@ func TestLocalRuntime_FinalizeEventChannelDeliversStreamStoppedToSlowButAliveCon
 	rt.streamStoppedDeliveryTimeout = 2 * time.Second
 	sess := session.New()
 	events := make(chan Event, 1)
-	parent := make(chan Event, 1)
 	events <- Error("buffer already full")
-	rt.elicitation.swap(events)
 
 	done := make(chan struct{})
 	go func() {
-		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
+		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, events)
 		close(done)
 	}()
 

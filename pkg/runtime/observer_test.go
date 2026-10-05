@@ -107,8 +107,14 @@ func TestObserver_SeesEveryEventBeforeCaller(t *testing.T) {
 	got := obs.snapshot()
 	require.Len(t, got, len(consumed), "observer count must match consumer count")
 	for i := range consumed {
-		assert.Same(t, consumed[i], got[i],
-			"observer event %d must be the same pointer the consumer saw", i)
+		expected := consumed[i]
+		if event, ok := expected.(*MessageAddedEvent); ok {
+			copy := *event
+			copy.ownerMessage = nil
+			expected = &copy
+		}
+		assert.Equal(t, expected, got[i],
+			"observer event %d must match the detached consumer payload", i)
 	}
 }
 

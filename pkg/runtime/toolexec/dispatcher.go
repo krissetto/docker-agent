@@ -19,7 +19,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/safety"
@@ -217,7 +216,13 @@ type Dispatcher struct {
 
 	// Resume receives user-confirmation responses. Must be set; the
 	// dispatcher blocks on it whenever a tool requires confirmation.
-	Resume <-chan ResumeRequest
+	Resume    <-chan ResumeRequest
+	ResumeFor func(context.Context, *session.Session, string) (<-chan ResumeRequest, error)
+
+	MaxParallel             int
+	AcquireTool             func(context.Context, string, string) (func(), error)
+	RequireResponseIdentity bool
+	ApprovalEffect          func(context.Context, *session.Session, ResumeRequest, string) error
 
 	// AgentFor returns the active agent for a session. Required.
 	AgentFor func(*session.Session) *agent.Agent
@@ -271,7 +276,14 @@ func (d *Dispatcher) Process(ctx context.Context, sess *session.Session, calls [
 	defer cancelBatch(nil)
 
 	var stopOnce sync.Once
-	outcomes := concurrent.MapSlice(calls, func(tc tools.ToolCall) CallOutcome {
+	outcomes := make([]CallOutcome, len(calls))
+	parallel := d.MaxParallel
+	if parallel <= 0 {
+		parallel = 16
+	}
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	run := func(tc tools.ToolCall) CallOutcome {
 		c := d.newCall(sess, em, a, tc, toolByName)
 		outcome := c.run(batchCtx)
 		switch {
@@ -281,7 +293,19 @@ func (d *Dispatcher) Process(ctx context.Context, sess *session.Session, calls [
 			stopOnce.Do(func() { cancelBatch(errBatchStoppedByHook) })
 		}
 		return outcome
-	})
+	}
+	for range min(parallel, len(calls)) {
+		workers.Go(func() {
+			for index := range jobs {
+				outcomes[index] = run(calls[index])
+			}
+		})
+	}
+	for index := range calls {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
 
 	for _, outcome := range outcomes {
 		if outcome.StopRun {
@@ -848,6 +872,16 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 		return runTool()
 	}
 
+	resume := c.d.Resume
+	if c.d.ResumeFor != nil {
+		var err error
+		resume, err = c.d.ResumeFor(ctx, c.sess, c.tc.ID)
+		if err != nil {
+			confirmationMu.Unlock()
+			c.errorResponse(ctx, err.Error())
+			return CallOutcome{}
+		}
+	}
 	slog.DebugContext(ctx, "Tools not approved, waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 	c.prompted = true
 	c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
@@ -856,16 +890,21 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 		c.d.Hooks.NotifyUserInput(ctx, c.a, c.sess.ID, "tool confirmation")
 	}
 
-	select {
-	case req := <-c.d.Resume:
-		confirmationMu.Unlock()
-		return c.handleResume(ctx, req, runTool)
-	case <-ctx.Done():
-		confirmationMu.Unlock()
-		slog.DebugContext(ctx, "Context cancelled while waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
-		c.notifyApproval(ctx, ApprovalDecisionCanceled, ApprovalSourceContextCanceled)
-		c.errorResponse(ctx, c.cancellationMessage(ctx))
-		return c.cancellationOutcome(ctx)
+	for {
+		select {
+		case req := <-resume:
+			if c.d.RequireResponseIdentity && (req.SessionID != c.sess.ID || req.RequestID != c.tc.ID) {
+				continue
+			}
+			confirmationMu.Unlock()
+			return c.handleResume(ctx, req, runTool)
+		case <-ctx.Done():
+			confirmationMu.Unlock()
+			slog.DebugContext(ctx, "Context cancelled while waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+			c.notifyApproval(ctx, ApprovalDecisionCanceled, ApprovalSourceContextCanceled)
+			c.errorResponse(ctx, c.cancellationMessage(ctx))
+			return c.cancellationOutcome(ctx)
+		}
 	}
 }
 
@@ -947,6 +986,12 @@ func (c *call) confirmationMetadata(permissionMeta map[string]string) map[string
 // (with optional session/tool-wide approval persistence) or emit a
 // rejection error response.
 func (c *call) handleResume(ctx context.Context, req ResumeRequest, runTool func() CallOutcome) CallOutcome {
+	if c.d.ApprovalEffect != nil {
+		if err := c.d.ApprovalEffect(ctx, c.sess, req, c.tc.Function.Name); err != nil {
+			c.errorResponse(ctx, "Unable to persist approval: "+err.Error())
+			return CallOutcome{}
+		}
+	}
 	approved, source := resumeVerdict(ctx, c.sess, req, c.tc.Function.Name)
 	switch {
 	case approved:
@@ -1058,13 +1103,16 @@ func (r callRuntime) ConfirmAndRun(ctx context.Context, run tools.ConfirmedRun, 
 
 func (r callRuntime) gate() *Gate {
 	return &Gate{
-		Sess:        r.c.sess,
-		Agent:       r.c.a,
-		Emitter:     r.c.em,
-		Resume:      r.c.d.Resume,
-		Hooks:       r.c.d.Hooks,
-		Permissions: r.c.d.Permissions,
-		Mu:          r.c.confirmationMutex(),
+		Sess:                    r.c.sess,
+		Agent:                   r.c.a,
+		Emitter:                 r.c.em,
+		Resume:                  r.c.d.Resume,
+		ResumeFor:               r.c.d.ResumeFor,
+		RequireResponseIdentity: r.c.d.RequireResponseIdentity,
+		ApprovalEffect:          r.c.d.ApprovalEffect,
+		Hooks:                   r.c.d.Hooks,
+		Permissions:             r.c.d.Permissions,
+		Mu:                      r.c.confirmationMutex(),
 	}
 }
 
@@ -1107,7 +1155,14 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 
 	c.em.EmitToolCall(c.tc, c.tool, c.a.Name())
 
-	res, duration, err := exec(ctx)
+	var res *tools.ToolCallResult
+	var duration time.Duration
+	var err error
+	if admissionErr := c.d.invokeAdmitted(ctx, c.sess.ID, c.tc.Function.Name, func(ctx context.Context) {
+		res, duration, err = exec(ctx)
+	}); admissionErr != nil {
+		err = admissionErr
+	}
 	telemetry.RecordToolCall(ctx, c.tc.Function.Name, c.sess.ID, c.a.Name(), duration, err)
 
 	var stop *StopRunError

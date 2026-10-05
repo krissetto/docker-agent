@@ -158,7 +158,9 @@ func TestAsyncSubagentAutomaticCompactionSurvivesWakeAndReload(t *testing.T) {
 	require.Len(t, callsA, 3, "initial child turn, summary call, and idle wake")
 	assert.False(t, containsSessionSummary(callsA[0]))
 	assert.True(t, containsSessionSummary(callsA[2]), "the idle wake must consume the generated summary")
-	assert.Equal(t, "durable compacted context", info.Session.LastSummary())
+	snapshot, err := childSession.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "durable compacted context", snapshot.LastSummary())
 
 	// A root driver follows the same pre-turn threshold path; this guards the
 	// comparison against accidentally validating a child-only test double.

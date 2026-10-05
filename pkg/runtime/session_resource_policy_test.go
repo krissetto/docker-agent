@@ -29,19 +29,20 @@ func TestSessionResourcePolicyDefaultsAndConstruction(t *testing.T) {
 
 	want := DefaultSessionResourcePolicy()
 	assert.Equal(t, want, rt.policy)
+	assert.Equal(t, want.MaxExecutions, rt.maxExecutions)
+	assert.Equal(t, want.MaxTools, rt.maxTools)
 	assert.Equal(t, want.MaxSessions, rt.maxSessions)
 	assert.Equal(t, want.MaxActiveDescendants, rt.maxActiveDescendants)
 	assert.Equal(t, want.MaxActivePerRoot, rt.maxActiveDescendantsRoot)
 	assert.Equal(t, want.MaxDepth, rt.maxSubagentDepth)
 	assert.Equal(t, want.MailboxMessages, rt.maxPendingMailbox)
-	assert.Equal(t, want.OrphanMessages, rt.maxOrphanMailbox)
 	assert.Equal(t, want.ReplayEvents, rt.maxReplayEvents)
 	assert.Equal(t, want.ReplayBytes, rt.maxReplayBytes)
 	assert.Equal(t, want.IdleRetention, rt.idleRetention)
 }
 
 func TestSessionResourcePolicyOptionsComposeAndReplace(t *testing.T) {
-	replacement := SessionResourcePolicy{MaxSessions: 7, MaxActiveDescendants: 8, MaxActivePerRoot: 9, MaxDepth: 10, MailboxMessages: 11, OrphanMessages: 12, ReplayEvents: 13, ReplayBytes: 14}
+	replacement := SessionResourcePolicy{MaxSessions: 7, MaxActiveDescendants: 8, MaxActivePerRoot: 9, MaxDepth: 10, MailboxMessages: 11, ReplayEvents: 13, ReplayBytes: 14}
 	rt, err := NewLocalRuntime(t.Context(), newPolicyTestTeam(),
 		WithSessionResourcePolicy(replacement),
 		WithMaxActiveDescendants(18),
@@ -54,11 +55,9 @@ func TestSessionResourcePolicyOptionsComposeAndReplace(t *testing.T) {
 	replacement.MaxActivePerRoot = 19
 	replacement.MaxDepth = 20
 	replacement.MailboxMessages = 21
-	replacement.OrphanMessages = 21
 	assert.Equal(t, replacement, rt.policy)
 	assert.Equal(t, 7, rt.maxSessions)
 	assert.Equal(t, 21, rt.maxPendingMailbox)
-	assert.Equal(t, 21, rt.maxOrphanMailbox)
 
 	rt, err = NewLocalRuntime(t.Context(), newPolicyTestTeam(),
 		WithMaxSubagentMailbox(21),
@@ -68,7 +67,6 @@ func TestSessionResourcePolicyOptionsComposeAndReplace(t *testing.T) {
 	assert.Equal(t, SessionResourcePolicy{}, rt.policy, "full policy option replaces earlier individual mutations")
 	assert.Zero(t, rt.maxSessions)
 	assert.Zero(t, rt.maxPendingMailbox)
-	assert.Zero(t, rt.maxOrphanMailbox)
 	assert.False(t, rt.sessionDrivers.PostOrBuffer(t.Context(), "disabled-orphan", QueuedMessage{Content: "no"}, true))
 
 	disabledDriver := newSessionDriver(rt, session.New(session.WithID("disabled-mailbox")))
@@ -82,7 +80,6 @@ func TestUnlimitedSessionResourcesForSessionsAndMailboxes(t *testing.T) {
 	policy := DefaultSessionResourcePolicy()
 	policy.MaxSessions = UnlimitedSessionResources
 	policy.MailboxMessages = UnlimitedSessionResources
-	policy.OrphanMessages = UnlimitedSessionResources
 	rt, err := NewLocalRuntime(t.Context(), newPolicyTestTeam(), WithSessionResourcePolicy(policy))
 	require.NoError(t, err)
 
@@ -100,8 +97,8 @@ func TestUnlimitedSessionResourcesForSessionsAndMailboxes(t *testing.T) {
 		assert.True(t, driver.Post(t.Context(), QueuedMessage{Content: fmt.Sprintf("pending-%d", i)}, true))
 	}
 
-	for i := range defaultMaxOrphanMailbox + 1 {
-		assert.True(t, rt.sessionDrivers.PostOrBuffer(t.Context(), "orphan", QueuedMessage{Content: fmt.Sprintf("orphan-%d", i)}, true))
+	for i := range defaultMaxSubagentMailbox + 1 {
+		assert.False(t, rt.sessionDrivers.PostOrBuffer(t.Context(), "orphan", QueuedMessage{Content: fmt.Sprintf("orphan-%d", i)}, true))
 	}
 }
 
@@ -116,7 +113,5 @@ func TestWithMaxSubagentMailboxAcceptsUnlimitedSentinel(t *testing.T) {
 	rt, err := NewLocalRuntime(t.Context(), newPolicyTestTeam(), WithMaxSubagentMailbox(UnlimitedSessionResources))
 	require.NoError(t, err)
 	assert.Equal(t, UnlimitedSessionResources, rt.policy.MailboxMessages)
-	assert.Equal(t, UnlimitedSessionResources, rt.policy.OrphanMessages)
 	assert.Equal(t, UnlimitedSessionResources, rt.maxPendingMailbox)
-	assert.Equal(t, UnlimitedSessionResources, rt.maxOrphanMailbox)
 }

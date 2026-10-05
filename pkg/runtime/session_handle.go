@@ -513,23 +513,26 @@ func (h *sessionHandle) mutateTodo(ctx context.Context, id string, operation Ses
 	if todoSet.Shared() {
 		key = h.runtime.todoRootSessionID(key)
 	}
-	items, err := func() ([]session.Todo, error) {
-		h.driver.mu.Lock()
-		defer h.driver.mu.Unlock()
+	var items []session.Todo
+	err := h.driver.durableIO(ctx, func() (sessionIOReservation, error) {
 		if err := h.driver.admitLocked(operation); err != nil {
-			return nil, err
+			return sessionIOReservation{}, err
 		}
 		if h.driver.reclaiming {
-			return nil, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: operation}
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-		return store.MutateTodos(ctx, key, func(items []session.Todo) ([]session.Todo, error) {
-			index := slices.IndexFunc(items, func(item session.Todo) bool { return item.ID == id })
-			if index < 0 {
-				return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: h.sessionID, Operation: operation, Detail: "todo ID not found"}
-			}
-			return mutate(items, index)
-		})
-	}()
+		return sessionIOReservation{write: func(ctx context.Context) error {
+			var err error
+			items, err = store.MutateTodos(ctx, key, func(current []session.Todo) ([]session.Todo, error) {
+				index := slices.IndexFunc(current, func(item session.Todo) bool { return item.ID == id })
+				if index < 0 {
+					return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: h.sessionID, Operation: operation, Detail: "todo ID not found"}
+				}
+				return mutate(current, index)
+			})
+			return err
+		}}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +627,7 @@ func (h *sessionHandle) Steer(ctx context.Context, input TurnInput) (Submission,
 	msg := QueuedMessage{InputOrigin: session.InputOriginUser, Content: input.Content, MultiContent: input.MultiContent, RequestID: turnID, InputMode: "steer"}
 	queued, err := h.driver.postSteer(ctx, msg)
 	if err != nil {
-		return Submission{}, err
+		return Submission{}, h.inputError(err, SessionOperationSteer, turnID)
 	}
 	disposition := SubmissionDisposition("")
 	if queued {
@@ -655,9 +658,11 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 	queued, err := h.driver.post(ctx, msg, true)
 	if err != nil {
 		var sessionErr *SessionError
-		if errors.As(err, &sessionErr) && sessionErr.Operation == "post" {
+		if errors.As(err, &sessionErr) && (sessionErr.Operation == "post" || sessionErr.Operation == "") {
 			sessionErrCopy := *sessionErr
 			sessionErrCopy.Operation = SessionOperation(operation)
+			sessionErrCopy.SessionID = h.sessionID
+			sessionErrCopy.RequestID = requestID
 			return Submission{}, &sessionErrCopy
 		}
 		return Submission{}, err
@@ -667,6 +672,19 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 		disposition = SubmissionDispositionQueued
 	}
 	return Submission{SessionID: h.sessionID, TurnID: requestID, Disposition: disposition}, nil
+}
+
+func (h *sessionHandle) inputError(err error, operation SessionOperation, requestID string) error {
+	var sessionErr *SessionError
+	if !errors.As(err, &sessionErr) {
+		return err
+	}
+	detached := *sessionErr
+	if detached.Operation == "" {
+		detached.Operation = operation
+	}
+	detached.SessionID, detached.RequestID = h.sessionID, requestID
+	return &detached
 }
 
 func newSessionRequestID() (string, error) {
@@ -773,18 +791,23 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 	if operationID == "" {
 		return &SessionError{Kind: SessionErrorInvalid, SessionID: h.sessionID, Operation: "run_skill", Reason: SessionErrorReasonBusy}
 	}
-	h.driver.mu.Lock()
-	if admissionErr := h.driver.admitLocked(SessionOperationRunSkill); admissionErr != nil {
-		h.driver.mu.Unlock()
-		return admissionErr
+	var operationCtx context.Context
+	var cancel context.CancelFunc
+	var generation uint64
+	if err := h.driver.ownerCall(ctx, func() error {
+		if err := h.driver.admitLocked(SessionOperationRunSkill); err != nil {
+			return err
+		}
+		operationCtx, cancel = context.WithCancel(ctx) //nolint:gosec,fatcontext // owner stores cancel; worker defers it and stop fences it
+		h.driver.skillGeneration++
+		generation = h.driver.skillGeneration
+		h.driver.skillOperationID = operationID
+		h.driver.skillCancel = cancel
+		h.driver.wg.Add(1)
+		return nil
+	}); err != nil {
+		return err
 	}
-	operationCtx, cancel := context.WithCancel(ctx)
-	h.driver.skillGeneration++
-	generation := h.driver.skillGeneration
-	h.driver.skillOperationID = operationID
-	h.driver.skillCancel = cancel
-	h.driver.wg.Add(1)
-	h.driver.mu.Unlock()
 	h.PublishOperation(SkillOperation(h.sessionID, h.agentName, operationID, args.Name, "accepted", ""))
 	go func() {
 		defer h.driver.wg.Done()
@@ -803,9 +826,7 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 		if failure != "" {
 			status = "failed"
 		}
-		func() {
-			h.driver.mu.Lock()
-			defer h.driver.mu.Unlock()
+		_ = h.driver.ownerCall(context.WithoutCancel(ctx), func() error {
 			publish := !h.driver.stopped && h.driver.skillGeneration == generation && h.driver.skillOperationID == operationID
 			if publish {
 				// Publish while reservation remains held. Event hub publication does
@@ -815,7 +836,8 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 				h.driver.skillOperationID = ""
 				h.driver.skillCancel = nil
 			}
-		}()
+			return nil
+		})
 	}()
 	return nil
 }
@@ -836,7 +858,7 @@ func (h *sessionHandle) Snapshot(ctx context.Context) (*session.Session, error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return h.driver.session().Clone(), nil
+	return h.driver.ownerSnapshot(ctx)
 }
 
 // Compact requests manual compaction through the session driver's serialized
@@ -1145,7 +1167,6 @@ func (r *LocalRuntime) DeleteSession(ctx context.Context, sessionID string) erro
 	if err := r.subagents.deleteSession(ctx, sessionID); err != nil {
 		return err
 	}
-	r.interactions.deleteSession(sessionID)
 	r.sessionEvents.Delete(sessionID)
 	if r.sessionStore != nil {
 		if err := r.sessionStore.DeleteSession(ctx, sessionID); err != nil && !errors.Is(err, session.ErrNotFound) {

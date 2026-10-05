@@ -193,8 +193,8 @@ func (e *TreeObservationError) Error() string {
 }
 
 func rejectTreeObservation(observation runtime.Observation) error {
-	if len(observation.Initial) > 1 || observation.SessionsAdded != nil {
-		return &TreeObservationError{InitialSessions: len(observation.Initial), SessionsAdded: observation.SessionsAdded != nil}
+	if len(observation.Initial) > 1 || observation.SessionsAdded != nil || observation.TreeUpdates != nil {
+		return &TreeObservationError{InitialSessions: len(observation.Initial), SessionsAdded: observation.SessionsAdded != nil || observation.TreeUpdates != nil}
 	}
 	return nil
 }

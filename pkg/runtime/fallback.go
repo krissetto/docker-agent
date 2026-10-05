@@ -43,7 +43,7 @@ type modelWithFallback struct {
 type fallbackExecutor struct {
 	// prepareMessages applies runtime message transforms for the provider
 	// selected for each attempt. It is set by [NewLocalRuntime].
-	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) []chat.Message
+	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) ([]chat.Message, error)
 	// prepareTools reapplies live runtime policy after retry backoff.
 	prepareTools func(*session.Session, []tools.Tool) []tools.Tool
 
@@ -271,9 +271,6 @@ func (e *fallbackExecutor) execute(
 
 		for attempt := range maxAttempts {
 			attemptMessages := messages
-			if e.prepareMessages != nil {
-				attemptMessages = e.prepareMessages(ctx, sess, a, modelEntry.provider, messages)
-			}
 
 			// Check context before each attempt
 			if ctx.Err() != nil {
@@ -340,6 +337,17 @@ func (e *fallbackExecutor) execute(
 			if e.prepareTools != nil {
 				attemptTools = e.prepareTools(sess, agentTools)
 			}
+			if e.prepareMessages != nil {
+				var err error
+				attemptMessages, err = e.prepareMessages(streamCtx, sess, a, modelEntry.provider, messages)
+				if err != nil {
+					close(creating)
+					<-creationWatcherDone
+					streamCancel(nil)
+					return streamResult{}, nil, err
+				}
+			}
+
 			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, attemptTools)
 			close(creating)
 			<-creationWatcherDone

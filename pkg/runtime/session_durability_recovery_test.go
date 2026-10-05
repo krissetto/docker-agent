@@ -64,6 +64,7 @@ func TestMetadataRetryPreservesAcknowledgedPolicyRevocation(t *testing.T) {
 	h, err := r.CreateSession(t.Context(), s, SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	p := newPersistenceObserver(wrapper)
+	p.owner = func(id string) *sessionDriver { d, _ := r.sessionDrivers.Lookup(id); return d }
 	wrapper.failNext = true
 	p.OnRunStart(t.Context(), h.(*sessionHandle).driver.session())
 	require.Error(t, p.pendingError(s.ID))
@@ -103,10 +104,11 @@ func TestDurableTurnTerminalEvidenceSurvivesRestart(t *testing.T) {
 			r.sessionDrivers.closed = true
 			r.sessionDrivers.mu.Unlock()
 			d := handle.(*sessionHandle).driver
-			d.mu.Lock()
 			msg := QueuedMessage{RequestID: "turn", Content: "work", InputOrigin: session.InputOriginUser}
-			require.NoError(t, d.appendInputLocked(&msg))
-			require.NoError(t, d.promoteInputLocked(msg))
+			_, err = d.admitInput(t.Context(), msg, SessionOperationPost, true, false)
+			require.NoError(t, err)
+			require.NoError(t, d.promoteInput(t.Context(), msg.RequestID, func(QueuedMessage) { d.pending = nil }))
+			d.mu.Lock()
 			d.activeRequestID, d.generation, d.phase = "turn", 1, sessionRunning
 			if tc.canceled {
 				d.phase = sessionCancelling
@@ -143,6 +145,7 @@ func TestMetadataRetryPreservesAcknowledgedPermissions(t *testing.T) {
 	handle, err := r.CreateSession(t.Context(), session.New(session.WithID("permissions")), SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	observer := newPersistenceObserver(store)
+	observer.owner = func(id string) *sessionDriver { d, _ := r.sessionDrivers.Lookup(id); return d }
 	store.failNext = true
 	observer.OnRunStart(t.Context(), handle.(*sessionHandle).driver.session())
 	permissions := &session.PermissionsConfig{Deny: []string{"shell"}}
@@ -232,7 +235,11 @@ func TestLegacyTitleUpdateUsesAuthoritativeOwnerAndPublishesAfterCommit(t *testi
 			require.Equal(t, "after", persisted.TitleSnapshot())
 			require.Equal(t, session.SafetyPolicyStrict, persisted.GetSafetyPolicy())
 			if resident {
-				require.Equal(t, "after", sess.TitleSnapshot())
+				canonical, err := driver.ownerSnapshot(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, "after", canonical.TitleSnapshot())
+				require.Equal(t, session.SafetyPolicyStrict, canonical.GetSafetyPolicy())
+				require.Equal(t, "before", sess.TitleSnapshot(), "detached snapshot is not live edit authority")
 				require.Equal(t, "before", stale.TitleSnapshot())
 				require.Len(t, canonicalReplay(driver), 1)
 			} else {

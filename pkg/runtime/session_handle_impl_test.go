@@ -100,22 +100,23 @@ func TestSessionWakesIdleSessionOnNote(t *testing.T) {
 	}
 }
 
-func TestSessionBuffersUnknownSessionUntilSeen(t *testing.T) {
+func TestSessionRejectsUnknownInboxUntilSeen(t *testing.T) {
 	t.Parallel()
 
 	rt, sess := newSessionFixture(t)
 
-	rt.deliverOrBuffer(t.Context(), sess.ID, "early note")
-	assert.False(t, rt.sessionDrivers.Settled(sess.ID), "note must stay buffered")
+	require.False(t, rt.sessionDrivers.PostReliable(t.Context(), sess.ID, QueuedMessage{Content: "early note"}))
+	assert.True(t, rt.sessionDrivers.Settled(sess.ID))
 
 	sess.AddMessage(session.UserMessage("hi"))
 	for range rt.runExecution(t.Context(), sess) {
 	}
 
-	assert.Eventually(t, func() bool {
-		return rt.sessionDrivers.Settled(sess.ID) && len(sess.Messages) >= 3
-	}, 5*time.Second, 10*time.Millisecond)
-	assert.NotContains(t, sess.Messages[0].Message.Message.Content, "early note", "detached runtime note is steering context, not the initial user turn")
+	for _, item := range sess.MessagesSnapshot() {
+		if item.Message != nil {
+			assert.NotContains(t, item.Message.Message.Content, "early note")
+		}
+	}
 }
 
 func TestDriveDrivesFreeSession(t *testing.T) {

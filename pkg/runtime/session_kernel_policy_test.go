@@ -27,8 +27,6 @@ func TestDeleteSessionCascadesNestedSessionsInteractionsAndObservers(t *testing.
 	grand, ok := rt.SubagentAttachInfo(grandID)
 	require.True(t, ok)
 
-	rt.interactions.resumeChannel(root.ID)
-	rt.interactions.resumeChannel(child.Session.ID)
 	_, observer, cancel, _ := rt.sessionEvents.SubscribeSequenced(child.Session.ID, nil, 1)
 	defer cancel()
 
@@ -37,8 +35,6 @@ func TestDeleteSessionCascadesNestedSessionsInteractionsAndObservers(t *testing.
 	require.NoError(t, rt.DeleteSession(ctx, root.ID))
 	for _, id := range []string{root.ID, child.Session.ID, grand.Session.ID} {
 		_, exists := rt.sessionDrivers.Lookup(id)
-		assert.False(t, exists)
-		_, exists = rt.interactions.resume[id]
 		assert.False(t, exists)
 	}
 	_, open := <-observer
@@ -65,7 +61,6 @@ func TestDeleteSessionLateMetricsPreserveNestedTopologyAndAdmissionFence(t *test
 	for _, sess := range []*session.Session{root, child, grand} {
 		_, err := store.GetSession(t.Context(), sess.ID)
 		require.NoError(t, err, "admitted rows are durable before deletion")
-		rt.interactions.resumeChannel(sess.ID)
 		_, observer, cancel, _ := rt.sessionEvents.SubscribeSequenced(sess.ID, nil, 1)
 		t.Cleanup(cancel)
 		observers = append(observers, observer)
@@ -127,8 +122,6 @@ func TestDeleteSessionLateMetricsPreserveNestedTopologyAndAdmissionFence(t *test
 	require.NoError(t, deleteErr)
 	for i, sess := range []*session.Session{root, child, grand} {
 		_, exists := rt.sessionDrivers.Lookup(sess.ID)
-		assert.False(t, exists)
-		_, exists = rt.interactions.resume[sess.ID]
 		assert.False(t, exists)
 		_, err := store.GetSession(t.Context(), sess.ID)
 		require.ErrorIs(t, err, session.ErrNotFound)

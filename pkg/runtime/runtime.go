@@ -35,7 +35,6 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
-	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -64,9 +63,12 @@ type ModelStore interface {
 	GetDatabase(ctx context.Context) (*modelsdev.Database, error)
 }
 
+const maxStartupToolSubscribers = 64
+const maxStartupToolEvents = 128
+
 type startupToolSeed struct {
 	events      []Event
-	subscribers []chan Event
+	subscribers map[chan Event]struct{}
 }
 
 // LocalRuntime manages the execution of agents
@@ -78,6 +80,8 @@ type LocalRuntime struct {
 	ctx                       func() context.Context
 	lifecycleCancel           context.CancelFunc
 	shutdownMu                sync.Mutex
+	shutdownGate              chan struct{}
+	shutdownFence             sync.Once
 	creationMu                sync.Mutex
 	drainMu                   sync.Mutex
 	drainCtx                  context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
@@ -87,7 +91,6 @@ type LocalRuntime struct {
 	toolDeferrals             tools.DeferralTracker
 	team                      *team.Team
 	agents                    *agentRouter
-	interactions              *sessionInteractions
 	tracer                    trace.Tracer
 	modelsStore               ModelStore
 	sessionCompaction         bool
@@ -98,11 +101,8 @@ type LocalRuntime struct {
 	startupTools              map[string]*startupToolSeed
 	startupToolsCtx           context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
 	startupToolsCancel        context.CancelFunc
-	startupToolsWG            sync.WaitGroup
+	startupToolsWG            *driverWorkGroup
 	startupToolsClosed        bool
-	elicitation               elicitationBridge  // Owns the per-stream events channel for outbound elicitation requests
-	elicitationWaiters        elicitationWaiters // Routes elicitation responses to the request awaiting them, keyed by ID (#3584)
-	elicitationDeclines       elicitationDeclineNotes
 
 	// elicitationSinkMu guards the embedder-wide fallback sink and the
 	// session-scoped App subscribers. Requests prefer their exact session,
@@ -164,14 +164,6 @@ type LocalRuntime struct {
 	// holds the cooldownManager and rate-limit retry flag so that state
 	// stays out of LocalRuntime. See [fallbackExecutor].
 
-	// steerQueue stores urgent mid-turn messages. The agent loop drains
-	// ALL pending messages after tool execution, before the stop check.
-	steerQueue MessageQueue
-
-	// followUpQueue stores end-of-turn messages. The agent loop pops
-	// exactly ONE message after the model stops and stop-hooks have run.
-	followUpQueue MessageQueue
-
 	// budgetCfg is the run-wide budget (nil when unset), budgetsCfg the
 	// named budget definitions, and agentBudgets the names each agent
 	// declared. All three are immutable templates; budget below is the
@@ -180,52 +172,16 @@ type LocalRuntime struct {
 	budgetsCfg   map[string]latest.BudgetConfig
 	agentBudgets map[string][]string
 
-	// budgetMu guards budget and budgetStarted. The first root stream
-	// installs the trackers and every later one reuses them, so a budget
-	// spans the session rather than resetting on each message; sub-sessions
-	// read the same set, so delegated work spends against the root run's
-	// wallets rather than getting a fresh allowance each.
-	budgetMu sync.Mutex
-	budget   *budgetSet
-	// budgetStarted distinguishes "not built yet" from "built, and there
-	// was nothing to budget" — without it a nil budget would be rebuilt on
-	// every message, and the reset bug would come back for unbudgeted runs.
-	budgetStarted bool
-
-	// activeRootStreams tracks top-level RunStream loops. Recalls use this to
-	// preserve mid-turn steering while still waking the embedder once the parent
-	// stream has gone idle.
-	activeRootStreams atomic.Int32
-
-	// liveSessions is the registry of sessions with an active RunStream,
-	// keyed by session ID. It backs the /context team view (LiveSessions)
-	// and targeted manual compaction (CompactLiveSession). Guarded by
-	// liveSessionsMu; see live_sessions.go for the enqueue/drain contract.
-	liveSessionsMu sync.Mutex
-	liveSessions   map[string]*liveSessionEntry
-
-	// recallHandler wakes embedders (TUI/App) when a tool recall arrives after
-	// the active RunStream has gone idle. Protected by recallMu because tool
-	// callbacks can fire from background goroutines.
-	recallMu      sync.RWMutex
-	recallHandler RecallHandler
+	// rootBudgets keeps independent wallets for canonical root session trees.
+	budgetMu    sync.Mutex
+	rootBudgets map[string]*budgetSet
 
 	// onToolsChanged is called when an MCP toolset reports a tool list
 	// change. Protected by toolsChangedMu because MCP change-notification
-	// goroutines call emitToolsChanged concurrently, mirroring
-	// onBackgroundEvent/backgroundEventMu below.
+	// goroutines call emitToolsChanged concurrently.
 	toolsChangedMu       sync.RWMutex
 	onToolsChanged       func(Event)
 	toolsChangedReleases []func()
-
-	// onBackgroundEvent is called for events surfaced from detached
-	// background work (e.g. background agent tasks). Protected by
-	// backgroundEventMu because background tasks read it from their own
-	// goroutines.
-	backgroundEventMu sync.RWMutex
-	onBackgroundEvent func(Event)
-
-	bgAgents *agenttool.Handler
 
 	subagents *subagentManager
 
@@ -234,11 +190,15 @@ type LocalRuntime struct {
 	subagentsDisabled   atomic.Bool // inverted so the zero value is enabled
 
 	policy                   SessionResourcePolicy
+	maxExecutions            int
+	maxTools                 int
+	executionAdmissionMu     sync.Mutex
+	executionAdmission       *executionAdmission
+	toolPermits              chan struct{}
 	maxActiveDescendants     int
 	maxActiveDescendantsRoot int
 	maxSubagentDepth         int
 	maxPendingMailbox        int
-	maxOrphanMailbox         int
 	maxSessions              int
 	maxReplayEvents          int
 	maxReplayBytes           int
@@ -309,7 +269,7 @@ type Opt func(*LocalRuntime)
 
 func WithCurrentAgent(agentName string) Opt {
 	return func(r *LocalRuntime) {
-		r.agents.Set(agentName)
+		r.agents = newAgentRouter(r.team, agentName)
 	}
 }
 
@@ -359,7 +319,7 @@ func WithTracer(t trace.Tracer) Opt {
 // If not provided, an in-memory buffered queue is used.
 func WithSteerQueue(q MessageQueue) Opt {
 	return func(r *LocalRuntime) {
-		r.steerQueue = q
+		_ = q
 	}
 }
 
@@ -367,7 +327,7 @@ func WithSteerQueue(q MessageQueue) Opt {
 // messages. If not provided, an in-memory buffered queue is used.
 func WithFollowUpQueue(q MessageQueue) Opt {
 	return func(r *LocalRuntime) {
-		r.followUpQueue = q
+		_ = q
 	}
 }
 
@@ -386,18 +346,20 @@ func WithProviderRegistry(registry *provider.Registry) Opt {
 }
 
 // UnlimitedSessionResources explicitly disables a supported resource bound.
-// It is currently supported for sessions and pending/orphan mailboxes.
+// It is currently supported for sessions and pending mailboxes.
 const UnlimitedSessionResources = -1
 
 // SessionResourcePolicy bounds session/topology resources. Zero means the resource
 // is disabled (no admission/retention), never "use an implicit default".
 type SessionResourcePolicy struct {
+	// Positive execution/tool limits wait for capacity; zero disables admission.
+	MaxExecutions        int
+	MaxTools             int
 	MaxSessions          int
 	MaxActiveDescendants int
 	MaxActivePerRoot     int
 	MaxDepth             int
 	MailboxMessages      int
-	OrphanMessages       int
 	ReplayEvents         int
 	ReplayBytes          int
 	IdleRetention        time.Duration
@@ -405,10 +367,11 @@ type SessionResourcePolicy struct {
 
 func DefaultSessionResourcePolicy() SessionResourcePolicy {
 	return SessionResourcePolicy{
+		MaxExecutions: 32, MaxTools: 32,
 		MaxSessions: 1024, MaxActiveDescendants: defaultMaxActiveDescendants,
 		MaxActivePerRoot: defaultMaxActiveDescendantsRoot, MaxDepth: defaultMaxSubagentDepth,
-		MailboxMessages: defaultMaxSubagentMailbox, OrphanMessages: defaultMaxOrphanMailbox,
-		ReplayEvents: defaultSessionEventReplayCapacity, ReplayBytes: 8 << 20,
+		MailboxMessages: defaultMaxSubagentMailbox,
+		ReplayEvents:    defaultSessionEventReplayCapacity, ReplayBytes: 8 << 20,
 		IdleRetention: 5 * time.Minute,
 	}
 }
@@ -424,12 +387,17 @@ func WithSessionResourcePolicy(policy SessionResourcePolicy) Opt {
 // in NewLocalRuntime after all options compose; hand-built test runtimes must
 // call it too, so a zero policy can never masquerade as "default".
 func (r *LocalRuntime) applyResourcePolicy() {
+	r.maxExecutions = r.policy.MaxExecutions
+	r.maxTools = r.policy.MaxTools
+	r.executionAdmission = newExecutionAdmission(r.maxExecutions)
+	if r.maxTools > 0 {
+		r.toolPermits = make(chan struct{}, r.maxTools)
+	}
 	r.maxSessions = r.policy.MaxSessions
 	r.maxActiveDescendants = r.policy.MaxActiveDescendants
 	r.maxActiveDescendantsRoot = r.policy.MaxActivePerRoot
 	r.maxSubagentDepth = r.policy.MaxDepth
 	r.maxPendingMailbox = r.policy.MailboxMessages
-	r.maxOrphanMailbox = r.policy.OrphanMessages
 	r.maxReplayEvents = r.policy.ReplayEvents
 	r.maxReplayBytes = r.policy.ReplayBytes
 	r.idleRetention = r.policy.IdleRetention
@@ -484,7 +452,6 @@ func WithMaxSubagentMailbox(n int) Opt {
 	return func(r *LocalRuntime) {
 		if n > 0 || n == UnlimitedSessionResources {
 			r.policy.MailboxMessages = n
-			r.policy.OrphanMessages = n
 		}
 	}
 }
@@ -628,20 +595,14 @@ func WithAutoInjector(inj builtins.AutoInjector) Opt {
 	}
 }
 
-// WithHooksRegistry plugs a pre-populated [hooks.Registry] into the
-// runtime instead of letting it allocate a fresh one. Embedders use
-// this to pre-register builtins they own (today snapshot, tomorrow
-// any custom builtin) so the auto-injection chain set up by
-// [WithAutoInjector] resolves against the same registry.
-//
-// The runtime continues to register its own stateless and
-// closure-bound builtins (add_date, max_iterations, cache_response,
-// unload, ...) on top of the supplied registry, so the embedder only
-// needs to install entries that the runtime can't construct itself.
+// WithHooksRegistry snapshots embedder registrations into a private runtime
+// registry. Later caller changes cannot alter this runtime. Stock builtin names
+// retain caller overrides; cache_response is reserved for the runtime, and the
+// model hook factory is always bound to the runtime's provider registry.
 func WithHooksRegistry(reg *hooks.Registry) Opt {
 	return func(r *LocalRuntime) {
 		if reg != nil {
-			r.hooksRegistry = reg
+			r.hooksRegistry = reg.Clone()
 		}
 	}
 }
@@ -702,12 +663,8 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		ctx:                          func() context.Context { return context.WithoutCancel(ctx) },
 		lifecycleCtx:                 lifecycleCtx,
 		toolMap:                      make(map[string]ToolHandlerFunc),
-		liveSessions:                 make(map[string]*liveSessionEntry),
 		team:                         agents,
 		agents:                       newAgentRouter(agents, defaultAgent.Name()),
-		interactions:                 newSessionInteractions(),
-		steerQueue:                   NewInMemoryMessageQueue(defaultSteerQueueCapacity),
-		followUpQueue:                NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
 		sessionCompaction:            true,
 		managedOAuth:                 true,
 		sessionStore:                 session.NewInMemorySessionStore(),
@@ -723,7 +680,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		dmrModelLister:               dmrmodels.ListModels,
 	}
 	r.startupToolsCtx, r.startupToolsCancel = context.WithCancel(context.WithoutCancel(ctx))
-	r.bgAgents = agenttool.NewHandler(r)
+	r.startupToolsWG = newDriverWorkGroup()
 	r.fallback.prepareMessages = r.prepareMessagesForModel
 	r.fallback.prepareTools = r.filterSessionDelegationTools
 
@@ -818,16 +775,18 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		}
 	}
 
-	// Set up the hooks registry. Use the embedder-supplied registry
-	// (via [WithHooksRegistry]) when present so any builtins the
-	// embedder pre-registered — typically the snapshot builtin from
-	// [builtins.RegisterSnapshot] — are visible to the runtime, then
-	// register the runtime-owned builtins on top.
-	if r.hooksRegistry == nil {
-		r.hooksRegistry = hooks.NewRegistry()
-	}
-	if err := builtins.Register(r.hooksRegistry); err != nil {
+	// Defaults compose beneath embedder hooks; runtime-bound names are reserved.
+	defaults := hooks.NewRegistry()
+	if err := builtins.Register(defaults); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
+	}
+	if r.hooksRegistry == nil {
+		r.hooksRegistry = defaults
+	} else {
+		if _, exists := r.hooksRegistry.LookupBuiltin(BuiltinCacheResponse); exists {
+			return nil, fmt.Errorf("builtin hook %q is reserved for the runtime", BuiltinCacheResponse)
+		}
+		r.hooksRegistry.RegisterDefaults(defaults)
 	}
 	registerModelHook(r.hooksRegistry, r.providerRegistry)
 
@@ -893,6 +852,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// observer chain so any user-supplied observers see the same view
 	// of the session that future RunStream calls and store reads will.
 	if obs := newPersistenceObserver(r.sessionStore); obs != nil {
+		obs.owner = func(id string) *sessionDriver { d, _ := r.sessionDrivers.Lookup(id); return d }
 		obs.lifetime = r.lifetime()
 		r.observers = append([]EventObserver{obs}, r.observers...)
 	}
@@ -1677,13 +1637,8 @@ func (r *LocalRuntime) shutdownStartupTools(ctx context.Context) error {
 		r.startupToolsCancel()
 	}
 	r.startupToolsMu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		r.startupToolsWG.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-r.startupToolsWG.DoneChan():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1694,7 +1649,31 @@ func (r *LocalRuntime) shutdownStartupTools(ctx context.Context) error {
 // session store open.
 func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 	r.shutdownMu.Lock()
-	defer r.shutdownMu.Unlock()
+	if r.shutdownGate == nil {
+		r.shutdownGate = make(chan struct{}, 1)
+	}
+	gate := r.shutdownGate
+	r.shutdownMu.Unlock()
+	r.shutdownFence.Do(func() {
+		if r.subagents != nil {
+			r.subagents.closeAdmission()
+		}
+		if r.sessionDrivers != nil {
+			r.sessionDrivers.closeAdmission()
+		}
+		if r.lifecycleCancel != nil {
+			r.lifecycleCancel()
+		}
+	})
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.drainMu.Lock()
 	r.drainCtx = ctx
 	r.drainMu.Unlock()
@@ -1703,19 +1682,9 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 			p.setDrainContext(ctx)
 		}
 	}
-	if r.sessionDrivers != nil {
-		r.sessionDrivers.closeAdmission()
-	}
-	if r.subagents != nil {
-		r.subagents.closeAdmission()
-	}
-	if r.lifecycleCancel != nil {
-		r.lifecycleCancel()
-	}
 	if err := r.shutdownStartupTools(ctx); err != nil {
 		return err
 	}
-	r.bgAgents.StopAll()
 	if r.sessionDrivers != nil {
 		if err := r.sessionDrivers.CloseContext(ctx); err != nil {
 			return err
@@ -1725,9 +1694,6 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 		if err := r.subagents.CloseContext(ctx); err != nil {
 			return err
 		}
-	}
-	if r.interactions != nil {
-		r.interactions.close()
 	}
 	if r.sessionEvents != nil {
 		r.sessionEvents.Close()
@@ -1798,16 +1764,16 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 	if handler == nil {
 		return
 	}
-	seen := make(map[tools.ChangeSubscriber]bool)
 	for _, name := range r.team.AgentNames() {
 		a, err := r.team.Agent(name)
 		if err != nil {
 			continue
 		}
+		seen := make(map[tools.ChangeSubscriber]bool)
 		for _, ts := range a.ToolSets() {
 			if n, ok := tools.As[tools.ChangeSubscriber](ts); ok && !seen[n] {
 				seen[n] = true
-				release := n.SubscribeToolsChanged(r.emitToolsChanged)
+				release := n.SubscribeToolsChanged(func() { r.emitToolsChanged(a) })
 				stop := context.AfterFunc(r.lifetime(), release)
 				r.toolsChangedReleases = append(r.toolsChangedReleases, func() { stop(); release() })
 			}
@@ -1815,9 +1781,8 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 	}
 }
 
-// emitToolsChanged is the callback registered on MCP toolsets. It re-reads
-// the current agent's full tool list and pushes a ToolsetInfo event.
-func (r *LocalRuntime) emitToolsChanged() {
+// Unsolicited notifications identify affected agents, never an inferred session.
+func (r *LocalRuntime) emitToolsChanged(a *agent.Agent) {
 	r.toolsChangedMu.RLock()
 	handler := r.onToolsChanged
 	r.toolsChangedMu.RUnlock()
@@ -1826,35 +1791,16 @@ func (r *LocalRuntime) emitToolsChanged() {
 	}
 	ctx, cancel := context.WithTimeout(r.ctx(), toolsChangedTimeout)
 	defer cancel()
-	a := r.currentAgent()
 	agentTools, err := a.StartedTools(ctx)
 	if err != nil {
 		return
 	}
-	handler(ToolsetInfo(len(agentTools), false, r.currentAgentName()))
+	handler(ToolsetInfo(len(agentTools), false, a.Name()))
 }
 
-// OnBackgroundEvent registers a handler that receives events surfaced from
-// detached background work — today the TokenUsageEvents of background agent
-// tasks (run_background_agent), whose sub-sessions run on their own goroutine
-// with no live event channel. This lets the UI keep per-agent context
-// accounting for background agents.
-func (r *LocalRuntime) OnBackgroundEvent(handler func(Event)) {
-	r.backgroundEventMu.Lock()
-	defer r.backgroundEventMu.Unlock()
-	r.onBackgroundEvent = handler
-}
-
-// emitBackgroundEvent forwards an event from detached background work to the
-// registered handler, if any.
-func (r *LocalRuntime) emitBackgroundEvent(event Event) {
-	r.backgroundEventMu.RLock()
-	handler := r.onBackgroundEvent
-	r.backgroundEventMu.RUnlock()
-	if handler != nil {
-		handler(event)
-	}
-}
+// OnBackgroundEvent is retained for source compatibility. Child events are
+// observed through their session journals, never a runtime-global callback.
+func (r *LocalRuntime) OnBackgroundEvent(func(Event)) {}
 
 // emitAgentAndTeamInfo sends the AgentInfo and TeamInfo events that drive the
 // sidebar's agent/model/thinking display. It returns false when sending was
@@ -2008,15 +1954,6 @@ func (r *LocalRuntime) EmitStartupInfo(ctx context.Context, sess *session.Sessio
 // not the runtime's global current agent: for a pinned session's startup info
 // (e.g. an attached subagent tab) the two differ, and the TUI derives the
 // selected agent from event agent names.
-func (r *LocalRuntime) startupToolSubscriberCount(agentName string) int {
-	r.startupToolsMu.Lock()
-	defer r.startupToolsMu.Unlock()
-	if seed := r.startupTools[agentName]; seed != nil {
-		return len(seed.subscribers)
-	}
-	return 0
-}
-
 func (r *LocalRuntime) emitStartupTools(ctx context.Context, a *agent.Agent, send func(Event) bool) {
 	r.startupToolsMu.Lock()
 	if r.startupToolsClosed {
@@ -2028,18 +1965,30 @@ func (r *LocalRuntime) emitStartupTools(ctx context.Context, a *agent.Agent, sen
 	}
 	seed := r.startupTools[a.Name()]
 	if seed == nil {
-		seed = &startupToolSeed{}
+		seed = &startupToolSeed{subscribers: make(map[chan Event]struct{})}
 		r.startupTools[a.Name()] = seed
-		r.startupToolsWG.Go(func() {
+		r.startupToolsWG.Add(1)
+		go func() {
+			defer r.startupToolsWG.Done()
 			discoveryCtx := tools.WithoutInteractivePrompts(r.startupToolsCtx)
 			publish := func(event Event) bool {
 				if discoveryCtx.Err() != nil {
 					return false
 				}
 				r.startupToolsMu.Lock()
-				seed.events = append(seed.events, event)
-				for _, subscriber := range seed.subscribers {
-					subscriber <- event
+				if len(seed.events) == maxStartupToolEvents {
+					copy(seed.events, seed.events[1:])
+					seed.events[len(seed.events)-1] = event
+				} else {
+					seed.events = append(seed.events, event)
+				}
+				for subscriber := range seed.subscribers {
+					select {
+					case subscriber <- event:
+					default:
+						delete(seed.subscribers, subscriber)
+						close(subscriber)
+					}
 				}
 				r.startupToolsMu.Unlock()
 				return discoveryCtx.Err() == nil
@@ -2051,19 +2000,32 @@ func (r *LocalRuntime) emitStartupTools(ctx context.Context, a *agent.Agent, sen
 			func() {
 				r.startupToolsMu.Lock()
 				defer r.startupToolsMu.Unlock()
-				for _, subscriber := range seed.subscribers {
+				for subscriber := range seed.subscribers {
+					delete(seed.subscribers, subscriber)
 					close(subscriber)
 				}
 				if r.startupTools[a.Name()] == seed {
 					delete(r.startupTools, a.Name())
 				}
 			}()
-		})
+		}()
+	}
+	if len(seed.subscribers) == maxStartupToolSubscribers {
+		r.startupToolsMu.Unlock()
+		return
 	}
 	history := slices.Clone(seed.events)
-	subscriber := make(chan Event, len(a.ToolSets())+3)
-	seed.subscribers = append(seed.subscribers, subscriber)
+	subscriber := make(chan Event, min(len(a.ToolSets())+3, maxStartupToolEvents))
+	seed.subscribers[subscriber] = struct{}{}
 	r.startupToolsMu.Unlock()
+	defer func() {
+		r.startupToolsMu.Lock()
+		defer r.startupToolsMu.Unlock()
+		if _, registered := seed.subscribers[subscriber]; registered {
+			delete(seed.subscribers, subscriber)
+			close(subscriber)
+		}
+	}()
 
 	for _, event := range history {
 		if !send(event) {
@@ -2315,69 +2277,81 @@ func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout ti
 
 // Steer enqueues a user message for urgent mid-turn injection into the
 // running agent loop. The message will be picked up after the current batch
+func (r *LocalRuntime) compatibilityInputTarget(ctx context.Context) (*sessionDriver, error) {
+	if id := genai.ConversationIDFromContext(ctx); id != "" {
+		if driver, ok := r.sessionDrivers.Lookup(id); ok {
+			return driver, nil
+		}
+		return nil, ErrSessionClosed
+	}
+	r.sessionDrivers.mu.Lock()
+	var target *sessionDriver
+	for _, driver := range r.sessionDrivers.drivers {
+		if driver.identityParent != "" {
+			continue
+		}
+		if target != nil {
+			r.sessionDrivers.mu.Unlock()
+			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "input_route", Detail: "multiple root sessions require an explicit session handle"}
+		}
+		target = driver
+	}
+	r.sessionDrivers.mu.Unlock()
+	if target == nil {
+		return nil, ErrSessionClosed
+	}
+	return target, nil
+}
+
 func (r *LocalRuntime) Steer(ctx context.Context, msg QueuedMessage) error {
-	if !r.steerQueue.Enqueue(ctx, msg) {
-		return errors.New("steer queue full")
+	d, err := r.compatibilityInputTarget(ctx)
+	if err != nil {
+		return err
 	}
-	return nil
+	if msg.RequestID == "" {
+		msg.RequestID, err = newSessionRequestID()
+		if err != nil {
+			return err
+		}
+	}
+	_, err = d.postSteer(ctx, msg)
+	return err
 }
 
-// FollowUp enqueues a message to be processed after the current agent turn
-// finishes. Unlike Steer, follow-ups are popped one at a time and each gets
-// a full undivided agent turn.
 func (r *LocalRuntime) FollowUp(ctx context.Context, msg QueuedMessage) error {
-	if !r.followUpQueue.Enqueue(ctx, msg) {
-		return errors.New("follow-up queue full")
+	d, err := r.compatibilityInputTarget(ctx)
+	if err != nil {
+		return err
 	}
-	return nil
+	if msg.RequestID == "" {
+		msg.RequestID, err = newSessionRequestID()
+		if err != nil {
+			return err
+		}
+	}
+	msg.InputMode = "followup"
+	_, err = d.post(ctx, msg, true)
+	return err
 }
 
-func (r *LocalRuntime) CancelSteer(_ context.Context, id string) bool {
-	q, ok := r.steerQueue.(cancelableMessageQueue)
-	return ok && q.Cancel(id)
+func (r *LocalRuntime) CancelSteer(ctx context.Context, id string) bool {
+	d, err := r.compatibilityInputTarget(ctx)
+	if err != nil {
+		return false
+	}
+	withdrawn, err := d.cancelPendingMessage(ctx, id)
+	return err == nil && withdrawn
 }
 
-func (r *LocalRuntime) CancelFollowUp(_ context.Context, id string) bool {
-	q, ok := r.followUpQueue.(cancelableMessageQueue)
-	return ok && q.Cancel(id)
+func (r *LocalRuntime) CancelFollowUp(ctx context.Context, id string) bool {
+	return r.CancelSteer(ctx, id)
 }
 
-// SetRecallHandler registers an embedder-owned wake-up path for tool recalls.
-// When unset, recalls fall back to the steer queue and are consumed by the next
-// active RunStream.
-func (r *LocalRuntime) SetRecallHandler(handler RecallHandler) {
-	r.recallMu.Lock()
-	defer r.recallMu.Unlock()
-	r.recallHandler = handler
-}
+func (r *LocalRuntime) SetRecallHandler(_ RecallHandler) {}
 
-func (r *LocalRuntime) recall(ctx context.Context, msg QueuedMessage) error {
-	if r.activeRootStreams.Load() > 0 {
-		return r.Steer(ctx, msg)
-	}
+func (r *LocalRuntime) recall(ctx context.Context, msg QueuedMessage) error { return r.Steer(ctx, msg) }
 
-	r.recallMu.RLock()
-	handler := r.recallHandler
-	r.recallMu.RUnlock()
-	if handler == nil {
-		return r.Steer(ctx, msg)
-	}
-	if !handler(ctx, msg) {
-		return errors.New("recall handler rejected message")
-	}
-	return nil
-}
-
-func (r *LocalRuntime) QueueStatus() QueueStatus {
-	status := QueueStatus{}
-	if steerQ, ok := r.steerQueue.(*inMemoryMessageQueue); ok {
-		status.SteerDepth, status.SteerCapacity = steerQ.status()
-	}
-	if followupQ, ok := r.followUpQueue.(*inMemoryMessageQueue); ok {
-		status.FollowupDepth, status.FollowupCapacity = followupQ.status()
-	}
-	return status
-}
+func (r *LocalRuntime) QueueStatus() QueueStatus { return QueueStatus{} }
 
 // Run starts the agent's interaction loop
 

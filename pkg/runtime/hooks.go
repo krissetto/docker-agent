@@ -112,6 +112,9 @@ func (r *LocalRuntime) dispatchHook(
 	if input != nil && input.AgentName == "" {
 		input.AgentName = a.Name()
 	}
+	if input != nil && input.RootSessionID == "" {
+		input.RootSessionID = r.todoRootSessionID(input.SessionID)
+	}
 
 	started := time.Now()
 	if events != nil {
@@ -287,26 +290,22 @@ func instructionSources(sessionStart, userPrompt []chat.Message, turnStart instr
 }
 
 func (r *LocalRuntime) messagesWithDynamicContext(
-	ctx context.Context,
+	_ context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	sources []session.InstructionSource,
 	legacyExtras []chat.Message,
-) []chat.Message {
+) ([]chat.Message, *session.InstructionContextState, bool) {
+	// Instruction assembly is worker-local; the owner commits only this state.
+	scratch := sess.OwnSnapshot()
 	if !userconfig.Get().CacheStablePromptsEnabled() {
-		if sess.ClearInstructionContext() {
-			if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
-				slog.WarnContext(ctx, "Failed to clear instruction context", "session_id", sess.ID, "error", err)
-			}
-		}
-		return r.filterDelegationMessages(a, sess, sess.GetMessagesWithProjection(a, false, projectModelInput, legacyExtras...))
+		changed := scratch.ClearInstructionContext()
+		messages := r.filterDelegationMessages(a, scratch, scratch.GetMessagesWithProjection(a, false, projectModelInput, legacyExtras...))
+		return messages, nil, changed
 	}
-	if sess.PrepareInstructionContext(sources) {
-		if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
-			slog.WarnContext(ctx, "Failed to persist instruction context", "session_id", sess.ID, "error", err)
-		}
-	}
-	return r.filterDelegationMessages(a, sess, sess.GetMessagesWithProjection(a, true, projectModelInput))
+	changed := scratch.PrepareInstructionContext(sources)
+	messages := r.filterDelegationMessages(a, scratch, scratch.GetMessagesWithProjection(a, true, projectModelInput))
+	return messages, scratch.InstructionContext, changed
 }
 
 func instructionSource(key, label string, messages []chat.Message) session.InstructionSource {
@@ -707,20 +706,9 @@ func (r *LocalRuntime) executeUserSteeringMessagesSubmitHooks(ctx context.Contex
 	return false, "", contextMessages(result)
 }
 
-// executeUserFollowupSubmitHooks fires user_followup_submit each time
-// the runtime dequeues a follow-up message at the end of a turn and
-// starts a fresh turn for it. Follow-ups are user messages queued for
-// end-of-turn processing (the FollowUp API / queue), distinct from
-// mid-turn steering. It mirrors user_prompt_submit: the follow-up text
-// is passed in Prompt, a terminating verdict (decision="block" /
-// continue=false / exit 2) stops the run loop, and AdditionalContext is
-// returned as a transient system message that the caller threads into
-// the follow-up turn only — never persisted.
+// executeUserFollowupSubmitHooks gates a promoted follow-up before model delivery.
 func (r *LocalRuntime) executeUserFollowupSubmitHooks(ctx context.Context, sess *session.Session, a *agent.Agent, prompt string, events EventSink) (stop bool, message string, contextMsgs []chat.Message) {
-	result := r.dispatchHook(ctx, a, hooks.EventUserFollowupSubmit, &hooks.Input{
-		SessionID: sess.ID,
-		Prompt:    prompt,
-	}, events)
+	result := r.dispatchHook(ctx, a, hooks.EventUserFollowupSubmit, &hooks.Input{SessionID: sess.ID, Prompt: prompt}, events)
 	if result == nil {
 		return false, "", nil
 	}

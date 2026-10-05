@@ -97,3 +97,38 @@ func TestSharedToolSubscriptionsReleaseWithRuntime(t *testing.T) {
 		return calls[1].Load() == before
 	}, time.Second, time.Millisecond)
 }
+
+func TestSharedToolChangesPreserveAgentAndRuntimeAttribution(t *testing.T) {
+	notifier := &ownershipNotifier{}
+	root := agent.New("root", "prompt", agent.WithModel(&mockProvider{id: "test/mock-model"}), agent.WithToolSets(notifier))
+	worker := agent.New("worker", "prompt", agent.WithModel(&mockProvider{id: "test/mock-model"}), agent.WithToolSets(notifier), agent.WithTools(tools.Tool{Name: "worker_only"}))
+	sharedTeam := team.New(team.WithAgents(root, worker))
+	var runtimes []*LocalRuntime
+	var events [2][]Event
+	for i := range 2 {
+		r, err := NewLocalRuntime(t.Context(), sharedTeam)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, r.Close()) })
+		r.OnToolsChanged(func(event Event) { events[i] = append(events[i], event) })
+		runtimes = append(runtimes, r)
+	}
+	notifier.subscribers.Notify()
+	check := func(got []Event) {
+		require.Len(t, got, 2)
+		counts := map[string]int{}
+		for _, event := range got {
+			info := event.(*ToolsetInfoEvent)
+			counts[info.AgentName] = info.AvailableTools
+			_, scoped := event.(SessionScoped)
+			require.False(t, scoped, "unsolicited changes cannot infer session ownership")
+		}
+		require.Equal(t, map[string]int{"root": 0, "worker": 1}, counts)
+	}
+	check(events[0])
+	check(events[1])
+	runtimes[0].OnToolsChanged(nil)
+	events[1] = nil
+	notifier.subscribers.Notify()
+	require.Len(t, events[0], 2, "unsubscribing one runtime must not affect the other")
+	check(events[1])
+}

@@ -283,10 +283,7 @@ func TestCompletionIdentitySaturationRetainsUnacknowledgedReport(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reports, 1)
 	assert.Equal(t, "user", d.pending[0].RequestID)
-	d.mu.Lock()
-	require.NoError(t, d.promoteInputLocked(d.pending[0]))
-	d.pending = nil
-	d.mu.Unlock()
+	require.NoError(t, d.promoteInput(t.Context(), "user", func(QueuedMessage) { d.pending = nil }))
 	require.NoError(t, d.acceptReport(t.Context(), reports[0]))
 	require.Len(t, d.pending, 1)
 	require.NoError(t, d.acceptReport(t.Context(), reports[0]), "acknowledged replay bypasses full mailbox")

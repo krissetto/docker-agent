@@ -5,6 +5,8 @@ import (
 	"errors"
 	"slices"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 var errSteeringBoundary = errors.New("provider attempt interrupted by steering")
@@ -61,7 +63,9 @@ func (d *sessionDriver) hasSteeringLocked() bool {
 }
 
 func (d *sessionDriver) refreshSteeringLocked() {
-	d.interruptRequested = d.hasSteeringLocked()
+	d.interruptRequested = slices.ContainsFunc(d.steering, func(msg QueuedMessage) bool {
+		return normalizedInputOrigin(msg.InputOrigin) != session.InputOriginRuntime
+	})
 	if d.steeringChanged == nil {
 		d.steeringChanged = make(chan struct{})
 	}
@@ -78,43 +82,18 @@ func (d *sessionDriver) refreshSteeringLocked() {
 }
 
 func (d *sessionDriver) steeringContext(ctx context.Context) context.Context {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.refreshSteeringLocked()
-	return context.WithValue(ctx, steeringBoundaryContextKey{}, d.steeringChanged)
+	var signal chan struct{}
+	_ = d.ownerCall(ctx, func() error {
+		d.refreshSteeringLocked()
+		signal = d.steeringChanged
+		return nil
+	})
+	return context.WithValue(ctx, steeringBoundaryContextKey{}, signal)
 }
 
 // Promotion is one mailbox transaction across origins; ordinary turns stay queued.
 func (d *sessionDriver) drainBoundarySteering() []QueuedMessage {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	batch := slices.Clone(d.steering)
-	for _, msg := range d.pending {
-		if msg.RequestID == "" || msg.trustedSteering() {
-			batch = append(batch, msg)
-		}
-	}
-	slices.SortStableFunc(batch, func(a, b QueuedMessage) int { return a.AcceptedPosition - b.AcceptedPosition })
-	promoted := make([]QueuedMessage, 0, len(batch))
-	for _, msg := range batch {
-		if msg.RequestID != "" {
-			if err := d.promoteInputLocked(msg); err != nil {
-				d.lastError = err.Error()
-				break
-			}
-		}
-		promoted = append(promoted, msg)
-		remove := func(queued QueuedMessage) bool {
-			return queued.RequestID == msg.RequestID && queued.Content == msg.Content && queued.AcceptedPosition == msg.AcceptedPosition
-		}
-		d.steering = slices.DeleteFunc(d.steering, remove)
-		d.pending = slices.DeleteFunc(d.pending, remove)
-	}
-	d.refreshSteeringLocked()
-	if len(promoted) != 0 {
-		d.notifyTurnChangedLocked()
-	}
-	return promoted
+	return d.drainInputs(d.r.lifetime(), false)
 }
 
 func waitForRetryBoundary(ctx context.Context, delay time.Duration) error {

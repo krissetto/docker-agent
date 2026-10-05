@@ -90,22 +90,10 @@ func (d *sessionDriver) postTrustedInput(ctx context.Context, msg QueuedMessage)
 		}
 		msg.RequestID = id
 	}
-	d.mu.Lock()
-	if found, _, err := d.existingInputLocked(msg); found || err != nil {
-		d.mu.Unlock()
-		return err == nil
-	}
-	if ctx.Err() != nil || d.admitLocked(SessionOperationPost) != nil || !limitAllows(len(d.pending), d.pendingLimit()) {
-		d.mu.Unlock()
+	_, err := d.admitInput(ctx, msg, SessionOperationPost, true, false)
+	if err != nil {
 		return false
 	}
-	if err := d.acceptInputLocked(&msg); err != nil {
-		d.mu.Unlock()
-		return false
-	}
-	d.pending = append(d.pending, msg)
-	d.refreshSteeringLocked()
-	d.mu.Unlock()
 	d.WakePending()
 	return true
 }

@@ -177,13 +177,15 @@ type SessionInteraction[Kind ~string, Event any] struct {
 }
 
 type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
-	Session            *session.Session                  `json:"session"`
-	Status             SessionStatus[State]              `json:"status"`
-	Interactions       []SessionInteraction[Kind, Event] `json:"interactions"`
-	PendingInputs      []SessionPendingInput             `json:"pending_inputs"`
-	Epoch              string                            `json:"epoch,omitempty"`
-	Cursor             uint64                            `json:"cursor"`
-	TranscriptPosition int                               `json:"transcript_position"`
+	Session       *session.Session                  `json:"session"`
+	Status        SessionStatus[State]              `json:"status"`
+	Interactions  []SessionInteraction[Kind, Event] `json:"interactions"`
+	PendingInputs []SessionPendingInput             `json:"pending_inputs"`
+	// LiveSeeds supplements a dynamically admitted tree snapshot before its live tail.
+	LiveSeeds          []SessionEnvelope[Event] `json:"live_seeds,omitempty"`
+	Epoch              string                   `json:"epoch,omitempty"`
+	Cursor             uint64                   `json:"cursor"`
+	TranscriptPosition int                      `json:"transcript_position"`
 }
 
 // SessionEnvelope carries ordered journal events. Before "ready", a stream
@@ -193,6 +195,7 @@ type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
 // matching envelope/event session identities where the event carries one,
 // no turn/interaction identity, transcript_position -1, and no gap metadata.
 // They do not advance the replay cursor and are never live-tail journal events.
+// Dynamic tree admission carries the same seeds in snapshot.live_seeds.
 type SessionEnvelope[Event any] struct {
 	Version            int    `json:"version"`
 	SessionID          string `json:"session_id"`

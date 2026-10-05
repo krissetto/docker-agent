@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -17,6 +18,7 @@ import (
 // remain ordered until the driver's completion barrier retries them.
 type PersistenceObserver struct {
 	store    session.Store
+	owner    func(string) *sessionDriver
 	mu       sync.Mutex
 	journals map[string]*sessionPersistenceJournal
 	drain    context.Context //nolint:containedctx // supervisor shutdown context replaces canceled execution lifetime only for final writes
@@ -29,12 +31,14 @@ const (
 )
 
 type sessionPersistenceJournal struct {
-	mu        sync.Mutex
-	streaming *streamingState
-	pending   []persistenceEffect
-	bytes     int
-	failure   error
-	terminal  error
+	id         string
+	mu         sync.Mutex
+	invalidate atomic.Bool
+	streaming  *streamingState
+	pending    []persistenceEffect
+	bytes      int
+	failure    error
+	terminal   error
 }
 
 type persistenceEffect struct {
@@ -65,7 +69,7 @@ func (p *PersistenceObserver) journal(id string) *sessionPersistenceJournal {
 	}
 	j := p.journals[id]
 	if j == nil {
-		j = &sessionPersistenceJournal{}
+		j = &sessionPersistenceJournal{id: id}
 		p.journals[id] = j
 	}
 	return j
@@ -78,7 +82,7 @@ func (p *PersistenceObserver) enqueueLocked(ctx context.Context, j *sessionPersi
 		retryCtx, cancel := context.WithTimeout(p.durabilityContext(), defaultSubagentPersistenceTimeout)
 		err := p.flushLocked(retryCtx, j)
 		if err == nil && size > persistenceJournalBytes {
-			err = effect(retryCtx)
+			err = p.writeEffect(retryCtx, j.id, effect)
 		}
 		cancel()
 		if err == nil {
@@ -106,13 +110,17 @@ func (p *PersistenceObserver) flushLocked(ctx context.Context, j *sessionPersist
 	}
 	for len(j.pending) > 0 {
 		effect := j.pending[0]
-		if err := effect.write(ctx); err != nil {
+		if err := p.writeEffect(ctx, j.id, effect.write); err != nil {
 			// Execution cancellation after a failed write must not replace its storage cause.
-			if j.failure != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			if j.failure != nil && ctx.Err() != nil && errors.Is(err, ctx.Err()) && !session.IsTemporary(j.failure) {
 				return j.failure
 			}
-			j.failure = err
-			return err
+			if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+				j.failure = &session.TemporaryError{Err: err}
+			} else {
+				j.failure = err
+			}
+			return j.failure
 		}
 		j.bytes -= effect.bytes
 		j.pending[0] = persistenceEffect{}
@@ -171,9 +179,16 @@ func (p *PersistenceObserver) OnRunStart(ctx context.Context, sess *session.Sess
 	snapshot.Messages = nil
 	data, _ := json.Marshal(snapshot)
 	p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
-		unlock := sess.LockMetadata()
-		defer unlock()
 		latest := sess.OwnSnapshot()
+		if p.owner != nil {
+			if d := p.owner(sess.ID); d != nil {
+				var err error
+				latest, err = d.ownerSnapshot(ctx)
+				if err != nil {
+					return err
+				}
+			}
+		}
 		latest.Messages = nil
 		return p.store.UpdateSession(ctx, latest)
 	})
@@ -187,14 +202,23 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	id := sess.ID
-	appendItem := func(item session.Item) {
+	if j.invalidate.Swap(false) {
+		j.streaming = nil
+	}
+	appendItem := func(item session.Item, receipt *session.Message) {
 		writeID, err := newSessionRequestID()
 		if err != nil {
 			j.failure = err
 			return
 		}
 		data, _ := json.Marshal(item)
-		p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error { _, err := p.appendItem(ctx, id, writeID, item); return err })
+		p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
+			rowID, err := p.appendItem(ctx, id, writeID, item)
+			if err == nil && item.Message != nil {
+				err = p.publishMessageID(ctx, id, rowID, receipt)
+			}
+			return err
+		})
 	}
 	switch e := event.(type) {
 	case *AgentChoiceEvent:
@@ -220,7 +244,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		msg := QueuedMessage{Content: e.Message, MultiContent: e.MultiContent, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode}
 		message := msg.sessionMessage()
 		message.TurnID = e.TurnID
-		appendItem(session.NewMessageItem(message))
+		appendItem(session.NewMessageItem(message), e.ownerMessage)
 	case *MessageAddedEvent:
 		st := j.streaming
 		j.streaming = nil
@@ -229,9 +253,14 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		}
 		message := *e.Message
 		if st != nil && st.writeID != "" {
-			p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error { return p.store.UpdateMessage(ctx, id, st.messageID, &message) })
+			p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+				if err := p.store.UpdateMessage(ctx, id, st.messageID, &message); err != nil {
+					return err
+				}
+				return p.publishMessageID(ctx, id, st.messageID, e.ownerMessage)
+			})
 		} else {
-			appendItem(session.NewMessageItem(&message))
+			appendItem(session.NewMessageItem(&message), e.ownerMessage)
 		}
 	case *SubSessionCompletedEvent:
 		if child, ok := e.SubSession.(*session.Session); ok && !child.AsyncSubagent {
@@ -249,7 +278,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			usage := *e.Usage
 			item.Usage = &usage
 		}
-		appendItem(item)
+		appendItem(item, nil)
 	case *TokenUsageEvent:
 		if e.Usage != nil {
 			input, output, cost := e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.Cost
@@ -257,9 +286,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		}
 	case *SessionTitleEvent:
 		p.enqueueLocked(ctx, j, 256, func(ctx context.Context) error {
-			unlock := sess.LockMetadata()
-			defer unlock()
-			return p.store.UpdateSessionTitle(ctx, id, sess.TitleSnapshot())
+			return p.store.UpdateSessionTitle(ctx, id, e.Title)
 		})
 	case *ErrorEvent:
 		j.streaming = nil
@@ -267,7 +294,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		appendItem(session.Item{Error: &session.Error{Message: e.Error, Code: e.Code, AgentName: e.AgentName, CreatedAt: ts.Format(time.RFC3339)}})
+		appendItem(session.Item{Error: &session.Error{Message: e.Error, Code: e.Code, AgentName: e.AgentName, CreatedAt: ts.Format(time.RFC3339)}}, nil)
 	}
 	if err := j.failure; err != nil {
 		slog.WarnContext(ctx, "Session persistence awaiting retry", "session_id", id, "error", err)
@@ -316,4 +343,39 @@ func (p *PersistenceObserver) durabilityContext() context.Context {
 		return p.drain
 	}
 	return p.lifetime
+}
+
+func (p *PersistenceObserver) writeEffect(ctx context.Context, id string, write func(context.Context) error) error {
+	if p.owner != nil {
+		if d := p.owner(id); d != nil {
+			return d.durableIOContext(ctx, func() (sessionIOReservation, error) {
+				return sessionIOReservation{write: write}, nil
+			}, true)
+		}
+	}
+	return write(ctx)
+}
+
+func (p *PersistenceObserver) invalidateTranscript(id string) {
+	p.journal(id).invalidate.Store(true)
+}
+
+func (p *PersistenceObserver) publishMessageID(ctx context.Context, id string, rowID int64, receipt *session.Message) error {
+	if p.owner == nil || receipt == nil {
+		return nil
+	}
+	d := p.owner(id)
+	if d == nil {
+		return nil
+	}
+	return d.ownerCall(context.WithoutCancel(ctx), func() error {
+		// Receipt is opaque outside the owner. A replaced transcript invalidates it.
+		for _, item := range d.sess.Messages {
+			if item.Message == receipt {
+				receipt.ID = rowID
+				return nil
+			}
+		}
+		return nil
+	})
 }

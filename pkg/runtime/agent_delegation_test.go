@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
@@ -784,21 +785,11 @@ func TestValidateDelegation(t *testing.T) {
 		assert.Contains(t, errMsg, "root -> a -> b -> root")
 	})
 
-	t.Run("allows exactly the maximum depth", func(t *testing.T) {
-		parent := session.New(session.WithDelegationLineage(ancestorNames(maxDelegationDepth - 1)))
+	t.Run("lineage does not impose an independent fixed depth limit", func(t *testing.T) {
+		parent := session.New(session.WithDelegationLineage(ancestorNames(100)))
 		lineage, errMsg := validateDelegation(parent, "caller", "target")
 		assert.Empty(t, errMsg)
-		assert.Len(t, lineage, maxDelegationDepth)
-	})
-
-	t.Run("rejects one edge past the maximum", func(t *testing.T) {
-		parent := session.New(session.WithDelegationLineage(ancestorNames(maxDelegationDepth)))
-		lineage, errMsg := validateDelegation(parent, "caller", "target")
-		assert.Nil(t, lineage)
-		assert.Contains(t, errMsg, "delegation depth limit exceeded")
-		assert.Contains(t, errMsg, fmt.Sprintf("at delegation depth %d", maxDelegationDepth))
-		assert.Contains(t, errMsg, fmt.Sprintf("reach depth %d", maxDelegationDepth+1))
-		assert.Contains(t, errMsg, fmt.Sprintf("maximum of %d", maxDelegationDepth))
+		assert.Len(t, lineage, 101)
 	})
 
 	t.Run("sibling delegations never share lineage storage", func(t *testing.T) {
@@ -1249,56 +1240,6 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 	assert.Equal(t, "workerB", completedB.GetAgentName())
 }
 
-func TestTransferTask_DepthBoundary(t *testing.T) {
-	t.Parallel()
-
-	childStream := newStreamBuilder().AddContent("done").AddStopWithUsage(10, 5).Build()
-	librarian := agent.New("librarian", "Library agent", agent.WithModel(&mockProvider{id: "test/mock-model", stream: childStream}))
-	root := agent.New("root", "Root agent", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}))
-	agent.WithSubAgents(librarian)(root)
-
-	tm := team.New(team.WithAgents(root, librarian))
-	rt, err := NewLocalRuntime(t.Context(), tm,
-		WithSessionCompaction(false),
-		WithModelStore(mockModelStore{}),
-	)
-	require.NoError(t, err)
-
-	t.Run("allows exactly the maximum depth", func(t *testing.T) {
-		sess := session.New(
-			session.WithUserMessage("Test"),
-			session.WithDelegationLineage(ancestorNames(maxDelegationDepth-1)),
-		)
-		evts := make(chan Event, 128)
-
-		result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		assert.False(t, result.IsError, "delegation at the maximum depth must be allowed: %s", result.Output)
-
-		child := firstSubSession(sess)
-		require.NotNil(t, child)
-		assert.Len(t, child.DelegationLineage, maxDelegationDepth)
-	})
-
-	t.Run("rejects one edge past the maximum", func(t *testing.T) {
-		sess := session.New(
-			session.WithUserMessage("Test"),
-			session.WithDelegationLineage(ancestorNames(maxDelegationDepth)),
-		)
-		evts := make(chan Event, 128)
-
-		result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
-		require.NoError(t, err)
-		require.NotNil(t, result)
-		assert.True(t, result.IsError)
-		assert.Contains(t, result.Output, "delegation depth limit exceeded")
-		assert.Contains(t, result.Output, fmt.Sprintf("reach depth %d", maxDelegationDepth+1))
-		assert.Contains(t, result.Output, fmt.Sprintf("maximum of %d", maxDelegationDepth))
-		assert.Nil(t, firstSubSession(sess), "rejected delegation must not attach a child session")
-	})
-}
-
 func TestRunAgent_RejectsDelegationCycle(t *testing.T) {
 	t.Parallel()
 
@@ -1475,59 +1416,6 @@ func TestRunAgent_NestedBackgroundSubagentStopFiresOnPinnedCaller(t *testing.T) 
 	assert.Equal(t, "worker done", rootStops[0].StopResponse)
 }
 
-func TestRunAgent_DepthBoundary(t *testing.T) {
-	t.Parallel()
-
-	workerStream := newStreamBuilder().AddContent("done").AddStopWithUsage(10, 5).Build()
-	worker := agent.New("worker", "Worker agent", agent.WithModel(&mockProvider{id: "test/mock-model", stream: workerStream}))
-	root := agent.New("root", "Root agent", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}))
-	agent.WithSubAgents(worker)(root)
-
-	tm := team.New(team.WithAgents(root, worker))
-	rt, err := NewLocalRuntime(t.Context(), tm,
-		WithSessionCompaction(false),
-		WithModelStore(mockModelStore{}),
-	)
-	require.NoError(t, err)
-
-	t.Run("allows exactly the maximum depth", func(t *testing.T) {
-		parent := session.New(
-			session.WithUserMessage("Test"),
-			session.WithDelegationLineage(ancestorNames(maxDelegationDepth-1)),
-		)
-		res := rt.RunAgent(t.Context(), agenttool.RunParams{
-			AgentName:     "worker",
-			Task:          "deep work",
-			ParentSession: parent,
-		})
-		require.Empty(t, res.ErrMsg, "delegation at the maximum depth must be allowed")
-
-		child := firstSubSession(parent)
-		require.NotNil(t, child)
-		assert.Len(t, child.DelegationLineage, maxDelegationDepth)
-	})
-
-	t.Run("rejects one edge past the maximum", func(t *testing.T) {
-		parent := session.New(
-			session.WithUserMessage("Test"),
-			session.WithDelegationLineage(ancestorNames(maxDelegationDepth)),
-		)
-		res := rt.RunAgent(t.Context(), agenttool.RunParams{
-			AgentName:     "worker",
-			Task:          "too deep",
-			ParentSession: parent,
-		})
-		assert.Contains(t, res.ErrMsg, "delegation depth limit exceeded")
-		assert.Contains(t, res.ErrMsg, fmt.Sprintf("reach depth %d", maxDelegationDepth+1))
-		assert.Contains(t, res.ErrMsg, fmt.Sprintf("maximum of %d", maxDelegationDepth))
-		assert.Nil(t, firstSubSession(parent), "rejected delegation must not attach a child session")
-	})
-}
-
-// enqueue appends scripted streams to the provider after construction. Used
-// when a later turn's arguments are only known mid-test (e.g. a dynamic
-// background task ID parsed from an earlier tool result). Safe to call
-// concurrently with CreateChatCompletionStream.
 func (p *queueProvider) enqueue(streams ...chat.MessageStream) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1560,27 +1448,7 @@ func parseBackgroundTaskID(t *testing.T, dispatchOutput string) string {
 	return id
 }
 
-// TestRunStream_NestedBackgroundAgents_EndToEnd is the true asynchronous
-// end-to-end regression test for #3904/#3886. Unlike the tests above, it
-// never calls RunAgent or handleTaskTransfer directly: root is driven
-// through a session handle, so its run_background_agent tool call dispatches
-// through r.toolMap into the real agenttool.Handler.HandleRun, which returns
-// a task ID immediately and runs the worker on the real detached goroutine.
-// Inside that detached turn the worker's model again calls
-// run_background_agent (nested background → background), and root later
-// inspects completion through the real list/view handlers via further model
-// tool calls.
-//
-// This runtime integration test qualifies as end-to-end because it executes
-// the entire production async path — model stream → tool dispatch →
-// HandleRun → detached goroutine → nested HandleRun → task bookkeeping →
-// polling handlers — in one process with no external network; only the model
-// providers are scripted.
-//
-// Synchronisation is deterministic: subagent_stop hook channels gate the
-// worker's final turn and the test's own progress, and task completion is
-// awaited by polling the real registered list_background_agents handler
-// under a bounded deadline. No arbitrary sleeps.
+// Compatibility background tools use canonical nested child sessions and journals.
 func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -1727,9 +1595,7 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	assert.Equal(t, "root", rt.currentAgent().Name(),
 		"shared current agent must remain root while background tasks run")
 
-	// The subagent_stop hooks fire just before HandleRun's goroutines mark
-	// their tasks completed, so await both terminal statuses through the
-	// real registered list handler (bounded, no fixed sleep budget).
+	// Await the canonical children's settled states through the compatibility list.
 	listHandler := rt.toolMap[agenttool.ToolNameListBackgroundAgents]
 	require.NotNil(t, listHandler, "list_background_agents must be registered on the runtime tool map")
 	listCall := tools.ToolCall{
@@ -1744,13 +1610,13 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 			return false
 		}
 		listOut = res.Output
-		return strings.Count(listOut, "Status:  completed") == 2
+		return strings.Count(listOut, "Status: idle") == 2
 	}, 20*time.Second, time.Millisecond,
 		"both background tasks must reach completed status via the real list handler")
 	// Both the root-dispatched worker task and the worker-dispatched helper
 	// task live in the same real handler.
-	assert.Contains(t, listOut, "Agent:   worker")
-	assert.Contains(t, listOut, "Agent:   helper")
+	assert.Contains(t, listOut, "Agent: worker")
+	assert.Contains(t, listOut, "Agent: helper")
 	assert.Contains(t, listOut, taskID)
 
 	// Turn 2: root's model inspects the finished task through the real
@@ -1767,19 +1633,24 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 
 	viewOut := toolResultContent(t, sess, "call_view_worker")
 	assert.Contains(t, viewOut, taskID)
-	assert.Contains(t, viewOut, "Status:  completed", "the worker task must be completed")
+	assert.Contains(t, viewOut, "— idle", "the worker task must be idle")
 	assert.Contains(t, viewOut, "worker done", "the worker's final output must be visible through view_background_agent")
 
 	// Session structure: root → worker (pinned child) → helper (pinned
 	// grandchild), with delegation lineage recorded per edge.
-	child := firstSubSession(sess)
-	require.NotNil(t, child, "root session must carry the worker sub-session")
+	workerRecord, ok := rt.subagents.Read(subagent.NodeID(taskID))
+	require.True(t, ok)
+	child := workerRecord.session
+	require.NotNil(t, child, "canonical manager must retain the worker session")
 	assert.Equal(t, "worker", child.AgentName, "background child session must be pinned to worker")
 	assert.Equal(t, []string{"root"}, child.DelegationLineage)
 	assert.Equal(t, "worker done", child.GetLastAssistantMessageContent())
 
-	grandchild := firstSubSession(child)
-	require.NotNil(t, grandchild, "worker session must carry the nested helper sub-session")
+	helperID := parseBackgroundTaskID(t, toolResultContent(t, child, "call_run_helper"))
+	helperRecord, ok := rt.subagents.Read(subagent.NodeID(helperID))
+	require.True(t, ok)
+	grandchild := helperRecord.session
+	require.NotNil(t, grandchild, "canonical manager must retain the helper session")
 	assert.Equal(t, "helper", grandchild.AgentName, "nested background grandchild must be pinned to helper")
 	assert.Equal(t, []string{"root", "worker"}, grandchild.DelegationLineage)
 	assert.Equal(t, "nested helper done", grandchild.GetLastAssistantMessageContent())
@@ -1802,4 +1673,20 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 
 	assert.Equal(t, "root", rt.currentAgent().Name(),
 		"the shared current agent must still be root after the whole chain")
+}
+
+func TestBackgroundElicitationNotesUseCanonicalMarker(t *testing.T) {
+	sess := session.New()
+	note := backgroundElicitationDeclinedNote("approve access")
+	canonical := &session.Message{Message: chat.Message{Role: chat.MessageRoleSystem, Content: note}}
+	canonical.Implicit = true
+	canonical.InputOrigin, canonical.InputMode = session.InputOriginRuntime, "elicitation_declined"
+	sess.AddMessage(canonical)
+	sess.AddMessage(canonical)
+	sess.AddMessage(session.UserMessage(note))
+	unmarked := &session.Message{Message: chat.Message{Role: chat.MessageRoleSystem, Content: "not a decline"}}
+	unmarked.Implicit = true
+	unmarked.InputOrigin = session.InputOriginRuntime
+	sess.AddMessage(unmarked)
+	assert.Equal(t, []string{note}, backgroundElicitationNotes(sess))
 }

@@ -25,8 +25,9 @@ func TestDriverModelOverridePersistsCustomHistoryTransactionally(t *testing.T) {
 	sess.CustomModelsUsed = []string{"old/model"}
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), sess))
-	r := &LocalRuntime{sessionStore: store}
-	d := &sessionDriver{r: r, sess: sess, events: newSessionEventHubWithLimits(8, 1<<20), interactions: map[string]sessionInteraction{}}
+	r := newDriverTestRuntime(t)
+	r.sessionStore = store
+	d := r.sessionDrivers.Get(sess)
 	require.NoError(t, d.SetModelOverride(t.Context(), "root", "new/model", nil))
 	stored, err := store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
@@ -37,8 +38,11 @@ func TestDriverModelOverridePersistsCustomHistoryTransactionally(t *testing.T) {
 	d.r.sessionStore = modelPersistFailStore{Store: store, err: persistErr}
 	err = d.SetModelOverride(t.Context(), "root", "third/model", nil)
 	require.ErrorIs(t, err, persistErr)
-	assert.Equal(t, "new/model", sess.AgentModelOverrides["root"])
-	assert.Equal(t, []string{"old/model", "new/model"}, sess.CustomModelsUsed)
+	snapshot, err := d.ownerSnapshot(t.Context())
+	require.NoError(t, err)
+	overrides, custom := snapshot.ModelStateSnapshot()
+	assert.Equal(t, "new/model", overrides["root"])
+	assert.Equal(t, []string{"old/model", "new/model"}, custom)
 }
 
 func TestDriverModelOverrideRejectsCanceledResolution(t *testing.T) {
@@ -46,7 +50,10 @@ func TestDriverModelOverrideRejectsCanceledResolution(t *testing.T) {
 	sess.SetAgentModelOverride("root", "old/model")
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), sess))
-	d := &sessionDriver{r: &LocalRuntime{sessionStore: store}, sess: sess, modelRef: "old/model"}
+	r := newDriverTestRuntime(t)
+	r.sessionStore = store
+	d := r.sessionDrivers.Get(sess)
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.modelRef = "old/model"; return nil }))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // A provider may finish resolving after its request was canceled.
 	require.ErrorIs(t, d.SetModelOverride(ctx, "root", "new/model", nil), context.Canceled)

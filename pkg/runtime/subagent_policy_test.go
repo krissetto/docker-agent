@@ -119,24 +119,6 @@ func TestUseSubagentsExistingChildRoutes(t *testing.T) {
 	require.ErrorContains(t, err, "stopped")
 }
 
-func TestUseSubagentsAcceptedLegacyGrantIsOneShot(t *testing.T) {
-	rt := policyRuntime(t)
-	parent := session.New(session.WithTitle("parent"))
-	var admitted context.Context
-	_, err := rt.admitBackgroundDelegation(t.Context(), parent, tools.ToolCall{}, func(ctx context.Context, _ *session.Session, _ tools.ToolCall) (*tools.ToolCallResult, error) {
-		admitted = ctx
-		return tools.ResultSuccess("queued"), nil
-	})
-	require.NoError(t, err)
-	rt.SetUseSubagents(false)
-	params := agenttool.RunParams{ParentSession: parent, AgentName: "worker", Task: "accepted earlier"}
-	result := rt.RunAgent(admitted, params)
-	require.Empty(t, result.ErrMsg)
-	assert.Equal(t, "done", result.Result)
-	assert.Contains(t, rt.RunAgent(admitted, params).ErrMsg, "disabled", "the consumed grant cannot admit another descendant")
-	assert.False(t, rt.acceptLegacyDelegation(admitted))
-}
-
 func TestUseSubagentsFiltersDynamicExposure(t *testing.T) {
 	rt := policyRuntime(t)
 	a, err := rt.team.Agent("root")

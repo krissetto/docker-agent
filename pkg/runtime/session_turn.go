@@ -19,28 +19,33 @@ const SessionErrorInterrupted SessionErrorKind = "interrupted"
 
 // persistTurnOutcomeLocked commits terminal evidence before publishing settlement.
 // A promoted admission without this evidence is uncertain after a restart.
-func (d *sessionDriver) persistTurnOutcomeLocked(ctx context.Context, id string, outcome TurnOutcome) error {
-	if d.sess == nil {
-		return nil
-	}
-	unlock := d.sess.LockMetadata()
-	defer unlock()
-	next := d.sess.OwnSnapshot()
-	next.SetTurnOutcome(id, string(outcome))
-	for _, steeringID := range d.consumedSteering {
-		next.SetTurnOutcome(steeringID, string(outcome))
-	}
-	if d.r.sessionStore != nil {
-		if err := d.r.sessionStore.UpdateSession(ctx, next); err != nil {
-			return err
+func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outcome TurnOutcome) error {
+	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.sess == nil {
+			return sessionIOReservation{}, nil
 		}
-	}
-	d.sess.SetTurnOutcome(id, string(outcome))
-	for _, steeringID := range d.consumedSteering {
-		d.sess.SetTurnOutcome(steeringID, string(outcome))
-	}
-	d.consumedSteering = nil
-	return nil
+		next := d.sess.OwnSnapshot()
+		consumed := slices.Clone(d.consumedSteering)
+		next.SetTurnOutcome(id, string(outcome))
+		for _, steeringID := range consumed {
+			next.SetTurnOutcome(steeringID, string(outcome))
+		}
+		var write func(context.Context) error
+		if d.r.sessionStore != nil {
+			write = func(ctx context.Context) error { return d.r.sessionStore.UpdateSession(ctx, next) }
+		}
+		return sessionIOReservation{write: write, commit: func(err error) error {
+			if err != nil {
+				return err
+			}
+			d.sess.SetTurnOutcome(id, string(outcome))
+			for _, steeringID := range consumed {
+				d.sess.SetTurnOutcome(steeringID, string(outcome))
+			}
+			d.consumedSteering = slices.DeleteFunc(d.consumedSteering, func(value string) bool { return slices.Contains(consumed, value) })
+			return nil
+		}}, nil
+	})
 }
 
 type InteractionResolution string
@@ -75,7 +80,10 @@ func (d *sessionDriver) resolveInteractionsLocked() {
 	if d.stopped {
 		reason = InteractionStopped
 	}
-	for id := range d.interactions {
+	for id, interaction := range d.interactions {
+		if interaction.waiter != nil {
+			interaction.waiter.tryCancel()
+		}
 		delete(d.interactions, id)
 		d.events.Publish(d.sessionIDLocked(), &InteractionResolvedEvent{Type: "interaction_resolved", SessionID: d.sessionIDLocked(), InteractionID: id, Reason: reason})
 	}

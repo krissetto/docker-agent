@@ -154,6 +154,9 @@ func (e *PendingUserMessagePromotedEvent) GetSessionID() string { return e.Sessi
 type UserMessageEvent struct {
 	AgentContext
 
+	ownerAppend  bool
+	ownerMessage *session.Message
+
 	InputOrigin   session.InputOrigin   `json:"input_origin,omitempty"`
 	SenderID      string                `json:"sender_id,omitempty"`
 	SenderName    string                `json:"sender_name,omitempty"`
@@ -1337,6 +1340,7 @@ type MessageAddedEvent struct {
 	SessionID    string           `json:"session_id"`
 	Message      *session.Message `json:"-"`
 	boundaryOnly bool
+	ownerMessage *session.Message
 	// SessionPosition is the index in session.Messages the message was
 	// committed at, -1 when unknown. Emission happens synchronously after
 	// the commit and the event stream preserves order, so viewers merging a

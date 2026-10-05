@@ -289,7 +289,14 @@ func TestSteeringBoundaryActiveToolsDrainAllOriginsTogether(t *testing.T) {
 			}
 		}
 		assert.Greater(t, resultPosition, callPosition)
-		assert.Contains(t, contents, "user guidance")
+		canonical, err := h.Snapshot(t.Context())
+		require.NoError(t, err)
+		for _, item := range canonical.MessagesSnapshot() {
+			if item.Message != nil && item.Message.TurnID == guide.TurnID {
+				assert.Equal(t, "user guidance", item.Message.Message.Content, "separator is private model assembly, not canonical input")
+			}
+		}
+		assert.Contains(t, contents, "user guidance\n")
 		assert.NotContains(t, contents, "ordinary queued")
 		for _, body := range []string{"runtime guidance", "agent guidance"} {
 			count := 0

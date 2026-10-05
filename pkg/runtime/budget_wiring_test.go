@@ -43,7 +43,6 @@ func budgetRuntime(t *testing.T, clock func() time.Time) *LocalRuntime {
 func TestRecordBudgetEmitsNonZeroReading(t *testing.T) {
 	now := budgetEpoch
 	r := budgetRuntime(t, func() time.Time { return now })
-	r.ensureBudget()
 
 	sess := session.New()
 	a := agent.New("root", "test")
@@ -79,7 +78,6 @@ func TestRecordBudgetEmitsNonZeroReading(t *testing.T) {
 func TestRecordBudgetAccumulatesAcrossTurns(t *testing.T) {
 	now := budgetEpoch
 	r := budgetRuntime(t, func() time.Time { return now })
-	r.ensureBudget()
 
 	sess := session.New()
 	a := agent.New("root", "test")
@@ -106,7 +104,6 @@ func TestRecordBudgetAccumulatesAcrossTurns(t *testing.T) {
 func TestRecordBudgetNilUsageIsNotSilentZero(t *testing.T) {
 	now := budgetEpoch
 	r := budgetRuntime(t, func() time.Time { return now })
-	r.ensureBudget()
 
 	sink := &collectSink{}
 	r.recordBudget(session.New(), agent.New("root", "test"), nil, nil, time.Second, sink)
@@ -126,11 +123,9 @@ func TestBudgetSurvivesAcrossMessages(t *testing.T) {
 	a := agent.New("root", "test")
 	sink := &collectSink{}
 
-	r.ensureBudget()
 	now = budgetEpoch.Add(10 * time.Second)
 	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, new(0.02), 10*time.Second, sink)
 
-	r.ensureBudget()
 	now = budgetEpoch.Add(20 * time.Second)
 	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, new(0.02), 10*time.Second, sink)
 
@@ -156,7 +151,6 @@ func TestBudgetSurvivesAcrossMessages(t *testing.T) {
 func TestEnforceBudgetEmitsCanonicalStopMessage(t *testing.T) {
 	now := budgetEpoch
 	r := budgetRuntime(t, func() time.Time { return now })
-	r.ensureBudget()
 
 	sess := session.New()
 	a := agent.New("root", "test")

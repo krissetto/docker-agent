@@ -2,43 +2,29 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"reflect"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/session"
 )
 
-// EventObserver receives the runtime's event stream as it's produced.
-// Implementations subscribe to lifecycle moments and act on them —
-// persisting to a store, forwarding to a metrics pipeline, writing an
-// audit transcript, etc.
-//
-// Concurrency: the runtime invokes observers synchronously from the
-// goroutine that forwards events to the consumer's channel, in
-// registration order. A slow observer therefore back-pressures both
-// downstream observers and the consumer; long-running work (network
-// I/O, file syncing) should fan out to a private goroutine.
-//
-// Errors: observers do not return errors. The runtime cannot recover
-// from a misbehaving observer (it can't unregister it mid-stream and
-// can't ask the consumer to retry), so an observer must log internally
-// and never panic. The contract is "best-effort observation" rather
-// than "all-or-nothing transactional".
-//
-// Observers see every event the runtime emits, including sub-session
-// events (from delegated tasks via transfer_task) and
-// [SessionScoped]-mismatch events. Filtering is the observer's
-// responsibility; see [PersistenceObserver] for the canonical pattern.
+// EventObserver is a best-effort projection/telemetry boundary, not persistence
+// or policy authority. Callbacks run on the observation worker, in registration
+// order, with individually detached session/event snapshots. Mutation cannot
+// change execution or another observer's input. Panics are logged and contained.
+// Slow callbacks backpressure observation, not session mutation authority.
+// Callbacks must honor ctx cancellation; worker joins do not abandon callbacks.
 type EventObserver interface {
 	// OnRunStart fires once when [LocalRuntime.RunStream] begins, before
-	// any event is dispatched. Use it for one-shot lifecycle work like
-	// persisting initial session metadata.
+	// any event is dispatched. Use it for one-shot projection setup; it cannot change session metadata.
 	OnRunStart(ctx context.Context, sess *session.Session)
 	// OnEvent fires once per event, after the runtime emits it but
 	// before the consumer's channel receives it. Observers cannot
-	// modify or suppress events (a future extension may relax this);
-	// to drop an event from persistence, simply ignore it inside
-	// OnEvent.
+	// modify or suppress the authoritative payload or affect persistence.
 	OnEvent(ctx context.Context, sess *session.Session, event Event)
 }
 
@@ -98,7 +84,13 @@ func (r *LocalRuntime) observeRunStart(ctx context.Context, sess *session.Sessio
 			}
 			continue
 		}
-		obs.OnRunStart(ctx, sess)
+		snapshot := sess.Clone()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			observeBestEffort(ctx, func() { obs.OnRunStart(ctx, snapshot) })
+		}()
+		<-done
 	}
 }
 
@@ -112,15 +104,29 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 				close(fence.done)
 				continue
 			}
+			if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok {
+				if err := identity.driver.commitExecutionEvent(context.WithoutCancel(ctx), identity.generation, event); err != nil {
+					continue
+				}
+			}
 			for _, obs := range r.observers {
-				obs.OnEvent(ctx, sess, event)
 				if persistence, ok := obs.(*PersistenceObserver); ok {
+					// Storage is authoritative: it receives the owner payload and
+					// failures remain visible to the driver's completion barrier.
+					persistence.OnEvent(ctx, sess, event)
 					if err := persistence.pendingError(sess.ID); err != nil {
 						if d, found := r.sessionDrivers.Lookup(sess.ID); found {
 							d.cancelForPersistence(err)
 						}
 					}
+					continue
 				}
+				snapshot, err := observerEventSnapshot(event)
+				if err != nil {
+					slog.WarnContext(ctx, "Skipping observer event snapshot", "error", err)
+					continue
+				}
+				observeBestEffort(ctx, func() { obs.OnEvent(ctx, sess.Clone(), snapshot) })
 			}
 			// Publish through the owning session. Persistence observers and
 			// attached views consume the same ordered transition.
@@ -131,4 +137,61 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 		}
 	}()
 	return out
+}
+
+func observeBestEffort(ctx context.Context, fn func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.WarnContext(ctx, "Event observer panicked", "panic", p)
+		}
+	}()
+	fn()
+}
+
+func observerEventSnapshot(event Event) (Event, error) {
+	t := reflect.TypeOf(event)
+	if t == nil || t.Kind() != reflect.Pointer {
+		return nil, fmt.Errorf("unsupported observer event %T", event)
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	copy := reflect.New(t.Elem()).Interface()
+	if err := json.Unmarshal(data, copy); err != nil {
+		return nil, err
+	}
+	out, ok := copy.(Event)
+	if !ok {
+		return nil, fmt.Errorf("unsupported observer event %T", event)
+	}
+	// Preserve process-local timestamp identity (including its monotonic clock).
+	originalContext := reflect.ValueOf(event).Elem().FieldByName("AgentContext")
+	copiedContext := reflect.ValueOf(out).Elem().FieldByName("AgentContext")
+	if originalContext.IsValid() && copiedContext.IsValid() && copiedContext.CanSet() {
+		copiedContext.Set(originalContext)
+	}
+	switch e := event.(type) {
+	case *MessageAddedEvent:
+		copy := out.(*MessageAddedEvent)
+		copy.boundaryOnly = e.boundaryOnly
+		if e.Message != nil {
+			data, err := json.Marshal(e.Message)
+			if err != nil {
+				return nil, err
+			}
+			copy.Message = &session.Message{}
+			if err := json.Unmarshal(data, copy.Message); err != nil {
+				return nil, err
+			}
+		}
+	case *SessionSummaryEvent:
+		out.(*SessionSummaryEvent).persisted = e.persisted
+	}
+	if e, ok := event.(*SubSessionCompletedEvent); ok {
+		if child, ok := e.SubSession.(*session.Session); ok {
+			out.(*SubSessionCompletedEvent).SubSession = child.Clone()
+		}
+	}
+	return out, nil
 }

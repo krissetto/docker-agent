@@ -795,11 +795,11 @@ func (sm *SessionManager) GetAgentToolCount(ctx context.Context, agentFilename, 
 //
 // Rejected with ErrSessionBusy while the session is starting or running.
 func (sm *SessionManager) UpdateMessage(ctx context.Context, sessionID, msgID string, msg *session.Message) error {
-	msgPos, err := strconv.ParseInt(msgID, 10, 64)
+	messageID, err := strconv.ParseInt(msgID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid message ID %q: %w", msgID, err)
 	}
-	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "message", MessageIndex: msgPos, Message: msg})
+	return sm.editSession(ctx, sessionID, runtime.SessionEdit{Kind: "message", MessageIndex: messageID, Message: msg})
 }
 
 func (sm *SessionManager) AddSummary(ctx context.Context, sessionID string, item session.Item) error {

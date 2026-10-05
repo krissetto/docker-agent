@@ -139,6 +139,7 @@ func TestLiveSessions_ListsRootAndActiveChildren(t *testing.T) {
 
 	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
 	rootSess.SetUsage(100, 50)
+	rt.sessionDrivers.Get(rootSess)
 
 	// Two concurrent runs of the SAME agent: they must both be listed,
 	// never collapsed by agent name.
@@ -194,6 +195,7 @@ func TestLiveSessions_UnknownContextLimit(t *testing.T) {
 
 	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
 	rootSess.SetUsage(42, 8)
+	rt.sessionDrivers.Get(rootSess)
 
 	rows := rt.LiveSessions(t.Context(), rootSess)
 	require.Len(t, rows, 1, "the idle current root is always listed")
@@ -257,9 +259,10 @@ func TestLiveSessions_CompactionModelAttribution(t *testing.T) {
 			rt := newLiveSessionsRuntime(t, prov, tt.store, tt.workerOpts...)
 
 			rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
+			rt.sessionDrivers.Get(rootSess)
 			child := newWorkerSession(t.Name() + "/child-1")
 			child.ParentID = rootSess.ID
-			rt.registerLiveSession(child)
+			activateCanonicalLiveSession(t, rt, child)
 
 			rows := rt.LiveSessions(t.Context(), rootSess)
 			require.Len(t, rows, 2)
@@ -283,29 +286,30 @@ func TestLiveSessions_ExcludesSessionsOutsideCurrentRootTree(t *testing.T) {
 
 	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 1000})
 
-	current := session.New(session.WithID("root-current"), session.WithUserMessage("hi"))
+	current := session.New(session.WithID(t.Name()+"/root-current"), session.WithUserMessage("hi"))
+	rt.sessionDrivers.Get(current)
 
 	// Two concurrent same-agent children of current plus a nested sub-agent
 	// under the first child.
-	childA := session.New(session.WithID("child-a"), session.WithParentID("root-current"), session.WithAgentName("worker"))
-	childB := session.New(session.WithID("child-b"), session.WithParentID("root-current"), session.WithAgentName("worker"))
-	nested := session.New(session.WithID("nested-1"), session.WithParentID("child-a"), session.WithAgentName("worker"))
+	childA := session.New(session.WithID(t.Name()+"/child-a"), session.WithParentID(t.Name()+"/root-current"), session.WithAgentName("worker"))
+	childB := session.New(session.WithID(t.Name()+"/child-b"), session.WithParentID(t.Name()+"/root-current"), session.WithAgentName("worker"))
+	nested := session.New(session.WithID(t.Name()+"/nested-1"), session.WithParentID(t.Name()+"/child-a"), session.WithAgentName("worker"))
 
 	// An unrelated root still streaming, and its child.
-	staleRoot := session.New(session.WithID("root-stale"), session.WithUserMessage("old"))
-	staleChild := session.New(session.WithID("stale-child"), session.WithParentID("root-stale"), session.WithAgentName("worker"))
+	staleRoot := session.New(session.WithID(t.Name()+"/root-stale"), session.WithUserMessage("old"))
+	staleChild := session.New(session.WithID(t.Name()+"/stale-child"), session.WithParentID(t.Name()+"/root-stale"), session.WithAgentName("worker"))
 
 	for _, sess := range []*session.Session{childA, childB, nested, staleRoot, staleChild} {
-		rt.registerLiveSession(sess)
+		activateCanonicalLiveSession(t, rt, sess)
 	}
 
 	rows := rt.LiveSessions(t.Context(), current)
 	require.Len(t, rows, 4, "current plus its direct and nested descendants only")
 	assert.True(t, rows[0].Current)
-	assert.Equal(t, "root-current", rows[0].SessionID)
+	assert.Equal(t, t.Name()+"/root-current", rows[0].SessionID)
 	assert.Equal(t, childA.ID, rows[1].SessionID)
 	assert.Equal(t, childB.ID, rows[2].SessionID)
-	assert.Equal(t, "nested-1", rows[3].SessionID)
+	assert.Equal(t, t.Name()+"/nested-1", rows[3].SessionID)
 
 	rows = rt.LiveSessions(t.Context(), nil)
 	require.Len(t, rows, 5, "a nil current retains every live entry")
@@ -314,8 +318,7 @@ func TestLiveSessions_ExcludesSessionsOutsideCurrentRootTree(t *testing.T) {
 	}
 }
 
-// TestLiveSessions_KeepsNestedBackgroundAfterParentFinishes is the
-// regression test for cached tree-root ancestry: a nested background agent
+// TestLiveSessions_KeepsNestedBackgroundAfterParentFinishes retains canonical ancestry: a nested background agent
 // (root R -> transfer child C -> background B started by C) must stay in
 // current R's view after its intermediate parent C finished and
 // unregistered, and after R's own stream finished too. Re-walking ParentID
@@ -326,65 +329,61 @@ func TestLiveSessions_KeepsNestedBackgroundAfterParentFinishes(t *testing.T) {
 
 	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 1000})
 
-	current := session.New(session.WithID("root-current"), session.WithUserMessage("hi"))
-	child := session.New(session.WithID(t.Name()+"/child-1"), session.WithParentID("root-current"), session.WithAgentName("worker"))
-	nested := session.New(session.WithID("nested-bg"), session.WithParentID(t.Name()+"/child-1"), session.WithAgentName("worker"))
+	current := session.New(session.WithID(t.Name()+"/root-current"), session.WithUserMessage("hi"))
+	rt.sessionDrivers.Get(current)
+	child := session.New(session.WithID(t.Name()+"/child-1"), session.WithParentID(t.Name()+"/root-current"), session.WithAgentName("worker"))
+	nested := session.New(session.WithID(t.Name()+"/nested-bg"), session.WithParentID(t.Name()+"/child-1"), session.WithAgentName("worker"))
 
 	// Registration order mirrors the real flow: each child stream starts
 	// from within its parent's still-live stream.
-	rootEntry := rt.registerLiveSession(current)
-	childEntry := rt.registerLiveSession(child)
-	rt.registerLiveSession(nested)
+	rootEntry := activateCanonicalLiveSession(t, rt, current)
+	childEntry := activateCanonicalLiveSession(t, rt, child)
+	activateCanonicalLiveSession(t, rt, nested)
 
 	rows := rt.LiveSessions(t.Context(), current)
 	require.Len(t, rows, 3, "current plus both live descendants while everything runs")
 
 	// The intermediate parent finishes, then the root turn completes; the
 	// long-running background agent stays attributed to the current root.
-	rt.finishLiveSession(t.Context(), childEntry)
-	rt.finishLiveSession(t.Context(), rootEntry)
+	settleCanonicalLiveSession(t, childEntry)
+	settleCanonicalLiveSession(t, rootEntry)
 
 	rows = rt.LiveSessions(t.Context(), current)
 	require.Len(t, rows, 2, "the nested background agent survives its parent's unregistration")
 	assert.True(t, rows[0].Current)
-	assert.Equal(t, "root-current", rows[0].SessionID)
-	assert.Equal(t, "nested-bg", rows[1].SessionID)
+	assert.Equal(t, t.Name()+"/root-current", rows[0].SessionID)
+	assert.Equal(t, t.Name()+"/nested-bg", rows[1].SessionID)
 	assert.False(t, rows[1].Current)
 }
 
-// TestLiveSessions_CachedRootFallbackForUnregisteredParents pins the
-// registration fallback for entries whose parent entry is not live: the
-// parent ID itself is cached as the tree root. An orphan pointing at an
-// unknown parent and a malformed ParentID cycle therefore resolve to roots
-// outside the current tree and are excluded from its view, while the orphan
-// is still attributed to its vanished parent's tree.
-func TestLiveSessions_CachedRootFallbackForUnregisteredParents(t *testing.T) {
+// Missing or cyclic canonical ancestry is excluded from an addressed tree.
+func TestLiveSessions_RejectsMissingAndCyclicAncestry(t *testing.T) {
 	t.Parallel()
 
 	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 1000})
 
-	current := session.New(session.WithID("root-current"), session.WithUserMessage("hi"))
+	current := session.New(session.WithID(t.Name()+"/root-current"), session.WithUserMessage("hi"))
+	rt.sessionDrivers.Get(current)
 
-	orphan := session.New(session.WithID("orphan-1"), session.WithParentID("gone"), session.WithAgentName("worker"))
-	// cycle-a registers before cycle-b, so its unregistered parent cycle-b
-	// becomes the cached root, inherited by cycle-b in turn.
-	cycleA := session.New(session.WithID("cycle-a"), session.WithParentID("cycle-b"), session.WithAgentName("worker"))
-	cycleB := session.New(session.WithID("cycle-b"), session.WithParentID("cycle-a"), session.WithAgentName("worker"))
+	orphan := session.New(session.WithID(t.Name()+"/orphan-1"), session.WithParentID(t.Name()+"/gone"), session.WithAgentName("worker"))
+	// Cyclic canonical identities must not masquerade as a root tree.
+	cycleA := session.New(session.WithID(t.Name()+"/cycle-a"), session.WithParentID(t.Name()+"/cycle-b"), session.WithAgentName("worker"))
+	cycleB := session.New(session.WithID(t.Name()+"/cycle-b"), session.WithParentID(t.Name()+"/cycle-a"), session.WithAgentName("worker"))
 
 	for _, sess := range []*session.Session{orphan, cycleA, cycleB} {
-		rt.registerLiveSession(sess)
+		activateCanonicalLiveSession(t, rt, sess)
 	}
 
 	rows := rt.LiveSessions(t.Context(), current)
 	require.Len(t, rows, 1, "entries rooted outside the current tree are excluded")
 	assert.True(t, rows[0].Current)
 
-	// The orphan's cached root is its vanished parent: were that parent the
-	// current session, the orphan would be listed under it.
-	gone := session.New(session.WithID("gone"), session.WithUserMessage("old"))
+	// Once its missing parent is canonical, the child becomes attributable.
+	gone := session.New(session.WithID(t.Name()+"/gone"), session.WithUserMessage("old"))
+	rt.sessionDrivers.Get(gone)
 	rows = rt.LiveSessions(t.Context(), gone)
 	require.Len(t, rows, 2)
-	assert.Equal(t, "orphan-1", rows[1].SessionID)
+	assert.Equal(t, t.Name()+"/orphan-1", rows[1].SessionID)
 }
 
 func TestCompactLiveSession_UnknownSessionErrors(t *testing.T) {
@@ -394,7 +393,7 @@ func TestCompactLiveSession_UnknownSessionErrors(t *testing.T) {
 
 	err := rt.CompactLiveSession(t.Context(), "no-such-session", "", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not live")
+	require.ErrorAs(t, err, new(*SessionError))
 }
 
 func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
@@ -427,7 +426,7 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 	// A second request while one is pending is rejected clearly.
 	err := rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already pending")
+	require.ErrorAs(t, err, new(*SessionError))
 
 	close(release)
 	drainStream(t, stream)
@@ -454,7 +453,11 @@ func TestCompactLiveSession_ExecutesAtIterationBoundary(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"started", "summary", "completed:applied", "usage"}, kinds)
-	assert.Equal(t, "a compact summary", child.LastSummary())
+	snapshot, found := rt.sessionDrivers.Lookup(child.ID)
+	require.True(t, found)
+	state, snapshotErr := snapshot.ownerSnapshot(t.Context())
+	require.NoError(t, snapshotErr)
+	assert.Equal(t, "a compact summary", state.LastSummary())
 }
 
 // TestCompactLiveSession_AcceptedRequestDrainedAtTeardown pins the shutdown
@@ -495,13 +498,14 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 				assert.Equal(t, t.Name()+"/child-1", e.SessionID)
 				assert.Equal(t, "worker", e.AgentName)
 				assert.Equal(t, CompactionOutcomeApplied, e.Outcome)
-				assert.Equal(t, "teardown summary", child.LastSummary())
+				driver, found := rt.sessionDrivers.Lookup(child.ID)
+				require.True(t, found)
+				state, snapshotErr := driver.ownerSnapshot(t.Context())
+				require.NoError(t, snapshotErr)
+				assert.Equal(t, "teardown summary", state.LastSummary())
 
-				// The session is gone from the registry: further requests
-				// are rejected instead of stranded.
-				err := rt.CompactLiveSession(t.Context(), t.Name()+"/child-1", "", nil)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "not live")
+				// The owner remains addressable while its active projection disappears.
+				assert.Empty(t, rt.LiveSessions(t.Context(), nil))
 				return
 			}
 		case <-deadline:
@@ -510,52 +514,19 @@ func TestCompactLiveSession_AcceptedRequestDrainedAtTeardown(t *testing.T) {
 	}
 }
 
-// TestCompactLiveSession_StaleDuplicateEntryCannotDrainCurrentEntry is the
-// regression test for the boundary drain consuming the exact *liveSessionEntry
-// of its own RunStream: if an older entry with the same session ID is finishing
-// while a newer entry is targetable, a request queued to the current entry must
-// not be consumed by the stale entry's iteration boundary or teardown drain.
-func TestCompactLiveSession_StaleDuplicateEntryCannotDrainCurrentEntry(t *testing.T) {
-	t.Parallel()
-
-	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		// The compaction summary call, drained by the newer entry only.
-		{stream: newStreamBuilder().AddContent("latest summary").AddStopWithUsage(10, 5).Build()},
-	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
-
-	older := newWorkerSession("dup-id")
-	newer := newWorkerSession("dup-id")
-	olderEntry := rt.registerLiveSession(older)
-	newerEntry := rt.registerLiveSession(newer)
-
-	// The registry maps dup-id to the newer entry, so the request is queued there.
-	requestEvents := make(chan Event, 64)
-	require.NoError(t, rt.CompactLiveSession(t.Context(), "dup-id", "", NewChannelSink(requestEvents)))
-
-	// The stale entry's boundary and teardown drains must not consume the newer
-	// entry's request.
-	rt.runQueuedCompaction(t.Context(), olderEntry)
-	rt.finishLiveSession(t.Context(), olderEntry)
-	assert.Empty(t, older.LastSummary(), "the stale entry must not execute the current entry's request")
-
-	err := rt.CompactLiveSession(t.Context(), "dup-id", "", nil)
-	require.Error(t, err, "the queued request must survive the stale entry's drains")
-	assert.Contains(t, err.Error(), "already pending")
-
-	rt.runQueuedCompaction(t.Context(), newerEntry)
-	rt.finishLiveSession(t.Context(), newerEntry)
-	close(requestEvents)
-
-	var outcomes []string
-	for ev := range requestEvents {
-		if e, ok := ev.(*SessionCompactionEvent); ok && e.Status == "completed" {
-			outcomes = append(outcomes, e.Outcome)
-		}
-	}
-	assert.Equal(t, []string{CompactionOutcomeApplied}, outcomes)
-	assert.Equal(t, "latest summary", newer.LastSummary(), "the request must compact the newer in-memory session")
-	assert.Empty(t, older.LastSummary())
+func TestLiveSessions_CallerSnapshotCannotReplaceCanonicalOwner(t *testing.T) {
+	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 1000})
+	canonical := session.New(session.WithID(t.Name()), session.WithAgentName("worker"))
+	canonical.SetUsage(100, 50)
+	rt.sessionDrivers.Get(canonical)
+	caller := canonical.Clone()
+	caller.SetUsage(999, 999)
+	caller.AgentName = "root"
+	rows := rt.LiveSessions(t.Context(), caller)
+	require.Len(t, rows, 1)
+	assert.Equal(t, int64(100), rows[0].InputTokens)
+	assert.Equal(t, "worker", rows[0].AgentName)
+	assert.Empty(t, rt.LiveSessions(t.Context(), session.New()))
 }
 
 // TestCompactLiveSession_CancelledStreamEmitsSingleSkippedEvent pins the
@@ -652,9 +623,7 @@ func TestCompactLiveSession_HookVetoSynthesizesSkipped(t *testing.T) {
 	assert.Empty(t, child.LastSummary(), "a vetoed compaction must not modify the session")
 }
 
-// TestLiveSessions_ConcurrentAccess exercises the registry under -race:
-// listings and rejected targeting requests race with stream registration and
-// teardown.
+// TestLiveSessions_ConcurrentAccess exercises owner projection under -race.
 func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
@@ -664,6 +633,7 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 	}}
 	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 1000})
 	rootSess := session.New(session.WithID(t.Name()+"/root-session"), session.WithUserMessage("hi"))
+	rt.sessionDrivers.Get(rootSess)
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -688,4 +658,17 @@ func TestLiveSessions_ConcurrentAccess(t *testing.T) {
 
 	close(done)
 	wg.Wait()
+}
+
+func activateCanonicalLiveSession(t *testing.T, r *LocalRuntime, sess *session.Session) *sessionDriver {
+	t.Helper()
+	driver := r.sessionDrivers.Get(sess)
+	require.NoError(t, driver.ownerCall(t.Context(), func() error { driver.phase = sessionRunning; return nil }))
+	t.Cleanup(func() { settleCanonicalLiveSession(t, driver) })
+	return driver
+}
+
+func settleCanonicalLiveSession(t *testing.T, driver *sessionDriver) {
+	t.Helper()
+	require.NoError(t, driver.ownerCall(context.WithoutCancel(t.Context()), func() error { driver.phase = sessionIdle; return nil }))
 }

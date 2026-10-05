@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
@@ -50,22 +51,6 @@ func validateAgentInList(currentAgent, targetAgent, action, listDesc string, age
 	))
 }
 
-// maxDelegationDepth caps the number of chained agent-delegation edges
-// (transfer_task and run_background_agent) below a root session. The root
-// agent delegating to its first child is depth 1; a delegation is allowed at
-// exactly this depth and rejected beyond it. Handoffs and skill sub-sessions
-// are not delegation edges and do not count. This is a fixed runtime guard
-// against runaway recursion, not user configuration: legitimate teams stay
-// well below it.
-const maxDelegationDepth = 10
-
-// validateDelegation guards one agent-delegation edge from caller to target
-// against the parent session's recorded delegation lineage. On success it
-// returns the child session's lineage (parent lineage plus caller, freshly
-// allocated so concurrent fan-out from one parent never shares backing
-// arrays). On a direct or indirect cycle, or when the chain would exceed
-// maxDelegationDepth, it returns a non-empty actionable error message and
-// the caller must not spawn the child session.
 func validateDelegation(parent *session.Session, caller, target string) ([]string, string) {
 	childLineage := append(parent.DelegationLineageSnapshot(), caller)
 	if slices.Contains(childLineage, target) {
@@ -75,12 +60,7 @@ func validateDelegation(parent *session.Session, caller, target string) ([]strin
 			path, target,
 		)
 	}
-	if len(childLineage) > maxDelegationDepth {
-		return nil, fmt.Sprintf(
-			"delegation depth limit exceeded: agent %s is at delegation depth %d and delegating to %s would reach depth %d, exceeding the maximum of %d. Complete the task directly instead of delegating further.",
-			caller, len(childLineage)-1, target, len(childLineage), maxDelegationDepth,
-		)
-	}
+
 	return childLineage, ""
 }
 
@@ -302,6 +282,17 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	return s
 }
 
+func (r *LocalRuntime) admitDelegatedSession(parent *session.Session, caller string, child *session.Session, target *agent.Agent) error {
+	child.AsyncSubagent = true
+	id, err := r.subagents.admitChild(parent, caller, child, target, subagent.AllowedSubagent{Agent: target.Name(), Description: target.Description()}, "", true)
+	if err == nil {
+		r.subagents.mu.Lock()
+		r.subagents.children[id].synchronous = true
+		r.subagents.mu.Unlock()
+	}
+	return err
+}
+
 // mergeExcludedTools combines two excluded-tool lists, deduplicating entries.
 // It returns nil when both inputs are empty.
 func mergeExcludedTools(parent, child []string) []string {
@@ -344,7 +335,16 @@ func mergeExcludedTools(parent, child []string) []string {
 // (if requested; downgraded to pinning the child when the parent session is
 // itself pinned), resolving the child agent, building the sub-session,
 // driving RunStream, and recording the sub-session on the parent.
-func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (result *tools.ToolCallResult, runErr error) {
+	resume, err := r.suspendExecution(ctx, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := resume(ctx); err != nil && runErr == nil {
+			result, runErr = nil, err
+		}
+	}()
 	span := trace.SpanFromContext(ctx)
 
 	// The caller resolves from the parent session, not the shared current
@@ -378,17 +378,9 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	}
 
 	s := newSubSession(parent, req.SubSessionConfig, child)
-
-	// subagent_stop fires after the child's stream has fully drained,
-	// using the *parent* agent's executor so handlers configured on the
-	// orchestrator see every child completion in one place — success or
-	// failure. The deferred call ensures we don't lose the event when an
-	// ErrorEvent triggers an early return below; handlers can detect a
-	// failed run by an empty stop_response (or by correlating with the
-	// session-level error event the parent already received).
-	defer func() {
-		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, req.AgentName, s.GetLastAssistantMessageContent())
-	}()
+	if err := r.admitDelegatedSession(parent, callerAgent.Name(), s, child); err != nil {
+		return tools.ResultError(err.Error()), nil
+	}
 
 	childEvents := r.runExecution(ctx, s)
 	var subSessionErr error
@@ -403,6 +395,10 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 			// and the user without context for what actually went wrong.
 			subSessionErr = fmt.Errorf("%s", errEvent.Error)
 		}
+	}
+
+	if driver, ok := r.sessionDrivers.Lookup(s.ID); ok {
+		s = driver.session()
 	}
 
 	// Persist the sub-session unconditionally — even on error, the partial
@@ -448,7 +444,10 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	}
 	r.subagents.ensureRoot(parent, callerAgent.Name())
 	s := newSubSession(parent, cfg, child)
-	return r.runCollectingSession(ctx, parent, s, child, callerAgent, onContent)
+	if err := r.admitDelegatedSession(parent, callerAgent.Name(), s, child); err != nil {
+		return &agenttool.RunResult{ErrMsg: err.Error()}
+	}
+	return r.runCollectingSession(ctx, parent, s, child, onContent)
 }
 
 // runCollectingSession runs a pre-built child session to completion, collecting
@@ -456,18 +455,15 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 // the async subagent manager build the session first (so it can capture the
 // session id for message routing and transcript reads) and then hand it here to
 // run.
-func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *session.Session, child, parentAgent *agent.Agent, onContent func(string)) *agenttool.RunResult {
-	// subagent_stop fires after the sub-session has fully drained —
-	// success or failure. parentAgent owns the executor: subagent_stop is
-	// observed by whoever spawned the sub-agent. runCollecting resolves it
-	// via CurrentAgent (the background path doesn't carry the parent agent
-	// name); the subagent manager passes the recorded parent instead, since
-	// its children run concurrently with (and nest below) whatever agent
-	// currently drives the runtime. dispatchHook silently no-ops when
-	// parentAgent is nil. The deferred call ensures the hook fires even
-	// when an ErrorEvent or ctx cancellation breaks us out of the loop.
+func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *session.Session, child *agent.Agent, onContent func(string)) (result *agenttool.RunResult) {
+	resume, err := r.suspendExecution(ctx, parent.ID)
+	if err != nil {
+		return &agenttool.RunResult{ErrMsg: err.Error()}
+	}
 	defer func() {
-		r.executeSubagentStopHooks(ctx, parent, s, parentAgent, child.Name(), s.GetLastAssistantMessageContent())
+		if err := resume(ctx); err != nil {
+			result = &agenttool.RunResult{ErrMsg: err.Error()}
+		}
 	}()
 
 	var errMsg string
@@ -480,12 +476,6 @@ func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *sess
 			if onContent != nil {
 				onContent(choice.Content)
 			}
-		}
-		// Token usage is the one event a background sub-session surfaces
-		// out-of-band: it carries the sub-session id and agent name, so the
-		// UI can keep per-agent context accounting for background agents.
-		if usage, ok := event.(*TokenUsageEvent); ok {
-			r.emitBackgroundEvent(usage)
 		}
 		// Elicitation requests are NOT re-forwarded here: elicitationHandler
 		// already delivered this event to the OnElicitationRequest sink
@@ -506,24 +496,8 @@ func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *sess
 	for range events {
 	}
 
-	// The loop above stops forwarding on ctx cancellation / first ErrorEvent,
-	// so the drain can discard TokenUsageEvents carrying the child's latest
-	// recorded usage. Emit one authoritative final snapshot before the child
-	// is attached: AddLiveSubSession marks it live-attached, so the parent's
-	// own events will never fold this cost back in. UI snapshots replace by
-	// session ID, which makes the duplicate on the clean path harmless.
-	// A child that failed before recording any usage or cost gets no
-	// snapshot at all: a zero-usage event would only add an empty
-	// sub-session row to the UI and clobber per-agent context accounting.
-	// Check that before resolving the context limit — the model lookup is
-	// pure overhead for a snapshot that is never emitted.
-	finalUsage := SessionUsage(s, 0, child.CompactionThreshold())
-	usageCtx := context.WithoutCancel(ctx)
-	if finalUsage.ContextLength > 0 || finalUsage.Cost > 0 {
-		// usageCtx: the context-limit lookup must still resolve for a
-		// cancelled task.
-		finalUsage.ContextLimit = r.contextLimitForAgentModel(usageCtx, child, r.getEffectiveModelID(usageCtx, child))
-		r.emitBackgroundEvent(NewTokenUsageEvent(s.ID, child.Name(), finalUsage))
+	if driver, ok := r.sessionDrivers.Lookup(s.ID); ok {
+		s = driver.session()
 	}
 
 	// Persist the sub-session unconditionally — the partial transcript is
@@ -532,22 +506,11 @@ func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *sess
 	// paths.
 	parent.AddLiveSubSession(s)
 
-	// Mirror runForwarding's persistence, but write to the store directly
-	// instead of emitting SubSessionCompleted: runCollecting runs on a
-	// detached background goroutine, so routing through the shared observer
-	// chain would race the parent's live RunStream (the PersistenceObserver
-	// keeps unsynchronised streaming state). Without this the background
-	// sub-session never reaches the store — its tokens and cost are recorded
-	// as $0 and escape any spend accounting that reads the store. usageCtx is
-	// already detached, so a cancelled/stopped task still persists its
-	// transcript.
-	r.persistBackgroundSubSession(usageCtx, parent.ID, s)
-
 	if errMsg != "" {
 		return &agenttool.RunResult{ErrMsg: errMsg}
 	}
 
-	result := s.GetLastAssistantMessageContent()
+	output := s.GetLastAssistantMessageContent()
 	// A remote MCP toolset that needs first-time interactive OAuth fails fast
 	// in a background (non-interactive) session instead of hanging on an
 	// unanswerable elicitation (issue #3200). The resulting "needs auth" state
@@ -556,15 +519,33 @@ func (r *LocalRuntime) runCollectingSession(ctx context.Context, parent, s *sess
 	// no explanation. Prepend an actionable note so the model (and, through it,
 	// the user) learns the server must be authorized interactively first.
 	if note := backgroundAuthRequiredNote(child); note != "" {
-		result = prependNote(result, note)
+		output = prependNote(output, note)
 	}
-	// Mid-call elicitations that were auto-declined because this background
-	// session had no UI to answer them (see elicitationHandler) are recorded
-	// against this sub-session's ID; surface them the same way (#3584).
-	for _, note := range r.elicitationDeclines.drain(s.ID) {
-		result = prependNote(result, note)
+	// Decline notes live in the canonical transcript, including canceled runs.
+	for _, note := range backgroundElicitationNotes(s) {
+		output = prependNote(output, note)
 	}
-	return &agenttool.RunResult{Result: result}
+	return &agenttool.RunResult{Result: output}
+}
+
+func backgroundElicitationNotes(sess *session.Session) []string {
+	var notes []string
+	seen := make(map[string]bool)
+	for _, item := range sess.MessagesSnapshot() {
+		message := item.Message
+		if message == nil {
+			continue
+		}
+		if !message.Implicit || message.InputOrigin != session.InputOriginRuntime || message.InputMode != "elicitation_declined" || message.Message.Role != "system" {
+			continue
+		}
+		note := message.Message.Content
+		if note != "" && !seen[note] {
+			notes = append(notes, note)
+			seen[note] = true
+		}
+	}
+	return notes
 }
 
 // prependNote prepends note to result, separated by a blank line, handling
@@ -609,29 +590,7 @@ func backgroundAuthRequiredNote(child *agent.Agent) string {
 	)
 }
 
-// persistBackgroundSubSession writes a completed background sub-session to the
-// session store, linking it under parentID. It is the runCollecting analogue
-// of the SubSessionCompletedEvent that runForwarding emits: background tasks
-// have no live EventSink, so the persistence observer never sees them. Errors
-// are logged rather than surfaced — a failed persist must not change the tool
-// result the caller returns to the model.
-func (r *LocalRuntime) persistBackgroundSubSession(ctx context.Context, parentID string, sub *session.Session) {
-	if r.sessionStore == nil {
-		return
-	}
-	if err := r.sessionStore.AddSubSession(ctx, parentID, sub); err != nil {
-		slog.WarnContext(ctx, "Failed to persist background sub-session",
-			"parent_id", parentID, "sub_session_id", sub.ID, "error", err)
-	}
-}
-
-// SubAgentNames implements agenttool.SessionSubAgentResolver, which
-// HandleRun prefers over the legacy CurrentAgentSubAgentNames. The
-// sub-agent list resolves from the calling session — a pinned background
-// session yields its pinned agent — so a nested run_background_agent
-// dispatched from a detached background task is validated against the
-// actual caller, not whatever the concurrent foreground loop's shared
-// current agent points at (#3886).
+// SubAgentNames resolves allowed targets from the calling session.
 func (r *LocalRuntime) SubAgentNames(sess *session.Session) []string {
 	if sess == nil {
 		return nil
@@ -643,35 +602,19 @@ func (r *LocalRuntime) SubAgentNames(sess *session.Session) []string {
 	return agentNames(a.SubAgents())
 }
 
-// CurrentAgentSubAgentNames implements agenttool.Runner. It is the legacy
-// shared current-agent resolver, kept so the Runner contract stays
-// source-compatible; HandleRun never takes this path for LocalRuntime
-// because the session-aware SubAgentNames above is preferred.
-func (r *LocalRuntime) CurrentAgentSubAgentNames() []string {
-	a := r.currentAgent()
-	if a == nil {
-		return nil
-	}
-	return agentNames(a.SubAgents())
-}
-
-// RunAgent implements agenttool.Runner. It starts a sub-agent synchronously
-// and blocks until completion or cancellation.
-//
-// Background tasks inherit the parent session's safety policy and
-// session-scoped permissions. They still run non-interactively, so any tool
-// that remains Ask after those inherited rules is denied rather than blocking.
+// RunAgent synchronously runs a child through canonical admission.
 func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams) *agenttool.RunResult {
-	if !r.acceptLegacyDelegation(ctx, params.ParentSession) {
+	if !r.acceptSessionDelegation(params.ParentSession) {
 		return &agenttool.RunResult{ErrMsg: errSubagentsDisabled.Error()}
 	}
-	// Do not carry an admission grant into the child's future delegations.
-	ctx = context.WithValue(ctx, legacyDelegationKey{}, (*legacyDelegationGrant)(nil))
 	// Caller identity must come from the parent session, not the shared
 	// current agent: nested background delegation runs on pinned sessions.
 	caller := r.resolveSessionAgent(params.ParentSession)
 	if caller == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
+	}
+	if denied := validateAgentInList(caller.Name(), params.AgentName, "delegate to", "sub-agents list", caller.SubAgents()); denied != nil {
+		return &agenttool.RunResult{ErrMsg: denied.Output}
 	}
 	childLineage, guardErr := validateDelegation(params.ParentSession, caller.Name(), params.AgentName)
 	if guardErr != "" {
@@ -693,7 +636,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 }
 
 func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
-	if !r.acceptLegacyDelegation(ctx, sess) {
+	if !r.acceptSessionDelegation(sess) {
 		return tools.ResultError(errSubagentsDisabled.Error()), nil
 	}
 	var params struct {
@@ -832,13 +775,13 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 // dangling assistant message. The caller (runTurn) is responsible for
 // continuing the run loop, where the next iteration re-resolves the
 // current agent and emits the AgentInfo event.
-func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Session, from, to *agent.Agent) {
+func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Session, from, to *agent.Agent, events EventSink) {
 	slog.InfoContext(ctx, "Forced handoff", "from_agent", from.Name(), "to_agent", to.Name(), "session_id", sess.ID)
 
 	r.executeOnAgentSwitchHooks(ctx, from, sess.ID, from.Name(), to.Name(), agentSwitchKindForceHandoff)
 	r.setSessionActiveAgent(ctx, sess, to.Name())
 
-	sess.AddMessage(session.ImplicitUserMessage(
+	message := session.ImplicitUserMessage(
 		"The agent " + from.Name() + " finished its response and the conversation was automatically " +
 			"handed off to you. Your available handoff agents and tools are specified in the system " +
 			"messages that follow. Only use those capabilities - do not attempt to use tools or hand " +
@@ -846,25 +789,13 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 			"available to different agents with different capabilities. Look at the conversation history " +
 			"for context, continue the work from where the previous agent stopped, and complete your " +
 			"part of the task.",
-	))
+	)
+	position := sess.AddMessageAt(message)
+	events.Emit(MessageAddedAt(sess.ID, message, to.Name(), position))
 }
 
 func (r *LocalRuntime) setSessionActiveAgent(ctx context.Context, sess *session.Session, name string) {
-	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-		d.mu.Lock()
-		sess.AgentName = name
-		if a, err := r.team.Agent(name); err == nil {
-			d.modelProviders = a.ConfiguredModels()
-			d.modelRef = ""
-			d.bindingVersion++
-		}
-		d.mu.Unlock()
-	} else {
-		sess.AgentName = name
-	}
-	if r.sessionStore != nil {
-		if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
-			slog.WarnContext(ctx, "Persist active agent", "error", err)
-		}
+	if err := r.commitActiveAgent(ctx, sess, name); err != nil {
+		slog.WarnContext(ctx, "Persist active agent", "error", err)
 	}
 }

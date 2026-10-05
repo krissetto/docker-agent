@@ -139,7 +139,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		Model:          result.Model,
 		Usage:          summaryUsage(result),
 	}
-	if err := r.sessionStore.PersistCompaction(ctx, sess, result.InputTokens, 0, item); err != nil {
+	if err := r.persistCompactionEffect(ctx, sess, result.InputTokens, item); err != nil {
 		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
 		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))
 		outcome = CompactionOutcomeFailed
@@ -357,7 +357,7 @@ func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, s
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_, cancelErr := handle.Cancel(cleanupCtx, submission.TurnID)
-		return errors.Join(err, cancelErr, handle.AwaitTurn(cleanupCtx, submission.TurnID))
+		return errors.Join(err, cancelErr, supervisor.Shutdown(cleanupCtx))
 	}
 	status, err := handle.Status(ctx)
 	if err != nil {
@@ -370,6 +370,8 @@ func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, s
 	if err != nil {
 		return err
 	}
+	// Detached billing lives on message items; preserve the private seed's compatibility counter.
+	snapshot.Cost = seed.Cost
 	// Only the compactor's private result receives the detached transcript/accounting.
 	sess.CommitCompactionFrom(snapshot)
 	return nil

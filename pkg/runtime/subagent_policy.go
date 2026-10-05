@@ -1,12 +1,10 @@
 package runtime
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
-	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -37,45 +35,10 @@ func (r *LocalRuntime) SetUseSubagents(enabled bool) {
 	r.subagentsDisabled.Store(!enabled)
 }
 
-// Legacy synchronous calls accept their work at this point, then release the
-// lock before executing a child. Spawn and child messages instead hold the
-// same lock through their durable admission transaction.
-func (r *LocalRuntime) acceptAutonomousDelegation() bool {
+func (r *LocalRuntime) acceptSessionDelegation(sess *session.Session) bool {
 	r.subagentAdmissionMu.RLock()
 	defer r.subagentAdmissionMu.RUnlock()
-	return r.UseSubagents()
-}
-
-type legacyDelegationKey struct{}
-
-type legacyDelegationGrant struct {
-	runtime *LocalRuntime
-	used    atomic.Bool
-}
-
-func (r *LocalRuntime) acceptLegacyDelegation(ctx context.Context, sessions ...*session.Session) bool {
-	if grant, _ := ctx.Value(legacyDelegationKey{}).(*legacyDelegationGrant); grant != nil && grant.runtime == r && grant.used.CompareAndSwap(false, true) {
-		return true
-	}
-	if len(sessions) == 0 {
-		return r.acceptAutonomousDelegation()
-	}
-	r.subagentAdmissionMu.RLock()
-	defer r.subagentAdmissionMu.RUnlock()
-	return r.sessionDelegationEnabled(sessions[0])
-}
-
-// HandleRun queues a goroutine before calling RunAgent. The one-shot grant
-// preserves that already accepted work across a policy change without letting
-// the child's later tool calls inherit permission to delegate again.
-func (r *LocalRuntime) admitBackgroundDelegation(ctx context.Context, sess *session.Session, tc tools.ToolCall, run func(context.Context, *session.Session, tools.ToolCall) (*tools.ToolCallResult, error)) (*tools.ToolCallResult, error) {
-	r.subagentAdmissionMu.RLock()
-	defer r.subagentAdmissionMu.RUnlock()
-	if !r.sessionDelegationEnabled(sess) {
-		return tools.ResultError(errSubagentsDisabled.Error()), nil
-	}
-	ctx = context.WithValue(ctx, legacyDelegationKey{}, &legacyDelegationGrant{runtime: r})
-	return run(ctx, sess, tc)
+	return r.sessionDelegationEnabled(sess)
 }
 
 func (r *LocalRuntime) filterDelegationTools(agentTools []tools.Tool) []tools.Tool {

@@ -40,94 +40,98 @@ func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string)
 }
 
 func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.cancelPendingLocked(ctx, turnID)
-}
-
-func (d *sessionDriver) cancelPendingLocked(ctx context.Context, turnID string) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if d.stopped {
-		return false, &SessionError{Kind: SessionErrorStopped, SessionID: d.sessionIDLocked(), RequestID: turnID, Operation: "cancel_pending_message"}
-	}
-	if turnID == "" || d.sess == nil || turnID == d.activeRequestID {
-		return false, nil
-	}
-	queue := &d.pending
-	index := slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
-	if index < 0 {
-		queue = &d.steering
-		index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
-	}
-	if index < 0 {
-		return false, nil
-	}
-	if (*queue)[index].Retry {
-		*queue = slices.Delete(*queue, index, index+1)
-		d.completeTurnLocked(turnID)
-		return true, nil
-	}
-	position := -1
-	for i, item := range d.sess.MessagesSnapshot() {
-		if item.Message != nil && item.Message.Pending && item.Message.TurnID == turnID {
-			position = i
-			break
+	withdrawn := false
+	err := d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped {
+			return sessionIOReservation{}, ErrSessionStopped
 		}
-	}
-	if position < 0 {
-		return false, nil
-	}
-	unsupported := func() (bool, error) {
-		return false, &SessionError{Kind: SessionErrorUnsupported, SessionID: d.sessionIDLocked(), RequestID: turnID, Operation: "cancel_pending_message"}
-	}
-	if (*queue)[index].AcceptedPersisted {
-		store, ok := d.r.sessionStore.(session.PendingMessageDeleter)
-		if !ok {
-			return unsupported()
+		if turnID == "" || d.sess == nil || turnID == d.activeRequestID {
+			return sessionIOReservation{}, nil
 		}
-		if err := store.DeletePendingUserMessage(ctx, d.sess.ID, turnID); err != nil {
-			return false, err
+		queue := &d.pending
+		index := slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
+		if index < 0 {
+			queue = &d.steering
+			index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
 		}
-	}
-	// The in-memory store may share the session pointer and have already
-	// removed this item. All remaining operations are infallible under d.mu.
-	msg := (*queue)[index]
-	d.sess.RemovePendingUserMessageByTurnID(turnID)
-	*queue = slices.Delete(*queue, index, index+1)
-	d.completeTurnLocked(turnID)
-	d.refreshSteeringLocked()
-	d.events.PublishForRequest(d.sess.ID, turnID, inputEventMetadata(PendingUserMessageCanceled(d.sess.ID, turnID, position), msg))
-	return true, nil
+		if index < 0 {
+			return sessionIOReservation{}, nil
+		}
+		msg := (*queue)[index]
+		position := -1
+		for i, item := range d.sess.MessagesSnapshot() {
+			if item.Message != nil && item.Message.Pending && item.Message.TurnID == turnID {
+				position = i
+				break
+			}
+		}
+		if position < 0 && !msg.Retry {
+			return sessionIOReservation{}, nil
+		}
+		var write func(context.Context) error
+		if msg.AcceptedPersisted {
+			store, ok := d.r.sessionStore.(session.PendingMessageDeleter)
+			if !ok {
+				return sessionIOReservation{}, &SessionError{Kind: SessionErrorUnsupported, Operation: "cancel_pending_message"}
+			}
+			write = func(ctx context.Context) error { return store.DeletePendingUserMessage(ctx, d.identityID, turnID) }
+		}
+		d.editReserved = true
+		return sessionIOReservation{write: write, commit: func(err error) error {
+			d.editReserved = false
+			if err != nil {
+				return err
+			}
+			d.sess.RemovePendingUserMessageByTurnID(turnID)
+			*queue = slices.DeleteFunc(*queue, func(value QueuedMessage) bool { return value.RequestID == turnID })
+			d.completeTurnLocked(turnID)
+			d.refreshSteeringLocked()
+			d.events.PublishForRequest(d.identityID, turnID, inputEventMetadata(PendingUserMessageCanceled(d.identityID, turnID, position), msg))
+			withdrawn = true
+			return nil
+		}}, nil
+	})
+	return withdrawn, err
 }
 
 func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOutcome, error) {
-	d.mu.Lock()
-	if err := ctx.Err(); err != nil {
-		d.mu.Unlock()
-		return CancelNotActive, err
-	}
-	if turnID != "" && d.activeRequestID == turnID && d.running() && d.cancel != nil {
-		if d.cancelling() {
-			d.mu.Unlock()
-			return CancelAlreadyCancelling, nil
+	outcome := CancelNotActive
+	var cancel context.CancelFunc
+	err := d.ownerCall(ctx, func() error {
+		if turnID != "" && d.activeRequestID == turnID && d.starting() {
+			if d.startCanceled {
+				outcome = CancelAlreadyCancelling
+			} else {
+				d.startCanceled = true
+				outcome = CancelAccepted
+				d.resolveInteractionsLocked()
+			}
+			return nil
 		}
-		d.phase = sessionCancelling
-		d.resolveInteractionsLocked()
-		cancel := d.cancel
-		d.mu.Unlock()
-		cancel()
-		d.refreshAttention()
-		return CancelAccepted, nil
-	}
-	withdrawn, err := d.cancelPendingLocked(ctx, turnID)
-	d.mu.Unlock()
+		if turnID != "" && d.activeRequestID == turnID && d.running() && d.cancel != nil {
+			if d.cancelling() {
+				outcome = CancelAlreadyCancelling
+				return nil
+			}
+			d.phase = sessionCancelling
+			d.resolveInteractionsLocked()
+			cancel, outcome = d.cancel, CancelAccepted
+		}
+		return nil
+	})
 	if err != nil {
 		return CancelNotActive, err
 	}
-	if withdrawn {
-		return CancelAccepted, nil
+	if outcome != CancelNotActive {
+		if cancel != nil {
+			cancel()
+			d.refreshAttention()
+		}
+		return outcome, nil
 	}
-	return CancelNotActive, nil
+	withdrawn, err := d.cancelPendingMessage(ctx, turnID)
+	if withdrawn {
+		return CancelAccepted, err
+	}
+	return CancelNotActive, err
 }

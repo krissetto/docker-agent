@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"hash/maphash"
 	"maps"
 	"slices"
 	"sync"
@@ -11,16 +12,14 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 )
 
-// sessionDriverRegistry owns the per-sessions for a LocalRuntime. A
-// driver is created the first time the runtime sees a session object; detached
-// notes for not-yet-seen sessions are kept as orphaned messages and adopted by
-// the driver when the session appears.
+// sessionDriverRegistry owns the per-session drivers for a LocalRuntime.
 type sessionDriverRegistry struct {
 	r *LocalRuntime
 
 	mu                 sync.Mutex
+	publishing         [64]sync.Mutex
+	publicationSeed    maphash.Seed
 	drivers            map[string]*sessionDriver
-	orphans            map[string][]QueuedMessage
 	deleted            map[string]struct{}
 	reservations       map[string]*restoreDriverReservation
 	prepareRestoreHook func(string) // test-only barrier before reservation
@@ -36,11 +35,11 @@ type sessionDriverRegistry struct {
 
 func newSessionDriverRegistry(r *LocalRuntime) *sessionDriverRegistry {
 	return &sessionDriverRegistry{
-		r:            r,
-		drivers:      map[string]*sessionDriver{},
-		orphans:      map[string][]QueuedMessage{},
-		deleted:      map[string]struct{}{},
-		reservations: map[string]*restoreDriverReservation{},
+		publicationSeed: maphash.MakeSeed(),
+		r:               r,
+		drivers:         map[string]*sessionDriver{},
+		deleted:         map[string]struct{}{},
+		reservations:    map[string]*restoreDriverReservation{},
 	}
 }
 
@@ -98,20 +97,11 @@ func (g *sessionDriverRegistry) pruneIdleLocked(now time.Time) {
 	}
 	retention := g.r.idleRetention
 	for id, d := range g.drivers {
-		if g.ancestorResidentLocked(id) {
+		if g.ancestorResidentLocked(id) || g.pendingClaims[id] != 0 || g.reservations[id] != nil {
 			continue
 		}
-		if !d.mu.TryLock() {
-			continue
-		}
-		expired := now.Sub(d.lastActive) >= retention && d.beginReclaimLocked()
-		d.mu.Unlock()
-		if expired {
-			delete(g.drivers, id)
-			g.releasePersistence(id)
-			if g.r.sessionEvents != nil {
-				g.r.sessionEvents.Delete(id)
-			}
+		if now.Sub(d.registrySnapshot().lastActive) >= retention {
+			g.reclaimDriverLocked(id, d)
 		}
 	}
 }
@@ -119,14 +109,9 @@ func (g *sessionDriverRegistry) pruneIdleLocked(now time.Time) {
 func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 	ids := make([]string, 0, len(g.drivers))
 	lastActive := make(map[string]time.Time, len(g.drivers))
-	busyTime := time.Now()
 	for id, d := range g.drivers {
 		ids = append(ids, id)
-		lastActive[id] = busyTime
-		if d.mu.TryLock() {
-			lastActive[id] = d.lastActive
-			d.mu.Unlock()
-		}
+		lastActive[id] = d.registrySnapshot().lastActive
 	}
 	// The comparator observes one immutable snapshot, including one shared
 	// fallback timestamp for busy drivers; it never waits on session I/O.
@@ -143,32 +128,51 @@ func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 		return 0
 	})
 	for _, id := range ids {
-		if g.ancestorResidentLocked(id) {
+		if g.ancestorResidentLocked(id) || g.pendingClaims[id] != 0 || g.reservations[id] != nil {
 			continue
 		}
 		d := g.drivers[id]
-		if !d.mu.TryLock() {
-			continue
+		if d != nil && g.reclaimDriverLocked(id, d) {
+			return true
 		}
-		eligible := d.beginReclaimLocked()
-		d.mu.Unlock()
-		if !eligible {
-			continue
+	}
+	return false
+}
+
+func (g *sessionDriverRegistry) reclaimDriverLocked(id string, d *sessionDriver) bool {
+	if !d.mu.TryLock() {
+		return false
+	}
+	d.mu.Unlock()
+	g.mu.Unlock()
+	reclaimed := false
+	_ = d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.closed || g.drivers[id] != d || g.pendingClaims[id] != 0 || g.reservations[id] != nil || g.ancestorResidentLocked(id) || !d.beginReclaimLocked() {
+			return nil
 		}
 		delete(g.drivers, id)
 		g.releasePersistence(id)
-		if g.r.sessionEvents != nil {
+		if g.r != nil && g.r.sessionEvents != nil {
 			g.r.sessionEvents.Delete(id)
 		}
-		return true
+		reclaimed = true
+		return nil
+	})
+	g.mu.Lock()
+	if reclaimed {
+		g.mu.Unlock()
+		d.closeOwner()
+		g.mu.Lock()
 	}
-	return false
+	return reclaimed
 }
 
 func (g *sessionDriverRegistry) sessionBindingSnapshot(sess *session.Session) (*session.Session, string, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	clone := sess.Clone()
+	clone := sess.OwnSnapshot()
 	return clone, clone.AgentName, clone.MaxIterations
 }
 
@@ -182,6 +186,13 @@ func (g *sessionDriverRegistry) publishInitialized(sess *session.Session, modelR
 func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Session, modelRef string, providers []provider.Provider, agentName string, maxIterations int, stampAgent, bind bool) (*sessionDriver, error) {
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "register"}
+	}
+	publicationLock := &g.publishing[maphash.String(g.publicationSeed, sess.ID)%uint64(len(g.publishing))]
+	publicationLock.Lock()
+	defer publicationLock.Unlock()
+	parentPinned := g.pinResidentParent(sess.ParentID)
+	if parentPinned {
+		defer g.releaseUnpublishedClaim(sess.ParentID)
 	}
 	if err := g.beginClaim(sess.ID); err != nil {
 		return nil, err
@@ -214,9 +225,8 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 	}
 	d := g.drivers[sess.ID]
 	replacing := 0
-	adopted := g.orphans[sess.ID]
-	if d != nil && d.isStopped() {
-		if !d.stoppedAndSettled() {
+	if d != nil && d.registrySnapshot().stopped {
+		if !d.registrySnapshot().settled {
 			g.mu.Unlock()
 			return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "register"}
 		}
@@ -229,25 +239,16 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		d = nil
 	}
 	if d == nil {
-		if g.r != nil {
-			if err := g.r.sessionService.claim(g.r, sess.ID); err != nil {
-				g.mu.Unlock()
-				return nil, err
-			}
-		}
 		maxSessions := g.maxSessionsLocked()
 		if maxSessions > 0 && !limitAllows(len(g.drivers)-replacing, maxSessions) {
 			g.evictSettledForCapacityLocked()
 		}
-		if !limitAllows(len(g.drivers)+len(g.reservations)-replacing, maxSessions) {
+		if !limitAllows(g.residentAndReservedLocked()-replacing, maxSessions) {
 			g.mu.Unlock()
 			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: sess.ID, Operation: SessionOperationCreateSession, Reason: SessionErrorReasonLimit, Limit: maxSessions}
 		}
 		// Preserve the stopped generation's observation state if admission fails.
 		if replacing != 0 && g.r != nil {
-			if g.r.interactions != nil {
-				g.r.interactions.deleteSession(sess.ID)
-			}
 			if g.r.sessionEvents != nil {
 				g.r.sessionEvents.Delete(sess.ID)
 			}
@@ -260,10 +261,15 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 			}
 		}
 		d = newSessionDriver(g.r, sess)
+		g.mu.Unlock()
 		d.SetModelBinding(modelRef, providers)
-		d.adopt(adopted)
+		g.mu.Lock()
+		if g.closed || g.drivers[sess.ID] != nil && replacing == 0 {
+			g.mu.Unlock()
+			d.closeOwner()
+			return nil, &SessionError{Kind: SessionErrorClosed, SessionID: sess.ID, Operation: "register"}
+		}
 		g.drivers[sess.ID] = d
-		delete(g.orphans, sess.ID)
 		g.mu.Unlock()
 		if g.r != nil && g.r.agents != nil && g.r.subagents != nil && d.identityParent == "" {
 			g.r.subagents.bindPublishedRootDriver(d)
@@ -277,19 +283,16 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		}
 		return d, nil
 	}
-	current := d.session()
 	boundAgent := sess.AgentName
 	if bind {
 		boundAgent = agentName
 	}
-	if current != sess || (current != nil && current.AgentName != boundAgent) {
+	if d.identityID != sess.ID || d.registrySnapshot().agentName != boundAgent {
 		g.mu.Unlock()
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "replace_pinned_session"}
 	}
-	d.SetModelBinding(modelRef, providers)
-	d.adopt(adopted)
-	delete(g.orphans, sess.ID)
 	g.mu.Unlock()
+	d.SetModelBinding(modelRef, providers)
 	if g.r != nil && g.r.agents != nil && g.r.subagents != nil && d.identityParent == "" {
 		g.r.subagents.bindPublishedRootDriver(d)
 	}
@@ -312,6 +315,11 @@ func (g *sessionDriverRegistry) PrepareRestore(ctx context.Context, sess *sessio
 func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *session.Session, replaces *sessionDriver) (*restoreDriverReservation, error) {
 	if sess == nil || sess.ID == "" {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "restore_prepare"}
+	}
+	// Keep a resident parent routable while aggregate admission reclaims capacity.
+	parentPinned := g.pinResidentParent(sess.ParentID)
+	if parentPinned {
+		defer g.releaseUnpublishedClaim(sess.ParentID)
 	}
 	if err := g.beginClaim(sess.ID); err != nil {
 		return nil, err
@@ -339,12 +347,18 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 	d := newSessionDriver(g.r, sess)
 	d.SetModelBinding(modelRef, providers)
 	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID, replaces: replaces}
+	reserved := false
+	defer func() {
+		if !reserved {
+			d.closeOwner()
+		}
+	}()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return nil, &SessionError{Kind: SessionErrorClosed, SessionID: sess.ID, Operation: "restore_prepare"}
 	}
-	if g.drivers[sess.ID] != replaces || g.reservations[sess.ID] != nil || (replaces != nil && !replaces.stoppedViewReplaceable()) {
+	if g.drivers[sess.ID] != replaces || g.reservations[sess.ID] != nil || (replaces != nil && (!replaces.registrySnapshot().replaceable || !driverDrained(replaces))) {
 		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: sess.ID, Operation: "restore_collision"}
 	}
 	if _, stopped := g.stoppedTrees[sess.ID]; stopped {
@@ -353,7 +367,19 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 	if _, deleted := g.deleted[sess.ID]; deleted {
 		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "restore_prepare"}
 	}
+	maxSessions := g.maxSessionsLocked()
+	if replaces == nil {
+		for maxSessions > 0 && len(g.reservations) < maxSessions && !limitAllows(g.residentAndReservedLocked(), maxSessions) {
+			if !g.evictSettledForCapacityLocked() {
+				break
+			}
+		}
+		if !limitAllows(g.residentAndReservedLocked(), maxSessions) {
+			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: sess.ID, Operation: SessionOperationRestorePrepare, Reason: SessionErrorReasonLimit, Limit: maxSessions}
+		}
+	}
 	g.reservations[sess.ID] = reservation
+	reserved = true
 	return reservation, nil
 }
 
@@ -362,49 +388,47 @@ func (r *restoreDriverReservation) Discard() {
 		return
 	}
 	r.registry.mu.Lock()
-	defer r.registry.mu.Unlock()
+	discarded := false
+	defer func() {
+		r.registry.mu.Unlock()
+		if discarded {
+			r.driver.closeOwner()
+		}
+	}()
 	if r.registry.reservations[r.id] == r {
 		delete(r.registry.reservations, r.id)
+		discarded = true
 		if r.registry.pendingClaims[r.id] == 0 && r.registry.drivers[r.id] == nil && r.registry.r != nil {
 			r.registry.r.sessionService.release(r.registry.r, r.id)
 		}
 	}
 }
 
-// ActivateRestoreBatch atomically makes a prepared batch discoverable and only
-// then adopts unchanged orphan messages. Lock order: restoreMu -> manager.mu ->
-// registry.mu; registry code never acquires manager.mu.
+// ActivateRestoreBatch atomically makes a prepared batch discoverable.
+// Callers may hold manager.mu; registry code never acquires it.
 func (g *sessionDriverRegistry) ActivateRestoreBatch(batch []*restoreDriverReservation, commit func() error) error {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.closed {
+		g.mu.Unlock()
 		return &SessionError{Kind: SessionErrorClosed, Operation: "restore_activate"}
 	}
-	maxSessions := g.maxSessionsLocked()
-	for len(batch) == 1 && maxSessions > 0 && len(g.drivers)+len(batch) > maxSessions {
-		if !g.evictSettledForCapacityLocked() {
-			break
-		}
-	}
-	if maxSessions == 0 || (maxSessions > 0 && len(g.drivers)+len(batch) > maxSessions) {
-		return &SessionError{Kind: SessionErrorCapacity, Operation: "restore_activate", Reason: SessionErrorReasonLimit, Limit: maxSessions}
-	}
 	for _, reservation := range batch {
-		if reservation == nil || reservation.registry != g || g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != nil {
+		if reservation == nil || reservation.registry != g || g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != reservation.replaces {
+			g.mu.Unlock()
 			return &SessionError{Kind: SessionErrorInvalid, Operation: "restore_activate"}
 		}
 	}
 	if commit != nil {
 		if err := commit(); err != nil {
+			g.mu.Unlock()
 			return err
 		}
 	}
 	for _, reservation := range batch {
-		reservation.driver.adopt(g.orphans[reservation.id])
 		g.drivers[reservation.id] = reservation.driver
-		delete(g.orphans, reservation.id)
 		delete(g.reservations, reservation.id)
 	}
+	g.mu.Unlock()
 	return nil
 }
 
@@ -433,11 +457,7 @@ func (g *sessionDriverRegistry) ElicitationRoute(sessionID string) []string {
 		if d == nil {
 			break
 		}
-		sess := d.session()
-		if sess == nil {
-			break
-		}
-		current = sess.ParentID
+		current = d.identityParent
 	}
 	return route
 }
@@ -450,10 +470,8 @@ func (g *sessionDriverRegistry) PostKnown(ctx context.Context, sessionID string,
 	return d.Post(ctx, msg, wake)
 }
 
-// PostReliable accepts a runtime-authored lifecycle note for eventual
-// processing. Known idle sessions retain the note even when run admission is
-// temporarily denied; unknown sessions use the same bounded orphan mailbox as
-// other buffered delivery.
+// PostReliable accepts a runtime-authored lifecycle note for a known session.
+// Idle sessions retain the note even when run admission is temporarily denied.
 func (g *sessionDriverRegistry) PostReliable(ctx context.Context, sessionID string, msg QueuedMessage) bool {
 	msg.InputOrigin = session.InputOriginRuntime
 	msg.InputMode = "steer"
@@ -466,37 +484,20 @@ func (g *sessionDriverRegistry) PostReliable(ctx context.Context, sessionID stri
 	}
 	g.mu.Lock()
 	d, ok := g.drivers[sessionID]
-	if !ok {
-		if g.closed || !limitAllows(len(g.orphans[sessionID]), g.orphanLimitLocked()) {
-			g.mu.Unlock()
-			return false
-		}
-		g.orphans[sessionID] = append(g.orphans[sessionID], msg)
+	if !ok || g.closed {
 		g.mu.Unlock()
-		return true
+		return false
 	}
 	g.mu.Unlock()
 	return d.PostReliable(ctx, msg)
 }
 
-func (g *sessionDriverRegistry) orphanLimitLocked() int {
-	if g.r != nil {
-		return g.r.maxOrphanMailbox
-	}
-	return 0
-}
-
 func (g *sessionDriverRegistry) PostOrBuffer(ctx context.Context, sessionID string, msg QueuedMessage, wake bool) bool {
 	g.mu.Lock()
 	d, ok := g.drivers[sessionID]
-	if !ok {
-		if g.closed || !wake || !limitAllows(len(g.orphans[sessionID]), g.orphanLimitLocked()) {
-			g.mu.Unlock()
-			return false
-		}
-		g.orphans[sessionID] = append(g.orphans[sessionID], msg)
+	if !ok || g.closed {
 		g.mu.Unlock()
-		return true
+		return false
 	}
 	g.mu.Unlock()
 	return d.Post(ctx, msg, wake)
@@ -523,9 +524,7 @@ func (g *sessionDriverRegistry) StopAll(sessionID string) bool {
 func (g *sessionDriverRegistry) Settled(sessionID string) bool {
 	d, ok := g.Lookup(sessionID)
 	if !ok {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		return len(g.orphans[sessionID]) == 0
+		return true
 	}
 	return d.Settled()
 }
@@ -546,11 +545,17 @@ func (g *sessionDriverRegistry) Release(ctx context.Context, sessionID string) e
 // stable session ID.
 func (g *sessionDriverRegistry) ReplaceSettledSession(sessionID string, expected *sessionDriver, sess *session.Session) bool {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	d := g.drivers[sessionID]
-	if d == nil || d != expected || !d.Settled() {
+	if d == nil || d != expected || !d.registrySnapshot().settled {
+		g.mu.Unlock()
 		return false
 	}
+	if g.pendingClaims == nil {
+		g.pendingClaims = make(map[string]int)
+	}
+	g.pendingClaims[sessionID]++
+	g.mu.Unlock()
+	defer g.releaseUnpublishedClaim(sessionID)
 	d.replaceSession(sess)
 	return true
 }
@@ -571,19 +576,19 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 	}
 	if final {
 		g.deleted[sessionID] = struct{}{}
-		if d != nil {
-			// Fence admission while the registry still owns this generation, then
-			// capture Done only after stopped prevents any later work-group Add.
+	}
+	g.mu.Unlock()
+	if d != nil {
+		if final {
 			d.StopAllForDelete()
+		} else {
+			d.StopAll()
 		}
-	} else if d != nil {
-		d.StopAll()
 	}
 	var done <-chan struct{}
 	if d != nil {
 		done = d.Done()
 	}
-	g.mu.Unlock()
 	if d != nil {
 		d.refreshAttention()
 	}
@@ -627,11 +632,10 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 		delete(g.drivers, sessionID)
 		g.releasePersistence(sessionID)
 	}
-	delete(g.orphans, sessionID)
 	delete(g.stoppedTrees, sessionID)
 	g.mu.Unlock()
-	if g.r != nil && g.r.interactions != nil {
-		g.r.interactions.deleteSession(sessionID)
+	if d != nil {
+		d.closeOwner()
 	}
 	return nil
 }
@@ -651,15 +655,7 @@ func (g *sessionDriverRegistry) closeAdmission() {
 	g.mu.Lock()
 	g.closed = true
 	g.stopSchedulerLocked()
-	drivers := make([]*sessionDriver, 0, len(g.drivers))
-	for _, d := range g.drivers {
-		drivers = append(drivers, d)
-	}
 	g.mu.Unlock()
-	for _, d := range drivers {
-		d.StopAll()
-		d.refreshAttention()
-	}
 	g.signalWork()
 }
 
@@ -710,16 +706,19 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 		}
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	for id := range g.drivers {
 		g.releasePersistence(id)
 	}
 	for id := range g.reservations {
+		drivers = append(drivers, g.reservations[id].driver)
 		g.releasePersistence(id)
 	}
 	g.reservations = map[string]*restoreDriverReservation{}
 	g.drivers = map[string]*sessionDriver{}
-	g.orphans = map[string][]QueuedMessage{}
+	g.mu.Unlock()
+	for _, d := range drivers {
+		d.closeOwner()
+	}
 	return nil
 }
 
@@ -728,7 +727,31 @@ func (g *sessionDriverRegistry) Close() {
 }
 
 // Ancestors stay routable while any resident descendant can produce a report.
+func (g *sessionDriverRegistry) residentAndReservedLocked() int {
+	count := len(g.drivers)
+	for id := range g.reservations {
+		if g.drivers[id] == nil {
+			count++
+		}
+	}
+	return count
+}
+
 func (g *sessionDriverRegistry) ancestorResidentLocked(id string) bool {
+	for _, reservation := range g.reservations {
+		seen := make(map[string]bool)
+		for parentID := reservation.driver.identityParent; parentID != "" && !seen[parentID]; {
+			seen[parentID] = true
+			if parentID == id {
+				return true
+			}
+			parent := g.drivers[parentID]
+			if parent == nil || parent.identityParent == parentID {
+				break
+			}
+			parentID = parent.identityParent
+		}
+	}
 	for otherID, d := range g.drivers {
 		if otherID == id {
 			continue
@@ -750,21 +773,36 @@ func (g *sessionDriverRegistry) ancestorResidentLocked(id string) bool {
 	return false
 }
 
-func (g *sessionDriverRegistry) beginClaim(id string) error {
+func (g *sessionDriverRegistry) pinResidentParent(id string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed {
-		return &SessionError{Kind: SessionErrorClosed, SessionID: id, Operation: SessionOperationCreateSession}
-	}
-	if g.r != nil {
-		if err := g.r.sessionService.claim(g.r, id); err != nil {
-			return err
-		}
+	if id == "" || g.drivers[id] == nil {
+		return false
 	}
 	if g.pendingClaims == nil {
 		g.pendingClaims = make(map[string]int)
 	}
 	g.pendingClaims[id]++
+	return true
+}
+
+func (g *sessionDriverRegistry) beginClaim(id string) error {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return &SessionError{Kind: SessionErrorClosed, SessionID: id, Operation: SessionOperationCreateSession}
+	}
+	if g.pendingClaims == nil {
+		g.pendingClaims = make(map[string]int)
+	}
+	g.pendingClaims[id]++
+	g.mu.Unlock()
+	if g.r != nil {
+		if err := g.r.sessionService.claim(g.r, id); err != nil {
+			g.releaseUnpublishedClaim(id)
+			return err
+		}
+	}
 	return nil
 }
 

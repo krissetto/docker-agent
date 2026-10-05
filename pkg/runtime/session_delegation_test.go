@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -110,5 +111,53 @@ func TestSessionDelegationUnavailableAncestorFailsClosed(t *testing.T) {
 	require.False(t, r.sessionDelegationEnabled(child))
 	_, err := r.subagents.Spawn(child, "root", subagent.AllowedSubagent{Agent: "root"}, "must not bypass root revocation")
 	require.ErrorIs(t, err, errSubagentsDisabled)
-	require.False(t, r.acceptLegacyDelegation(t.Context(), child))
+	require.False(t, r.acceptSessionDelegation(child))
+}
+
+type blockedDelegationStore struct {
+	session.Store
+	blockedID string
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (s *blockedDelegationStore) UpdateSession(ctx context.Context, sess *session.Session) error {
+	if sess.ID == s.blockedID {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.Store.UpdateSession(ctx, sess)
+}
+
+func TestSessionDelegationPolicyWriteDoesNotBlockOtherRoots(t *testing.T) {
+	store := &blockedDelegationStore{Store: session.NewInMemorySessionStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	r := serviceRuntime(t, NewSessionService(), store)
+	first, err := r.CreateSession(t.Context(), session.New(session.WithID("blocked-policy-root")), SessionBinding{})
+	require.NoError(t, err)
+	second, err := r.CreateSession(t.Context(), session.New(session.WithID("independent-policy-root")), SessionBinding{})
+	require.NoError(t, err)
+	store.blockedID = first.ID()
+	var release sync.Once
+	defer release.Do(func() { close(store.release) })
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- first.(SessionDelegationController).SetDelegationPolicy(t.Context(), false) }()
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first policy write did not start")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- second.(SessionDelegationController).SetDelegationPolicy(t.Context(), false) }()
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("independent policy waited on blocked root store write")
+	}
+	release.Do(func() { close(store.release) })
+	require.NoError(t, <-firstDone)
 }

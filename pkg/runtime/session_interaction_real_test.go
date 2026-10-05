@@ -105,11 +105,11 @@ func TestLocalRuntimeGeneratedConcurrentElicitationsObserveRespondUnique(t *test
 		}
 		require.NotEmpty(t, envelope.InteractionID)
 		seen[envelope.InteractionID] = true
-		waiter := rt.elicitationWaiters.register(event.ElicitationID)
+		waiter := newElicitationWaiter()
+		require.NoError(t, driver.registerElicitation(t.Context(), event.RequestID, event, waiter))
 
 		require.NoError(t, handle.Respond(t.Context(), InteractionResponse{InteractionID: envelope.InteractionID, Kind: InteractionElicitation, ElicitationID: event.ElicitationID, Elicitation: ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"id": event.ElicitationID}}}))
 		assert.Equal(t, event.ElicitationID, (<-waiter.ch).Content["id"])
-		rt.elicitationWaiters.abandon(event.ElicitationID, waiter)
 	}
 	assert.Len(t, seen, 2)
 }

@@ -17,44 +17,11 @@ func (d *sessionDriver) postCommunication(ctx context.Context, msg QueuedMessage
 	} else {
 		receipt.Disposition = subagent.DeliveryNewTurn
 	}
-	d.mu.Lock()
-	if found, queued, err := d.existingInputLocked(msg); found || err != nil {
-		if err == nil {
-			receipt.Accepted, receipt.Idempotent, receipt.Queued = true, true, queued
-			for _, pending := range d.pending {
-				if pending.RequestID == msg.RequestID {
-					receipt.Durable = pending.AcceptedPersisted
-					break
-				}
-			}
-		}
-		d.mu.Unlock()
+	admission, err := d.admitInputReceipt(ctx, msg, SessionOperationPost, true, msg.trustedSteering())
+	if err != nil {
 		return receipt, err
 	}
-	if err := ctx.Err(); err != nil {
-		d.mu.Unlock()
-		return receipt, err
-	}
-	if err := d.admitLocked(SessionOperationPost); err != nil {
-		err.RequestID = msg.RequestID
-		d.mu.Unlock()
-		return receipt, err
-	}
-	if !limitAllows(len(d.pending), d.pendingLimit()) {
-		err := &SessionError{Kind: SessionErrorCapacity, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: SessionOperationPost, Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
-		d.mu.Unlock()
-		return receipt, err
-	}
-	if err := d.acceptInputLocked(&msg); err != nil {
-		d.mu.Unlock()
-		return receipt, err
-	}
-	d.pending = append(d.pending, msg)
-	if msg.trustedSteering() {
-		d.refreshSteeringLocked()
-	}
-	receipt.Accepted, receipt.Queued, receipt.Durable = true, true, msg.AcceptedPersisted
-	d.mu.Unlock()
+	receipt.Accepted, receipt.Queued, receipt.Idempotent, receipt.Durable = true, admission.queued, admission.idempotent, admission.durable
 	d.refreshAttention()
 	d.WakePending()
 	return receipt, nil

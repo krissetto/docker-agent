@@ -74,8 +74,24 @@ func TestSessionDriverPauseCancellation(t *testing.T) {
 	_, err := d.TogglePause(t.Context())
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reached := make(chan struct{})
+	type waitResult struct {
+		blocked bool
+		err     error
+	}
+	done := make(chan waitResult, 1)
+	// The pause was published while idle; reopen its boundary notification.
+	d.mu.Lock()
+	d.pausePublished = 0
+	d.mu.Unlock()
+	go func() {
+		blocked, err := d.waitIfPaused(ctx, func() { close(reached) })
+		done <- waitResult{blocked: blocked, err: err}
+	}()
+	<-reached
 	cancel()
-	blocked, err := d.waitIfPaused(ctx, nil)
-	assert.True(t, blocked)
-	require.ErrorIs(t, err, context.Canceled)
+	result := <-done
+	assert.True(t, result.blocked)
+	require.ErrorIs(t, result.err, context.Canceled)
 }

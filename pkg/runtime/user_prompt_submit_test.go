@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
-	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
@@ -103,13 +103,12 @@ func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
 		},
 	))
 
-	// Enqueue before RunStream so the messages are drained at the
-	// idle/first-turn drain site at the top of the run loop.
-	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "steer one"}))
-	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "steer two"}))
-
 	sess := session.New()
 	sess.Title = "Unit Test"
+	rt.sessionDrivers.Get(sess)
+	// Address the canonical owner before admission; its first run drains guidance.
+	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "steer one"}))
+	require.NoError(t, rt.Steer(t.Context(), QueuedMessage{Content: "steer two"}))
 
 	for range rt.runExecution(t.Context(), sess) {
 	}
@@ -189,10 +188,12 @@ func TestUserFollowupSubmitFiresOnDequeue(t *testing.T) {
 			AddStopWithUsage(3, 2).
 			Build()
 	}
-	prov := &queueProvider{
-		id:      "test/mock-model",
-		streams: []chat.MessageStream{newStopStream(), newStopStream()},
-	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+		{stream: newStopStream(), started: started, release: release},
+		{stream: newStopStream()},
+	}}
 
 	root := agent.New("root", "test agent",
 		agent.WithModel(prov),
@@ -219,19 +220,49 @@ func TestUserFollowupSubmitFiresOnDequeue(t *testing.T) {
 		},
 	))
 
-	// Enqueue before RunStream so the follow-up is dequeued when the
-	// first turn stops.
-	require.NoError(t, rt.FollowUp(t.Context(), QueuedMessage{Content: "please also do this"}))
-
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
-
-	for range rt.runExecution(t.Context(), sess) {
+	stream := rt.runExecution(t.Context(), sess)
+	waitClosed(t, started, "initial turn")
+	require.NoError(t, rt.FollowUp(t.Context(), QueuedMessage{Content: "please also do this"}))
+	close(release)
+	for range stream {
 	}
+	driver, found := rt.sessionDrivers.Lookup(sess.ID)
+	require.True(t, found)
+	driver.Wait()
 
 	assert.Equal(t, int32(1), calls.Load(),
 		"user_followup_submit must fire once for the dequeued follow-up")
 	got, _ := seen.Load().(string)
 	assert.Equal(t, "please also do this", got,
 		"hook must receive the follow-up text via Input.Prompt")
+}
+
+func TestPromotedFollowupHookBlocksWithSessionAttribution(t *testing.T) {
+	for _, mode := range []string{"followup", "legacy_followup"} {
+		t.Run(mode, func(t *testing.T) {
+			primary := &recordingMsgProvider{mockProvider: mockProvider{id: "test/model", stream: &mockStream{}}}
+			root := agent.New("root", "instructions", agent.WithModel(primary), agent.WithHooks(&latest.HooksConfig{UserFollowupSubmit: []latest.HookDefinition{{Type: "builtin", Command: "deny-followup"}}}))
+			r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(mockModelStore{}), WithSessionCompaction(false))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, r.Close()) })
+			sess := session.New(session.WithUserMessage("followup"))
+			sess.Messages[0].Message.InputMode = mode
+			require.NoError(t, r.hooksRegistry.RegisterBuiltin("deny-followup", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+				assert.Equal(t, sess.ID, in.SessionID)
+				assert.Equal(t, sess.ID, in.RootSessionID)
+				assert.Equal(t, "root", in.AgentName)
+				return &hooks.Output{Decision: hooks.DecisionBlockValue, Reason: "denied followup"}, nil
+			}))
+			var rejected bool
+			for event := range r.runExecution(t.Context(), sess) {
+				if failure, ok := event.(*ErrorEvent); ok && strings.Contains(failure.Error, "denied followup") {
+					rejected = true
+				}
+			}
+			require.True(t, rejected, "blocked hook must emit explicit rejection")
+			require.Empty(t, primary.got, "blocked followup must not reach provider")
+		})
+	}
 }

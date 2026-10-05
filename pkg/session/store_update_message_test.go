@@ -43,6 +43,13 @@ func TestStoresUpdateMessageIsScopedToSession(t *testing.T) {
 			require.Len(t, stored.GetAllMessages(), 1)
 			assert.Equal(t, "original", stored.GetAllMessages()[0].Message.Content)
 
+			summaryID, err := store.(ItemAppender).AppendItem(ctx, owner.ID, "summary", Item{Summary: "keep summary"})
+			require.NoError(t, err)
+			require.ErrorIs(t, store.UpdateMessage(ctx, owner.ID, summaryID, UserMessage("not a summary")), ErrNotFound)
+			unchanged, err := store.GetSession(ctx, owner.ID)
+			require.NoError(t, err)
+			require.Equal(t, "keep summary", unchanged.Messages[len(unchanged.Messages)-1].Summary)
+
 			require.NoError(t, store.UpdateMessage(ctx, owner.ID, messageID, UserMessage("updated")))
 			stored, err = store.GetSession(ctx, owner.ID)
 			require.NoError(t, err)

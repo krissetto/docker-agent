@@ -35,7 +35,10 @@ type Gate struct {
 
 	// Resume receives the user's confirmation response. Required for
 	// interactive sessions.
-	Resume <-chan ResumeRequest
+	Resume                  <-chan ResumeRequest
+	ResumeFor               func(context.Context, *session.Session, string) (<-chan ResumeRequest, error)
+	RequireResponseIdentity bool
+	ApprovalEffect          func(context.Context, *session.Session, ResumeRequest, string) error
 
 	// Hooks receives the "waiting for the user" and approval-decision
 	// notifications. May be nil.
@@ -61,10 +64,13 @@ func (g *Gate) ConfirmAndRun(ctx context.Context, run tools.ConfirmedRun, exec f
 		return "", err
 	}
 	d := &Dispatcher{
-		Hooks:          g.Hooks,
-		Resume:         g.Resume,
-		Permissions:    g.Permissions,
-		confirmationMu: g.Mu,
+		Hooks:                   g.Hooks,
+		Resume:                  g.Resume,
+		ResumeFor:               g.ResumeFor,
+		RequireResponseIdentity: g.RequireResponseIdentity,
+		ApprovalEffect:          g.ApprovalEffect,
+		Permissions:             g.Permissions,
+		confirmationMu:          g.Mu,
 	}
 	if d.confirmationMu == nil {
 		d.confirmationMu = &sync.Mutex{}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
 	"strconv"
 
@@ -38,13 +37,13 @@ type (
 )
 
 func (h *sessionHandle) LegacyQueueStatus(ctx context.Context) (LegacyQueueStatus, error) {
-	if err := ctx.Err(); err != nil {
-		return LegacyQueueStatus{}, err
-	}
-	d := h.driver
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return LegacyQueueStatus{SteerDepth: len(d.steering), SteerCapacity: d.pendingLimit(), FollowUpDepth: len(d.pending), FollowUpCapacity: d.pendingLimit()}, nil
+	var result LegacyQueueStatus
+	err := h.driver.ownerCall(ctx, func() error {
+		d := h.driver
+		result = LegacyQueueStatus{SteerDepth: len(d.steering), SteerCapacity: d.pendingLimit(), FollowUpDepth: len(d.pending), FollowUpCapacity: d.pendingLimit()}
+		return nil
+	})
+	return result, err
 }
 
 func (h *sessionHandle) RunLegacyTurn(ctx context.Context, inputs []TurnInput, requestID string) (Submission, error) {
@@ -64,185 +63,95 @@ func (h *sessionHandle) RunLegacyCommandTurn(ctx context.Context, messages []Leg
 }
 
 func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, commands []LegacyCommandMessage, modelRef, requestID string) (Submission, error) {
-	var providers []provider.Provider
 	id, err := sessionInputID(h.sessionID, requestID)
 	if err != nil {
 		return Submission{}, err
 	}
 	d := h.driver
-	// The driver lock (and maintenance reservation during tool evaluation)
-	// prevents starts before the atomic input append. Global admission is only
-	// needed when prepareStart reserves the generation, never during storage.
-	d.mu.Lock()
-	if err := ctx.Err(); err != nil {
-		d.mu.Unlock()
-		return Submission{}, err
-	}
-	if err := d.admitLocked(SessionOperationPost); err != nil {
-		d.mu.Unlock()
-		return Submission{}, err
-	}
 	marker := session.UserMessage("")
-	marker.Message.CreatedAt = ""
-	marker.Implicit = true
-	marker.Pending = true
-	marker.Accepted = true
-	marker.TurnID = id
-	marker.InputMode = "legacy_run"
-	marker.InputOrigin = session.InputOriginUser
-	marker.Message.Model = modelRef
-	var requestData []byte
+	marker.Message.CreatedAt, marker.Implicit = "", true
+	marker.Pending, marker.Accepted, marker.TurnID = true, true, id
+	marker.InputMode, marker.InputOrigin, marker.Message.Model = "legacy_run", session.InputOriginUser, modelRef
+	var data []byte
 	if commands != nil {
-		requestData, _ = json.Marshal(commands)
+		data, _ = json.Marshal(commands)
 	} else {
-		requestData, _ = json.Marshal(inputs)
+		data, _ = json.Marshal(inputs)
 	}
-	marker.Message.ReasoningContent = string(requestData)
-	receipt, found, lookupErr := d.lookupLegacyBatchLocked(ctx, "run:"+id, []session.Item{session.NewMessageItem(marker)})
-	if lookupErr != nil {
-		d.mu.Unlock()
-		return Submission{}, lookupErr
-	}
-	if found {
-		err = d.reconcileLegacyBatchLocked(ctx, receipt)
-		d.mu.Unlock()
-		if err == nil {
-			d.WakePending()
-		}
-		return Submission{SessionID: h.sessionID, TurnID: id}, err
-	}
-	if d.running() || d.starting() || d.settling() || d.compactReserved || d.skillOperationID != "" {
-		d.mu.Unlock()
-		return Submission{}, &SessionError{Kind: SessionErrorConflict, SessionID: h.sessionID, Operation: "legacy_run", Reason: SessionErrorReasonBusy}
-	}
-	originalAgent := d.sess.AgentName
-	activeAgent := originalAgent
-	// Validate all command targets against the pre-batch active agent before any
-	// mutation. Resolution also uses that agent even when several switches occur.
-	targets := make(map[int]string)
-	for i, message := range commands {
-		if message.Role != chat.MessageRoleUser {
-			continue
-		}
-		cmd, _, ok := LookupCommand(ctx, h.runtime, originalAgent, message.Input.Content)
-		if !ok || cmd.Agent == "" {
-			continue
-		}
-		if _, targetErr := h.runtime.team.Agent(cmd.Agent); targetErr != nil {
-			d.mu.Unlock()
-			return Submission{}, targetErr
-		}
-		targets[i] = cmd.Agent
-		activeAgent = cmd.Agent
-	}
-	if modelRef != "" {
-		if !h.runtime.SupportsModelSwitching() {
-			d.mu.Unlock()
-			return Submission{}, sessionUnsupported(h.sessionID, SessionOperationSetModel)
-		}
-		providers, err = h.runtime.resolveModelProviders(ctx, originalAgent, modelRef)
-		if err != nil {
-			d.mu.Unlock()
-			return Submission{}, err
-		}
-	}
-	activeRef := modelRef
-	if activeAgent != originalAgent {
-		candidate := d.sess.OwnSnapshot()
-		candidate.AgentName = activeAgent
-		activeRef, providers, err = h.runtime.resolveSessionModelBinding(ctx, candidate, "")
-		if err != nil {
-			d.mu.Unlock()
-			return Submission{}, err
-		}
-	}
-	// Command evaluators may call tools; release d.mu while the existing
-	// maintenance reservation rejects concurrent input/agent mutation.
-	if len(targets) != 0 {
-		d.switchReserved = true
-		d.mu.Unlock()
+	marker.Message.ReasoningContent = string(data)
+	var originalAgent, activeAgent, activeRef string
+	var providers []provider.Provider
+	var items []session.Item
+	_, err = d.legacyBatch(ctx, "run:"+id, []session.Item{session.NewMessageItem(marker)}, len(inputs)+1, true, func(snapshot *session.Session) error {
+		originalAgent, activeAgent, activeRef = snapshot.AgentName, snapshot.AgentName, modelRef
 		inputs = slices.Clone(inputs)
-		for i := range inputs {
-			if _, ok := targets[i]; ok {
-				inputs[i].Content = ResolveCommand(ctx, h.runtime, originalAgent, inputs[i].Content)
+		for i, message := range commands {
+			if message.Role != chat.MessageRoleUser {
+				continue
+			}
+			cmd, _, ok := LookupCommand(ctx, h.runtime, originalAgent, message.Input.Content)
+			if !ok || cmd.Agent == "" {
+				continue
+			}
+			if _, err := h.runtime.team.Agent(cmd.Agent); err != nil {
+				return err
+			}
+			activeAgent = cmd.Agent
+			inputs[i].Content = ResolveCommand(ctx, h.runtime, originalAgent, inputs[i].Content)
+		}
+		if modelRef != "" {
+			if !h.runtime.SupportsModelSwitching() {
+				return sessionUnsupported(h.sessionID, SessionOperationSetModel)
+			}
+			var err error
+			providers, err = h.runtime.resolveModelProviders(ctx, originalAgent, modelRef)
+			if err != nil {
+				return err
 			}
 		}
-		d.mu.Lock()
-		d.switchReserved = false
-		if d.stopped {
-			d.mu.Unlock()
-			return Submission{}, ErrSessionStopped
+		if activeAgent != originalAgent {
+			snapshot.AgentName = activeAgent
+			var err error
+			activeRef, providers, err = h.runtime.resolveSessionModelBinding(ctx, snapshot, "")
+			if err != nil {
+				return err
+			}
 		}
-	}
-	items := make([]session.Item, 0, len(inputs)+1)
-	for _, input := range inputs {
-		if input.Retry {
-			d.mu.Unlock()
-			return Submission{}, errors.New("legacy batch input cannot request retry")
+		for _, input := range inputs {
+			if input.Retry {
+				return errors.New("legacy batch input cannot request retry")
+			}
+			message := session.UserMessage(input.Content, input.MultiContent...)
+			message.Message.CreatedAt, message.InputOrigin = "", session.InputOriginUser
+			items = append(items, session.NewMessageItem(message))
 		}
-		message := session.UserMessage(input.Content, input.MultiContent...)
-		message.Message.CreatedAt = ""
-		message.InputOrigin = session.InputOriginUser
-		items = append(items, session.NewMessageItem(message))
-	}
-	marker.AgentName = activeAgent
-	items = append(items, session.NewMessageItem(marker))
-	if !limitAllows(len(d.pending), d.pendingLimit()) {
-		d.mu.Unlock()
-		return Submission{}, ErrSessionCapacity
-	}
-	var duplicate bool
-	if modelRef == "" && activeAgent == originalAgent {
-		duplicate, err = d.appendLegacyBatchLocked(ctx, "run:"+id, items)
-	} else {
-		modelStore, ok := d.r.sessionStore.(session.ItemBatchBindingAppender)
+		marker.AgentName = activeAgent
+		items = append(items, session.NewMessageItem(marker))
+		return nil
+	}, func(ctx context.Context, store session.ItemBatchAppender) (session.ItemBatchReceipt, error) {
+		if modelRef == "" && activeAgent == originalAgent {
+			return store.AppendItems(ctx, h.sessionID, "run:"+id, items)
+		}
+		bindingStore, ok := d.r.sessionStore.(session.ItemBatchBindingAppender)
 		if !ok {
-			err = UnsupportedSessionOperation(h.sessionID, "atomic_model_input_batch")
-		} else {
-			receipt, appendErr := modelStore.AppendItemsWithBinding(ctx, h.sessionID, "run:"+id, items, originalAgent, modelRef, activeAgent)
-			err = appendErr
-			duplicate = receipt.Duplicate
-			if err == nil && !duplicate {
-				for i, item := range items {
-					item.Message.ID = receipt.IDs[i]
-					d.sess.AddMessageAt(item.Message)
-				}
-				if modelRef != "" {
-					d.sess.SetAgentModelOverride(originalAgent, modelRef)
-				}
-				d.sess.AgentName = activeAgent
-				d.modelRef = activeRef
-				d.modelProviders = slices.Clone(providers)
-				d.bindingVersion++
-			}
+			return session.ItemBatchReceipt{}, UnsupportedSessionOperation(h.sessionID, "atomic_model_input_batch")
 		}
-	}
-	if err == nil && !duplicate {
-		message := queuedSessionInput(marker, len(d.sess.MessagesSnapshot())-1, d.r.sessionStore != nil)
-		d.pending = append([]QueuedMessage{message}, d.pending...)
+		return bindingStore.AppendItemsWithBinding(ctx, h.sessionID, "run:"+id, items, originalAgent, modelRef, activeAgent)
+	}, func() {
+		if modelRef != "" {
+			d.sess.SetAgentModelOverride(originalAgent, modelRef)
+		}
+		d.sess.AgentName = activeAgent
+		if modelRef != "" || activeAgent != originalAgent {
+			d.modelRef, d.modelProviders = activeRef, slices.Clone(providers)
+			d.bindingVersion++
+		}
 		d.authorizeViewLocked()
-	}
-	d.mu.Unlock()
-	var runCtx context.Context
-	var generation uint64
-	var callbacks []func()
-	var startErr error
-	if err == nil && !duplicate {
-		runCtx, generation, callbacks, startErr = d.prepareStartAdmissionLocked(d.r.lifetime(), true)
-	}
+	})
 	if err != nil {
 		return Submission{}, err
 	}
-	if !duplicate {
-		if startErr != nil {
-			d.schedulePendingRetry()
-		} else {
-			for _, fn := range callbacks {
-				fn()
-			}
-			d.startWake(runCtx, generation)
-		}
-	}
+	d.WakePending()
 	return Submission{SessionID: h.sessionID, TurnID: id}, nil
 }
 
@@ -251,73 +160,128 @@ func (h *sessionHandle) QueueLegacyFollowUps(ctx context.Context, inputs []TurnI
 	if err != nil {
 		return LegacyFollowUpResult{}, err
 	}
-	d := h.driver
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return LegacyFollowUpResult{}, err
-	}
-	if err := d.admitLocked(SessionOperationPost); err != nil {
-		return LegacyFollowUpResult{}, err
-	}
-	streaming := d.running() || d.starting() || d.settling()
 	items := make([]session.Item, 0, len(inputs))
 	for i, input := range inputs {
 		if input.Retry {
 			return LegacyFollowUpResult{}, errors.New("legacy followup cannot request retry")
 		}
 		msg := session.UserMessage(input.Content, input.MultiContent...)
-		msg.Message.CreatedAt = ""
-		msg.Pending = true
-		msg.Accepted = true
-		msg.TurnID = id + ":" + strconv.Itoa(i)
-		msg.InputOrigin = session.InputOriginUser
-		msg.InputMode = "legacy_followup"
+		msg.Message.CreatedAt, msg.Pending, msg.Accepted = "", true, true
+		msg.TurnID, msg.InputOrigin, msg.InputMode = id+":"+strconv.Itoa(i), session.InputOriginUser, "legacy_followup"
 		items = append(items, session.NewMessageItem(msg))
 	}
-	receipt, found, err := d.lookupLegacyBatchLocked(ctx, "followup:"+id, items)
-	if err != nil {
-		return LegacyFollowUpResult{}, err
-	}
-	if found {
-		err = d.reconcileLegacyBatchLocked(ctx, receipt)
-		return LegacyFollowUpResult{Streaming: streaming, Duplicate: true}, err
-	}
-	if d.pendingLimit() >= 0 && len(inputs) > d.pendingLimit()-len(d.pending) {
-		return LegacyFollowUpResult{}, ErrSessionCapacity
-	}
-	duplicate, err := d.appendLegacyBatchLocked(ctx, "followup:"+id, items)
-	if err != nil {
-		return LegacyFollowUpResult{}, err
-	}
-	if !duplicate {
-		position := len(d.sess.MessagesSnapshot()) - len(items)
-		for i, item := range items {
-			msg := queuedSessionInput(item.Message, position+i, d.r.sessionStore != nil)
-			d.pending = append(d.pending, msg)
-			d.events.PublishForRequest(h.sessionID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(h.sessionID, msg.RequestID, msg.Content, msg.MultiContent, position+i), msg))
-		}
-	}
-	return LegacyFollowUpResult{Streaming: streaming, Duplicate: duplicate}, nil
+	var streaming bool
+	_ = h.driver.ownerCall(ctx, func() error { streaming = h.driver.running() || h.driver.starting() || h.driver.settling(); return nil })
+	duplicate, err := h.driver.legacyBatch(ctx, "followup:"+id, items, len(inputs), false, nil, func(ctx context.Context, store session.ItemBatchAppender) (session.ItemBatchReceipt, error) {
+		return store.AppendItems(ctx, h.sessionID, "followup:"+id, items)
+	}, nil)
+	return LegacyFollowUpResult{Streaming: streaming, Duplicate: duplicate}, err
 }
 
-func (d *sessionDriver) appendLegacyBatchLocked(ctx context.Context, requestID string, items []session.Item) (bool, error) {
-	store, ok := d.r.sessionStore.(session.ItemBatchAppender)
-	if !ok {
-		return false, UnsupportedSessionOperation(d.sessionIDLocked(), "atomic_input_batch")
-	}
-	receipt, err := store.AppendItems(ctx, d.sessionIDLocked(), requestID, items)
+// legacyBatch preserves atomic store batches while the owner remains available
+// during lookup, command evaluation, append and uncertain-ack reconciliation.
+func (d *sessionDriver) legacyBatch(ctx context.Context, key string, identity []session.Item, count int, run bool, prepare func(*session.Session) error, appendBatch func(context.Context, session.ItemBatchAppender) (session.ItemBatchReceipt, error), publish func()) (duplicate bool, err error) {
+	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if err := d.admitLocked(SessionOperationPost); err != nil {
+			return sessionIOReservation{}, err
+		}
+		store, ok := d.r.sessionStore.(session.ItemBatchAppender)
+		if !ok {
+			return sessionIOReservation{}, UnsupportedSessionOperation(d.identityID, "atomic_input_batch")
+		}
+		snapshot := d.sess.OwnSnapshot()
+		busy := run && (d.running() || d.starting() || d.settling() || d.compactReserved || d.skillOperationID != "")
+		capacity := d.pendingLimit() >= 0 && count > d.pendingLimit()-len(d.pending)
+		if run {
+			capacity = !limitAllows(len(d.pending), d.pendingLimit())
+		}
+		d.switchReserved = run
+		var receipt session.ItemBatchReceipt
+		var stored *session.Session
+		var ref string
+		var providers []provider.Provider
+		return sessionIOReservation{write: func(ctx context.Context) error {
+			var err error
+			var found bool
+			receipt, found, err = store.LookupItemBatch(ctx, d.identityID, key, identity)
+			if err != nil {
+				return err
+			}
+			duplicate = found
+			if !found {
+				if busy {
+					return &SessionError{Kind: SessionErrorConflict, Operation: "legacy_run", Reason: SessionErrorReasonBusy}
+				}
+				if capacity {
+					return ErrSessionCapacity
+				}
+				if prepare != nil {
+					if err := prepare(snapshot); err != nil {
+						return err
+					}
+				}
+				receipt, err = appendBatch(ctx, store)
+				if err != nil {
+					return err
+				}
+				duplicate = receipt.Duplicate
+			}
+			stored, err = d.r.sessionStore.GetSession(ctx, d.identityID)
+			if err != nil {
+				return err
+			}
+			if run {
+				ref, providers, err = d.r.resolveSessionModelBinding(ctx, stored, "")
+			}
+			return err
+		}, commit: func(err error) error {
+			d.switchReserved = false
+			if err != nil {
+				return err
+			}
+			present := map[int64]bool{}
+			for _, item := range d.sess.MessagesSnapshot() {
+				if item.Message != nil {
+					present[item.Message.ID] = true
+				}
+			}
+			wanted := map[int64]bool{}
+			for _, id := range receipt.IDs {
+				wanted[id] = true
+			}
+			for _, item := range stored.MessagesSnapshot() {
+				msg := item.Message
+				if msg == nil || present[msg.ID] || !wanted[msg.ID] {
+					continue
+				}
+				pos := d.sess.AddMessageAt(msg)
+				if msg.Pending && msg.Accepted {
+					queued := queuedSessionInput(msg, pos, true)
+					if msg.InputMode == "legacy_run" {
+						d.pending = append([]QueuedMessage{queued}, d.pending...)
+					} else {
+						d.pending = append(d.pending, queued)
+						d.events.PublishForRequest(d.identityID, queued.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.identityID, queued.RequestID, queued.Content, queued.MultiContent, pos), queued))
+					}
+				}
+			}
+			if run {
+				d.sess.AgentName = stored.AgentName
+				overrides, custom := stored.ModelStateSnapshot()
+				d.sess.ReplaceModelState(overrides, custom)
+				d.modelRef, d.modelProviders = ref, providers
+				d.bindingVersion++
+			}
+			if !duplicate && publish != nil {
+				publish()
+			}
+			return nil
+		}}, nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("append input batch: %w", err)
+		return false, err
 	}
-	if receipt.Duplicate {
-		return true, nil
-	}
-	for i, item := range items {
-		item.Message.ID = receipt.IDs[i]
-		d.sess.AddMessageAt(item.Message)
-	}
-	return false, nil
+	return duplicate, nil
 }
 
 // Legacy headless follow-ups stay dormant while idle. Explicit user submission
@@ -329,68 +293,4 @@ func (d *sessionDriver) pendingWakeableLocked() bool {
 		}
 	}
 	return false
-}
-
-func (d *sessionDriver) lookupLegacyBatchLocked(ctx context.Context, key string, items []session.Item) (session.ItemBatchReceipt, bool, error) {
-	store, ok := d.r.sessionStore.(session.ItemBatchAppender)
-	if !ok {
-		return session.ItemBatchReceipt{}, false, UnsupportedSessionOperation(d.sessionIDLocked(), "atomic_input_batch")
-	}
-	return store.LookupItemBatch(ctx, d.sessionIDLocked(), key, items)
-}
-
-// Reconcile an uncertain acknowledgement from persisted rows, never the retried
-// payload: a previously promoted or edited input cannot be resurrected.
-func (d *sessionDriver) reconcileLegacyBatchLocked(ctx context.Context, receipt session.ItemBatchReceipt) error {
-	present := map[int64]bool{}
-	for _, item := range d.sess.MessagesSnapshot() {
-		if item.Message != nil {
-			present[item.Message.ID] = true
-		}
-	}
-	missing := false
-	for _, id := range receipt.IDs {
-		if !present[id] {
-			missing = true
-		}
-	}
-	if !missing {
-		return nil
-	}
-	stored, err := d.r.sessionStore.GetSession(ctx, d.sessionIDLocked())
-	if err != nil {
-		return err
-	}
-	if !d.running() && !d.starting() && !d.settling() {
-		modelRef, providers, bindErr := d.r.resolveSessionModelBinding(ctx, stored, "")
-		if bindErr != nil {
-			return bindErr
-		}
-		d.sess.AgentName = stored.AgentName
-		overrides, custom := stored.ModelStateSnapshot()
-		d.sess.ReplaceModelState(overrides, custom)
-		d.modelRef = modelRef
-		d.modelProviders = providers
-		d.bindingVersion++
-	}
-	receiptIDs := map[int64]bool{}
-	for _, id := range receipt.IDs {
-		receiptIDs[id] = true
-	}
-	for _, item := range stored.MessagesSnapshot() {
-		msg := item.Message
-		if msg == nil || present[msg.ID] || !receiptIDs[msg.ID] {
-			continue
-		}
-		pos := d.sess.AddMessageAt(msg)
-		if msg.Pending && msg.Accepted {
-			queued := queuedSessionInput(msg, pos, true)
-			if msg.InputMode == "legacy_run" {
-				d.pending = append([]QueuedMessage{queued}, d.pending...)
-			} else {
-				d.pending = append(d.pending, queued)
-			}
-		}
-	}
-	return nil
 }

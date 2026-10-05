@@ -25,12 +25,16 @@ not a universal resource destructor.
 
 ## Persistence and turn evidence
 
-Metadata writes serialize with `Session.LockMetadata`. The persistence observer's
-run-start journal takes a fresh authoritative metadata snapshot **on each retry**,
-not the stale snapshot captured when a write was queued. Handle edits commit to
-the store before changing live metadata. `LocalRuntime.UpdateSessionTitle` routes
-resident sessions through the driver; cold writes update only the title under
-the metadata lock. A stale title caller cannot overwrite safety or permissions.
+Resident metadata writes use the session owner's reserved I/O lane. Detached
+payloads are materialized after the preceding write acknowledgement, and storage
+runs outside the owner before its memory delta commits. The persistence journal's
+run-start effect obtains fresh authoritative metadata **on each retry**, not a
+stale queued snapshot. Handle edits commit to the store before changing live
+metadata. `LocalRuntime.UpdateSessionTitle` routes resident sessions through the
+driver; cold writes update only the title under `Session.LockMetadata`. A stale
+title caller cannot overwrite safety or permissions. Caller cancellation can
+return before a reserved write finishes; its acknowledgement and any required
+stop withdrawal still complete before the lane is released.
 
 Settlement flushes transcript effects and commits terminal turn evidence before
 publishing `TurnSettled` or releasing settlement waiters. Storage failure retains
@@ -62,11 +66,35 @@ outstanding interactions and pending input; transcript positions disambiguate
 snapshot/replay overlap. Turn and interaction IDs must remain exact when sending
 cancellation or responses.
 
+The session owner registers each confirmation or max-iteration request with its
+own one-response buffered channel; elicitation uses a request-specific waiter.
+There is no runtime-global response-channel or waiter registry. The owner checks
+interaction kind, turn and generation, then claims and delivers a response in
+one transition. Duplicate, stale-generation and mismatched elicitation responses
+fail rather than resolving another request. Cancel/stop removes outstanding
+interactions and cancels execution; waiting operations must honor that context.
+
+Each event hub admits at most **256 active subscribers**, combining compatibility
+and sequenced subscriptions. Requested subscriber buffers clamp to **1024 events**
+plus one terminal/gap slot. Each subscriber also has an **8 MiB serialized queued
+payload** budget, independent of replay retention. Oversized or backlogged
+sequenced delivery produces a gap and closes; compatibility delivery disconnects.
+Initial live seeds and replay are checked against the same payload budget before
+large snapshots are cloned. These bounds do not cap the authoritative transcript
+or the memory required for a session snapshot.
+
 The ordinary single-session client helper resets on epoch change, retries
 recoverable transport failures with bounded backoff, and resnapshots on gaps;
 repeated gaps without progress terminate explicitly. It rejects tree observations
-(including a descendant-addition channel) rather than dropping children. Tree
-observation has its own contract and does not support cursor-based reconnect.
+(including ordered tree updates or a descendant-addition channel) rather than
+dropping children. Tree observation does not support cursor-based reconnect.
+`OrderedTree` selects one bounded `TreeUpdates` tail: each dynamically admitted
+child arrives as an atomic snapshot plus sequence-zero live seeds, before any
+of that child's live events. Those seeds preserve uncommitted assistant and tool
+state and do not advance the journal cursor. HTTP carries dynamic seeds in the
+additive `snapshot.live_seeds` field, including chunked snapshots. Legacy
+`SessionsAdded`/`Events` projections remain available, but separate channels do
+not guarantee snapshot/event ordering; older clients ignore the added seeds.
 Remote subtree watching carries descendant events, so bandwidth scales with the
 subtree; a temporarily missing topology is rebaselined at most eight times and
 remote child visibility can briefly lag. An epoch/cursor is not an exactly-once
@@ -81,8 +109,27 @@ call identity, including unsolicited callbacks, are rejected rather than routed
 to whichever runtime most recently installed a handler. Legacy direct setters
 remain a single-owner integration boundary. Subscription APIs are required for
 custom notifiers/RAG integrations; unsupported opaque todo composites or extra
-toolsets without binding fail explicitly. Memory accepts an injected backend
+toolsets without binding fail explicitly. Unsolicited tool-list notifications
+retain their subscribed agent identity; a shared toolset fans out to every
+affected agent in each runtime, without inferring a session from global current
+selection. Memory accepts an injected backend
 factory; selecting one does not create a native directory as a side effect.
+
+Startup tool-info projection admits at most **64 subscribers per agent** and
+retains at most **128 history events**; each live subscriber queue also caps at
+**128 events**. The publisher never waits on a subscriber: cancellation or a
+rejected send unregisters it, and a full live queue removes and closes the slow
+subscription. Capacity rejection or overflow ends only that startup projection;
+tool discovery and execution continue. A caller must re-emit startup info to
+refresh a rejected or truncated projection. History is a bounded latest tail,
+not a durable or lossless startup log.
+
+The compatibility `LiveSessions` view projects detached canonical owner state;
+caller session objects supply identity only. It lists active owners within the
+addressed canonical root tree and retains settled parents for ancestry, without
+a separate writable live-session registry. `CompactLiveSession` forwards to the
+addressed owner's compaction reservation; active-turn requests execute at a safe
+boundary or drain during teardown, rather than using an independent mailbox.
 
 `send_message` addresses only the sender's parent or direct children. Typed
 `DeliveryReceipt` fields distinguish acceptance, idempotent retry, durable
@@ -91,9 +138,43 @@ admission, queued state, delivery disposition and rejection. Acceptance is an
 busy recipient at a safe boundary; `new_turn` stays in its ordinary FIFO. Stable
 explicit request IDs, or IDs derived from sender session plus tool-call ID,
 allow exact retries; changed payload/mode under the same identity conflicts.
-An unavailable live inbox cannot acknowledge durable acceptance. The internal
-lifecycle orphan buffer remains volatile and is not equivalent to this receipt
-contract or the durable coordination outbox.
+An unavailable live inbox rejects delivery, including internal lifecycle notes;
+there is no unknown-session buffer. Durable child completion reports use the
+coordination outbox and are restored through canonical sessions.
+
+## Hooks and extension correctness
+
+`WithHooksRegistry` takes a private registration snapshot; later caller registry
+changes and construction of another runtime cannot replace its handlers. Caller
+stock-builtin overrides are preserved. `cache_response` is runtime-owned and a
+caller registration with that name is rejected; the model-hook factory is bound
+to the runtime's provider registry. Handler closures remain caller-owned and
+must support concurrent sessions. Hook inputs identify both the emitting session
+and its canonical root tree.
+
+`WithMessageTransform` is a best-effort projection boundary, not authorization or
+redaction authority. Each transform receives detached messages and attribution;
+errors and panics discard its rewrite without changing the retained input.
+`WithMessagePolicy` is the authoritative outbound boundary: policies run after
+projections on every provider attempt, including retries and fallbacks, and before
+external harness delivery. An error, panic or cancellation prevents delivery and
+is not retried through another model. Policies can inspect resolved model
+capabilities where available; external harnesses supply none. Invalid policy
+registrations fail closed rather than silently removing enforcement. Callbacks
+execute on the existing owned execution worker and must honor cancellation;
+shutdown retains that worker and reports a drain deadline if a callback ignores
+its context, rather than abandoning an extension goroutine or claiming success.
+
+Custom `EventObserver` callbacks receive independently detached session/event
+snapshots on an observation worker. They cannot mutate execution, change another
+observer's payload or suppress persistence; panics are contained. Callbacks remain
+ordered and a slow observer can backpressure observation. Cancellation is
+cooperative: joins wait for callbacks, so an extension that ignores its context
+can prevent a bounded drain. There is no hard callback-kill guarantee.
+Persistence is an explicit authoritative journal path, not a best-effort custom observer. Dynamic
+instruction assembly uses worker-local scratch state and returns only the
+instruction-context effect for durable owner commit, not a stale whole-session
+metadata write.
 
 ## Adapter boundaries
 
@@ -147,13 +228,23 @@ and present it as portable authority.
 ## Stop and recoverable start
 
 The optional `SessionTreeController.StopSubtree` capability works for roots and
-children and preserves transcript rows. Clients type-assert this capability;
-it is not part of the compatibility `SessionHandle` interface. Root stop fences new tree admission, cancels/drains its driver and stops its
-children under the caller's context. The root fence is process-local, not a new
-durable root tombstone. Child stop uses committed subtree tombstones before
-retiring/draining execution; repeated stop is idempotent. Deadline or persistence
-failure is returned, not treated as successful destructive cleanup. Cancellation
-of one turn, detachment, shutdown and durable child stop are distinct operations.
+children and retains completed transcript history. Clients type-assert this
+capability; it is not part of the compatibility `SessionHandle` interface. Root
+stop fences new tree admission and cancels its driver. It durably withdraws
+accepted pending and steering input and records canceled outcomes, including
+reconciliation of a reserved append that commits after cancellation, before
+acknowledging successful stop. It also stops and drains children under the
+caller's context. Withdrawn pending entries do not replay after reload. The root
+admission fence remains process-local: withdrawal is durable, but there is no new
+durable root tombstone preventing later explicit execution after restart.
+
+Child stop uses committed subtree tombstones before retiring/draining execution;
+repeated stop is idempotent. Root withdrawal and child stops are separate durable
+operations, not one atomic tree transaction. Deadline or persistence failure can
+leave partial stop progress and is returned for retry, not treated as successful
+destructive cleanup. Stores must support pending-message deletion to withdraw
+durable queued input. Cancellation of one turn, detachment, shutdown and durable
+subtree stop are distinct operations; shutdown preserves queued root input.
 
 `POST /api/v2/sessions/start` requires a caller-selected root session ID, agent and
 initial submit request ID. It persists a SHA-256 proof of the normalized supplied
@@ -167,10 +258,45 @@ external model/tool effects.
 
 ## Explicit limits
 
+Runtime execution and tool-handler concurrency default to 32 each through
+`SessionResourcePolicy.MaxExecutions` and `MaxTools`. Positive limits wait for
+capacity with context cancellation; zero disables admission and returns a typed
+capacity error. Tool batches use bounded workers. Synchronous delegation lends
+the waiting parent's execution slot and invocation's tool permit to canonical
+children, then reacquires both before continuing; nested delegation therefore
+progresses with a single slot without bypassing the bounds. Coordination-only
+`transfer_task` and `handoff` handlers do not retain tool-handler permits.
+
 Claims, event epochs and root-stop fences are process-local: there are no
 distributed leases or cross-process execution fencing. Durable guarantees require
 a supporting store; memory-only operation is not crash persistence. Legacy or
-expired terminal evidence remains uncertain. Internal lifecycle orphan delivery
-is volatile. Team, backend, transport and delegated filesystem lifetimes remain
-with their owners. These boundaries are intentional and must not be hidden by an
-adapter's UI, successful HTTP acknowledgement or local browser demo.
+expired terminal evidence remains uncertain. Explicit root-stop withdrawal is
+durable on supporting stores, while its admission fence is process-local. Team,
+backend, transport and delegated filesystem lifetimes remain with their owners.
+These boundaries are intentional and must not be hidden by an adapter's UI,
+successful HTTP acknowledgement or local browser demo.
+
+## Canonical delegation and root budgets
+
+`transfer_task`, synchronous `RunAgent`, `spawn_subagent`, and the compatibility
+background-agent tool names all admit children through the canonical child
+manager. There is no separate background task registry or fixed background-task
+concurrency/depth policy. The configured descendant and depth limits apply to
+all routes, including zero-valued limits. Blocking delegation temporarily lends
+execution/tool capacity while waiting for its canonical child, then reacquires
+capacity before the parent continues. Compatibility list/view/stop tools cannot
+inspect or stop another root's children; directed communication remains limited
+to the parent and direct children.
+
+Budget wallets are isolated per canonical root tree and shared by its
+descendants across turns. Elapsed limits cancel the execution context, including
+provider/tool waits, and use wall time from the wallet's first execution rather
+than summing concurrent child durations. Cost/token usage is charged when usage
+is reported; exhausted shared wallets cancel participating executions and stop
+further execution. Token accounting includes cached prompt tokens. These limits
+are not exact external billing ceilings: concurrent or already-started calls can
+report spend above a limit, and unpriced usage cannot enforce a monetary ceiling.
+Wallets are process-local; persisted transcripts do not restore their counters or
+elapsed clock after restart. Driver eviction retains a root wallet so reopening
+a session cannot reset its allowance; deleting the root releases its wallet. Cancellation requires providers/tools to honor their
+context and cannot undo an external effect already performed.

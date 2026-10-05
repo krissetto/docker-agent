@@ -550,8 +550,8 @@ func (a *App) startSubagentTreeWatch(ctx context.Context, handle runtime.Session
 	go func() {
 		attempt, rebaselines := 0, 0
 		for ctx.Err() == nil {
-			observation, err := handle.Observe(ctx, runtime.ObserveOptions{Tree: true})
-			if err == nil && observation.SessionsAdded == nil {
+			observation, err := handle.Observe(ctx, runtime.ObserveOptions{Tree: true, OrderedTree: true})
+			if err == nil && observation.SessionsAdded == nil && observation.TreeUpdates == nil {
 				// A single-session observer cannot represent descendants.
 				if observation.Cancel != nil {
 					observation.Cancel()
@@ -645,10 +645,25 @@ func (a *App) consumeTreeObservation(ctx context.Context, watch *treeWatch, obse
 		return false, true
 	}
 	added, events, errs := observation.SessionsAdded, observation.Events, observation.Errors
-	for added != nil || events != nil {
+	updates := observation.TreeUpdates
+	for added != nil || events != nil || updates != nil {
 		select {
 		case <-ctx.Done():
 			return progress, false
+		case update, ok := <-updates:
+			if !ok {
+				return progress, false
+			}
+			progress = true
+			if update.Snapshot != nil {
+				watch.add(*update.Snapshot)
+				for _, seed := range update.Replay {
+					apply(seed)
+				}
+				a.emitSubagentTreeView(ctx, epoch)
+			} else if update.Event != nil {
+				apply(*update.Event)
+			}
 		case snapshot, ok := <-added:
 			if !ok {
 				added = nil

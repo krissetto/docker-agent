@@ -63,6 +63,14 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	// Harness labels are not models.dev identities and carry no resolved
 	// capabilities; capability-gated transforms skip on nil.
 	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID, nil, messages)
+	messages, err = r.applyMessagePolicies(ctx, sess, a, modelID, nil, messages)
+	if err != nil {
+		msg := err.Error()
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, msg))
+		r.notifyError(ctx, a, sess.ID, msg)
+		endReason = turnEndReasonError
+		return endReason
+	}
 	prompt := strings.TrimSpace(harnessPrompt(messages))
 	if prompt == "" {
 		msg := "cannot run external harness without a user prompt"
@@ -408,11 +416,7 @@ func harnessSessionIDFor(sess *session.Session, a *agent.Agent) string {
 }
 
 func (r *LocalRuntime) rememberHarnessSessionID(ctx context.Context, sess *session.Session, a *agent.Agent, harnessSessionID string) {
-	sess.SetAttribute(harnessSessionAttributeKey(sess, a), harnessSessionID)
-	if r.sessionStore == nil {
-		return
-	}
-	if err := r.sessionStore.UpdateSession(context.WithoutCancel(ctx), sess); err != nil {
+	if err := r.commitSessionAttribute(ctx, sess, harnessSessionAttributeKey(sess, a), harnessSessionID); err != nil {
 		slog.WarnContext(ctx, "Failed to persist harness session ID", "session_id", sess.ID, "agent", a.Name(), "error", err)
 	}
 }

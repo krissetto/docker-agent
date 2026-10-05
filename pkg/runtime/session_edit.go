@@ -49,158 +49,201 @@ type SessionEdit struct {
 
 func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Session, error) {
 	d := h.driver
-	if edit.Kind == SessionEditResume || edit.Kind == SessionEditOpenView {
-		d.mu.Lock()
-		if err := ctx.Err(); err != nil {
-			d.mu.Unlock()
-			return nil, err
-		}
-		if d.r.lifetime().Err() != nil {
-			d.mu.Unlock()
-			return nil, ErrSessionClosed
-		}
-		if err := d.admitLocked(SessionOperationPost); err != nil {
-			d.mu.Unlock()
-			return nil, err
-		}
-		changed := edit.Kind == SessionEditResume && d.authorizeViewLocked()
-		snapshot := d.sess.Clone()
-		d.mu.Unlock()
-		if changed {
-			d.r.sessionDrivers.signalWork()
-		}
-		return snapshot, nil
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if d.stopped {
-		return nil, ErrSessionStopped
-	}
 	if edit.Kind == SessionEditPendingMessage {
-		return h.editPendingMessageLocked(ctx, edit.PendingMessage)
+		return h.editPendingMessage(ctx, edit.PendingMessage)
 	}
-	transcript := edit.Kind == SessionEditMessage || edit.Kind == SessionEditSummary || edit.Kind == SessionEditTokens
-	if transcript && (d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {
-		return nil, ErrSessionCapacity
-	}
-	unlockMetadata := d.sess.LockMetadata()
-	defer unlockMetadata()
-	next := d.sess.Clone()
-	store := d.r.sessionStore
-	var err error
-	switch edit.Kind {
-	case SessionEditAttachment:
-		abs, pathErr := filepath.Abs(edit.AttachmentPath)
-		if pathErr != nil {
-			return nil, pathErr
+	if edit.Kind == SessionEditAttachment {
+		abs, err := filepath.Abs(edit.AttachmentPath)
+		if err != nil {
+			return nil, err
 		}
-		info, statErr := os.Stat(abs)
-		if statErr != nil {
-			return nil, statErr
+		info, err := os.Stat(abs)
+		if err != nil {
+			return nil, err
 		}
 		if !info.Mode().IsRegular() {
 			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_attachment"}
 		}
-		next.AddAttachedFile(abs)
 		edit.AttachmentPath = abs
-		if store != nil {
-			err = store.UpdateSession(ctx, next)
-		}
-	case SessionEditPolicy:
-		if edit.SafetyPolicy != nil {
-			if !edit.SafetyPolicy.IsValid() {
-				return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_policy"}
-			}
-			next.SetSafetyPolicy(*edit.SafetyPolicy)
-		}
-		if edit.ToolsApproved != nil {
-			next.SetToolsApproved(*edit.ToolsApproved)
-		}
-		if edit.ToggleToolsApproved {
-			next.ToggleYolo()
-		}
-		if store != nil {
-			err = store.UpdateSession(ctx, next)
-		}
-	case SessionEditPermissions:
-		next.SetPermissions(edit.Permissions)
-		if store != nil {
-			err = store.UpdateSession(ctx, next)
-		}
-	case SessionEditTitle:
-		next.SetTitle(edit.Title)
-		if store != nil {
-			err = store.UpdateSessionTitle(ctx, h.sessionID, edit.Title)
-		}
-	case SessionEditMessage:
-		if edit.Message == nil {
-			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_message"}
-		}
-		if edit.MessageIndex < 0 {
-			next.AddMessage(edit.Message)
-			if store != nil {
-				_, err = store.AddMessage(ctx, h.sessionID, edit.Message)
-			}
-		} else {
-			if int(edit.MessageIndex) >= len(next.Messages) {
-				return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_message"}
-			}
-			next.Messages[edit.MessageIndex].Message = edit.Message
-			if store != nil {
-				err = store.UpdateMessage(ctx, h.sessionID, edit.MessageIndex, edit.Message)
-			}
-		}
-	case SessionEditSummary:
-		if edit.Summary != nil && (edit.Summary.Cost < 0 || math.IsNaN(edit.Summary.Cost) || math.IsInf(edit.Summary.Cost, 0) || len(edit.Summary.Model) > 256) {
-			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_summary"}
-		}
-		if edit.Summary == nil {
-			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_summary"}
-		}
-		next.Messages = append(next.Messages, *edit.Summary)
-		if store != nil {
-			err = store.AddSummary(ctx, h.sessionID, *edit.Summary)
-		}
-	case SessionEditTokens:
-		if edit.InputTokens < 0 || edit.OutputTokens < 0 || edit.Cost < 0 || math.IsNaN(edit.Cost) || math.IsInf(edit.Cost, 0) {
-			return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit_tokens"}
-		}
-		next.SetTokensAndCost(edit.InputTokens, edit.OutputTokens, edit.Cost)
-		if store != nil {
-			err = store.UpdateSessionTokens(ctx, h.sessionID, edit.InputTokens, edit.OutputTokens, edit.Cost)
-		}
-	default:
-		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "edit"}
 	}
+	var snapshot *session.Session
+	if edit.Kind == SessionEditResume || edit.Kind == SessionEditOpenView {
+		changed := false
+		err := d.ownerCall(ctx, func() error {
+			if d.r.lifetime().Err() != nil {
+				return ErrSessionClosed
+			}
+			if err := d.admitLocked(SessionOperationPost); err != nil {
+				return err
+			}
+			changed = edit.Kind == SessionEditResume && d.authorizeViewLocked()
+			snapshot = d.sess.Clone()
+			return nil
+		})
+		if changed {
+			d.r.sessionDrivers.signalWork()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return snapshot, nil
+	}
+	err := d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.stopped {
+			return sessionIOReservation{}, ErrSessionStopped
+		}
+		transcript := edit.Kind == SessionEditMessage || edit.Kind == SessionEditSummary || edit.Kind == SessionEditTokens
+		if transcript && (d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.compactReserved) {
+			return sessionIOReservation{}, ErrSessionCapacity
+		}
+		next := d.sess.OwnSnapshot()
+		store := d.r.sessionStore
+		var write func(context.Context) error
+		position := -1
+		invalid := func() (sessionIOReservation, error) {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorInvalid, Operation: "edit"}
+		}
+		switch edit.Kind {
+		case SessionEditAttachment:
+			next.AddAttachedFile(edit.AttachmentPath)
+			if store != nil {
+				write = func(ctx context.Context) error { return store.UpdateSession(ctx, next) }
+			}
+		case SessionEditPolicy:
+			if edit.SafetyPolicy != nil {
+				if !edit.SafetyPolicy.IsValid() {
+					return invalid()
+				}
+				next.SetSafetyPolicy(*edit.SafetyPolicy)
+			}
+			if edit.ToolsApproved != nil {
+				next.SetToolsApproved(*edit.ToolsApproved)
+			}
+			if edit.ToggleToolsApproved {
+				next.ToggleYolo()
+			}
+			if store != nil {
+				write = func(ctx context.Context) error { return store.UpdateSession(ctx, next) }
+			}
+		case SessionEditPermissions:
+			next.SetPermissions(edit.Permissions)
+			if store != nil {
+				write = func(ctx context.Context) error { return store.UpdateSession(ctx, next) }
+			}
+		case SessionEditTitle:
+			next.SetTitle(edit.Title)
+			if store != nil {
+				write = func(ctx context.Context) error { return store.UpdateSessionTitle(ctx, h.sessionID, edit.Title) }
+			}
+		case SessionEditMessage:
+			if edit.Message == nil {
+				return invalid()
+			}
+			// MessageIndex is the durable message identity, never a transcript position.
+			detached := session.New()
+			detached.AddMessage(edit.Message)
+			edit.Message = detached.OwnSnapshot().Messages[0].Message
+			if edit.MessageIndex < 0 {
+				edit.Message.ID = 0
+				if store != nil {
+					write = func(ctx context.Context) error {
+						id, err := store.AddMessage(ctx, h.sessionID, edit.Message)
+						if err == nil {
+							edit.Message.ID = id
+						}
+						return err
+					}
+				}
+			} else {
+				for i, item := range next.Messages {
+					if item.Message != nil && item.Message.ID == edit.MessageIndex {
+						position = i
+						break
+					}
+				}
+				if position < 0 {
+					return invalid()
+				}
+				edit.Message.ID = next.Messages[position].Message.ID
+				if store != nil {
+					write = func(ctx context.Context) error {
+						return store.UpdateMessage(ctx, h.sessionID, edit.Message.ID, edit.Message)
+					}
+				}
+			}
+		case SessionEditSummary:
+			if edit.Summary == nil || edit.Summary.Message != nil || edit.Summary.SubSession != nil || edit.Summary.Error != nil || edit.Summary.Termination != nil || edit.Summary.Cost < 0 || math.IsNaN(edit.Summary.Cost) || math.IsInf(edit.Summary.Cost, 0) || len(edit.Summary.Model) > 256 {
+				return invalid()
+			}
+			detached := session.New()
+			detached.Messages = []session.Item{*edit.Summary}
+			item := detached.OwnSnapshot().Messages[0]
+			edit.Summary = &item
+			if store != nil {
+				write = func(ctx context.Context) error { return store.AddSummary(ctx, h.sessionID, item) }
+			}
+		case SessionEditTokens:
+			if edit.InputTokens < 0 || edit.OutputTokens < 0 || edit.Cost < 0 || math.IsNaN(edit.Cost) || math.IsInf(edit.Cost, 0) {
+				return invalid()
+			}
+			if store != nil {
+				write = func(ctx context.Context) error {
+					return store.UpdateSessionTokens(ctx, h.sessionID, edit.InputTokens, edit.OutputTokens, edit.Cost)
+				}
+			}
+		default:
+			return invalid()
+		}
+		d.editReserved = true
+		return sessionIOReservation{write: write, commit: func(err error) error {
+			d.editReserved = false
+			if err != nil {
+				return err
+			}
+			switch edit.Kind {
+			case SessionEditAttachment:
+				d.sess.AddAttachedFile(edit.AttachmentPath)
+			case SessionEditPolicy:
+				d.sess.SetSafetyPolicy(next.GetSafetyPolicy())
+				d.sess.SetToolsApproved(next.ToolsApproved)
+			case SessionEditPermissions:
+				d.sess.SetPermissions(next.ClonePermissions())
+			case SessionEditTitle:
+				d.sess.SetTitle(edit.Title)
+				d.events.Publish(h.sessionID, SessionTitle(h.sessionID, edit.Title))
+			case SessionEditMessage:
+				published := d.sess.OwnSnapshot()
+				if position < 0 {
+					published.AddMessage(edit.Message)
+				} else {
+					published.Messages[position].Message = edit.Message
+				}
+				d.sess = published
+			case SessionEditSummary:
+				published := d.sess.OwnSnapshot()
+				published.Messages = append(published.Messages, *edit.Summary)
+				d.sess = published
+			case SessionEditTokens:
+				d.sess.SetTokensAndCost(edit.InputTokens, edit.OutputTokens, edit.Cost)
+			}
+			if transcript {
+				d.invalidatePersistenceTranscript()
+			}
+			snapshot = d.sess.Clone()
+			d.r.sessionDrivers.signalWork()
+			return nil
+		}}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	// Policy changes apply to the live session even while a provider call runs.
-	if !transcript {
-		switch edit.Kind {
-		case SessionEditAttachment:
-			d.sess.AddAttachedFile(edit.AttachmentPath)
-		case SessionEditPolicy:
-			if edit.SafetyPolicy != nil {
-				d.sess.SetSafetyPolicy(*edit.SafetyPolicy)
-			}
-			if edit.ToolsApproved != nil {
-				d.sess.SetToolsApproved(*edit.ToolsApproved)
-			}
-			if edit.ToggleToolsApproved {
-				d.sess.ToggleYolo()
-			}
-		case SessionEditPermissions:
-			d.sess.SetPermissions(edit.Permissions)
-		case SessionEditTitle:
-			d.sess.SetTitle(edit.Title)
-			d.events.Publish(h.sessionID, SessionTitle(h.sessionID, edit.Title))
+	return snapshot, nil
+}
+
+func (d *sessionDriver) invalidatePersistenceTranscript() {
+	for _, observer := range d.r.observers {
+		if p, ok := observer.(*PersistenceObserver); ok {
+			p.invalidateTranscript(d.sessionIDLocked())
 		}
-	} else {
-		d.sess = next
 	}
-	return d.sess.Clone(), nil
 }

@@ -629,7 +629,7 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		}
 		since = &value
 	}
-	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree})
+	observation, err := handle.Observe(c.Request().Context(), runtime.ObserveOptions{Since: since, SinceEpoch: sinceEpoch, Tree: tree, OrderedTree: tree})
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -684,6 +684,24 @@ func (s *Server) sessionEventStream(c echo.Context) error {
 		select {
 		case <-c.Request().Context().Done():
 			return nil
+		case update, ok := <-observation.TreeUpdates:
+			if !ok {
+				return nil
+			}
+			if update.Snapshot != nil {
+				dto := sessionSnapshot(*update.Snapshot)
+				for _, seed := range update.Replay {
+					dto.LiveSeeds = append(dto.LiveSeeds, sessionEnvelope(seed))
+				}
+				if err := writeSessionSnapshot(dto, write); err != nil {
+					return nil
+				}
+			} else if update.Event != nil {
+				dto := sessionEnvelope(*update.Event)
+				if err := write(sessionStreamMessage{Version: api.SessionAPIVersion, Type: "event", Envelope: &dto}); err != nil {
+					return nil
+				}
+			}
 		case snapshot, ok := <-observation.SessionsAdded:
 			if !ok {
 				observation.SessionsAdded = nil

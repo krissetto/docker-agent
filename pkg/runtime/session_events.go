@@ -13,7 +13,13 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-const defaultSessionEventReplayCapacity = 1024
+const (
+	defaultSessionEventReplayCapacity = 1024
+	// Subscriber limits are independent of caller buffers and replay retention.
+	maxSessionEventSubscriberBuffer = 1024
+	maxSessionEventSubscribers      = 256
+	maxSessionEventSubscriberBytes  = 8 << 20
+)
 
 // SequencedSessionEvent is a replayable session event. Gap marks that events
 // after the requested cursor were evicted and the consumer must resnapshot.
@@ -37,37 +43,42 @@ type retainedSessionEvent struct {
 }
 
 type sessionEventHub struct {
-	epoch       string
-	mu          sync.Mutex
-	subs        map[string]map[*sessionEventSubscriber]struct{}
-	seqSubs     map[string]map[*sequencedSessionEventSubscriber]struct{}
-	inflight    map[string]*inflightAssistant
-	activeTools map[string][]*inflightTool
-	outputBytes map[string]int
-	liveRuns    map[string]int
-	liveAgent   map[string]string
-	nextSeq     map[string]uint64
-	requestID   map[string]string
-	generation  map[string]uint64
-	terminal    map[string]bool
-	deleting    map[string]bool
-	closed      map[string]bool
-	replay      map[string][]retainedSessionEvent
-	capacity    int
-	maxBytes    int
-	bytes       map[string]int
+	subscriberCount int
+	epoch           string
+	mu              sync.Mutex
+	subs            map[string]map[*sessionEventSubscriber]struct{}
+	seqSubs         map[string]map[*sequencedSessionEventSubscriber]struct{}
+	inflight        map[string]*inflightAssistant
+	activeTools     map[string][]*inflightTool
+	outputBytes     map[string]int
+	liveRuns        map[string]int
+	liveAgent       map[string]string
+	nextSeq         map[string]uint64
+	requestID       map[string]string
+	generation      map[string]uint64
+	terminal        map[string]bool
+	deleting        map[string]bool
+	closed          map[string]bool
+	replay          map[string][]retainedSessionEvent
+	capacity        int
+	maxBytes        int
+	bytes           map[string]int
 }
 
 type sessionEventSubscriber struct {
-	out    chan Event
-	limit  int
-	closed bool
+	queuedBytes int
+	queuedSizes []int
+	out         chan Event
+	limit       int
+	closed      bool
 }
 
 type sequencedSessionEventSubscriber struct {
-	out    chan SequencedSessionEvent
-	limit  int
-	closed bool
+	queuedBytes int
+	queuedSizes []int
+	out         chan SequencedSessionEvent
+	limit       int
+	closed      bool
 }
 
 type inflightAssistant struct {
@@ -105,16 +116,21 @@ func newSessionEventHubWithLimits(capacity, maxBytes int) *sessionEventHub {
 // Subscribe is the compatibility event surface. Its channel is bounded; a
 // slow consumer is disconnected rather than retaining an unbounded queue.
 func (h *sessionEventHub) Subscribe(sessionID string, buffer int) (seed []Event, _ <-chan Event, cancel func()) {
-	if buffer < 1 {
-		buffer = 1
+	buffer = min(max(buffer, 1), maxSessionEventSubscriberBuffer)
+	h.mu.Lock()
+	if h.closed[sessionID] || h.subscriberCount >= maxSessionEventSubscribers || !h.liveSeedFitsLocked(sessionID) {
+		out := make(chan Event)
+		close(out)
+		h.mu.Unlock()
+		return nil, out, func() {}
 	}
 	sub := &sessionEventSubscriber{out: make(chan Event, buffer+1), limit: buffer}
-	h.mu.Lock()
 	seed = h.liveSeedLocked(sessionID)
 	if h.subs[sessionID] == nil {
 		h.subs[sessionID] = map[*sessionEventSubscriber]struct{}{}
 	}
 	h.subs[sessionID][sub] = struct{}{}
+	h.subscriberCount++
 	h.mu.Unlock()
 	var once sync.Once
 	return seed, sub.out, func() {
@@ -131,12 +147,17 @@ func (h *sessionEventHub) Subscribe(sessionID string, buffer int) (seed []Event,
 // SubscribeSequenced atomically registers a bounded subscriber and returns
 // retained events after since. A nil cursor starts from current live state.
 func (h *sessionEventHub) SubscribeSequenced(sessionID string, since *uint64, buffer int) (seed []SequencedSessionEvent, events <-chan SequencedSessionEvent, cancel func(), cursor uint64) {
-	if buffer < 1 {
-		buffer = 1
-	}
-	sub := &sequencedSessionEventSubscriber{out: make(chan SequencedSessionEvent, buffer+1), limit: buffer}
+	buffer = min(max(buffer, 1), maxSessionEventSubscriberBuffer)
 	h.mu.Lock()
 	cursor = h.nextSeq[sessionID]
+	if h.closed[sessionID] || h.subscriberCount >= maxSessionEventSubscribers || (since == nil && !h.liveSeedFitsLocked(sessionID)) || (since != nil && !h.replayFitsLocked(sessionID, *since)) {
+		out := make(chan SequencedSessionEvent, 1)
+		out <- SequencedSessionEvent{Epoch: h.epoch, Gap: true, FirstAvailable: cursor + 1}
+		close(out)
+		h.mu.Unlock()
+		return nil, out, func() {}, cursor
+	}
+	sub := &sequencedSessionEventSubscriber{out: make(chan SequencedSessionEvent, buffer+1), limit: buffer}
 	if since == nil {
 		for _, event := range h.liveSeedLocked(sessionID) {
 			seed = append(seed, SequencedSessionEvent{Epoch: h.epoch, Event: event})
@@ -148,6 +169,7 @@ func (h *sessionEventHub) SubscribeSequenced(sessionID string, since *uint64, bu
 		h.seqSubs[sessionID] = map[*sequencedSessionEventSubscriber]struct{}{}
 	}
 	h.seqSubs[sessionID][sub] = struct{}{}
+	h.subscriberCount++
 	h.mu.Unlock()
 	var once sync.Once
 	cancel = func() {
@@ -198,32 +220,98 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 	interactionID := interactionEventID(event)
 	sequence := h.nextSeq[sessionID] + 1
 	h.nextSeq[sessionID] = sequence
-	h.appendReplayLocked(sessionID, retainedSessionEvent{sequence: sequence, requestID: h.requestID[sessionID], interactionID: interactionID, generation: h.generation[sessionID], event: event, bytes: estimateEventBytes(event)})
+	eventBytes := estimateEventBytes(event) + len(h.requestID[sessionID]) + len(interactionID)
+	h.appendReplayLocked(sessionID, retainedSessionEvent{sequence: sequence, requestID: h.requestID[sessionID], interactionID: interactionID, generation: h.generation[sessionID], event: event, bytes: eventBytes})
 	for sub := range h.subs[sessionID] {
+		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
+		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes {
+			h.removeSubscriberLocked(sessionID, sub)
+			continue
+		}
 		if !terminalEvent && len(sub.out) >= sub.limit {
 			h.removeSubscriberLocked(sessionID, sub)
 			continue
 		}
 		select {
 		case sub.out <- event:
+			sub.queuedBytes += eventBytes
+			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
 			h.removeSubscriberLocked(sessionID, sub)
 		}
 	}
 	for sub := range h.seqSubs[sessionID] {
+		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
+		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes {
+			h.gapSequencedSubscriberLocked(sessionID, sub)
+			continue
+		}
 		if !terminalEvent && len(sub.out) >= sub.limit {
 			h.gapSequencedSubscriberLocked(sessionID, sub)
 			continue
 		}
 		select {
 		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: event}:
+			sub.queuedBytes += eventBytes
+			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
 			h.gapSequencedSubscriberLocked(sessionID, sub)
 		}
 	}
 }
 
+// Channel drains happen outside the hub lock. FIFO reconciliation can overcount
+// a concurrent drain, but never underestimate retained payload bytes.
+func reconcileQueuedBytes(total *int, sizes *[]int, queued int) {
+	consumed := len(*sizes) - queued
+	for _, size := range (*sizes)[:consumed] {
+		*total -= size
+	}
+	*sizes = (*sizes)[consumed:]
+}
+
+func (h *sessionEventHub) replayFitsLocked(sessionID string, since uint64) bool {
+	total := 0
+	for _, event := range h.replay[sessionID] {
+		if event.sequence > since {
+			total += event.bytes
+			if total > maxSessionEventSubscriberBytes {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (h *sessionEventHub) liveSeedFitsLocked(sessionID string) bool {
+	total := 0
+	if st := h.inflight[sessionID]; st != nil {
+		total = st.content.Len() + st.reasoning.Len()
+	}
+	for _, tool := range h.activeTools[sessionID] {
+		total += tool.arguments.Len() + tool.output.Len()
+		if total > maxSessionEventSubscriberBytes {
+			return false
+		}
+	}
+	if total > maxSessionEventSubscriberBytes {
+		return false
+	}
+	total = 0
+	for _, event := range h.liveSeedWithCloneLocked(sessionID, false) {
+		total += estimateEventBytes(event)
+		if total > maxSessionEventSubscriberBytes {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *sessionEventHub) liveSeedLocked(sessionID string) []Event {
+	return h.liveSeedWithCloneLocked(sessionID, true)
+}
+
+func (h *sessionEventHub) liveSeedWithCloneLocked(sessionID string, clone bool) []Event {
 	var seed []Event
 	if h.liveRuns[sessionID] > 0 {
 		seed = append(seed, StreamStarted(sessionID, h.liveAgent[sessionID]))
@@ -239,7 +327,10 @@ func (h *sessionEventHub) liveSeedLocked(sessionID string) []Event {
 	for _, tool := range h.activeTools[sessionID] {
 		call := tool.call
 		call.Function.Arguments = tool.arguments.String()
-		definition := cloneLiveToolDefinition(tool.definition)
+		definition := tool.definition
+		if clone {
+			definition = cloneLiveToolDefinition(definition)
+		}
 		if tool.running {
 			seed = append(seed, ToolCall(call, definition, tool.agentName))
 		} else {
@@ -250,7 +341,10 @@ func (h *sessionEventHub) liveSeedLocked(sessionID string) []Event {
 			output += "\n[Earlier tool output truncated at the session replay byte limit]\n"
 		}
 		if output != "" {
-			seed = append(seed, ToolCallOutput(call.ID, cloneLiveToolDefinition(tool.definition), output, tool.agentName))
+			if clone {
+				definition = cloneLiveToolDefinition(tool.definition)
+			}
+			seed = append(seed, ToolCallOutput(call.ID, definition, output, tool.agentName))
 		}
 	}
 	return seed
@@ -400,6 +494,7 @@ func (h *sessionEventHub) removeSubscriberLocked(sessionID string, sub *sessionE
 		return
 	}
 	sub.closed = true
+	h.subscriberCount--
 	delete(h.subs[sessionID], sub)
 	if len(h.subs[sessionID]) == 0 {
 		delete(h.subs, sessionID)
@@ -432,6 +527,7 @@ func (h *sessionEventHub) removeSequencedSubscriberLocked(sessionID string, sub 
 		return
 	}
 	sub.closed = true
+	h.subscriberCount--
 	delete(h.seqSubs[sessionID], sub)
 	if len(h.seqSubs[sessionID]) == 0 {
 		delete(h.seqSubs, sessionID)

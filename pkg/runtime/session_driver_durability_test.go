@@ -63,23 +63,23 @@ func TestInputAppendAmbiguousAcknowledgment(t *testing.T) {
 	require.Len(t, stored.MessagesSnapshot(), 1)
 	require.Len(t, sess.MessagesSnapshot(), 1)
 }
-func TestOrphanAdoptionRetainsFailedFIFO(t *testing.T) {
+func TestDurablePendingInputsRestoreFIFO(t *testing.T) {
 	base := coordinationSQLite(t)
 	store := &inputAckStore{Store: base, ItemAppender: base.(session.ItemAppender)}
 	r := newDriverTestRuntime(t)
 	r.sessionStore = store
-	sess := session.New(session.WithID("orphans"))
+	sess := session.New(session.WithID("durable-pending"))
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	for _, id := range []string{"first", "second"} {
-		require.True(t, r.sessionDrivers.PostOrBuffer(t.Context(), sess.ID, QueuedMessage{RequestID: id, Content: id}, true))
+		msg := session.UserMessage(id)
+		msg.Pending, msg.Accepted, msg.TurnID = true, true, id
+		_, err := store.AddMessage(t.Context(), sess.ID, msg)
+		require.NoError(t, err)
+		sess.AddMessage(msg)
 	}
-	store.fail.Store(true)
 	d, err := r.sessionDrivers.GetInitialized(t.Context(), sess)
 	require.NoError(t, err)
-	require.Len(t, d.pending, 2, "publication must retain ownership even if persistence fails")
-	_, _, _, err = d.prepareStart(t.Context(), true)
-	require.Error(t, err)
-	require.Len(t, d.pending, 2, "failed head must retain the entire FIFO")
+	require.Len(t, d.pending, 2, "publication restores durable pending inputs in FIFO order")
 	ctx, generation, _, err := d.prepareStart(t.Context(), true)
 	require.NoError(t, err)
 	require.NotNil(t, ctx)
@@ -104,10 +104,8 @@ func TestPromotionDoesNotBlockIndependentAdmission(t *testing.T) {
 		require.NoError(t, store.AddSession(t.Context(), sess))
 		d := r.sessionDrivers.Get(sess)
 		msg := QueuedMessage{RequestID: id, Content: id}
-		d.mu.Lock()
-		require.NoError(t, d.acceptInputLocked(&msg))
-		d.pending = append(d.pending, msg)
-		d.mu.Unlock()
+		_, err := d.admitInput(t.Context(), msg, SessionOperationPost, true, false)
+		require.NoError(t, err)
 		ds = append(ds, d)
 	}
 	r.sessionDrivers.closed = true
@@ -143,17 +141,16 @@ func TestAsyncAdmissionContentionIsConservativeAndRetryable(t *testing.T) {
 	r.maxActiveDescendants = 1
 	a := r.sessionDrivers.Get(session.New(session.WithID("a"), session.WithParentID("root"), session.WithAsyncSubagent(true)))
 	b := r.sessionDrivers.Get(session.New(session.WithID("b"), session.WithParentID("root"), session.WithAsyncSubagent(true)))
-	a.mu.Lock()
+	require.NoError(t, a.ownerCall(t.Context(), func() error { a.phase = sessionStarting; return nil }))
 	result := make(chan error, 1)
 	go func() { _, _, _, err := b.prepareStart(t.Context(), false); result <- err }()
 	select {
 	case err := <-result:
 		require.ErrorIs(t, err, ErrSessionCapacity)
 	case <-time.After(time.Second):
-		a.mu.Unlock()
 		t.Fatal("admission waited on another driver's lock")
 	}
-	a.mu.Unlock()
+	require.NoError(t, a.ownerCall(t.Context(), func() error { a.phase = sessionIdle; return nil }))
 	_, generation, _, err := b.prepareStart(t.Context(), false)
 	require.NoError(t, err)
 	r.sessionDrivers.closed = true
@@ -244,15 +241,19 @@ func TestInputAppendRetryRejectsChangedContentAfterLostAcknowledgment(t *testing
 	require.Len(t, d.pending, 1)
 }
 
-func TestRestoreBatchAdoptsWithoutStorageAndRetainsFIFO(t *testing.T) {
+func TestRestoreBatchPublishesDurablePendingFIFOWithoutStorage(t *testing.T) {
 	base := coordinationSQLite(t)
 	store := &inputAckStore{Store: base, ItemAppender: base.(session.ItemAppender)}
 	r := newDriverTestRuntime(t)
 	r.sessionStore = store
-	sess := session.New(session.WithID("restore-orphans"))
+	sess := session.New(session.WithID("restore-pending"))
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	for _, id := range []string{"first", "second"} {
-		require.True(t, r.sessionDrivers.PostOrBuffer(t.Context(), sess.ID, QueuedMessage{RequestID: id, Content: id}, true))
+		msg := session.UserMessage(id)
+		msg.Pending, msg.Accepted, msg.TurnID = true, true, id
+		_, err := store.AddMessage(t.Context(), sess.ID, msg)
+		require.NoError(t, err)
+		sess.AddMessage(msg)
 	}
 	reservation, err := r.sessionDrivers.PrepareRestore(t.Context(), sess)
 	require.NoError(t, err)
@@ -261,9 +262,6 @@ func TestRestoreBatchAdoptsWithoutStorageAndRetainsFIFO(t *testing.T) {
 	require.True(t, store.fail.Load(), "atomic registry activation must not call storage")
 	d, ok := r.sessionDrivers.Lookup(sess.ID)
 	require.True(t, ok)
-	require.Len(t, d.pending, 2)
-	_, _, _, err = d.prepareStart(t.Context(), true)
-	require.Error(t, err)
 	require.Len(t, d.pending, 2)
 }
 

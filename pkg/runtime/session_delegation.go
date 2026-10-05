@@ -79,8 +79,6 @@ func (h *sessionHandle) DelegationPolicy(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	h.runtime.subagentAdmissionMu.RLock()
-	defer h.runtime.subagentAdmissionMu.RUnlock()
 	root, err := h.runtime.delegationRoot(h.driver.session())
 	if err != nil {
 		return false, err
@@ -93,8 +91,6 @@ func (h *sessionHandle) SetDelegationPolicy(ctx context.Context, enabled bool) e
 		return err
 	}
 	r := h.runtime
-	r.subagentAdmissionMu.Lock()
-	defer r.subagentAdmissionMu.Unlock()
 	root, err := r.delegationRoot(h.driver.session())
 	if err != nil {
 		return err
@@ -103,21 +99,28 @@ func (h *sessionHandle) SetDelegationPolicy(ctx context.Context, enabled bool) e
 	if !ok {
 		return &SessionError{Kind: SessionErrorNotFound, SessionID: root.ID, Operation: "delegation_policy"}
 	}
-	driver.mu.Lock()
-	defer driver.mu.Unlock()
-	if driver.stopped {
-		return &SessionError{Kind: SessionErrorStopped, SessionID: root.ID, Operation: "delegation_policy"}
-	}
-	unlockMetadata := root.LockMetadata()
-	defer unlockMetadata()
-	next := root.Clone()
-	next.SetAttribute(SessionDelegationAttribute, strconv.FormatBool(enabled))
+	transition := r.subagents.transition(root.ID)
+	transition.Lock()
+	defer transition.Unlock()
 	if r.sessionStore == nil {
 		return sessionUnsupported(root.ID, "delegation_policy")
 	}
-	if err := r.sessionStore.UpdateSession(ctx, next); err != nil {
-		return err
-	}
-	root.SetAttribute(SessionDelegationAttribute, strconv.FormatBool(enabled))
-	return nil
+	value := strconv.FormatBool(enabled)
+	return driver.durableIO(ctx, func() (sessionIOReservation, error) {
+		if driver.stopped {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorStopped, SessionID: root.ID, Operation: "delegation_policy"}
+		}
+		next := driver.sess.OwnSnapshot()
+		next.SetAttribute(SessionDelegationAttribute, value)
+		return sessionIOReservation{
+			write: func(ctx context.Context) error { return r.sessionStore.UpdateSession(ctx, next) },
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				driver.sess.SetAttribute(SessionDelegationAttribute, value)
+				return nil
+			},
+		}, nil
+	})
 }

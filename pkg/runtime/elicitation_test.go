@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -23,182 +22,14 @@ func TestElicitationError_Error(t *testing.T) {
 	assert.Equal(t, "elicitation decline: user said no", err.Error())
 }
 
-func TestElicitationBridge_SendBeforeSwapReturnsError(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	err := b.send(t.Context(), Error("nothing"))
-	assert.ErrorIs(t, err, errNoElicitationChannel)
-}
-
-func TestElicitationBridge_SwapReturnsPrevious(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	first := make(chan Event, 1)
-	second := make(chan Event, 1)
-
-	prev := b.swap(first)
-	assert.Nil(t, prev, "first swap should return nil prev")
-
-	prev = b.swap(second)
-	assert.Equal(t, first, prev, "swap should return the previously stored channel")
-
-	prev = b.swap(nil)
-	assert.Equal(t, second, prev, "swap(nil) should return the previously stored channel")
-}
-
-func TestElicitationBridge_SendDeliversToCurrentChannel(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	ch := make(chan Event, 1)
-	b.swap(ch)
-
-	require.NoError(t, b.send(t.Context(), Error("hello")))
-
-	select {
-	case ev := <-ch:
-		ee, ok := ev.(*ErrorEvent)
-		require.True(t, ok)
-		assert.Equal(t, "hello", ee.Error)
-	case <-time.After(time.Second):
-		t.Fatal("expected event, none received")
-	}
-}
-
-func TestElicitationBridge_SendRecoversClosedChannel(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	ch := make(chan Event)
-	b.swap(ch)
-	close(ch)
-
-	err := b.send(t.Context(), Error("closed"))
-	assert.ErrorIs(t, err, errNoElicitationChannel)
-}
-
-// TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders is the
-// regression test for issue #3069: stream teardown must not close an event
-// channel while an MCP elicitation goroutine is blocked sending to it.
-//
-// The test parks a send on the current channel, starts restoreAndClose, and
-// verifies teardown cannot close the channel until the parked send drains.
-// Running under -race exercises the close-vs-send coordination that used to
-// panic with "send on closed channel".
-func TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	current := make(chan Event)
-	parent := make(chan Event, 1)
-	b.swap(current)
-
-	sendDone := make(chan error, 1)
-	go func() {
-		sendDone <- b.send(t.Context(), Error("inflight"))
-	}()
-
-	// Wait until the sender holds the read lock: TryLock fails only while
-	// another lock is held, and the sender is the only other lock user.
-	// From that point on, restoreAndClose's write lock (and therefore the
-	// close) cannot possibly precede the parked send.
-	require.Eventually(t, func() bool {
-		if b.mu.TryLock() {
-			b.mu.Unlock()
-			return false
-		}
-		return true
-	}, time.Second, time.Microsecond, "sender never acquired the read lock")
-
-	closed := make(chan struct{})
-	go func() {
-		b.restoreAndClose(current, parent)
-		close(closed)
-	}()
-
-	// The teardown ordering itself is verified below: the parked send must
-	// complete without a send-on-closed-channel panic, which is only
-	// possible if restoreAndClose waited for the read lock.
-
-	select {
-	case ev := <-current:
-		ee, ok := ev.(*ErrorEvent)
-		require.True(t, ok)
-		assert.Equal(t, "inflight", ee.Error)
-	case <-time.After(time.Second):
-		t.Fatal("expected in-flight event")
-	}
-
-	select {
-	case err := <-sendDone:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("in-flight send never completed after reader drained")
-	}
-
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("restoreAndClose never completed after reader drained")
-	}
-
-	select {
-	case _, ok := <-current:
-		assert.False(t, ok, "current channel should be closed after in-flight send completed")
-	default:
-		t.Fatal("current channel should be closed")
-	}
-}
-
-// TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely runs many
-// concurrent sends while closing the stream under -race to confirm the bridge
-// owns all close-vs-send synchronization.
-func TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely(t *testing.T) {
-	t.Parallel()
-
-	var b elicitationBridge
-	ch := make(chan Event, 64)
-	parent := make(chan Event, 1)
-	b.swap(ch)
-
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Go(func() {
-			for range 5 {
-				_ = b.send(t.Context(), Error("x"))
-			}
-		})
-	}
-
-	received := make(chan struct{})
-	go func() {
-		defer close(received)
-		for range ch {
-		}
-	}()
-
-	wg.Wait()
-	b.restoreAndClose(ch, parent)
-
-	select {
-	case <-received:
-	case <-time.After(time.Second):
-		t.Fatal("reader did not observe channel close")
-	}
-}
-
 func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
 	t.Parallel()
 
 	rt := newElicitationTestRuntime(t)
 	sess := session.New()
 	events := make(chan Event, 1)
-	parent := make(chan Event, 1)
-	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, events)
 
 	var stopped int
 	for ev := range events {
@@ -222,14 +53,12 @@ func TestLocalRuntime_FinalizeEventChannelDropsStreamStoppedAfterBoundedTimeout(
 	rt.streamStoppedDeliveryTimeout = timeout
 	sess := session.New()
 	events := make(chan Event, 1)
-	parent := make(chan Event, 1)
 	events <- Error("buffer already full")
-	rt.elicitation.swap(events)
 
 	done := make(chan struct{})
 	start := time.Now()
 	go func() {
-		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
+		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, events)
 		close(done)
 	}()
 
@@ -266,16 +95,14 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 	rt := newElicitationTestRuntime(t)
 	sess := session.New()
 	events := make(chan Event, defaultEventChannelCapacity)
-	parent := make(chan Event, 1)
 
 	// Seed events that stand in for the stream's prior output so asserting
 	// StreamStopped is *last* is a real ordering check, not merely "it was the
 	// only event delivered".
 	events <- Error("prior stream output 1")
 	events <- Error("prior stream output 2")
-	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events, true)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, events)
 
 	var delivered []Event
 	for ev := range events {
@@ -295,7 +122,7 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 		"StreamStopped must be the last event delivered before the channel closes")
 }
 
-// TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn is the
+// TestRunStreamClosesChannelOnEarlyReturn is the
 // regression test for issue #3073: runStreamLoop swapped this stream's
 // events channel into the elicitation bridge before registering the
 // finalize defer, so the early-return paths (tool setup failure, a
@@ -307,7 +134,7 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 // We drive the reachable early return — a user_prompt_submit hook that
 // stops the run — and assert the consumer's range terminates and the
 // previously-swapped elicitation channel is restored.
-func TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn(t *testing.T) {
+func TestRunStreamClosesChannelOnEarlyReturn(t *testing.T) {
 	t.Parallel()
 
 	const hookName = "test-stop-user-prompt-submit"
@@ -334,12 +161,6 @@ func TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn(t *testing.T)
 		},
 	))
 
-	// Seed a sentinel "parent" elicitation channel. After the stream tears
-	// down, the bridge must be restored to this channel — not left pointing
-	// at the stream's own (now closed) events channel.
-	parent := make(chan Event, 1)
-	rt.elicitation.swap(parent)
-
 	sess := session.New(session.WithUserMessage("hi"))
 	sess.Title = "Unit Test"
 
@@ -355,10 +176,6 @@ func TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn(t *testing.T)
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunStream consumer hung: events channel was never closed on the hook-driven early return")
 	}
-
-	restored := rt.elicitation.swap(nil)
-	assert.Equal(t, parent, restored,
-		"the previous elicitation channel must be restored on the early-return path")
 }
 
 func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
@@ -369,5 +186,7 @@ func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+	_, err = rt.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/elicitation-owner")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
 	return rt
 }

@@ -26,22 +26,26 @@ func attentionFixture(t *testing.T) (*subagentManager, *sessionDriver, SessionHa
 
 func resolveConfirmation(t *testing.T, d *sessionDriver, h SessionHandle, id string) {
 	t.Helper()
-	resume := d.r.interactions.resumeChannel(d.sessionID())
+	d.mu.Lock()
+	delete(d.interactions, id)
+	d.mu.Unlock()
+	resume, err := d.registerResume(t.Context(), id, InteractionConfirmation)
+	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
 		done <- h.Respond(t.Context(), InteractionResponse{InteractionID: id, Kind: InteractionConfirmation, Resume: ResumeApprove()})
 	}()
 	<-resume
 	require.NoError(t, <-done)
-	d.r.interactions.removeResume(d.sessionID(), resume)
 }
 
 func resolveElicitation(t *testing.T, d *sessionDriver, h SessionHandle, interactionID, elicitationID string) {
 	t.Helper()
-	waiter := d.r.elicitationWaiters.register(elicitationID)
+	waiter := newElicitationWaiter()
+	event := ElicitationRequest("question", "form", nil, "", elicitationID, "", d.identityID, nil, "worker").(*ElicitationRequestEvent)
+	require.NoError(t, d.registerElicitation(t.Context(), interactionID, event, waiter))
 	require.NoError(t, h.Respond(t.Context(), InteractionResponse{InteractionID: interactionID, Kind: InteractionElicitation, ElicitationID: elicitationID, Elicitation: ElicitationResult{Action: tools.ElicitationActionAccept}}))
 	<-waiter.ch
-	d.r.elicitationWaiters.abandon(elicitationID, waiter)
 }
 
 func TestAttentionMultipleInteractionsResolveConfirmationThenElicitation(t *testing.T) {

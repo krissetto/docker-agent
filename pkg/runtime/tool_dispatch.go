@@ -40,17 +40,28 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		}
 	}
 
-	resume := r.interactions.resumeChannel(sess.ID)
-	defer r.interactions.removeResume(sess.ID, resume)
 	d := &toolexec.Dispatcher{
-		Tracer:      r.tracer,
-		Hooks:       &hookDispatcher{r: r, events: events},
-		Resume:      resume,
-		AgentFor:    r.resolveSessionAgent,
-		Permissions: r.permissionCheckers,
-		Handlers:    handlers,
-		Recall: func(ctx context.Context, _ *session.Session, _ *agent.Agent, message string) error {
-			return r.recall(ctx, QueuedMessage{Content: message})
+		Tracer:                  r.tracer,
+		MaxParallel:             r.maxTools,
+		AcquireTool:             r.acquireTool,
+		Hooks:                   &hookDispatcher{r: r, events: events},
+		ResumeFor:               r.interactionResume,
+		RequireResponseIdentity: true,
+		ApprovalEffect:          r.commitApproval,
+		AgentFor:                r.resolveSessionAgent,
+		Permissions:             r.permissionCheckers,
+		Handlers:                handlers,
+		Recall: func(ctx context.Context, sess *session.Session, _ *agent.Agent, message string) error {
+			driver, ok := r.sessionDrivers.Lookup(sess.ID)
+			if !ok {
+				return ErrSessionClosed
+			}
+			id, err := newSessionRequestID()
+			if err != nil {
+				return err
+			}
+			_, err = driver.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputMode: "steer"})
+			return err
 		},
 	}
 	return d.Process(ctx, sess, calls, agentTools, &sinkEmitter{runtime: r, events: events, sessionID: sess.ID})

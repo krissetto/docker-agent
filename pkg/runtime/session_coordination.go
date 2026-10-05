@@ -44,17 +44,18 @@ func (m *subagentManager) completeSessionTurn(d *sessionDriver, turnID, runErr s
 }
 
 func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *sessionDriver, turnID, runErr string) error {
-	m.transitionMu.Lock()
-	transitionHeld := true
-	defer func() {
-		if transitionHeld {
-			m.transitionMu.Unlock()
-		}
-	}()
 	sess := d.session()
 	if sess == nil || !sess.AsyncSubagent {
 		return nil
 	}
+	transition := m.transition(m.rootSessionLockedSafe(d.sessionID()))
+	transition.Lock()
+	transitionHeld := true
+	defer func() {
+		if transitionHeld {
+			transition.Unlock()
+		}
+	}()
 	m.mu.Lock()
 	var id subagent.NodeID
 	var rec *childRecord
@@ -87,7 +88,7 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 	record.Result, record.LastTurnID = preview, turnID
 	parentID, parentAgent := rec.parentSession, rec.parentAgentName
 	report := session.ChildReport{}
-	if turnID != "" && state != subagent.NodeStopped && !m.hasRunningSubagentsLocked(sess.ID) {
+	if !rec.synchronous && turnID != "" && state != subagent.NodeStopped && !m.hasRunningSubagentsLocked(sess.ID) {
 		detail := preview
 		if truncated {
 			detail += " [...]"
@@ -136,12 +137,21 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 		})
 	}
 	m.mu.Unlock()
-	m.transitionMu.Unlock()
+	transition.Unlock()
 	transitionHeld = false
-	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok && m.r.team != nil {
-		a, _ := m.r.team.Agent(parentAgent)
-		m.r.executeSubagentStopHooks(m.r.lifetime(), parent.session(), sess, a, sess.AgentName, result)
+	parentSession := rec.parentSess
+	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok {
+		parentSession = parent.session()
 	}
+	if parentSession != nil && m.r.team != nil {
+		a, _ := m.r.team.Agent(parentAgent)
+		m.r.executeSubagentStopHooks(m.r.lifetime(), parentSession, sess, a, sess.AgentName, result)
+	}
+	m.mu.Lock()
+	if current := m.children[id]; current == rec {
+		current.parentSess = nil
+	}
+	m.mu.Unlock()
 	m.persistSnapshot()
 	m.r.sessionDrivers.signalWork()
 	return nil
@@ -151,20 +161,17 @@ func (g *sessionDriverRegistry) deliverReports(d *sessionDriver) bool {
 	if g.r.subagents == nil {
 		return false
 	}
-	d.mu.Lock()
-	if d.viewDormant {
-		d.mu.Unlock()
+	var retry *session.ChildReport
+	dormant := false
+	_ = d.ownerCall(g.r.lifetime(), func() error { dormant, retry = d.viewDormant, d.reportRetry; return nil })
+	if dormant {
 		return false
 	}
-	retry := d.reportRetry
-	d.mu.Unlock()
 	if retry != nil {
 		if err := d.acceptReport(g.r.lifetime(), *retry); err != nil {
 			return true
 		}
-		d.mu.Lock()
-		d.reportRetry = nil
-		d.mu.Unlock()
+		_ = d.ownerCall(g.r.lifetime(), func() error { d.reportRetry = nil; return nil })
 	}
 	reports, err := g.r.subagents.coordination().PendingReports(g.r.lifetime(), d.sessionID())
 	if err != nil {
@@ -172,9 +179,7 @@ func (g *sessionDriverRegistry) deliverReports(d *sessionDriver) bool {
 	}
 	for _, report := range reports {
 		if err := d.acceptReport(g.r.lifetime(), report); err != nil {
-			d.mu.Lock()
-			d.reportRetry = &report
-			d.mu.Unlock()
+			_ = d.ownerCall(g.r.lifetime(), func() error { reportSnapshot := report; d.reportRetry = &reportSnapshot; return nil })
 			return true
 		}
 	}
@@ -196,65 +201,71 @@ func (d *sessionDriver) acceptReport(ctx context.Context, report session.ChildRe
 		}
 	}
 	d.r.subagents.mu.Unlock()
-	d.mu.Lock()
-	if d.viewDormant {
-		d.mu.Unlock()
-		return nil
-	}
-	acceptance, err := store.AcceptReport(ctx, d.sessionIDLocked(), report.ID, nil)
-	if err != nil {
-		d.mu.Unlock()
-		return err
-	}
-	if acceptance.MessageID == 0 {
-		if d.stopped || !limitAllows(len(d.pending), d.pendingLimit()) {
-			d.mu.Unlock()
-			return ErrSessionCapacity
+	err := d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.viewDormant {
+			return sessionIOReservation{}, nil
 		}
 		message := session.UserMessage(report.Content)
 		message.Pending, message.Accepted, message.TurnID = true, true, "report:"+report.ID
 		message.InputOrigin, message.InputMode = session.InputOriginRuntime, "steer"
 		message.SenderID, message.SenderName = report.ChildSessionID, senderName
 		message.ReportOutcome = report.ReportOutcome
-		acceptance, err = store.AcceptReport(ctx, d.sessionIDLocked(), report.ID, message)
-		if err != nil {
-			d.mu.Unlock()
-			return err
-		}
-	}
-	message := acceptance.Message
-	if message == nil || !message.Pending || !message.Accepted {
-		d.mu.Unlock()
-		return nil
-	}
-	position := -1
-	for i, item := range d.sess.MessagesSnapshot() {
-		if item.Message != nil && item.Message.TurnID == message.TurnID {
-			if !item.Message.Pending {
-				d.mu.Unlock()
+		canAdmit := !d.stopped && limitAllows(len(d.pending), d.pendingLimit())
+		var acceptance session.ReportAcceptance
+		return sessionIOReservation{
+			write: func(ctx context.Context) error {
+				var err error
+				acceptance, err = store.AcceptReport(ctx, d.identityID, report.ID, nil)
+				if err != nil {
+					return err
+				}
+				if acceptance.MessageID == 0 {
+					if !canAdmit {
+						return ErrSessionCapacity
+					}
+					acceptance, err = store.AcceptReport(ctx, d.identityID, report.ID, message)
+				}
+				return err
+			},
+			commit: func(err error) error {
+				if err != nil {
+					return err
+				}
+				message := acceptance.Message
+				if message == nil || !message.Pending || !message.Accepted {
+					return nil
+				}
+				position := -1
+				for i, item := range d.sess.MessagesSnapshot() {
+					if item.Message != nil && item.Message.TurnID == message.TurnID {
+						if !item.Message.Pending {
+							return nil
+						}
+						position = i
+						break
+					}
+				}
+				for _, queued := range append(slices.Clone(d.pending), d.steering...) {
+					if queued.RequestID == message.TurnID {
+						return nil
+					}
+				}
+				if position < 0 {
+					position = d.sess.AddMessageAt(message)
+				}
+				_, persisted := d.r.sessionStore.(session.CoordinationStore)
+				msg := queuedSessionInput(message, position, persisted)
+				d.pending = append(d.pending, msg)
+				d.refreshSteeringLocked()
+				d.events.PublishForRequest(d.identityID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.identityID, msg.RequestID, msg.Content, msg.MultiContent, position), msg))
 				return nil
-			}
-			position = i
-			break
-		}
+			},
+		}, nil
+	})
+	if err == nil {
+		d.WakePending()
 	}
-	for _, queued := range append(slices.Clone(d.pending), d.steering...) {
-		if queued.RequestID == message.TurnID {
-			d.mu.Unlock()
-			return nil
-		}
-	}
-	if position < 0 {
-		position = d.sess.AddMessageAt(message)
-	}
-	_, persisted := d.r.sessionStore.(session.CoordinationStore)
-	msg := queuedSessionInput(message, position, persisted)
-	d.pending = append(d.pending, msg)
-	d.refreshSteeringLocked()
-	d.events.PublishForRequest(d.sessionIDLocked(), msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.sessionIDLocked(), msg.RequestID, msg.Content, msg.MultiContent, position), msg))
-	d.mu.Unlock()
-	d.WakePending()
-	return nil
+	return err
 }
 
 func childReportOutcome(state subagent.NodeState) session.ReportOutcome {

@@ -14,6 +14,7 @@ import (
 // process; they are not distributed leases or durable ownership records.
 type SessionService struct {
 	mu          sync.Mutex
+	admissionMu sync.Mutex
 	runtimes    []*LocalRuntime
 	closed      bool
 	maxSessions int
@@ -76,6 +77,33 @@ func (s *SessionService) claim(r *LocalRuntime, id string) error {
 	if s == nil {
 		return nil
 	}
+	// Admission never enters a registry while holding the service or process
+	// owner lock. Pending registry claims pin identities across this gap.
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	if err := s.tryClaim(r, id); !errors.Is(err, ErrSessionCapacity) || s.maxSessions == 0 {
+		return err
+	}
+	s.mu.Lock()
+	runtimes := append([]*LocalRuntime(nil), s.runtimes...)
+	s.mu.Unlock()
+	for _, candidate := range runtimes {
+		g := candidate.sessionDrivers
+		if g == nil || !g.mu.TryLock() {
+			continue
+		}
+		reclaimed := g.evictSettledForCapacityLocked()
+		g.mu.Unlock()
+		if reclaimed {
+			if err := s.tryClaim(r, id); !errors.Is(err, ErrSessionCapacity) {
+				return err
+			}
+		}
+	}
+	return s.tryClaim(r, id)
+}
+
+func (s *SessionService) tryClaim(r *LocalRuntime, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {

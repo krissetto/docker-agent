@@ -57,14 +57,10 @@ func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[subagent.ToolReadSubagent] = r.handleReadSubagent
 	r.toolMap[subagent.ToolStopSubagent] = r.handleStopSubagent
 
-	r.bgAgents.RegisterHandlers(func(name string, fn func(context.Context, *session.Session, tools.ToolCall) (*tools.ToolCallResult, error)) {
-		r.toolMap[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
-			if name == bgagent.ToolNameRunBackgroundAgent {
-				return r.admitBackgroundDelegation(ctx, sess, tc, fn)
-			}
-			return fn(ctx, sess, tc)
-		}
-	})
+	r.toolMap[bgagent.ToolNameRunBackgroundAgent] = r.handleBackgroundRun
+	r.toolMap[bgagent.ToolNameListBackgroundAgents] = r.handleBackgroundList
+	r.toolMap[bgagent.ToolNameViewBackgroundAgent] = r.handleBackgroundView
+	r.toolMap[bgagent.ToolNameStopBackgroundAgent] = r.handleBackgroundStop
 }
 
 // initialUserPrompt returns the user prompt that was staged by the embedder
@@ -107,9 +103,16 @@ func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.
 	if normalizedInputOrigin(prompt.InputOrigin) != session.InputOriginUser {
 		return nil, false
 	}
-	stopRun, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, events)
+	var stopRun bool
+	var msg string
+	var ctxMsgs []chat.Message
+	if prompt.InputMode == "followup" || prompt.InputMode == "legacy_followup" {
+		stopRun, msg, ctxMsgs = r.executeUserFollowupSubmitHooks(ctx, sess, a, prompt.Content, events)
+	} else {
+		stopRun, msg, ctxMsgs = r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, events)
+	}
 	if stopRun {
-		slog.WarnContext(ctx, "user_prompt_submit hook signalled run termination",
+		slog.WarnContext(ctx, "User input hook signalled run termination",
 			"agent", a.Name(), "session_id", sess.ID, "reason", msg)
 		r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
 		return nil, true
@@ -121,7 +124,9 @@ func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.
 func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessage, events EventSink) {
 	message := sm.sessionMessage()
 	pos := sess.AddMessageAt(message)
-	events.Emit(inputEventMetadata(UserMessage(sm.Content, sess.ID, sm.MultiContent, pos), sm))
+	event := inputEventMetadata(UserMessage(sm.Content, sess.ID, sm.MultiContent, pos), sm).(*UserMessageEvent)
+	event.ownerAppend = true
+	events.Emit(event)
 }
 
 // drainAndEmitSteered drains all messages from the steer queue and injects
@@ -155,11 +160,10 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 	if !waitForObserverDelivery(ctx, events) {
 		return steerResult{}
 	}
-	var steered []QueuedMessage
-	if !isDetachedSubSession(sess) {
-		steered = r.steerQueue.Drain(ctx)
+	steered := r.drainSessionSteer(sess.ID)
+	if err := refreshExecutionInput(ctx, sess); err != nil {
+		return steerResult{stop: true, stopMsg: err.Error()}
 	}
-	steered = append(steered, r.drainSessionSteer(sess.ID)...)
 	steered = slices.DeleteFunc(steered, func(sm QueuedMessage) bool {
 		return !sm.Retry && sm.Content == "" && len(sm.MultiContent) == 0
 	})
@@ -182,6 +186,15 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 		}
 		if sm.RequestID == "" {
 			r.appendSteerAndEmit(sess, sm, events)
+		} else if i < len(steered)-1 {
+			// Accepted transcript input is immutable; separate only model scratch.
+			for _, item := range sess.Messages {
+				if item.Message != nil && item.Message.TurnID == sm.RequestID {
+					item.Message.Message.Content = sm.Content
+					item.Message.Message.MultiContent = sm.MultiContent
+					break
+				}
+			}
 		}
 	}
 	if len(contents) == 0 {
@@ -273,7 +286,7 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // those hooks dispatch with a nil event sink and never emit onto this channel,
 // so StreamStopped stays the last event a consumer observes. The authoritative
 // "all cleanup done" signal is the channel close (done last, in
-// restoreAndClose) that terminates a `for range`, not the StreamStopped event.
+// channel close) that terminates a `for range`, not the StreamStopped event.
 //
 // Delivery: StreamStopped is delivered with a bounded blocking send (see
 // [boundedChannelSink]) rather than a plain non-blocking one. A consumer
@@ -285,7 +298,7 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // is bounded rather than unbounded). Consumers must still rely on the channel
 // close, not on receiving StreamStopped, as the one guaranteed terminal
 // signal.
-func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.Session, reason string, prevElicitationCh, events chan Event, ownsElicitation bool) {
+func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.Session, reason string, events chan Event) {
 	a := r.resolveSessionAgent(sess)
 
 	if ctx.Err() != nil && reason == "" {
@@ -311,11 +324,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 
 	r.telemetry.RecordSessionEnd(ctx)
 
-	if ownsElicitation {
-		r.elicitation.restoreAndClose(events, prevElicitationCh)
-	} else {
-		close(events)
-	}
+	close(events)
 }
 
 // streamStoppedTimeout returns the bounded-delivery deadline for the
@@ -333,10 +342,7 @@ func (r *LocalRuntime) streamStoppedTimeout() time.Duration {
 // compatibility event stream used only by runtime internals and package tests.
 // Every local session executes through its initialized stable-ID session.
 func (r *LocalRuntime) runExecution(ctx context.Context, sess *session.Session) <-chan Event {
-	if !sess.IsSubSession() {
-		// Install one budget shared by the root run and all descendants.
-		r.ensureBudget()
-	}
+	r.rootBudget(sess)
 	driver, err := r.sessionDrivers.GetInitialized(ctx, sess)
 	if err != nil {
 		out := make(chan Event, 1)
@@ -350,18 +356,13 @@ func (r *LocalRuntime) runExecution(ctx context.Context, sess *session.Session) 
 // runStreamRaw drives one runtime loop without session-driver arbitration.
 func (r *LocalRuntime) runStreamRaw(ctx context.Context, sess *session.Session) <-chan Event {
 	ctx = context.WithValue(ctx, observerDeliveryContextKey{}, true)
-	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
+	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.sessionAgentName(sess), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
-
-	// Register before the run goroutine starts so the session is listed in
-	// the /context team view (and targetable for explicit compaction) for
-	// the whole lifetime of its stream.
-	entry := r.registerLiveSession(sess)
 
 	// Persist startup metadata before execution can advance the active agent.
 	r.observeRunStart(ctx, sess)
 	go func() {
-		r.runStreamLoop(ctx, sess, entry, events)
+		r.runStreamLoop(ctx, sess, events)
 	}()
 	return r.observe(ctx, sess, events)
 }
@@ -369,8 +370,9 @@ func (r *LocalRuntime) runStreamRaw(ctx context.Context, sess *session.Session) 
 // runStreamLoop is the body of RunStream. Pulled out of the anonymous
 // goroutine so it has a real name in stack traces and is easier to navigate
 // in editors.
-func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, liveEntry *liveSessionEntry, events chan Event) {
+func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, events chan Event) {
 	sink := &channelSink{ch: events}
+	ctx = context.WithValue(ctx, executionEventSinkKey{}, EventSink(sink))
 
 	// Marking session liveness is owned by sessionDriver; raw RunStream callers
 	// bypass that session contract intentionally.
@@ -391,7 +393,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			nonBlocking(sink).Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgent(sess).Name()))
 		},
 	})
-	r.telemetry.RecordSessionStart(ctx, r.currentAgentName(), sess.ID)
+	r.telemetry.RecordSessionStart(ctx, r.sessionAgentName(sess), sess.ID)
 
 	// Seed `gen_ai.conversation.id` into baggage at the session
 	// boundary. Every span the runtime, providers, MCP client, RAG,
@@ -426,25 +428,16 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental.
 	sessionAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrConversationID, sess.ID),
-		attribute.String(genai.AttrAgentNameRuntime, r.currentAgentName()),
+		attribute.String(genai.AttrAgentNameRuntime, r.sessionAgentName(sess)),
 	}
 	if genai.EmitLegacyAttributes() {
 		sessionAttrs = append(sessionAttrs,
-			attribute.String("agent", r.currentAgentName()),
+			attribute.String("agent", r.sessionAgentName(sess)),
 			attribute.String("session.id", sess.ID),
 		)
 	}
 	ctx, sessionSpan := r.startSpan(ctx, "runtime.session", trace.WithAttributes(sessionAttrs...))
 	defer sessionSpan.End()
-
-	// Non-interactive async sessions cannot elicit and must not participate in
-	// the runtime-global interactive bridge; concurrent child teardown would
-	// otherwise restore channels out of stack order and corrupt the root run.
-	ownsElicitation := !sess.NonInteractive
-	var prevElicitationCh chan Event
-	if ownsElicitation {
-		prevElicitationCh = r.elicitation.swap(events)
-	}
 
 	// streamReason records the exit reason from the final turn so
 	// finalizeEventChannel can surface it in the StreamStoppedEvent.
@@ -455,19 +448,13 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// failure, a user_prompt_submit hook signalling termination). Without
 	// this, those early returns leak the events channel: observe's
 	// forwarder goroutine never exits, a `for range RunStream(...)`
-	// consumer hangs forever, and the elicitation bridge is left pointing
-	// at this dead stream's channel.
+	// consumer hangs forever.
 	var streamReason string
 	defer func() {
-		r.finalizeEventChannel(ctx, sess, streamReason, prevElicitationCh, events, ownsElicitation)
+		r.finalizeEventChannel(ctx, sess, streamReason, events)
 	}()
 
-	// Unregister from the live-session registry and execute any accepted
-	// explicit-compaction request before the stream lifecycle closes.
-	// Registered after the finalize defer so it runs first (LIFO): an
-	// accepted request is processed before StreamStopped is emitted and
-	// the events channel closes, so it can never be stranded.
-	defer r.finishLiveSession(ctx, liveEntry)
+	defer func() { r.runOwnerQueuedCompaction(ctx, sess) }()
 
 	// Subscribe this stream to shared-plan change notifications for its
 	// whole lifecycle. Registered once here rather than per iteration, and
@@ -503,7 +490,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	// so the configured ceilings are visible immediately rather than only
 	// after the first priced turn. A run that fails on its very first call
 	// (e.g. a bad API key) still shows its budget was active.
-	if b := r.currentBudget(); b != nil {
+	if b := r.rootBudget(sess); b != nil {
 		sink.Emit(BudgetUsage(sess.ID, a.Name(), b.snapshot()))
 	}
 
@@ -564,6 +551,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	)
 
 	for {
+		if err := refreshExecutionInput(ctx, sess); err != nil {
+			return
+		}
 		// Pause only this session at an iteration boundary. Independent
 		// sessions sharing the LocalRuntime continue to run.
 		if driver, ok := r.sessionDrivers.Lookup(sess.ID); ok {
@@ -576,7 +566,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// session now, at the iteration boundary: no model turn is in flight,
 		// so the compaction snapshot cannot race with messages being appended
 		// between the snapshot and ApplyCompaction.
-		r.runQueuedCompaction(ctx, liveEntry)
+		r.runOwnerQueuedCompaction(ctx, sess)
 
 		a = r.resolveSessionAgent(sess)
 
@@ -893,7 +883,14 @@ func (r *LocalRuntime) runTurn(
 	legacyExtras := slices.Concat(ls.sessionStartLegacyMsgs, ls.userPromptMsgs, turnStartMsgs.legacyMessages(), reminderMsgs)
 	sources := instructionSources(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs, ls.sessionStartSources...)
 	sources = append(sources, instructionSource("runtime/structured-output", "structured-output reminder", reminderMsgs))
-	messages := r.messagesWithDynamicContext(ctx, sess, a, sources, legacyExtras)
+	messages, instructionState, instructionsChanged := r.messagesWithDynamicContext(ctx, sess, a, sources, legacyExtras)
+	if instructionsChanged {
+		if err := r.commitInstructionState(ctx, sess, instructionState); err != nil {
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
+			endReason = turnEndReasonError
+			return turnExit
+		}
+	}
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
 	// before_llm_call hooks fire just before the model is invoked.
@@ -1071,6 +1068,7 @@ func (r *LocalRuntime) runTurn(
 	// tool work through notification steering; user/task input resets it below.
 	if !res.Steered {
 		ls.prevTurnMadeToolCalls = len(res.Calls) > 0
+		ls.turnInputSeen, ls.quietCoordinationTurn = false, false
 	}
 
 	// Record per-toolset model override for the next LLM turn.
@@ -1163,7 +1161,7 @@ func (r *LocalRuntime) runTurn(
 		// Session sessions are always pinned. A force handoff updates that pin
 		// atomically for the next loop iteration.
 		if next := a.ForceHandoff(); next != nil {
-			r.applyForceHandoff(ctx, sess, a, next)
+			r.applyForceHandoff(ctx, sess, a, next, events)
 			endReason = turnEndReasonForceHandoff
 			return turnContinue
 		}
@@ -1186,33 +1184,6 @@ func (r *LocalRuntime) runTurn(
 			return turnContinue
 		}
 
-		// --- FOLLOW-UP: end-of-turn injection ---
-		// Pop exactly one follow-up message. Unlike steered
-		// messages, follow-ups are plain user messages that start
-		// a new turn — the model sees them as fresh input, not a
-		// mid-stream interruption. Each follow-up gets a full
-		// undivided agent turn.
-		if !isDetachedSubSession(sess) {
-			if followUp, ok := r.followUpQueue.Dequeue(ctx); ok {
-				userMsg := session.UserMessage(followUp.Content, followUp.MultiContent...)
-				pos := sess.AddMessageAt(userMsg)
-				events.Emit(UserMessage(followUp.Content, sess.ID, followUp.MultiContent, pos))
-				stop, msg, ctxMsgs := r.executeUserFollowupSubmitHooks(ctx, sess, a, followUp.Content, events)
-				if stop {
-					slog.WarnContext(ctx, "user_followup_submit hook signalled run termination",
-						"agent", a.Name(), "session_id", sess.ID, "reason", msg)
-					r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
-					endReason = turnEndReasonHookBlocked
-					return turnExit
-				}
-				ls.userPromptMsgs = ctxMsgs
-				ls.consumeTurnInput(false)
-				r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
-				endReason = turnEndReasonContinue
-				return turnContinue // re-enter the loop for a new turn
-			}
-		}
-
 		endReason = turnEndReasonNormal
 		return turnExit
 	}
@@ -1220,10 +1191,6 @@ func (r *LocalRuntime) runTurn(
 	r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
 	endReason = turnEndReasonContinue
 	return turnContinue
-}
-
-func isDetachedSubSession(sess *session.Session) bool {
-	return sess.IsSubSession() && sess.NonInteractive
 }
 
 // applyConfigCost overlays a config-declared price table (USD per 1M tokens)
@@ -1391,13 +1358,6 @@ func (r *LocalRuntime) recordAssistantMessage(
 		assistantMessage.MultiContent = append(assistantMessage.MultiContent, mediaParts...)
 	}
 
-	if r.sessionDrivers != nil {
-		if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-			d.mu.Lock()
-			d.generationResult = res.Content
-			d.mu.Unlock()
-		}
-	}
 	if res.Steered && strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && res.ReasoningContent == "" {
 		boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &assistantMessage), a.Name(), -1).(*MessageAddedEvent)
 		boundary.boundaryOnly = true

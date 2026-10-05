@@ -30,11 +30,13 @@ func TestCommunicationRetryIdentity(t *testing.T) {
 	assert.True(t, first.Accepted)
 	assert.True(t, first.Durable)
 	assert.False(t, first.Idempotent)
+	assert.False(t, first.Queued, "guidance to active work enters its steering lane")
 	retry, err := d.postCommunication(t.Context(), msg)
 	require.NoError(t, err)
 	assert.True(t, retry.Idempotent)
 	assert.True(t, retry.Durable)
-	require.Len(t, d.pending, 1)
+	require.Empty(t, d.pending)
+	require.Len(t, d.steering, 1)
 	stored, err := store.GetSession(t.Context(), child.ID)
 	require.NoError(t, err)
 	require.Len(t, stored.MessagesSnapshot(), 1)
@@ -51,7 +53,8 @@ func TestCommunicationRetryIdentity(t *testing.T) {
 		assert.False(t, rejected.Accepted)
 		assert.Equal(t, "conflict", communicationRejection(rejected, err).Rejection)
 	}
-	require.Len(t, d.pending, 1)
+	require.Empty(t, d.pending)
+	require.Len(t, d.steering, 1)
 }
 
 func TestCommunicationGuidanceAndNewTurn(t *testing.T) {
@@ -108,7 +111,6 @@ func TestCommunicationRejectsAbsentParentAndUnauthorizedChild(t *testing.T) {
 	assert.False(t, receipt.Accepted)
 	assert.False(t, receipt.Durable)
 	assert.Equal(t, "not_found", receipt.Rejection)
-	assert.Empty(t, m.r.sessionDrivers.orphans[parent.ID])
 	assert.False(t, m.deliverExplicitToParent(parent.ID, "update", child.ID, "worker"))
 }
 

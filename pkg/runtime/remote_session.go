@@ -875,16 +875,29 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
 	}
-	events := make(chan SessionEvent, buffer)
+	var events chan SessionEvent
+	if !options.Tree || !options.OrderedTree {
+		events = make(chan SessionEvent, buffer)
+	}
 	var sessionsAdded chan SessionSnapshot
+	var updates chan TreeUpdate
 	if options.Tree {
-		sessionsAdded = make(chan SessionSnapshot, buffer)
+		if options.OrderedTree {
+			updates = make(chan TreeUpdate, buffer)
+		} else {
+			sessionsAdded = make(chan SessionSnapshot, buffer)
+		}
 	}
 	errorsCh := make(chan error, 1)
 	go func() {
-		defer close(events)
+		if events != nil {
+			defer close(events)
+		}
 		if sessionsAdded != nil {
 			defer close(sessionsAdded)
+		}
+		if updates != nil {
+			defer close(updates)
 		}
 		defer close(errorsCh)
 		defer resp.Body.Close()
@@ -909,18 +922,46 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				}
 				return
 			}
-			if options.Tree && m.Type == "snapshot" && m.Snapshot != nil {
+			if options.Tree && m.Version == sessionWireVersion && m.Type == "snapshot" && m.Snapshot != nil {
 				additional, decodeErr := c.decodeSessionSnapshot(*m.Snapshot)
 				if decodeErr != nil {
 					errorsCh <- protocolError(decodeErr)
 					return
 				}
+				if _, exists := lastSequences[additional.Status.SessionID]; exists {
+					errorsCh <- protocolError(errors.New("duplicate tree session snapshot"))
+					return
+				}
+				var seeds []SessionEvent
+				for _, raw := range m.Snapshot.LiveSeeds {
+					seed, err := c.decodeSessionEnvelope(raw)
+					if err != nil || !seed.IsLiveSeed() || seed.SessionID != additional.Status.SessionID || seed.Epoch != additional.Epoch {
+						errorsCh <- protocolError(errors.New("invalid dynamic tree live seed"))
+						return
+					}
+					seeds = append(seeds, seed)
+				}
 				lastSequences[additional.Status.SessionID] = additional.Cursor
 				replayEpochs[additional.Status.SessionID] = additional.Epoch
-				select {
-				case sessionsAdded <- additional:
-				case <-streamCtx.Done():
-					return
+				if updates != nil {
+					select {
+					case updates <- TreeUpdate{Snapshot: &additional, Replay: seeds}:
+					case <-streamCtx.Done():
+						return
+					}
+				} else {
+					select {
+					case sessionsAdded <- additional:
+					case <-streamCtx.Done():
+						return
+					}
+					for _, seed := range seeds {
+						select {
+						case events <- seed:
+						case <-streamCtx.Done():
+							return
+						}
+					}
 				}
 				continue
 			}
@@ -933,13 +974,21 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				errorsCh <- protocolError(fmt.Errorf("decode session observation at cursor %d: %w", lastSequence, e))
 				return
 			}
-			previous := lastSequences[env.SessionID]
-			if env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
+			previous, known := lastSequences[env.SessionID]
+			if !known || env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
 				errorsCh <- protocolError(fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous))
 				return
 			}
 			if env.Sequence != 0 {
 				lastSequences[env.SessionID], lastSequence = env.Sequence, env.Sequence
+			}
+			if updates != nil {
+				select {
+				case updates <- TreeUpdate{Event: &env}:
+				case <-streamCtx.Done():
+					return
+				}
+				continue
 			}
 			select {
 			case events <- env:
@@ -949,7 +998,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 	}()
 	var once sync.Once
-	return Observation{Initial: snapshots, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
+	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: func() { once.Do(cancel) }}, nil
 }
 
 const remoteSnapshotChunkBytes = 64 << 10

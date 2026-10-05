@@ -37,20 +37,6 @@ func TestAgentRouter_NameAndCurrent(t *testing.T) {
 	assert.Equal(t, "child", a.Name())
 }
 
-func TestAgentRouter_SetUnvalidated(t *testing.T) {
-	t.Parallel()
-
-	tm := newTestTeam(t)
-	r := newAgentRouter(tm, "root")
-
-	r.Set("child")
-	assert.Equal(t, "child", r.Name())
-
-	a := r.Current()
-	require.NotNil(t, a, "Current must resolve a valid agent after Set")
-	assert.Equal(t, "child", a.Name())
-}
-
 func TestAgentRouter_ResolveSession_PinnedWins(t *testing.T) {
 	t.Parallel()
 
@@ -102,17 +88,8 @@ func TestAgentRouter_ConcurrentSafety(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(3)
-		go func() {
-			defer wg.Done()
-			for i := range 200 {
-				if i%2 == 0 {
-					r.Set("root")
-				} else {
-					r.Set("child")
-				}
-			}
-		}()
+		wg.Add(2)
+
 		go func() {
 			defer wg.Done()
 			for range 200 {

@@ -64,9 +64,6 @@ func TestNormalCreateRejectsReservedRestoreChildWithoutSideEffects(t *testing.T)
 	unrelatedDriver.mu.Lock()
 	unrelatedDriver.lastActive = time.Time{}
 	unrelatedDriver.mu.Unlock()
-	rt.sessionDrivers.mu.Lock()
-	rt.sessionDrivers.orphans[first.ID] = []QueuedMessage{{Content: "preserve orphan"}}
-	rt.sessionDrivers.mu.Unlock()
 
 	entered, release := make(chan struct{}), make(chan struct{})
 	rt.sessionDrivers.prepareRestoreHook = func(id string) {
@@ -96,9 +93,6 @@ func TestNormalCreateRejectsReservedRestoreChildWithoutSideEffects(t *testing.T)
 	assert.False(t, visible)
 	_, unrelatedVisible := rt.sessionDrivers.Lookup(unrelated.ID)
 	assert.True(t, unrelatedVisible, "reservation rejection must happen before idle pruning")
-	rt.sessionDrivers.mu.Lock()
-	assert.Equal(t, []QueuedMessage{{Content: "preserve orphan"}}, rt.sessionDrivers.orphans[first.ID])
-	rt.sessionDrivers.mu.Unlock()
 	stored, err := store.GetSession(t.Context(), first.ID)
 	require.NoError(t, err)
 	require.Len(t, stored.MessagesSnapshot(), 1)
@@ -107,31 +101,35 @@ func TestNormalCreateRejectsReservedRestoreChildWithoutSideEffects(t *testing.T)
 
 	rt.maxSessions = 1
 	close(release)
-	require.Error(t, <-done)
+	require.ErrorIs(t, <-done, ErrSessionCapacity, "the unreserved second child must fail preparation")
 	assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
 	_, visible = rt.sessionDrivers.Lookup(first.ID)
 	assert.False(t, visible)
 	_, unrelatedVisible = rt.sessionDrivers.Lookup(unrelated.ID)
 	assert.True(t, unrelatedVisible)
+	stored, err = store.GetSession(t.Context(), first.ID)
+	require.NoError(t, err)
+	require.Len(t, stored.MessagesSnapshot(), 1)
+	assert.True(t, stored.MessagesSnapshot()[0].Message.Pending)
+	assert.Empty(t, stored.GetLastAssistantMessageContent())
 	func() {
 		rt.sessionDrivers.mu.Lock()
 		defer rt.sessionDrivers.mu.Unlock()
-		assert.Equal(t, []QueuedMessage{{Content: "preserve orphan"}}, rt.sessionDrivers.orphans[first.ID])
 		assert.Empty(t, rt.sessionDrivers.reservations)
 	}()
 }
 
-func TestRestorePreparedDriversRemainInvisibleAndPreserveOrphans(t *testing.T) {
+func TestRestorePreparedDriversRemainInvisibleAndPreserveDurablePending(t *testing.T) {
 	rt, store, sess := newRestoreFixture(t)
 	first := session.New(session.WithID("prepared-child"))
 	first.ParentID = sess.ID
+	pending := session.UserMessage("preserve durable pending")
+	pending.Pending, pending.Accepted, pending.TurnID = true, true, "preserved-turn"
+	first.AddMessage(pending)
 	require.NoError(t, store.AddSession(t.Context(), first))
 	second := session.New(session.WithID("blocked-child"))
 	second.ParentID = sess.ID
 	require.NoError(t, store.AddSession(t.Context(), second))
-	rt.sessionDrivers.mu.Lock()
-	rt.sessionDrivers.orphans[first.ID] = []QueuedMessage{{Content: "preserve me"}}
-	rt.sessionDrivers.mu.Unlock()
 	entered, release := make(chan struct{}), make(chan struct{})
 	rt.sessionDrivers.prepareRestoreHook = func(id string) {
 		if id == second.ID {
@@ -156,21 +154,20 @@ func TestRestorePreparedDriversRemainInvisibleAndPreserveOrphans(t *testing.T) {
 	_, err := rt.SessionByID(first.ID)
 	require.Error(t, err)
 	assert.False(t, rt.sessionDrivers.PostKnown(t.Context(), first.ID, QueuedMessage{Content: "not accepted"}, true))
-	rt.sessionDrivers.mu.Lock()
-	assert.Equal(t, []QueuedMessage{{Content: "preserve me"}}, rt.sessionDrivers.orphans[first.ID])
-	rt.sessionDrivers.mu.Unlock()
 
-	rt.maxSessions = 1 // force activation failure after detached construction
+	rt.maxSessions = 1 // reject the second child before activation
 	close(release)
 	require.Error(t, <-done)
 	assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
 	_, lookup = rt.sessionDrivers.Lookup(first.ID)
 	assert.False(t, lookup)
 	rt.sessionDrivers.mu.Lock()
-	assert.Equal(t, []QueuedMessage{{Content: "preserve me"}}, rt.sessionDrivers.orphans[first.ID])
 	assert.Empty(t, rt.sessionDrivers.reservations)
 	rt.sessionDrivers.mu.Unlock()
-	assert.Empty(t, first.GetAllMessages())
+	stored, err := store.GetSession(t.Context(), first.ID)
+	require.NoError(t, err)
+	require.Len(t, stored.MessagesSnapshot(), 1)
+	assert.True(t, stored.MessagesSnapshot()[0].Message.Pending)
 }
 
 func TestRestoreInitializationFailureLeavesPendingChildDormantAndNoTopology(t *testing.T) {
@@ -836,7 +833,11 @@ func TestSpawnedSubagentSessionShape(t *testing.T) {
 	require.False(t, res.IsError, res.Output)
 
 	require.Eventually(t, func() bool {
-		for _, m := range info.Session.GetAllMessages() {
+		current, ok := rt.SubagentViewInfo(id)
+		if !ok || current.Session == nil {
+			return false
+		}
+		for _, m := range current.Session.GetAllMessages() {
 			if m.Message.Role == chat.MessageRoleUser && m.Message.Content == "extra context" {
 				return true
 			}

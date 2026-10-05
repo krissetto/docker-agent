@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"slices"
 	"sync"
 	"time"
@@ -105,21 +106,13 @@ func (g *sessionDriverRegistry) schedule() {
 					delete(queued, d)
 					continue
 				}
-				if !d.mu.TryLock() {
-					if retry == nil {
-						retry = time.After(retryDelay)
-					}
-					continue
-				}
-				if d.reclaiming {
-					d.mu.Unlock()
+				if d.registrySnapshot().reclaiming {
 					delete(queued, d)
 					continue
 				}
-				// Reserve before releasing registry.mu: removal/close cannot observe a
-				// drained driver and then race with a late worker Add.
+				// Reserve before releasing registry.mu; reclaim validates under
+				// this same lock before retiring the driver's work authority.
 				d.wg.Add(1)
-				d.mu.Unlock()
 				workers.Add(1)
 				drivers = append(drivers, d)
 				delete(queued, d)
@@ -143,21 +136,28 @@ func (g *sessionDriverRegistry) schedule() {
 }
 
 func (g *sessionDriverRegistry) maintainDriver(d *sessionDriver) bool {
-	d.mu.Lock()
-	dormant := d.viewDormant
-	d.mu.Unlock()
-	if dormant {
+	var dormant bool
+	if err := d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error {
+		dormant = d.viewDormant
+		return nil
+	}); err != nil || dormant {
 		return false
 	}
 	pending := g.deliverReports(d)
-	d.mu.Lock()
-	completion := d.settling() && d.completionErr != nil
-	generation, runErr := d.generation, d.completionRunErr
-	wake := d.pendingWakeableLocked() && !d.stopped && !d.running() && !d.starting() && !d.settling()
-	if completion {
-		d.wg.Add(1)
+	var completion, wake bool
+	var generation uint64
+	var runErr string
+	if err := d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error {
+		completion = d.settling() && d.completionErr != nil
+		generation, runErr = d.generation, d.completionRunErr
+		wake = d.pendingWakeableLocked() && !d.stopped && !d.running() && !d.starting() && !d.settling()
+		if completion {
+			d.wg.Add(1)
+		}
+		return nil
+	}); err != nil {
+		return pending
 	}
-	d.mu.Unlock()
 	if completion {
 		ctx, next, again := d.finishRun(generation, runErr)
 		if again {
@@ -169,10 +169,11 @@ func (g *sessionDriverRegistry) maintainDriver(d *sessionDriver) bool {
 	}
 	if wake {
 		err := d.wakePending()
-		d.mu.Lock()
-		d.retryRunning = err != nil && isRetryableSessionError(err)
-		pending = pending || d.retryRunning
-		d.mu.Unlock()
+		_ = d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error {
+			d.retryRunning = err != nil && isRetryableSessionError(err)
+			pending = pending || d.retryRunning
+			return nil
+		})
 	}
 	return pending
 }
@@ -208,14 +209,7 @@ func (g *sessionDriverRegistry) admitRun(candidate *sessionDriver) error {
 		if !d.identityAsync {
 			continue
 		}
-		// Contended driver state may be doing storage I/O. Conservatively reserve
-		// its slot for this attempt instead of holding the global admission lock.
-		running := true
-		if d.mu.TryLock() {
-			running = d.running() || d.starting() || d.settling()
-			d.mu.Unlock()
-		}
-		if !running {
+		if !d.registrySnapshot().active {
 			continue
 		}
 

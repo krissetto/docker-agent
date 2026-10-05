@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/path"
@@ -86,8 +87,9 @@ type BuiltinFunc func(ctx context.Context, in *Input, args []string) (*Output, e
 // Registry maps [HookType] to [HandlerFactory], plus a name → [BuiltinFunc]
 // table for [HookTypeBuiltin]. Safe for concurrent use.
 type Registry struct {
-	factories concurrent.Map[HookType, HandlerFactory]
-	builtins  concurrent.Map[string, BuiltinFunc]
+	factories            concurrent.Map[HookType, HandlerFactory]
+	builtins             concurrent.Map[string, BuiltinFunc]
+	customBuiltinFactory atomic.Bool
 }
 
 // NewRegistry returns a registry pre-populated with [HookTypeCommand]
@@ -95,12 +97,35 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(HookTypeCommand, newCommandFactory())
-	r.Register(HookTypeBuiltin, r.builtinFactory)
+	r.factories.Store(HookTypeBuiltin, r.builtinFactory)
 	return r
+}
+
+// Clone returns an independent registration snapshot. Handler functions themselves
+// are shared; their captured state must be safe for concurrent sessions.
+func (r *Registry) Clone() *Registry {
+	clone := NewRegistry()
+	if r == nil {
+		return clone
+	}
+	r.factories.Range(func(t HookType, f HandlerFactory) bool {
+		if t != HookTypeBuiltin || r.customBuiltinFactory.Load() {
+			clone.Register(t, f)
+		}
+		return true
+	})
+	r.builtins.Range(func(name string, fn BuiltinFunc) bool {
+		clone.builtins.Store(name, fn)
+		return true
+	})
+	return clone
 }
 
 // Register associates a factory with a hook type, replacing any prior one.
 func (r *Registry) Register(t HookType, f HandlerFactory) {
+	if t == HookTypeBuiltin {
+		r.customBuiltinFactory.Store(true)
+	}
 	r.factories.Store(t, f)
 }
 
@@ -120,6 +145,14 @@ func (r *Registry) RegisterBuiltin(name string, fn BuiltinFunc) error {
 	}
 	r.builtins.Store(name, fn)
 	return nil
+}
+
+// RegisterDefaults installs only builtin names absent from r.
+func (r *Registry) RegisterDefaults(defaults *Registry) {
+	defaults.builtins.Range(func(name string, fn BuiltinFunc) bool {
+		r.builtins.LoadOrStore(name, fn)
+		return true
+	})
 }
 
 // LookupBuiltin returns the function registered as name, or (nil, false).

@@ -235,7 +235,6 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 			}
 			if transition == "start" {
 				h.driver.cancel()
-				h.driver.r.activeRootStreams.Add(-1)
 				h.driver.wg.Done()
 			}
 			_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, "late", "new"))

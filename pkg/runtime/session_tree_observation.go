@@ -43,8 +43,17 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	}
 
 	obsCtx, cancelCtx := context.WithCancel(ctx)
-	events := make(chan SessionEvent, buffer)
-	sessionsAdded := make(chan SessionSnapshot, buffer)
+	var events chan SessionEvent
+	if !options.Tree || !options.OrderedTree {
+		events = make(chan SessionEvent, buffer)
+	}
+	var sessionsAdded chan SessionSnapshot
+	var updates chan TreeUpdate
+	if options.OrderedTree {
+		updates = make(chan TreeUpdate, buffer)
+	} else {
+		sessionsAdded = make(chan SessionSnapshot, buffer)
+	}
 	errorsCh := make(chan error, 1)
 	observations := make(map[string]Observation)
 	var snapshots []SessionSnapshot
@@ -59,9 +68,19 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 			return err
 		}
 		observations[sessionID] = observation
-		if collect {
+		switch {
+		case collect:
 			snapshots = append(snapshots, observation.Primary())
-		} else {
+			replay = append(replay, observation.Replay...)
+		case updates != nil:
+			snapshot := observation.Primary()
+			select {
+			case updates <- TreeUpdate{Snapshot: &snapshot, Replay: observation.Replay}:
+			case <-obsCtx.Done():
+				observation.Cancel()
+				return nil
+			}
+		default:
 			select {
 			case sessionsAdded <- observation.Primary():
 			case <-obsCtx.Done():
@@ -69,7 +88,15 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 				return nil
 			}
 		}
-		replay = append(replay, observation.Replay...)
+		if !collect && updates == nil {
+			for _, seed := range observation.Replay {
+				select {
+				case events <- seed:
+				case <-obsCtx.Done():
+					return nil
+				}
+			}
+		}
 		wg.Add(1)
 		go func(observedSessionID string) {
 			defer wg.Done()
@@ -99,6 +126,14 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 							cancelCtx()
 						}
 						return
+					}
+					if updates != nil {
+						select {
+						case updates <- TreeUpdate{Event: &envelope}:
+						case <-obsCtx.Done():
+							return
+						}
+						continue
 					}
 					select {
 					case events <- envelope:
@@ -131,8 +166,15 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	}
 
 	go func() {
-		defer close(events)
-		defer close(sessionsAdded)
+		if events != nil {
+			defer close(events)
+		}
+		if sessionsAdded != nil {
+			defer close(sessionsAdded)
+		}
+		if updates != nil {
+			defer close(updates)
+		}
 		defer close(errorsCh)
 		defer cancelTopology()
 		for {
@@ -165,7 +207,7 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	}()
 	var once sync.Once
 	cancel := func() { once.Do(cancelCtx) }
-	return Observation{Initial: snapshots, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: cancel}, nil
+	return Observation{Initial: snapshots, TreeUpdates: updates, SessionsAdded: sessionsAdded, Replay: replay, Events: events, Errors: errorsCh, Cancel: cancel}, nil
 }
 
 func subtreeForSession(snapshot subagent.Snapshot, sessionID string) (subagent.NodeSnapshot, bool) {

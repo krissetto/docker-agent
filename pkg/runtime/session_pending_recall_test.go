@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -178,15 +179,13 @@ func TestPendingRecallSerializesWithPromotion(t *testing.T) {
 					promoted = len(d.DrainSteering()) == 1
 					return
 				}
-				d.mu.Lock()
-				defer d.mu.Unlock()
-				if len(d.pending) != 0 {
-					promotionErr = d.promoteInputLocked(d.pending[0])
-					if promotionErr == nil {
-						d.pending = d.pending[1:]
-						d.activeRequestID = turn.TurnID
-						promoted = true
-					}
+				promotionErr = d.promoteInput(t.Context(), turn.TurnID, func(QueuedMessage) {
+					d.pending = nil
+					d.activeRequestID = turn.TurnID
+					promoted = true
+				})
+				if errors.Is(promotionErr, &SessionError{Kind: SessionErrorStale}) {
+					promotionErr = nil
 				}
 			})
 			close(start)

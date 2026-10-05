@@ -54,19 +54,21 @@ func admissionTestDriver(m *subagentManager, id, parent string) *sessionDriver {
 	return m.r.sessionDrivers.Get(session.New(session.WithID(id), session.WithParentID(parent), session.WithAsyncSubagent(true)))
 }
 
-func setAdmissionTestState(d *sessionDriver, starting, running, settling bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.phase = sessionIdle
-	if starting {
-		d.phase = sessionStarting
-	}
-	if running {
-		d.phase = sessionRunning
-	}
-	if settling {
-		d.phase = sessionSettling
-	}
+func setAdmissionTestState(t *testing.T, d *sessionDriver, starting, running, settling bool) {
+	t.Helper()
+	_ = d.ownerCall(t.Context(), func() error {
+		d.phase = sessionIdle
+		if starting {
+			d.phase = sessionStarting
+		}
+		if running {
+			d.phase = sessionRunning
+		}
+		if settling {
+			d.phase = sessionSettling
+		}
+		return nil
+	})
 }
 
 func TestSubagentAdmissionDepthAndCount(t *testing.T) {
@@ -116,7 +118,7 @@ func TestActualSpawnCapacityAndRelease(t *testing.T) {
 		agent.New("root", "prompt", agent.WithModel(rootProvider), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
 		agent.New("worker", "prompt", agent.WithModel(workerProvider)),
 	))
-	rt, err := NewLocalRuntime(t.Context(), tm, WithMaxActiveDescendants(100), WithMaxActiveDescendantsPerRoot(100))
+	rt, err := NewLocalRuntime(t.Context(), tm, WithMaxActiveDescendants(100), WithMaxActiveDescendantsPerRoot(100), func(r *LocalRuntime) { r.policy.MaxExecutions = 100 })
 	require.NoError(t, err)
 	parent := session.New(session.WithID("capacity-root"))
 	ref := subagent.AllowedSubagent{Agent: "worker"}
@@ -192,17 +194,17 @@ func TestNestedGlobalAndPerRootRunLimits(t *testing.T) {
 	childA := admissionTestDriver(m, "child-a", "root-a")
 	grandA := admissionTestDriver(m, "grand-a", "child-a")
 	idleA := admissionTestDriver(m, "idle-a", "root-a")
-	setAdmissionTestState(childA, false, true, false)
-	setAdmissionTestState(grandA, false, true, false)
+	setAdmissionTestState(t, childA, false, true, false)
+	setAdmissionTestState(t, grandA, false, true, false)
 	var denial *SessionError
 	require.ErrorAs(t, m.r.sessionDrivers.admitRun(idleA), &denial)
 	assert.Equal(t, SessionOperationActiveDescendantsRoot, denial.Operation)
 	childB := admissionTestDriver(m, "child-b", "root-b")
 	idleB := admissionTestDriver(m, "idle-b", "root-b")
-	setAdmissionTestState(childB, false, true, false)
+	setAdmissionTestState(t, childB, false, true, false)
 	require.ErrorAs(t, m.r.sessionDrivers.admitRun(idleB), &denial)
 	assert.Equal(t, SessionOperationActiveDescendants, denial.Operation)
-	setAdmissionTestState(grandA, false, false, false)
+	setAdmissionTestState(t, grandA, false, false, false)
 	require.NoError(t, m.r.sessionDrivers.admitRun(idleB), "nested settlement releases global capacity")
 }
 
@@ -223,7 +225,7 @@ func TestFailedSessionMessageableButRunGated(t *testing.T) {
 	failedDriver.SetPreStartErrorGate(func() error { return m.admitChildRun("f0001") }, func() { m.abortChildStart("f0001") })
 	m.registerChild(parent, "root", "a0001", "worker", active)
 
-	_, err := m.sendToChild(parent.ID, "f0001", "retry")
+	_, err := m.sendCommunicationToChild(t.Context(), parent.ID, "f0001", "retry", "retry-failed-child", subagent.DeliveryNewTurn)
 	require.NoError(t, err, "durable acceptance remains successful even when execution admission is denied")
 	assert.Equal(t, subagent.NodeFailed, m.children["f0001"].durable.Node.State)
 	assert.True(t, m.r.sessionDrivers.Get(failed).HasPending())
@@ -258,19 +260,19 @@ func TestSubagentAdmissionCountsOnlyStartingAndRunning(t *testing.T) {
 	candidate := admissionTestDriver(m, "candidate", "root")
 	for _, state := range []subagent.NodeState{subagent.NodeIdle, subagent.NodeFailed, subagent.NodeCompleted, subagent.NodeStopped} {
 		d := admissionTestDriver(m, string(state), "root")
-		setAdmissionTestState(d, false, false, false)
+		setAdmissionTestState(t, d, false, false, false)
 	}
 	require.NoError(t, m.r.sessionDrivers.admitRun(candidate), "retained quiescent sessions do not consume run capacity")
 	starting := admissionTestDriver(m, "starting", "root")
 	running := admissionTestDriver(m, "running", "root")
-	setAdmissionTestState(starting, true, false, false)
-	setAdmissionTestState(running, false, true, false)
+	setAdmissionTestState(t, starting, true, false, false)
+	setAdmissionTestState(t, running, false, true, false)
 	var denial *SessionError
 	require.ErrorAs(t, m.r.sessionDrivers.admitRun(candidate), &denial)
 	assert.Equal(t, SessionOperationActiveDescendants, denial.Operation)
-	setAdmissionTestState(running, false, false, true)
+	setAdmissionTestState(t, running, false, false, true)
 	require.Error(t, m.r.sessionDrivers.admitRun(candidate), "completion persistence still owns its slot")
-	setAdmissionTestState(running, false, false, false)
+	setAdmissionTestState(t, running, false, false, false)
 	require.NoError(t, m.r.sessionDrivers.admitRun(candidate), "committed settlement releases exactly one slot")
 }
 
@@ -353,7 +355,7 @@ func TestSubagentRunAdmissionIsAtomicAndSharedAcrossRoots(t *testing.T) {
 	}
 	require.NotNil(t, denied)
 	require.NotNil(t, release)
-	setAdmissionTestState(release, false, false, false)
+	setAdmissionTestState(t, release, false, false, false)
 	_, generation, _, err := denied.prepareStart(t.Context(), false)
 	require.NoError(t, err, "released capacity is immediately reusable")
 	assert.Positive(t, generation)
@@ -439,7 +441,11 @@ func TestConcurrentPostsWaitForAdmissionAndPreserveOrder(t *testing.T) {
 			assert.True(t, <-second, "second post is accepted behind a denied predecessor")
 			require.Eventually(t, func() bool {
 				var seen []string
-				for _, item := range sess.GetAllMessages() {
+				snapshot, err := d.ownerSnapshot(t.Context())
+				if err != nil {
+					return false
+				}
+				for _, item := range snapshot.GetAllMessages() {
 					if item.Message.Role == chat.MessageRoleUser {
 						seen = append(seen, item.Message.Content)
 					}
@@ -672,25 +678,32 @@ func TestSessionDriverMailboxBound(t *testing.T) {
 	assert.False(t, d.Post(t.Context(), QueuedMessage{Content: "3"}, false))
 }
 
-func TestOrphanMailboxBound(t *testing.T) {
+func TestUnknownSessionInboxRejectsDelivery(t *testing.T) {
 	r := newDriverTestRuntime(t)
-	r.maxOrphanMailbox = 2
-	assert.True(t, r.sessionDrivers.PostOrBuffer(t.Context(), "s", QueuedMessage{Content: "1"}, true))
-	assert.True(t, r.sessionDrivers.PostOrBuffer(t.Context(), "s", QueuedMessage{Content: "2"}, true))
-	assert.False(t, r.sessionDrivers.PostOrBuffer(t.Context(), "s", QueuedMessage{Content: "3"}, true))
+	for i := range 1000 {
+		id := fmt.Sprintf("unknown-%d", i)
+		require.False(t, r.sessionDrivers.PostOrBuffer(t.Context(), id, QueuedMessage{Content: "message"}, true))
+		require.False(t, r.sessionDrivers.PostReliable(t.Context(), id, QueuedMessage{Content: "message"}))
+	}
+	assert.Empty(t, r.sessionDrivers.drivers)
+	assert.Empty(t, r.sessionDrivers.reservations)
+	d := r.sessionDrivers.Get(session.New(session.WithID("deleted-inbox")))
+	require.NotNil(t, d)
+	require.NoError(t, r.sessionDrivers.Delete(t.Context(), "deleted-inbox"))
+	require.False(t, r.sessionDrivers.PostReliable(t.Context(), "deleted-inbox", QueuedMessage{Content: "must not resurrect"}))
+	require.False(t, r.sessionDrivers.PostOrBuffer(t.Context(), "deleted-inbox", QueuedMessage{Content: "must not resurrect"}, true))
+	assert.Empty(t, r.sessionDrivers.drivers)
 }
 
-func TestFullOrphanMailboxIsAdoptedBeforeDriverPublication(t *testing.T) {
+func TestKnownReliableMailboxBound(t *testing.T) {
 	r := newDriverTestRuntime(t)
-	r.maxOrphanMailbox = 2
 	r.maxPendingMailbox = 2
 	g := r.sessionDrivers
+	d := g.Get(session.New(session.WithID("s")))
+	d.compactReserved = true
 	require.True(t, g.PostReliable(t.Context(), "s", QueuedMessage{Content: "old-1"}))
 	require.True(t, g.PostReliable(t.Context(), "s", QueuedMessage{Content: "old-2"}))
-
-	d := g.Get(session.New(session.WithID("s")))
-	assert.False(t, g.PostReliable(t.Context(), "s", QueuedMessage{Content: "new"}),
-		"new delivery observes the already-full adopted mailbox")
+	assert.False(t, g.PostReliable(t.Context(), "s", QueuedMessage{Content: "new"}))
 	pending := d.DrainPending()
 	require.Len(t, pending, 2)
 	assert.Equal(t, "old-1", pending[0].Content)

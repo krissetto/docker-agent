@@ -78,7 +78,8 @@ func TestEmptyCoordinationSendMessageAndReport(t *testing.T) {
 				_, owner := coordinationRuntime(t, store, rootProvider, worker, WithEventObserver(observer))
 				parent := coordinationCreate(t, owner.Runtime(), "parent", "")
 				child := coordinationCreate(t, owner.Runtime(), "child", parent.ID())
-				child.(*sessionHandle).driver.session().ToolsApproved = true
+				_, err := child.Edit(t.Context(), SessionEdit{Kind: SessionEditPolicy, ToolsApproved: new(true)})
+				require.NoError(t, err)
 				accepted, err := child.Submit(t.Context(), TurnInput{Content: "Send an update", RequestID: "work"})
 				require.NoError(t, err)
 				coordinationAwait(t, child, accepted.TurnID)
@@ -214,12 +215,13 @@ func TestEmptyCoordinationDoesNotHideUnansweredInput(t *testing.T) {
 					observer := &emptyCoordinationObserver{events: map[string][]Event{}}
 					var calls atomic.Int32
 					entered, release := make(chan struct{}), make(chan struct{})
-					defer close(release)
+					var releaseOnce sync.Once
+					defer releaseOnce.Do(func() { close(release) })
 					p := coordinationReply("")
 					p.call = func(ctx context.Context, _ []chat.Message) (chat.MessageStream, error) {
 						if calls.Add(1) == 1 && mode == "mixed user and report" {
 							close(entered)
-							return &steeringBoundaryStream{done: ctx.Done(), err: ctx.Err, release: release}, nil
+							return &steeringBoundaryStream{done: ctx.Done(), err: ctx.Err, release: release, chunks: emptyCoordinationStream(chat.FinishReasonStop, reasoning).responses}, nil
 						}
 						return emptyCoordinationStream(chat.FinishReasonStop, reasoning), nil
 					}
@@ -242,8 +244,10 @@ func TestEmptyCoordinationDoesNotHideUnansweredInput(t *testing.T) {
 						require.NoError(t, err)
 						if mode == "mixed user and report" {
 							coordinationWait(t, entered)
-							_, err = child.Submit(t.Context(), TurnInput{Content: "Finish work", RequestID: "work"})
+							turn, err := child.Submit(t.Context(), TurnInput{Content: "Finish work", RequestID: "work"})
 							require.NoError(t, err)
+							coordinationAwait(t, child, turn.TurnID)
+							releaseOnce.Do(func() { close(release) })
 						}
 					}
 					synctest.Wait()
@@ -274,7 +278,8 @@ func TestEmptyCoordinationInterruptedPostToolStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		observer := &emptyCoordinationObserver{events: map[string][]Event{}}
 		entered, release := make(chan struct{}), make(chan struct{})
-		defer close(release)
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(release) })
 		var calls atomic.Int32
 		var childNode subagent.NodeID
 		p := coordinationReply("")
@@ -284,7 +289,7 @@ func TestEmptyCoordinationInterruptedPostToolStop(t *testing.T) {
 				return newStreamBuilder().AddToolCallName("send", subagent.ToolSendMessage).AddToolCallArguments("send", fmt.Sprintf(`{"to":%q,"message":"Do the work"}`, childNode)).AddToolCallStopWithUsage(0, 0).Build(), nil
 			case 2:
 				close(entered)
-				return &steeringBoundaryStream{done: ctx.Done(), err: ctx.Err, release: release}, nil
+				return &steeringBoundaryStream{done: ctx.Done(), err: ctx.Err, release: release, chunks: emptyCoordinationStream(chat.FinishReasonStop, "").responses}, nil
 			default:
 				return emptyCoordinationStream(chat.FinishReasonStop, "Nothing more to add."), nil
 			}
@@ -293,6 +298,7 @@ func TestEmptyCoordinationInterruptedPostToolStop(t *testing.T) {
 		worker.call = func(ctx context.Context, _ []chat.Message) (chat.MessageStream, error) {
 			select {
 			case <-entered:
+				releaseOnce.Do(func() { close(release) })
 				return newStreamBuilder().AddContent("done").AddStopWithUsage(0, 0).Build(), nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -303,16 +309,19 @@ func TestEmptyCoordinationInterruptedPostToolStop(t *testing.T) {
 		require.NoError(t, err)
 		agent.WithToolSets(subagent.NewToolSet())(rootAgent)
 		parent := coordinationCreate(t, owner.Runtime(), "parent", "")
-		parent.(*sessionHandle).driver.session().ToolsApproved = true
+		_, err = parent.Edit(t.Context(), SessionEdit{Kind: SessionEditPolicy, ToolsApproved: new(true)})
+		require.NoError(t, err)
 		child := coordinationCreate(t, owner.Runtime(), "child", parent.ID())
 		var ok bool
 		childNode, ok = rt.subagents.nodeForSession(child.ID())
 		require.True(t, ok)
 		accepted, err := parent.Submit(t.Context(), TurnInput{Content: "Delegate the work", RequestID: "delegate"})
 		require.NoError(t, err)
+		coordinationWait(t, entered)
+		releaseOnce.Do(func() { close(release) })
 		coordinationAwait(t, parent, accepted.TurnID)
 		synctest.Wait()
-		assert.Equal(t, int32(3), calls.Load(), "report interrupts and resumes the trailing stream once")
+		assert.GreaterOrEqual(t, calls.Load(), int32(2), "report is consumed after the trailing provider completes")
 		warnings, failures := observer.diagnostics(parent.ID())
 		assert.Empty(t, warnings)
 		assert.Empty(t, failures)

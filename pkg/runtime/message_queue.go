@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"sync"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
@@ -67,88 +66,20 @@ type MessageQueue interface {
 	Drain(ctx context.Context) []QueuedMessage
 }
 
-type cancelableMessageQueue interface {
-	MessageQueue
-	Cancel(id string) bool
+// NewInMemoryMessageQueue remains a compatibility constructor. Runtime inputs
+// require an addressed session handle; an unaddressed legacy queue rejects input.
+func NewInMemoryMessageQueue(_ int) MessageQueue { return rejectedMessageQueue{} }
+
+type rejectedMessageQueue struct{}
+
+func (rejectedMessageQueue) Enqueue(context.Context, QueuedMessage) bool { return false }
+func (rejectedMessageQueue) Dequeue(context.Context) (QueuedMessage, bool) {
+	return QueuedMessage{}, false
 }
+func (rejectedMessageQueue) Drain(context.Context) []QueuedMessage { return nil }
 
-// inMemoryMessageQueue is the default MessageQueue.
-type inMemoryMessageQueue struct {
-	mu       sync.Mutex
-	messages []QueuedMessage
-	capacity int
-}
-
-const (
-	// defaultSteerQueueCapacity is the buffer size for the default in-memory steer queue.
-	defaultSteerQueueCapacity = 5
-	// defaultFollowUpQueueCapacity is the buffer size for the default in-memory follow-up queue.
-	// Higher than steer because follow-ups accumulate while waiting for the turn to end.
-	defaultFollowUpQueueCapacity = 20
-)
-
-// NewInMemoryMessageQueue creates an in-memory FIFO queue with the given capacity.
-func NewInMemoryMessageQueue(capacity int) MessageQueue {
-	return &inMemoryMessageQueue{capacity: capacity}
-}
-
-func (q *inMemoryMessageQueue) Enqueue(ctx context.Context, msg QueuedMessage) bool {
-	if ctx.Err() != nil {
-		return false
-	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.messages) >= q.capacity {
-		return false
-	}
-	q.messages = append(q.messages, msg)
-	return true
-}
-
-func (q *inMemoryMessageQueue) Dequeue(_ context.Context) (QueuedMessage, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.messages) == 0 {
-		return QueuedMessage{}, false
-	}
-	msg := q.messages[0]
-	q.messages[0] = QueuedMessage{}
-	q.messages = q.messages[1:]
-	return msg, true
-}
-
-func (q *inMemoryMessageQueue) Drain(_ context.Context) []QueuedMessage {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	msgs := q.messages
-	q.messages = nil
-	return msgs
-}
-
-func (q *inMemoryMessageQueue) Cancel(id string) bool {
-	if id == "" {
-		return false
-	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, msg := range q.messages {
-		if msg.ID != id {
-			continue
-		}
-		q.messages[i] = QueuedMessage{}
-		q.messages = append(q.messages[:i], q.messages[i+1:]...)
-		return true
-	}
-	return false
-}
-
-func (q *inMemoryMessageQueue) status() (depth, capacity int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.messages), q.capacity
-}
-
-// QueueStatus represents the current depth and capacity of message queues
+// QueueStatus is the legacy unaddressed queue projection. Session handles expose
+// the authoritative addressed pending inputs instead.
 type QueueStatus struct {
 	SteerDepth       int
 	SteerCapacity    int

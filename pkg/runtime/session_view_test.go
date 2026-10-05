@@ -97,10 +97,12 @@ func TestSessionViewCommitDormantResumeFIFOAndIdempotence(t *testing.T) {
 	assert.Len(t, canonicalSettlements(canonicalReplay(driver)), 1)
 }
 
-func TestSessionViewDeleteAndCapacityRejectWithoutPublication(t *testing.T) {
+func TestSessionViewDeleteRejectsAndCapacityChangePreservesReservation(t *testing.T) {
 	for _, deletion := range []bool{false, true} {
 		t.Run(map[bool]string{false: "capacity", true: "delete"}[deletion], func(t *testing.T) {
 			rt, owner, store, root := viewRootFixture(t)
+			before, err := store.GetSession(t.Context(), root.ID)
+			require.NoError(t, err)
 			prepared, err := owner.Runtime().(SessionViewPreparer).PrepareSessionView(t.Context(), root.ID)
 			require.NoError(t, err)
 			if deletion {
@@ -109,10 +111,20 @@ func TestSessionViewDeleteAndCapacityRejectWithoutPublication(t *testing.T) {
 				rt.maxSessions = 0
 			}
 			_, err = prepared.Commit(t.Context())
-			require.Error(t, err)
 			_, found := rt.sessionDrivers.Lookup(root.ID)
-			assert.False(t, found)
-			assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
+			if deletion {
+				require.Error(t, err)
+				assert.False(t, found)
+				assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
+			} else {
+				require.NoError(t, err)
+				assert.True(t, found)
+				driver, _ := rt.sessionDrivers.Lookup(root.ID)
+				assert.True(t, driver.Status().Dormant)
+				stored, loadErr := store.GetSession(t.Context(), root.ID)
+				require.NoError(t, loadErr)
+				assert.Equal(t, before.OwnSnapshot(), stored.OwnSnapshot())
+			}
 			func() {
 				rt.sessionDrivers.mu.Lock()
 				defer rt.sessionDrivers.mu.Unlock()
@@ -217,13 +229,19 @@ func TestSessionViewCanceledPublishedResidencyIsBoundedWithoutEviction(t *testin
 		sess := session.New(session.WithID(id), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
 		require.NoError(t, store.AddSession(t.Context(), sess))
 		prepared, err := owner.Runtime().(SessionViewPreparer).PrepareSessionView(t.Context(), id)
+		if i == 2 {
+			require.ErrorIs(t, err, ErrSessionCapacity)
+			require.Nil(t, prepared)
+			_, visible := rt.sessionDrivers.Lookup(id)
+			assert.False(t, visible)
+			stored, loadErr := store.GetSession(t.Context(), id)
+			require.NoError(t, loadErr)
+			assert.Equal(t, sess.OwnSnapshot(), stored.OwnSnapshot())
+			continue
+		}
 		require.NoError(t, err)
 		result, err := prepared.Commit(t.Context())
 		prepared.Abort()
-		if i == 2 {
-			require.ErrorIs(t, err, ErrSessionCapacity)
-			continue
-		}
 		require.NoError(t, err)
 		committed = append(committed, result.SessionHandle)
 	}

@@ -205,10 +205,10 @@ func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
 	local.driver.mu.Lock()
 	local.driver.phase = sessionRunning
 	first := QueuedMessage{Content: "accepted during compact", RequestID: "first"}
-	require.NoError(t, local.driver.acceptInputLocked(&first))
-	local.driver.pending = append(local.driver.pending, first)
 	local.driver.compactReserved = false // reservation just released at the loop boundary
 	local.driver.mu.Unlock()
+	_, err = local.driver.admitInput(t.Context(), first, SessionOperationPost, true, false)
+	require.NoError(t, err)
 
 	submission, err := handle.Steer(t.Context(), TurnInput{Content: "newer steer"})
 	require.NoError(t, err)

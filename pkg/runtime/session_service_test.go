@@ -57,6 +57,9 @@ func TestSessionServiceAggregateAdmissionAndRelease(t *testing.T) {
 	firstID, secondID := t.Name()+"/first", t.Name()+"/second"
 	h, err := r1.CreateSession(t.Context(), session.New(session.WithID(firstID)), SessionBinding{})
 	require.NoError(t, err)
+	observation, err := h.Observe(t.Context(), ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
 	_, err = r2.CreateSession(t.Context(), session.New(session.WithID(secondID)), SessionBinding{})
 	require.ErrorIs(t, err, ErrSessionCapacity)
 	require.NoError(t, h.Release(t.Context()))
@@ -171,4 +174,186 @@ func TestSessionServiceClosedRuntimeDoesNotRemainRouteCandidate(t *testing.T) {
 	fresh, err := service.Runtime().CreateSession(t.Context(), session.New(session.WithID(id+"/fresh")), SessionBinding{})
 	require.NoError(t, err)
 	require.Same(t, second, fresh.(*sessionHandle).runtime)
+}
+
+func TestSessionServiceReclaimsForAggregateAdmission(t *testing.T) {
+	for _, crossRuntime := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same-runtime", true: "other-runtime"}[crossRuntime], func(t *testing.T) {
+			service := NewSessionService(SessionServiceOptions{MaxSessions: 1})
+			first := serviceRuntime(t, service, session.NewInMemorySessionStore())
+			second := first
+			if crossRuntime {
+				second = serviceRuntime(t, service, session.NewInMemorySessionStore())
+			}
+			oldID, newID := t.Name()+"/old", t.Name()+"/new"
+			old, err := first.CreateSession(t.Context(), session.New(session.WithID(oldID)), SessionBinding{})
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				_, err = second.CreateSession(t.Context(), session.New(session.WithID(newID)), SessionBinding{})
+				return err == nil
+			}, time.Second, time.Millisecond)
+			_, err = service.SessionByID(oldID)
+			require.ErrorIs(t, err, &SessionError{Kind: SessionErrorNotFound})
+			_, err = old.Observe(t.Context(), ObserveOptions{})
+			require.ErrorIs(t, err, ErrSessionStopped)
+			_, err = service.SessionByID(newID)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestSessionServiceReclaimPreservesPendingClaimsAndReservations(t *testing.T) {
+	service := NewSessionService(SessionServiceOptions{MaxSessions: 1})
+	r := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	id := t.Name() + "/resident"
+	_, err := r.CreateSession(t.Context(), session.New(session.WithID(id)), SessionBinding{})
+	require.NoError(t, err)
+	require.NoError(t, r.sessionDrivers.beginClaim(id))
+	_, err = r.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/blocked")), SessionBinding{})
+	require.ErrorIs(t, err, ErrSessionCapacity)
+	_, err = service.SessionByID(id)
+	require.NoError(t, err)
+	r.sessionDrivers.releaseUnpublishedClaim(id)
+
+	var reservation *restoreDriverReservation
+	require.Eventually(t, func() bool {
+		reservation, err = r.sessionDrivers.PrepareRestore(t.Context(), session.New(session.WithID(t.Name()+"/reserved"), session.WithAgentName("root")))
+		return err == nil
+	}, time.Second, time.Millisecond)
+	defer reservation.Discard()
+	_, err = r.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/blocked-again")), SessionBinding{})
+	require.ErrorIs(t, err, ErrSessionCapacity)
+	reservation.Discard()
+	_, err = r.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/admitted")), SessionBinding{})
+	require.NoError(t, err)
+}
+
+func TestSessionServiceConcurrentClaimsRespectAggregateCapacity(t *testing.T) {
+	service := NewSessionService(SessionServiceOptions{MaxSessions: 1})
+	first := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	second := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	const count = 16
+	errs := make([]error, count)
+	ids := make([]string, count)
+	runtimes := make([]*LocalRuntime, count)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range count {
+		ids[i] = session.New().ID
+		runtimes[i] = first
+		if i%2 != 0 {
+			runtimes[i] = second
+		}
+		wg.Go(func() {
+			<-start
+			errs[i] = runtimes[i].sessionDrivers.beginClaim(ids[i])
+		})
+	}
+	close(start)
+	wg.Wait()
+	admitted := 0
+	for i, err := range errs {
+		if err == nil {
+			admitted++
+			runtimes[i].sessionDrivers.releaseUnpublishedClaim(ids[i])
+		} else {
+			require.ErrorIs(t, err, ErrSessionCapacity)
+		}
+	}
+	require.Equal(t, 1, admitted)
+	_, err := first.CreateSession(t.Context(), session.New(session.WithID(t.Name())), SessionBinding{})
+	require.NoError(t, err)
+}
+
+func TestSessionServiceConcurrentClaimsPreserveProcessExclusivity(t *testing.T) {
+	first := serviceRuntime(t, NewSessionService(), session.NewInMemorySessionStore())
+	second := serviceRuntime(t, NewSessionService(), session.NewInMemorySessionStore())
+	id := t.Name()
+	const count = 16
+	errs := make([]error, count)
+	runtimes := make([]*LocalRuntime, count)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range count {
+		runtimes[i] = first
+		if i%2 != 0 {
+			runtimes[i] = second
+		}
+		wg.Go(func() {
+			<-start
+			errs[i] = runtimes[i].sessionDrivers.beginClaim(id)
+		})
+	}
+	close(start)
+	wg.Wait()
+	var owner *LocalRuntime
+	for i, err := range errs {
+		if err == nil {
+			if owner == nil {
+				owner = runtimes[i]
+			}
+			require.Same(t, owner, runtimes[i])
+		} else {
+			require.ErrorIs(t, err, &SessionError{Kind: SessionErrorConflict})
+		}
+	}
+	require.NotNil(t, owner)
+	for i, err := range errs {
+		if err == nil {
+			runtimes[i].sessionDrivers.releaseUnpublishedClaim(id)
+		}
+	}
+	_, err := second.CreateSession(t.Context(), session.New(session.WithID(id)), SessionBinding{})
+	require.NoError(t, err)
+}
+
+func TestSessionServiceAggregateReclaimDoesNotWaitForSessionIO(t *testing.T) {
+	service := NewSessionService(SessionServiceOptions{MaxSessions: 1})
+	first := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	second := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	handle, err := first.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/busy")), SessionBinding{})
+	require.NoError(t, err)
+	driver := handle.(*sessionHandle).driver
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	result := make(chan error, 1)
+	go func() {
+		_, err := second.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/new")), SessionBinding{})
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, ErrSessionCapacity)
+	case <-time.After(time.Second):
+		t.Fatal("aggregate admission waited for a session lock")
+	}
+}
+
+func TestSessionRestoreReservationPinsRuntimeCapacity(t *testing.T) {
+	r := serviceRuntime(t, NewSessionService(SessionServiceOptions{MaxSessions: -1}), session.NewInMemorySessionStore())
+	r.maxSessions = 1
+	reservation, err := r.sessionDrivers.PrepareRestore(t.Context(), session.New(session.WithID(t.Name()+"/reserved"), session.WithAgentName("root")))
+	require.NoError(t, err)
+	defer reservation.Discard()
+	_, err = r.CreateSession(t.Context(), session.New(session.WithID(t.Name()+"/blocked")), SessionBinding{})
+	require.ErrorIs(t, err, ErrSessionCapacity)
+	_, err = r.sessionDrivers.PrepareRestore(t.Context(), session.New(session.WithID(t.Name()+"/also-blocked"), session.WithAgentName("root")))
+	require.ErrorIs(t, err, ErrSessionCapacity)
+	r.maxSessions = 0
+	require.NoError(t, r.sessionDrivers.ActivateRestoreBatch([]*restoreDriverReservation{reservation}, nil))
+	_, err = r.SessionByID(reservation.id)
+	require.NoError(t, err)
+}
+
+func TestSessionRestoreReservationProtectsParentAtAggregateCapacity(t *testing.T) {
+	service := NewSessionService(SessionServiceOptions{MaxSessions: 1})
+	r := serviceRuntime(t, service, session.NewInMemorySessionStore())
+	parentID := t.Name() + "/parent"
+	_, err := r.CreateSession(t.Context(), session.New(session.WithID(parentID)), SessionBinding{})
+	require.NoError(t, err)
+	child := session.New(session.WithID(t.Name()+"/child"), session.WithAgentName("root"), session.WithParentID(parentID))
+	_, err = r.sessionDrivers.PrepareRestore(t.Context(), child)
+	require.ErrorIs(t, err, ErrSessionCapacity)
+	_, err = service.SessionByID(parentID)
+	require.NoError(t, err)
 }
