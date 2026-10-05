@@ -44,6 +44,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				require.Equal(t, 1, hits)
 				assert.False(t, view.InputReferenceOnLine(len(lines)))
 			}
+			collapsedHeader := ansi.Strip(view.replyHeader(80))
 			view.SetExpanded(!view.IsExpanded())
 			other := New(animation.NewRuntime(), msg, nil)
 			assert.NotContains(t, other.View(), "Delivered", "expansion belongs to each view")
@@ -53,10 +54,11 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				view.SetHovered(true)
 				view.Finalize()
 				out := ansi.Strip(view.View())
+				require.Contains(t, out, strings.TrimSuffix(collapsedHeader, ">")+"v", "expansion preserves incoming icon, wording and order")
 				if origin == session.InputOriginRuntime {
-					assert.Contains(t, out, "v · report received")
+					assert.Contains(t, out, "· report received v")
 				} else {
-					assert.Contains(t, out, "v has replied")
+					assert.Contains(t, out, "has replied v")
 				}
 				for _, line := range strings.Split(strings.TrimSuffix(body, "\n"), "\n") {
 					assert.Contains(t, out, strings.ReplaceAll(line, "\t", "    "))

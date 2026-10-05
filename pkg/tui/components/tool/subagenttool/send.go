@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -97,8 +98,6 @@ func (m *sendModel) reference(msg *types.Message, to string) lifecycle.InputRefe
 
 func (m *sendModel) header(msg *types.Message, s spinner.Spinner, width int) string {
 	params, _ := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
-	status := statusIcon(msg, s) + " " + verb(msg, "Messaging", "Messaged")
-	ref := m.reference(msg, params.To)
-	compact := agentmessage.CompactHeader(status+" ", ref, "", m.disclosure.Chevron(), width)
-	return m.disclosure.Header(ref, status, compact, width)
+	prefix := statusIcon(msg, s) + " " + styles.MutedStyle.Render(verb(msg, "Messaging", "Messaged")) + " "
+	return m.disclosure.Header(prefix, m.reference(msg, params.To), "", width)
 }

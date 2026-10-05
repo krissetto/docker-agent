@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -23,6 +24,13 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				view := NewSend(ar, msg, nil, nil).(*sendModel)
 				require.NotContains(t, view.View(), "Literal")
 				require.NotContains(t, ansi.Strip(view.View()), "━", "collapsed outgoing message has no card rail")
+				collapsedHeader := strings.Split(view.View(), "\n")[0]
+				wording := verb(msg, "Messaging", "Messaged")
+				require.Contains(t, collapsedHeader, styles.MutedStyle.Render(wording), "outgoing verb uses the neighboring tool status style")
+				if status == types.ToolStatusError {
+					require.Contains(t, ansi.Strip(view.View()), "✗ Messaging")
+					require.Contains(t, ansi.Strip(view.View()), `Message delivered to subagent "worker" (abcde-child).`)
+				}
 				for _, width := range []int{80, 28, 8, 4, 80} {
 					view.SetSize(width, 0)
 					hits := 0
@@ -39,6 +47,11 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				}
 				view.SetExpanded(true)
 				body := ansi.Strip(view.View())
+				require.Contains(t, body, strings.TrimSuffix(ansi.Strip(collapsedHeader), ">")+"v", "expanded send retains collapsed icon, wording and order")
+				if status == types.ToolStatusError {
+					require.Contains(t, body, "✗ Messaging")
+					require.Contains(t, body, `Message delivered to subagent "worker" (abcde-child).`)
+				}
 				require.Contains(t, body, "Literal **request**")
 				require.Equal(t, 1, strings.Count(body, "Literal"))
 				require.Contains(t, body, "━", "expanded body uses agent-input border")

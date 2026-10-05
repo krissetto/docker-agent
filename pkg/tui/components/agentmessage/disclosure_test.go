@@ -70,7 +70,7 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 	ar := animation.NewRuntimeWithScheduler(&clock{now: time.Unix(1, 0)})
 	d := New(ar)
 	for _, width := range []int{80, 28, 8, 4, 80} {
-		header := Header(ref, d.Chevron(), "✓ turn finished", width)
+		header := Header("✓ ", ref, " turn finished", d.Chevron(), width)
 		hits := 0
 		for y, line := range strings.Split(header, "\n") {
 			require.LessOrEqual(t, ansi.StringWidth(line), width)
@@ -82,13 +82,13 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 			}
 		}
 		require.Equal(t, 1, hits)
-		if width >= 28 {
-			require.Contains(t, ansi.Strip(header), "(abcde) >")
+		if width == 80 {
+			require.Contains(t, ansi.Strip(header), "✓ director 界 (abcde) turn finished >")
 		}
 	}
 	body := Body("unchanged <system_info>literal report</system_info>", 80, false, "")
 	d.Toggle()
-	expandedHeader := Header(ref, d.Chevron(), "✓ turn finished", 80)
+	expandedHeader := Header("✓ ", ref, " turn finished", d.Chevron(), 80)
 	for d.NeedsTick() {
 		advance(t, ar, &d)
 		output := ansi.Strip(d.Render(expandedHeader, body))
@@ -97,7 +97,7 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 	}
 	require.Contains(t, ansi.Strip(d.Render(expandedHeader, body)), "unchanged <system_info>literal report</system_info>")
 	d.Toggle()
-	collapsedHeader := Header(ref, d.Chevron(), "✓ turn finished", 80)
+	collapsedHeader := Header("✓ ", ref, " turn finished", d.Chevron(), 80)
 	for d.NeedsTick() {
 		advance(t, ar, &d)
 		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(collapsedHeader, body)), ref.Label()))
@@ -110,8 +110,7 @@ func TestQuietCompactHeaderBeforeExpansionAndAfterCollapse(t *testing.T) {
 		ar := animation.NewRuntimeWithScheduler(&clock{now: time.Unix(1, 0)})
 		d := New(ar)
 		render := func(width int) string {
-			compact := CompactHeader("✓ ", ref, " "+status, d.Chevron(), width)
-			return d.Header(ref, status, compact, width)
+			return d.Header("✓ ", ref, " "+status, width)
 		}
 		compact := ansi.Strip(render(80))
 		require.Equal(t, "✓ director (74399) "+status+" >", compact)
@@ -134,7 +133,9 @@ func TestQuietCompactHeaderBeforeExpansionAndAfterCollapse(t *testing.T) {
 		d.Toggle()
 		require.NotContains(t, ansi.Strip(render(80)), "━", "no card before first visible body frame")
 		advance(t, ar, &d)
-		require.Contains(t, ansi.Strip(render(80)), "━")
+		expanded := ansi.Strip(render(80))
+		require.Contains(t, expanded, "━")
+		require.Contains(t, expanded, strings.TrimSuffix(compact, ">")+"v", "expansion preserves the icon, wording and order")
 		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(render(80), body)), ref.Label()))
 		d.Toggle()
 		require.Contains(t, ansi.Strip(render(80)), "━", "collapse retains card while rows remain visible")

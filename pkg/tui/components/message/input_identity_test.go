@@ -41,8 +41,8 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 			for line := range strings.SplitSeq(header, "\n") {
 				assert.LessOrEqual(t, ansi.StringWidth(line), width)
 			}
-			if width >= 28 {
-				assert.Contains(t, ansi.Strip(header), "━ worker (abcde) v")
+			if width == 80 {
+				assert.Contains(t, ansi.Strip(header), "worker (abcde) sent a message v")
 			}
 
 			view.SetHovered(true)

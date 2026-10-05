@@ -462,8 +462,7 @@ func (mv *messageModel) replyHeader(width int) string {
 		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
 		status = "· " + label
 	}
-	compact := agentmessage.CompactHeader(icon+" ", mv.message.InputReference, " "+status, mv.disclosure.Chevron(), width)
-	return mv.disclosure.Header(mv.message.InputReference, status, compact, width)
+	return mv.disclosure.Header(icon+" ", mv.message.InputReference, " "+status, width)
 }
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.

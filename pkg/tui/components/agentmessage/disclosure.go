@@ -75,11 +75,11 @@ func (d *Disclosure) Render(header, body string) string {
 
 const toggleLink = "docker-agent:disclosure"
 
-func (d *Disclosure) Header(ref lifecycle.InputReference, status, compact string, width int) string {
+func (d *Disclosure) Header(prefix string, ref lifecycle.InputReference, status string, width int) string {
 	if !d.Visible() {
-		return compact
+		return CompactHeader(prefix, ref, status, d.Chevron(), width)
 	}
-	return Header(ref, d.Chevron(), status, width)
+	return Header(prefix, ref, status, d.Chevron(), width)
 }
 
 func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
@@ -87,13 +87,12 @@ func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron 
 	return agentidentity.Wrap(prefix, ref, styles.MutedStyle.Render(status+" ")+control, width)
 }
 
-func Header(ref lifecycle.InputReference, chevron, status string, width int) string {
+func Header(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
 	style := styles.UserMessageStyle.Bold(false)
 	surface := styles.NoStyle.Foreground(style.GetForeground()).Background(style.GetBackground())
 	rule := surface.Foreground(style.GetBorderLeftForeground())
-	control := ansi.SetHyperlink(toggleLink) + styles.MutedStyle.Render(chevron) + ansi.ResetHyperlink()
 	border := style.GetBorderStyle()
-	header := agentidentity.Wrap(rule.Render(border.TopLeft+border.Top+" "), ref, " "+control+styles.MutedStyle.Render(" "+status), width)
+	header := ansi.Hardwrap(CompactHeader(rule.Render(border.TopLeft+border.Top+" ")+prefix, ref, status, chevron, width), max(1, width), true)
 	lines := strings.Split(header, "\n")
 	for i, line := range lines {
 		tail := max(0, width-ansi.StringWidth(line))
