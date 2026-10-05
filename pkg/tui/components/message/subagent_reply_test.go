@@ -28,6 +28,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				view.SetSize(width, 100)
 				out := view.View()
 				assert.NotContains(t, ansi.Strip(out), "Delivered")
+				assert.NotContains(t, ansi.Strip(out), "━", "collapsed reply has no card rail")
 				lines := strings.Split(out, "\n")
 				hits := 0
 				for y, line := range lines {
@@ -67,6 +68,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 			msg.ReceivedBody = strings.Repeat("expensive hidden payload\n", 100000)
 			assert.Nil(t, PrepareRender(view), "collapsed replies need no asynchronous body preparation")
 			assert.Less(t, len(view.View()), 4096)
+			assert.NotContains(t, ansi.Strip(view.View()), "━", "collapse restores quiet header")
 			assert.Nil(t, view.mdRenderer)
 			assert.NotContains(t, New(animation.NewRuntime(), msg, nil).View(), "expensive")
 		})

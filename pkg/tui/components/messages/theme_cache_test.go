@@ -36,7 +36,7 @@ func TestWarmAgentTranscriptRestylesAndKeepsFullIdentityHitCells(t *testing.T) {
 	require.NotEqual(t, before, after)
 	require.Greater(t, m.contentGeneration, generation)
 	require.Equal(t, ansi.Strip(before), ansi.Strip(after))
-	require.Contains(t, ansi.Strip(strings.Split(after, "\n")[0]), "Worker 界 (abcde) > sent a message")
+	require.Contains(t, ansi.Strip(strings.Split(after, "\n")[0]), "Worker 界 (abcde) sent a message >")
 	hits := 0
 	for y, line := range m.renderedLines {
 		for _, span := range extractOSC8Links(line) {

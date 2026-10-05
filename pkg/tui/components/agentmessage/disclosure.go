@@ -75,6 +75,18 @@ func (d *Disclosure) Render(header, body string) string {
 
 const toggleLink = "docker-agent:disclosure"
 
+func (d *Disclosure) Header(ref lifecycle.InputReference, status, compact string, width int) string {
+	if !d.Visible() {
+		return compact
+	}
+	return Header(ref, d.Chevron(), status, width)
+}
+
+func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
+	control := ansi.SetHyperlink(toggleLink) + styles.MutedStyle.Render(chevron) + ansi.ResetHyperlink()
+	return agentidentity.Wrap(prefix, ref, styles.MutedStyle.Render(status+" ")+control, width)
+}
+
 func Header(ref lifecycle.InputReference, chevron, status string, width int) string {
 	style := styles.UserMessageStyle.Bold(false)
 	surface := styles.NoStyle.Foreground(style.GetForeground()).Background(style.GetBackground())

@@ -118,7 +118,7 @@ func TestTypedInputNoticesAndModeSurvivePromotionAndReset(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(out, "worker (12345) · report received"))
 		assert.Contains(t, out, "worker (12345)")
 		assert.NotContains(t, out, "original parent delegation")
-		assert.Equal(t, 2, strings.Count(out, "> sent a message"))
+		assert.Equal(t, 2, strings.Count(out, "sent a message >"))
 		assert.NotContains(t, out, "private runtime payload")
 		assert.NotContains(t, out, "12345678-long-id")
 		assert.Zero(t, p.messages.MessageTypeCount(types.MessageTypeUser))

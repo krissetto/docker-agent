@@ -103,3 +103,56 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(collapsedHeader, body)), ref.Label()))
 	}
 }
+
+func TestQuietCompactHeaderBeforeExpansionAndAfterCollapse(t *testing.T) {
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "74399-full", Name: "director", Agent: "director", DisplayID: "74399"}
+	for _, status := range []string{"has replied", "sent a message", "· turn finished", "Messaged"} {
+		ar := animation.NewRuntimeWithScheduler(&clock{now: time.Unix(1, 0)})
+		d := New(ar)
+		render := func(width int) string {
+			compact := CompactHeader("✓ ", ref, " "+status, d.Chevron(), width)
+			return d.Header(ref, status, compact, width)
+		}
+		compact := ansi.Strip(render(80))
+		require.Equal(t, "✓ director (74399) "+status+" >", compact)
+		for _, width := range []int{80, 28, 8, 4, 80} {
+			header := render(width)
+			require.NotContains(t, ansi.Strip(header), "━")
+			hits := 0
+			for y, line := range strings.Split(header, "\n") {
+				require.LessOrEqual(t, ansi.StringWidth(line), width)
+				for x := range width {
+					if ToggleAt(header, y, x) {
+						hits++
+						require.Equal(t, ">", ansi.Strip(ansi.Cut(line, x, x+1)))
+					}
+				}
+			}
+			require.Equal(t, 1, hits)
+		}
+		body := Body("unchanged literal report", 80, false, "")
+		d.Toggle()
+		require.NotContains(t, ansi.Strip(render(80)), "━", "no card before first visible body frame")
+		advance(t, ar, &d)
+		require.Contains(t, ansi.Strip(render(80)), "━")
+		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(render(80), body)), ref.Label()))
+		d.Toggle()
+		require.Contains(t, ansi.Strip(render(80)), "━", "collapse retains card while rows remain visible")
+		d.Toggle()
+		for d.NeedsTick() {
+			advance(t, ar, &d)
+			require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(render(80), body)), ref.Label()))
+		}
+		d.Toggle()
+		for d.NeedsTick() {
+			advance(t, ar, &d)
+		}
+		require.Equal(t, compact, ansi.Strip(render(80)))
+		require.Zero(t, ar.ActiveCount())
+		d.Toggle()
+		d.Settle()
+		d.Toggle()
+		d.Settle()
+		require.Equal(t, compact, ansi.Strip(render(80)), "hidden collapse settles to quiet header")
+	}
+}

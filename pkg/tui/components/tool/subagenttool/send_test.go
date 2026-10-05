@@ -22,6 +22,7 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				ar := animation.NewRuntime()
 				view := NewSend(ar, msg, nil, nil).(*sendModel)
 				require.NotContains(t, view.View(), "Literal")
+				require.NotContains(t, ansi.Strip(view.View()), "━", "collapsed outgoing message has no card rail")
 				for _, width := range []int{80, 28, 8, 4, 80} {
 					view.SetSize(width, 0)
 					hits := 0
@@ -56,6 +57,7 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				view.StopAnimation()
 				require.Zero(t, ar.ActiveCount())
 				require.NotContains(t, view.View(), "Literal")
+				require.NotContains(t, ansi.Strip(view.View()), "━", "collapsed outgoing message has no card rail")
 			}
 		}
 	}

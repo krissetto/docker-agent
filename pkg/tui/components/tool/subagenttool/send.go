@@ -98,5 +98,7 @@ func (m *sendModel) reference(msg *types.Message, to string) lifecycle.InputRefe
 func (m *sendModel) header(msg *types.Message, s spinner.Spinner, width int) string {
 	params, _ := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
 	status := statusIcon(msg, s) + " " + verb(msg, "Messaging", "Messaged")
-	return agentmessage.Header(m.reference(msg, params.To), m.disclosure.Chevron(), status, width)
+	ref := m.reference(msg, params.To)
+	compact := agentmessage.CompactHeader(status+" ", ref, "", m.disclosure.Chevron(), width)
+	return m.disclosure.Header(ref, status, compact, width)
 }

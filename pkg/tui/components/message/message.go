@@ -452,15 +452,18 @@ func (mv *messageModel) isAgentMessage() bool {
 func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 
 func (mv *messageModel) replyHeader(width int) string {
+	icon := styles.ToolCompletedIcon.Render("✓")
 	status := "has replied"
 	if !mv.message.IsSubagentReply() {
 		status = "sent a message"
 	}
 	if mv.message.Type == types.MessageTypeRuntimeNotice {
-		icon, label := subagenttool.CompletionPresentation(mv.message.ReportOutcome)
-		status = icon + " " + label
+		var label string
+		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
+		status = "· " + label
 	}
-	return agentmessage.Header(mv.message.InputReference, mv.disclosure.Chevron(), status, width)
+	compact := agentmessage.CompactHeader(icon+" ", mv.message.InputReference, " "+status, mv.disclosure.Chevron(), width)
+	return mv.disclosure.Header(mv.message.InputReference, status, compact, width)
 }
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
