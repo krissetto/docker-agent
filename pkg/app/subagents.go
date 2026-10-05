@@ -198,7 +198,7 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	defer a.lifecycleMu.Unlock()
 
 	switch e.(type) {
-	case *SessionResetEvent, *SessionViewEvent, *ConnectionStateEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.DormancyChangedEvent:
+	case *SessionResetEvent, *SessionViewEvent, *ConnectionStateEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.SubagentTreeEvent, *runtime.DormancyChangedEvent:
 		return e
 	}
 	_, cancelled := a.cancelledRequests[requestID]

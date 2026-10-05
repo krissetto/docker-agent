@@ -328,6 +328,18 @@ func (w *treeWatch) apply(envelope runtime.SessionEvent) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	switch e := envelope.Event.(type) {
+	case *runtime.SubagentTreeEvent:
+		if envelope.SessionID != w.rootSessionID {
+			return false
+		}
+		root, ok := findSnapshot(e.Snapshot.Nodes, e.Snapshot.Root)
+		if !ok || (root.Node.SessionID != w.rootSessionID && root.Node.ID != subagent.SessionRootID(w.rootSessionID)) {
+			return false
+		}
+		tree := e.Snapshot
+		tree.Nodes = cloneNodes(tree.Nodes)
+		w.rootTree = &tree
+		return true
 	case *runtime.SubagentCreatedEvent:
 		if e.ChildSessionID == "" || w.created[e.ChildSessionID] != nil {
 			return false
@@ -411,10 +423,11 @@ func (w *treeWatch) merged(base *subagent.Snapshot) *subagent.Snapshot {
 		out.Nodes = cloneNodes(base.Nodes)
 	}
 	if w.rootTree != nil {
-		if len(out.Nodes) == 0 {
-			out.Version, out.Durability, out.Root = w.rootTree.Version, w.rootTree.Durability, w.rootTree.Root
+		out = *w.rootTree
+		out.Nodes = cloneNodes(w.rootTree.Nodes)
+		if base != nil {
+			out.Nodes = graftMissing(out.Nodes, base.Nodes)
 		}
-		out.Nodes = graftMissing(out.Nodes, w.rootTree.Nodes)
 	}
 	rootID := subagent.SessionRootID(w.rootSessionID)
 	if len(w.order) > 0 {
@@ -508,7 +521,9 @@ func overlay(nodes []subagent.NodeSnapshot, sessions map[string]*watchedSession)
 			case s.known && (node.State == subagent.NodeRunning || node.State == subagent.NodeStarting):
 				node.State = subagent.NodeIdle
 			}
-			if node.State == subagent.NodeFailed {
+			if node.State == subagent.NodeStopped {
+				node.NeedsAttention, node.WaitingOn = false, ""
+			} else if node.State == subagent.NodeFailed {
 				node.NeedsAttention, node.WaitingOn = true, "failed"
 			} else {
 				node.WaitingOn = s.waitingOn()

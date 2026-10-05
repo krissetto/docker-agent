@@ -257,9 +257,8 @@ func (m *subagentManager) bindRootDriverLocked(sessionID string, st *sessionSuba
 	st.unwatch = func() { unwatchStarted(); unwatchSettled() }
 }
 
-// persistSnapshot mirrors each dirty root's subtree onto its owning top-level
-// session and store row. A runtime can serve multiple root sessions, so each
-// owner must receive only its own swarm.
+// persistSnapshot mirrors dirty subtrees onto live session owners and stores
+// each top-level root's swarm without leaking unrelated session trees.
 func (m *subagentManager) persistSnapshot() {
 	m.persistSnapshotLocked(false)
 }
@@ -295,9 +294,21 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 	m.mu.Unlock()
 	for _, item := range projections {
 		if m.r.sessionDrivers != nil {
-			if d, ok := m.r.sessionDrivers.Lookup(item.id); ok {
-				_ = d.ownerCall(m.r.lifetime(), func() error { d.sess.SetSubagentTree(&item.snap); return nil })
-				item.sess = nil
+			for _, id := range subtreeSessionIDs(item.snap.Nodes[0]) {
+				d, ok := m.r.sessionDrivers.Lookup(id)
+				if !ok {
+					continue
+				}
+				node, _ := subtreeForSession(item.snap, id)
+				tree := subagent.Snapshot{Version: item.snap.Version, Durability: item.snap.Durability, Root: node.Node.ID, Nodes: []subagent.NodeSnapshot{node}}
+				_ = d.ownerCall(m.r.lifetime(), func() error {
+					d.sess.SetSubagentTree(&tree)
+					d.events.Publish(d.identityID, SubagentTree(tree))
+					return nil
+				})
+				if id == item.id {
+					item.sess = nil
+				}
 			}
 		}
 		if item.sess != nil {

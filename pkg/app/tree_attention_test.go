@@ -154,3 +154,38 @@ func TestDelegationPolicyRequiresCanonicalCapability(t *testing.T) {
 	require.ErrorIs(t, plain.SetDelegationPolicy(t.Context(), false), runtime.ErrUnsupported)
 	assert.False(t, (*App)(nil).CanSetDelegationPolicy())
 }
+
+func TestTreeWatchCanonicalStoppedStateWinsOverRunAndInteractionOverlay(t *testing.T) {
+	const rootID = "tree-owner"
+	base := &subagent.Snapshot{Version: subagent.SnapshotVersion, Root: subagent.SessionRootID(rootID), Nodes: []subagent.NodeSnapshot{{
+		Node:     subagent.Node{ID: subagent.SessionRootID(rootID), State: subagent.NodeIdle},
+		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", Parent: subagent.SessionRootID(rootID), SessionID: "child-session", State: subagent.NodeRunning}}},
+	}}}
+	watch := newTreeWatch(rootID)
+	watch.add(runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: "child-session", State: runtime.SessionStateRunning}})
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: &runtime.ToolCallConfirmationEvent{SessionID: "child-session", RequestID: "approval"}}))
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: runtime.StreamStopped("child-session", "worker", "completed")}))
+	ordinary := watch.merged(base).Nodes[0].Children[0].Node
+	assert.Equal(t, subagent.NodeIdle, ordinary.State, "ending a turn is not a canonical subtree stop")
+	assert.True(t, ordinary.NeedsAttention)
+
+	stopped := *base
+	stopped.Nodes = cloneNodes(base.Nodes)
+	stopped.Nodes[0].Children[0].Node.State = subagent.NodeStopped
+	event := runtime.SubagentTree(stopped)
+	a := newMetadataTestApp(t)
+	a.cancelledRequests = map[string]struct{}{"canceled-turn": {}}
+	assert.Same(t, event, a.filterBridgedEvent("canceled-turn", event), "canonical tree changes survive turn cancellation")
+	assert.False(t, watch.apply(runtime.SessionEvent{SessionID: "foreign-owner", Event: event}), "foreign owners cannot replace the tree")
+	foreign := stopped
+	foreign.Root = subagent.SessionRootID("foreign-owner")
+	assert.False(t, watch.apply(runtime.SessionEvent{SessionID: rootID, Event: runtime.SubagentTree(foreign)}), "tree identity must match its owner")
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: rootID, Event: event}))
+	require.True(t, watch.apply(runtime.SessionEvent{SessionID: "child-session", Event: runtime.StreamStarted("child-session", "worker")}))
+	got := watch.merged(base).Nodes[0].Children[0].Node
+	assert.Equal(t, "child-session", got.SessionID)
+	assert.Equal(t, subagent.NodeID("child-node"), got.ID)
+	assert.Equal(t, subagent.NodeStopped, got.State, "owner snapshot wins over stale baseline and stream state")
+	assert.False(t, got.NeedsAttention)
+	assert.Empty(t, got.WaitingOn)
+}

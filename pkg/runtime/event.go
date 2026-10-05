@@ -720,10 +720,8 @@ func StreamStopped(sessionID, agentName, reason string) Event {
 
 func (e *StreamStoppedEvent) GetSessionID() string { return e.SessionID }
 
-// SubagentTreeEvent carries a snapshot of the async subagent swarm for a
-// runtime. It is emitted outside of any RunStream (a subagent's state can
-// change while the parent is idle), so the app forwards it through its event
-// bus for the sidebar to render a live tree.
+// SubagentTreeEvent carries a canonical swarm snapshot. State changes can
+// occur while the root is idle, so snapshots are journaled independently of runs.
 type SubagentTreeEvent struct {
 	AgentContext
 

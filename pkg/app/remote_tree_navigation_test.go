@@ -45,7 +45,7 @@ func TestRemoteViewResolvesOpensAndStopsDescendantOverSessionAPI(t *testing.T) {
 	dir := t.TempDir()
 	local, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "root", agent.WithModel(idleTreeProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
-		agent.New("worker", "worker", agent.WithModel(idleTreeProvider{})),
+		agent.New("worker", "worker", agent.WithModel(idleTreeProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
 	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(dir))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(local)
@@ -122,6 +122,25 @@ func TestRemoteViewResolvesOpensAndStopsDescendantOverSessionAPI(t *testing.T) {
 	assert.Equal(t, rootSession.ID, childView.Session().ParentID, "remote views retain canonical child ancestry")
 	require.NotNil(t, childView.AttachedSubagent())
 	assert.Equal(t, rootSession.ID, childView.AttachedSubagent().Session.ParentID)
+	childView.Start(ctx)
+	grandchild, err := owner.Runtime().CreateSession(t.Context(), session.New(session.WithAgentName("worker"), session.WithWorkingDir(dir)), runtime.SessionBinding{AgentName: "worker", ParentSessionID: child.ID()})
+	require.NoError(t, err)
+	grandNode, ok := local.SubagentNodeForSession(grandchild.ID())
+	require.True(t, ok)
+	var grandTarget SubagentTarget
+	require.Eventually(t, func() bool {
+		grandTarget, ok = childView.ResolveSubagentTarget(string(grandNode))
+		return ok
+	}, 2*time.Second, 10*time.Millisecond)
+	require.NoError(t, childView.StopSubtree(t.Context(), grandTarget))
+	require.Eventually(t, func() bool {
+		snapshot := childView.SubagentTreeSnapshot()
+		if snapshot == nil {
+			return false
+		}
+		found, ok := findNode(snapshot.Nodes, func(n subagent.Node) bool { return n.ID == grandNode })
+		return ok && found.SessionID == grandchild.ID() && found.State == subagent.NodeStopped
+	}, 2*time.Second, 10*time.Millisecond, "nested remote view mirrors its descendant's canonical stop")
 
 	// Use subagents is the canonical tree policy: the child view reads the root's.
 	require.True(t, view.CanSetDelegationPolicy())
@@ -143,6 +162,26 @@ func TestRemoteViewResolvesOpensAndStopsDescendantOverSessionAPI(t *testing.T) {
 		found, ok := local.SubagentTree().Node(node)
 		return ok && found.State == subagent.NodeStopped
 	}, 5*time.Second, 10*time.Millisecond, "stop reaches the canonical owner over HTTP")
+	require.Eventually(t, func() bool {
+		snapshot := view.SubagentTreeSnapshot()
+		if snapshot == nil {
+			return false
+		}
+		found, ok := findNode(snapshot.Nodes, func(n subagent.Node) bool { return n.ID == node })
+		return ok && found.SessionID == child.ID() && found.State == subagent.NodeStopped
+	}, 2*time.Second, 10*time.Millisecond, "remote view mirrors the canonical stopped node")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case tree := <-trees:
+			found, ok := findNode(tree.Snapshot.Nodes, func(n subagent.Node) bool { return n.ID == node })
+			if ok && found.SessionID == child.ID() && found.State == subagent.NodeStopped {
+				return
+			}
+		case <-deadline:
+			t.Fatal("remote sidebar bus received no canonical stopped tree")
+		}
+	}
 }
 
 // The saved local preference is only the owner's default: the session-tree
