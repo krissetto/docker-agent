@@ -25,19 +25,21 @@ type CollapsedRenderer func(msg *types.Message, s spinner.Spinner, sessionState 
 // Base provides common boilerplate for tool components.
 // It handles spinner management, sizing, and delegates rendering to a custom function.
 type Base struct {
-	message             *types.Message
-	spinner             spinner.Spinner
-	width               int
-	height              int
-	sessionState        service.SessionStateReader // read-only access to session state
-	render              Renderer
-	collapsedRenderer   CollapsedRenderer
-	spinnerRegistered   bool // tracks whether spinner is registered with coordinator
-	themeGeneration     uint64
-	lastRendered        string
-	lastRenderedHeight  int
-	lastCollapsed       string
-	lastCollapsedHeight int
+	message              *types.Message
+	spinner              spinner.Spinner
+	width                int
+	height               int
+	sessionState         service.SessionStateReader // read-only access to session state
+	render               Renderer
+	collapsedRenderer    CollapsedRenderer
+	spinnerRegistered    bool // tracks whether spinner is registered with coordinator
+	themeGeneration      uint64
+	lastRendered         string
+	lastRenderedHeight   int
+	lastRenderedSpinner  string
+	lastCollapsed        string
+	lastCollapsedHeight  int
+	lastCollapsedSpinner string
 }
 
 // NewBase creates a new base tool component with the given renderer.
@@ -119,11 +121,12 @@ func (b *Base) View() string {
 	rendered := b.render(b.message, b.spinner, b.sessionState, b.width, b.height)
 	height := renderedViewHeight(rendered)
 	if b.shouldKeepLastPendingRender(rendered, height, b.lastRendered, b.lastRenderedHeight) {
-		return b.lastRendered
+		return strings.Replace(b.lastRendered, b.lastRenderedSpinner, b.spinner.View(), 1)
 	}
 	if rendered != "" {
-		b.lastRendered = rendered     //rubocop:disable Lint/TUIViewPurity // render-stability cache for temporarily unparseable streamed arguments
-		b.lastRenderedHeight = height //rubocop:disable Lint/TUIViewPurity // paired height for the render-stability cache above
+		b.lastRendered = rendered                //rubocop:disable Lint/TUIViewPurity // render-stability cache for temporarily unparseable streamed arguments
+		b.lastRenderedHeight = height            //rubocop:disable Lint/TUIViewPurity // paired height for the render-stability cache above
+		b.lastRenderedSpinner = b.spinner.View() //rubocop:disable Lint/TUIViewPurity // retained content must not retain its spinner phase
 	}
 	return rendered
 }
@@ -141,11 +144,12 @@ func (b *Base) CollapsedView() string {
 		rendered := b.collapsedRenderer(b.message, b.spinner, b.sessionState, b.width, b.height)
 		height := renderedViewHeight(rendered)
 		if b.shouldKeepLastPendingRender(rendered, height, b.lastCollapsed, b.lastCollapsedHeight) {
-			return b.lastCollapsed
+			return strings.Replace(b.lastCollapsed, b.lastCollapsedSpinner, b.spinner.View(), 1)
 		}
 		if rendered != "" {
 			b.lastCollapsed = rendered
 			b.lastCollapsedHeight = height
+			b.lastCollapsedSpinner = b.spinner.View() //rubocop:disable Lint/TUIViewPurity // retained content must not retain its spinner phase
 		}
 		return rendered
 	}

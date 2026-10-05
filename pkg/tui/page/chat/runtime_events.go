@@ -63,9 +63,15 @@ import (
 // The switch is organized by event category for clarity.
 func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	seed := false
+	previousTurnID := p.lifecycle.TurnID
 	if bridged, ok := msg.(msgtypes.SessionRuntimeEventMsg); ok {
 		msg = bridged.Event
 		seed = bridged.Seed
+		if bridged.Sequence != 0 && bridged.TurnID != "" && bridged.OriginSessionID == p.lifecycle.SessionID {
+			if _, started := bridged.Event.(*runtime.StreamStartedEvent); started {
+				p.lifecycle.TurnID = bridged.TurnID
+			}
+		}
 		if bridged.Projection != nil {
 			p.lifecycle = bridged.Projection.Lifecycle
 			p.sharedProjection = true
@@ -122,6 +128,22 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.StreamStoppedEvent:
 		return true, p.handleStreamStopped(msg)
+
+	case *runtime.TurnSettledEvent:
+		if msg.SessionID != p.lifecycle.SessionID || msg.TurnID == "" {
+			return true, nil
+		}
+		if p.sharedProjection {
+			if msg.TurnID != previousTurnID || p.lifecycle.TurnID != "" || p.lifecycle.Status != runtime.SessionStateSettled {
+				return true, nil
+			}
+		} else {
+			if msg.TurnID != p.lifecycle.TurnID {
+				return true, nil
+			}
+			p.applyLifecycle(msg)
+		}
+		return true, p.finishTurnPresentation()
 
 	// ===== Content Events =====
 	case *runtime.PendingUserMessageAcceptedEvent:
@@ -297,7 +319,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 		if msg.Status == "completed" {
 			noticeCmd := rootCompactionNotice(msg)
-			if p.lifecycle.Depth() > 0 {
+			if p.lifecycle.Depth() > 0 || p.lifecycle.TurnID != "" {
 				// Automatic compaction nested in a live stream (the threshold
 				// fires after StreamStarted): update presentation only.
 				// Clearing msgCancel/working/queue here would break Esc and
@@ -516,6 +538,15 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 			sound.Play(p.ctx(), sound.Success)
 		}
 	}
+	// Accepted journal turns require TurnSettled; identity-free legacy streams finish on stop.
+	if p.lifecycle.TurnID != "" {
+		p.setPendingResponse(false)
+		return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), sidebarCmd)
+	}
+	return tea.Batch(finalizeCmd, sidebarCmd, p.finishTurnPresentation())
+}
+
+func (p *chatPage) finishTurnPresentation() tea.Cmd {
 	p.msgCancel = nil
 	p.streamCancelled = false
 	spinnerCmd := p.setWorking(false)
@@ -528,12 +559,10 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, exitCmd)
+	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, exitCmd)
 }
 
-// handlePartialToolCall processes partial tool call events by rendering each
-// tool call as it streams in. The tool call appears with its name and a static
-// "pending" indicator (not animated) to show it's receiving data.
+// handlePartialToolCall renders each streaming tool call with an animated pending indicator.
 func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.Cmd {
 	p.setPendingResponse(false)
 	var toolDef tools.Tool

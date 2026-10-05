@@ -2221,14 +2221,16 @@ func (m *appModel) applyPauseEvent(ss *service.SessionState, msg tea.Msg) {
 }
 
 // handleWorkingStateChanged updates the editor working indicator and resize handle spinner.
-func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleWorkingStateChanged(_ messages.WorkingStateChangedMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	// Commands may arrive out of order or after a tab switch; resample the active owner.
+	working := m.chatPage.IsWorking()
 
 	// Update editor working state
-	cmds = append(cmds, m.editor.SetWorking(msg.Working))
+	cmds = append(cmds, m.editor.SetWorking(working))
 
 	// Start/stop working spinner
-	if msg.Working {
+	if working {
 		cmds = append(cmds, m.workingSpinner.Init())
 	} else {
 		m.workingSpinner.Stop()

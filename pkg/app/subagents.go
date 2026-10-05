@@ -164,13 +164,16 @@ func (a *App) sendSequencedBridgedEventFrom(ctx context.Context, requestID strin
 		next := *projection
 		switch event.(type) {
 		case *runtime.StreamStartedEvent:
-			next.Status.TurnID = requestID
+			if sequence != 0 && originSessionID == next.Lifecycle.SessionID {
+				next.Status.TurnID = requestID
+				next.Lifecycle.TurnID = requestID
+			}
 		case *runtime.StreamStoppedEvent:
-			if next.Status.TurnID == requestID && next.Lifecycle.Depth() == 0 {
+			if next.Status.TurnID == requestID && next.Lifecycle.Depth() == 0 && next.Lifecycle.TurnID == "" {
 				next.Status.TurnID = ""
 			}
 		}
-		if next.Status.TurnID != projection.Status.TurnID {
+		if next.Status.TurnID != projection.Status.TurnID || next.Lifecycle.TurnID != projection.Lifecycle.TurnID {
 			projection = &next
 			a.presentation.Store(projection)
 		}

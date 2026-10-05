@@ -181,9 +181,12 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 		}
 		a.presentation.Store(head)
 		return head
-	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *runtime.PendingUserMessageAcceptedEvent, *runtime.PendingUserMessagePromotedEvent, *runtime.SessionCompactionEvent:
+	case *runtime.StreamStartedEvent, *runtime.StreamStoppedEvent, *runtime.TurnSettledEvent, *runtime.PendingUserMessageAcceptedEvent, *runtime.PendingUserMessagePromotedEvent, *runtime.SessionCompactionEvent:
 		next.Lifecycle, _ = next.Lifecycle.Apply(event)
 		next.Status.State = next.Lifecycle.Status
+		if _, settled := event.(*runtime.TurnSettledEvent); settled {
+			next.Status.TurnID = next.Lifecycle.TurnID
+		}
 	case *runtime.PendingUserMessageEditedEvent:
 		// Editing changes payload only, not lifecycle or pending membership.
 	case *runtime.InteractionResolvedEvent:

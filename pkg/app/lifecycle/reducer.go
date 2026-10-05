@@ -35,6 +35,7 @@ type Stream struct {
 
 type State struct {
 	SessionID string
+	TurnID    string
 	Status    runtime.SessionState
 	Streams   []Stream
 	Pending   []string
@@ -45,7 +46,7 @@ func FromSnapshot(snapshot runtime.SessionSnapshot) State {
 	for _, input := range snapshot.PendingInputs {
 		pending = append(pending, input.TurnID)
 	}
-	return State{SessionID: snapshot.Status.SessionID, Status: snapshot.Status.State, Pending: pending}
+	return State{SessionID: snapshot.Status.SessionID, TurnID: snapshot.Status.TurnID, Status: snapshot.Status.State, Pending: pending}
 }
 
 func (s State) ApplySession(event runtime.SessionEvent) (State, []Action) {
@@ -62,6 +63,9 @@ func (s State) apply(event runtime.Event, envelopeTurnID string) (State, []Actio
 	s.Pending = slices.Clone(s.Pending)
 	switch event := event.(type) {
 	case *runtime.StreamStartedEvent:
+		if envelopeTurnID != "" && (s.SessionID == "" || event.SessionID == s.SessionID) {
+			s.TurnID = envelopeTurnID
+		}
 		s.Streams = append(s.Streams, Stream{SessionID: event.SessionID, AgentName: event.AgentName})
 		s.Status = runtime.SessionStateRunning
 		return s, []Action{{Kind: TurnStarted, TurnID: envelopeTurnID, AgentName: event.AgentName}}
@@ -69,14 +73,28 @@ func (s State) apply(event runtime.Event, envelopeTurnID string) (State, []Actio
 		if len(s.Streams) > 0 {
 			s.Streams = s.Streams[:len(s.Streams)-1]
 		}
-		if len(s.Streams) == 0 {
+		if len(s.Streams) == 0 && s.TurnID == "" {
 			s.Status = runtime.SessionStateSettled
+		}
+		if s.TurnID != "" {
+			return s, nil
 		}
 		kind := TurnSettled
 		if event.Reason == "cancelled" || event.Reason == "canceled" {
 			kind = CancelSettled
 		}
 		return s, []Action{{Kind: kind, TurnID: envelopeTurnID, AgentName: event.AgentName}}
+	case *runtime.TurnSettledEvent:
+		if event.SessionID != s.SessionID || event.TurnID == "" || event.TurnID != s.TurnID {
+			return s, nil
+		}
+		s.TurnID = ""
+		s.Status = runtime.SessionStateSettled
+		kind := TurnSettled
+		if event.Outcome == runtime.TurnCanceled {
+			kind = CancelSettled
+		}
+		return s, []Action{{Kind: kind, TurnID: event.TurnID, AgentName: event.AgentName}}
 	case *runtime.PendingUserMessageAcceptedEvent:
 		if !slices.Contains(s.Pending, event.TurnID) {
 			s.Pending = append(s.Pending, event.TurnID)
