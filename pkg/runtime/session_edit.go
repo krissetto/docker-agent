@@ -209,6 +209,7 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 			case SessionEditPermissions:
 				d.sess.SetPermissions(next.ClonePermissions())
 			case SessionEditTitle:
+				d.invalidateTitleLocked()
 				d.sess.SetTitle(edit.Title)
 				d.events.Publish(h.sessionID, SessionTitle(h.sessionID, edit.Title))
 			case SessionEditMessage:

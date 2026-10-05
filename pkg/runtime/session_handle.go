@@ -676,6 +676,18 @@ func (h *sessionHandle) submit(ctx context.Context, input TurnInput, operation s
 		}
 		return Submission{}, err
 	}
+	if input.GenerateTitle && !input.Retry {
+		text := input.Content
+		if text == "" {
+			for _, part := range input.MultiContent {
+				if part.Type == "text" {
+					text = part.Text
+					break
+				}
+			}
+		}
+		_ = h.GenerateSessionTitle(context.WithoutCancel(ctx), input.TitleGenerator, []string{text}, false)
+	}
 	disposition := SubmissionDisposition("")
 	if queued {
 		disposition = SubmissionDispositionQueued
@@ -1129,8 +1141,9 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	for i, item := range observed.seed {
 		replay[i] = sessionEnvelope(h.sessionID, item)
 	}
+	presentation := h.observationPresentation(ctx, observed)
 	return Observation{
-		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position}},
+		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position, Presentation: presentation, TitleStatus: observed.titleStatus}},
 		Replay:  replay, Events: observed.live, Cancel: cancel,
 	}, nil
 }

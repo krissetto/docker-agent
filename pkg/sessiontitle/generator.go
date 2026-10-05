@@ -40,7 +40,18 @@ const (
 
 // Generator generates session titles using a one-shot LLM completion.
 type Generator struct {
-	models []provider.Provider
+	models  []provider.Provider
+	prepare func(context.Context, provider.Provider, []chat.Message) ([]chat.Message, error)
+}
+
+// WithPreparation returns an independent generator with a mandatory outbound boundary.
+func (g *Generator) WithPreparation(prepare func(context.Context, provider.Provider, []chat.Message) ([]chat.Message, error)) *Generator {
+	if g == nil {
+		return nil
+	}
+	prepared := *g
+	prepared.prepare = prepare
+	return &prepared
 }
 
 // New creates a title Generator from the ordered candidate models. Nil
@@ -113,7 +124,14 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 			return "", err
 		}
 
-		title, err := generateOnce(ctx, baseModel, messages)
+		attemptMessages := messages
+		if g.prepare != nil {
+			attemptMessages, err = g.prepare(ctx, baseModel, messages)
+			if err != nil {
+				return "", err
+			}
+		}
+		title, err := generateOnce(ctx, baseModel, attemptMessages)
 		if err == nil {
 			slog.DebugContext(ctx, "Generated session title", "session_id", sessionID, "title", title, "model", baseModel.ID())
 			return title, nil

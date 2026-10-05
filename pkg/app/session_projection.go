@@ -159,6 +159,7 @@ func (a *App) projectEvent(event runtime.Event) *PresentationState {
 	next := *previous
 	switch e := event.(type) {
 	case *SessionResetEvent:
+		a.titleGenerating.Store(e.Snapshot.TitleStatus == "started")
 		a.lifecycleMu.Lock()
 		a.projectedRequestID = e.Snapshot.Status.TurnID
 		a.lifecycleMu.Unlock()
@@ -248,7 +249,9 @@ func (a *App) projectTranscript(event runtime.Event) {
 	}
 	switch e := event.(type) {
 	case *runtime.SessionTitleEvent:
-		sess.SetTitle(e.Title)
+		if (e.SessionID == "" || e.SessionID == sess.ID) && (e.Status == "" || e.Title != "") {
+			sess.SetTitle(e.Title)
+		}
 	case *runtime.TokenUsageEvent:
 		if e.Usage != nil {
 			if e.SessionID == "" || e.SessionID == sess.ID {

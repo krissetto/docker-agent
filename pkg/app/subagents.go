@@ -214,13 +214,15 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 		return e
 	}
 
-	switch e.(type) {
+	switch event := e.(type) {
 	case *SessionResetEvent, *runtime.InteractionResolvedEvent, *runtime.PauseChangedEvent, *runtime.PausedEvent, *runtime.SkillOperationEvent:
 		// Session state/lifecycle transitions are canonical and must survive
 		// request cancellation filtering.
 		return e
 	case *runtime.SessionTitleEvent:
-		a.titleGenerating.Store(false)
+		if sess := a.Session(); sess == nil || event.SessionID == "" || event.SessionID == sess.ID {
+			a.titleGenerating.Store(event.Status == "started")
+		}
 	case *runtime.StreamStartedEvent:
 		a.suppressUserEcho.Store(false)
 		if requestID != "" {

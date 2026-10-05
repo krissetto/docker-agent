@@ -34,7 +34,6 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
@@ -1208,17 +1207,8 @@ func (f *runExecFlags) shouldOfferTour(args []string) bool {
 	return tour.ShouldOffer(os.Getenv)
 }
 
-func withTitleGenerator(ctx context.Context, services app.Services, opts []app.Opt) []app.Opt {
-	provider, ok := services.(interface {
-		TitleGenerator(ctx context.Context) *sessiontitle.Generator
-	})
-	if !ok {
-		return opts
-	}
-	if gen := provider.TitleGenerator(ctx); gen != nil {
-		return append(opts, app.WithTitleGenerator(gen))
-	}
-	return opts
+func withTitleGenerator(_ context.Context, _ app.Services, opts []app.Opt) []app.Opt {
+	return append(opts, app.WithAutomaticTitles())
 }
 
 // runLeanTUI builds the App and drives the standalone lean TUI, used when

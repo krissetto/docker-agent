@@ -76,11 +76,12 @@ type App struct {
 	events                 chan any
 	throttleDuration       time.Duration
 	cancel                 context.CancelFunc
-	currentAgentModel      string                      // Tracks the current agent's model ID from AgentInfoEvent
-	exitAfterFirstResponse bool                        // Exit TUI after first assistant response completes
-	resolvedView           bool                        // canonical view acquisition already completed; Start must not restore again
-	readOnly               bool                        // When true, no new messages can be sent to the LLM
-	titleGenerating        atomic.Bool                 // True when title generation is in progress
+	currentAgentModel      string      // Tracks the current agent's model ID from AgentInfoEvent
+	exitAfterFirstResponse bool        // Exit TUI after first assistant response completes
+	resolvedView           bool        // canonical view acquisition already completed; Start must not restore again
+	readOnly               bool        // When true, no new messages can be sent to the LLM
+	titleGenerating        atomic.Bool // True when title generation is in progress
+	titleEnabled           bool
 	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
 	snapshotController     builtins.SnapshotController // Drives /undo, /snapshots, /reset; nil for runtimes that don't capture snapshots
 
@@ -162,8 +163,12 @@ func WithQueuedMessages(msgs []string) Opt {
 	}
 }
 
-// WithTitleGenerator sets the title generator for local title generation.
-// If not set, title generation will be handled by the runtime (for remote) or skipped.
+// WithAutomaticTitles requests first-turn titles through the canonical owner.
+func WithAutomaticTitles() Opt {
+	return func(a *App) { a.titleEnabled = true }
+}
+
+// WithTitleGenerator overrides title candidates for in-process sessions.
 func WithTitleGenerator(gen *sessiontitle.Generator) Opt {
 	return func(a *App) {
 		a.titleGen = gen
@@ -223,6 +228,7 @@ func NewResolvedFromTemplate(ctx context.Context, sessions runtime.SessionRuntim
 	options := []Opt{
 		WithRuntimeServices(template.runtime),
 		WithTitleGenerator(template.titleGen),
+		func(a *App) { a.titleEnabled = template.titleEnabled },
 		WithSnapshotController(template.snapshotController),
 	}
 	if committed.Info.Attach != nil {
@@ -956,12 +962,8 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 	a.cancel = cancel
 	a.runCancelled.Store(false)
 	state := a.state()
-	// If this is the first message and no title exists, start local title generation.
-	if state.session != nil && state.session.TitleSnapshot() == "" && a.titleGen != nil {
-		a.titleGenerating.Store(true)
-		go a.generateTitle(ctx, state, []string{message})
-	}
-	msg := runtime.TurnInput{Content: message}
+	a.startCompatibilityTitle(ctx, state, message)
+	msg := runtime.TurnInput{Content: message, GenerateTitle: a.titleEnabled || a.titleGen != nil, TitleGenerator: a.titleGen}
 	if len(attachments) > 0 {
 		msg.MultiContent = a.buildUserMultiContent(ctx, state.session, message, attachments)
 	}
@@ -1177,23 +1179,8 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 	a.cancel = cancel
 	a.runCancelled.Store(false)
 	state := a.state()
-	// If this is the first message and no title exists, start local title generation
-	if state.session != nil && state.session.TitleSnapshot() == "" && a.titleGen != nil {
-		a.titleGenerating.Store(true)
-		// Extract text content from the message for title generation
-		userMessage := msg.Message.Content
-		if userMessage == "" && len(msg.Message.MultiContent) > 0 {
-			for _, part := range msg.Message.MultiContent {
-				if part.Type == chat.MessagePartTypeText {
-					userMessage = part.Text
-					break
-				}
-			}
-		}
-		go a.generateTitle(ctx, state, []string{userMessage})
-	}
-
-	input := runtime.TurnInput{Content: msg.Message.Content, MultiContent: msg.Message.MultiContent}
+	a.startCompatibilityTitle(ctx, state, msg.Message.Content)
+	input := runtime.TurnInput{Content: msg.Message.Content, MultiContent: msg.Message.MultiContent, GenerateTitle: a.titleEnabled || a.titleGen != nil, TitleGenerator: a.titleGen}
 	if state.handle == nil {
 		a.sendEvent(ctx, runtime.Error(state.operationError("submit").Error()))
 		return
@@ -2174,6 +2161,15 @@ func (a *App) IsTitleGenerating() bool {
 // generateTitle generates a title using the local title generator.
 // This method always clears the titleGenerating flag when done (success or failure).
 // It should be called in a goroutine.
+func (a *App) startCompatibilityTitle(ctx context.Context, state sessionState, message string) {
+	if _, owned := state.handle.(runtime.SessionTitleGenerator); owned {
+		return
+	}
+	if state.session != nil && state.session.TitleSnapshot() == "" && a.titleGen != nil && a.titleGenerating.CompareAndSwap(false, true) {
+		go a.generateTitle(ctx, state, []string{message})
+	}
+}
+
 func (a *App) generateTitle(ctx context.Context, state sessionState, userMessages []string) {
 	// Always clear the flag when done, whether success or failure
 	defer a.titleGenerating.Store(false)
@@ -2214,6 +2210,24 @@ func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 		return ErrTitleGenerating
 	}
 
+	if owner, ok := state.handle.(runtime.SessionTitleGenerator); ok {
+		var userMessages []string
+		for _, msg := range state.session.GetAllMessages() {
+			if msg.Message.Role == chat.MessageRoleUser {
+				userMessages = append(userMessages, msg.Message.Content)
+			}
+		}
+		if len(userMessages) == 0 {
+			return errors.New("no user messages for title generation")
+		}
+		if err := owner.GenerateSessionTitle(ctx, a.titleGen, userMessages, true); err != nil {
+			if errors.Is(err, runtime.ErrSessionCapacity) {
+				return ErrTitleGenerating
+			}
+			return err
+		}
+		return nil
+	}
 	// For local runtime with title generator, use it directly
 	if a.titleGen != nil {
 		a.titleGenerating.Store(true)

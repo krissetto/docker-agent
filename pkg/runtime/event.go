@@ -560,6 +560,7 @@ func SessionUsage(sess *session.Session, contextLimit int64, compactionThreshold
 type SessionTitleEvent struct {
 	AgentContext
 
+	Status    string `json:"status,omitempty"`
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`

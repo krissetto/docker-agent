@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -257,7 +258,7 @@ func (s *remoteSession) Steer(ctx context.Context, input TurnInput) (Submission,
 }
 
 func (s *remoteSession) input(ctx context.Context, operation string, input TurnInput) (Submission, error) {
-	request := api.SessionInputRequest{Content: input.Content, MultiContent: input.MultiContent, Mode: operation, RequestID: input.RequestID}
+	request := api.SessionInputRequest{GenerateTitle: input.GenerateTitle, Content: input.Content, MultiContent: input.MultiContent, Mode: operation, RequestID: input.RequestID}
 	var out api.SessionSubmission[SubmissionDisposition]
 	err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("messages"), request, &out)
 	if err == nil && (out.SessionID != s.ID() || out.TurnID == "") {
@@ -326,6 +327,16 @@ func (s *remoteSession) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 		return nil, errors.New("invalid session edit identity")
 	}
 	return &updated, nil
+}
+
+func (s *remoteSession) GenerateSessionTitle(ctx context.Context, generator *sessiontitle.Generator, messages []string, replace bool) error {
+	if generator != nil {
+		return sessionUnsupported(s.ID(), "generate_title_custom_provider")
+	}
+	return s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("title"), struct {
+		Messages []string `json:"messages"`
+		Replace  bool     `json:"replace"`
+	}{messages, replace}, nil)
 }
 
 func (s *remoteSession) UpdateTitle(ctx context.Context, title string) error {
@@ -1199,7 +1210,14 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
 	in.Session.ParentID = in.ParentSessionID
-	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition}
+	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition, TitleStatus: in.TitleStatus}
+	for _, raw := range in.Presentation {
+		event, err := c.decodeSessionEvent(raw)
+		if err != nil {
+			return out, err
+		}
+		out.Presentation = append(out.Presentation, event)
+	}
 	for _, pending := range in.PendingInputs {
 		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, ReportOutcome: pending.ReportOutcome, InputMode: pending.InputMode})
 	}

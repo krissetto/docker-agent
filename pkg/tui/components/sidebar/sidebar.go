@@ -1696,6 +1696,10 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := m.startSpinner()
 		return m, cmd
 	case *runtime.SessionTitleEvent:
+		if msg.Status == "started" {
+			cmd := m.SetTitleRegenerating(true)
+			return m, cmd
+		}
 		// Clear regenerating state now that title generation is done
 		if m.titleRegenerating {
 			m.titleRegenerating = false
@@ -1719,10 +1723,6 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			m.rootSessionID = msg.SessionID
 		}
 		m.sessionStack = append(m.sessionStack, msg.SessionID)
-		// If title hasn't been generated yet, show the title generation spinner
-		if !m.titleGenerated {
-			m.titleRegenerating = true
-		}
 		m.invalidateCache()
 		cmd := m.startSpinner()
 		return m, cmd

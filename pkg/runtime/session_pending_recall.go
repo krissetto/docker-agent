@@ -120,6 +120,7 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 				outcome = CancelAlreadyCancelling
 			} else {
 				d.startCanceled = true
+				d.invalidateTitleLocked()
 				outcome = CancelAccepted
 				d.resolveInteractionsLocked()
 			}
@@ -131,6 +132,7 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 				return nil
 			}
 			d.phase = sessionCancelling
+			d.invalidateTitleLocked()
 			d.resolveInteractionsLocked()
 			cancel, outcome = d.cancel, CancelAccepted
 		}

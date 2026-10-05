@@ -160,6 +160,10 @@ type sessionDriver struct {
 	onSettled            map[int]func()
 	nextHookID           int
 	settled              chan struct{}
+	titleStatus          string
+	titleGeneration      uint64
+	titleCancel          context.CancelFunc
+	titleWriteReserved   bool
 }
 
 type sessionInteraction struct {
@@ -755,6 +759,7 @@ func (d *sessionDriver) UpdateTitle(ctx context.Context, title string) error {
 				if err != nil {
 					return err
 				}
+				d.invalidateTitleLocked()
 				d.sess.SetTitle(title)
 				d.events.Publish(d.identityID, SessionTitle(d.identityID, title))
 				return nil
@@ -775,6 +780,8 @@ type driverObservation struct {
 	interactions  []InteractionSnapshot
 	pendingInputs []PendingInput
 	position      int
+	models        []provider.Provider
+	titleStatus   string
 }
 
 func (d *sessionDriver) beginReclaimLocked() bool {
@@ -807,7 +814,7 @@ func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
 	}
 	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), since, buffer)
 	cloned, status, interactions, pendingInputs, position := d.snapshotLocked()
-	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position}
+	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position, models: slices.Clone(d.modelProviders), titleStatus: d.titleStatus}
 }
 
 func (d *sessionDriver) Cancel(turnID string) CancelOutcome {
@@ -822,6 +829,7 @@ func (d *sessionDriver) Cancel(turnID string) CancelOutcome {
 			return nil
 		}
 		d.phase = sessionCancelling
+		d.invalidateTitleLocked()
 		d.resolveInteractionsLocked()
 		cancel = d.cancel
 		outcome = CancelAccepted
@@ -856,6 +864,7 @@ func (d *sessionDriver) stopAll(deleting bool) bool {
 		d.pauseCh = nil
 		d.pending = nil
 		d.stopped = true
+		d.invalidateTitleLocked()
 		d.stoppedView = false
 		d.resolveInteractionsLocked()
 		d.notifyTurnChangedLocked()
@@ -1681,6 +1690,7 @@ func (d *sessionDriver) replaceSession(sess *session.Session) error {
 		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName {
 			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "replace_pinned_session"}
 		}
+		d.invalidateTitleLocked()
 		d.sess = next
 		return nil
 	})

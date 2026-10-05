@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -447,10 +448,12 @@ type SessionCapabilities struct {
 
 // TurnInput describes one requested turn.
 type TurnInput struct {
-	Content      string
-	MultiContent []chat.MessagePart
-	Retry        bool
-	RequestID    string `json:"request_id,omitempty"`
+	GenerateTitle  bool
+	TitleGenerator *sessiontitle.Generator `json:"-"`
+	Content        string
+	MultiContent   []chat.MessagePart
+	Retry          bool
+	RequestID      string `json:"request_id,omitempty"`
 }
 
 // SessionMetadata is immutable handle metadata.
@@ -635,6 +638,8 @@ type SessionSnapshot struct {
 	PendingInputs      []PendingInput
 	Cursor             uint64
 	TranscriptPosition int
+	Presentation       []Event
+	TitleStatus        string
 }
 
 // SessionEvent is the canonical session event stream. Sequence is

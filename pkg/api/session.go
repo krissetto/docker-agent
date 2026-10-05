@@ -114,10 +114,11 @@ type SessionThinkingLevel struct {
 }
 
 type SessionInputRequest struct {
-	Mode         string             `json:"mode,omitempty"`
-	Content      string             `json:"content"`
-	MultiContent []chat.MessagePart `json:"multi_content,omitempty"`
-	RequestID    string             `json:"request_id,omitempty"`
+	GenerateTitle bool               `json:"generate_title,omitempty"`
+	Mode          string             `json:"mode,omitempty"`
+	Content       string             `json:"content"`
+	MultiContent  []chat.MessagePart `json:"multi_content,omitempty"`
+	RequestID     string             `json:"request_id,omitempty"`
 }
 
 type SessionSubmission[Disposition ~string] struct {
@@ -187,6 +188,8 @@ type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
 	Epoch              string                   `json:"epoch,omitempty"`
 	Cursor             uint64                   `json:"cursor"`
 	TranscriptPosition int                      `json:"transcript_position"`
+	Presentation       []Event                  `json:"presentation,omitempty"`
+	TitleStatus        string                   `json:"title_status,omitempty"`
 }
 
 // SessionEnvelope carries ordered journal events. Before "ready", a stream

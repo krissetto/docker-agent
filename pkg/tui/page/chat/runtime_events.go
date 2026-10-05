@@ -266,6 +266,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		}
 
 	case *runtime.SessionTitleEvent:
+		if p.isSubSessionEvent(msg.SessionID) {
+			return true, nil
+		}
 		return true, p.forwardToSidebar(msg)
 
 	case *runtime.SubagentTreeEvent:
@@ -713,6 +716,11 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 			p.showStartupBanner = false
 		}
 	}
+	for _, event := range snapshot.Presentation {
+		_, cmd := p.handleRuntimeEvent(event)
+		cmds = append(cmds, cmd)
+	}
+	cmds = append(cmds, p.sidebar.SetTitleRegenerating(snapshot.TitleStatus == "started"))
 	running := snapshot.Status.State == runtime.SessionStateRunning || snapshot.Status.State == runtime.SessionStateQueued || snapshot.Status.State == runtime.SessionStateCancelling
 	p.streamCancelled = false
 	cmds = append(cmds, p.setWorking(running))

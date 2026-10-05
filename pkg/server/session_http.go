@@ -92,6 +92,7 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.POST("/:id/thinking-level/cycle", s.cycleCanonicalSessionThinkingLevel)
 	group.PATCH("/:id/thinking-level", s.updateCanonicalSessionThinkingLevel)
 	group.POST("/:id/pause", s.pauseCanonicalSession)
+	group.POST("/:id/title", s.generateCanonicalSessionTitle)
 	group.POST("/:id/switch-agent", s.switchCanonicalSessionAgent)
 	group.PATCH("/:id/starred", s.updateCanonicalSessionStarred)
 	group.DELETE("/:id/attachments", s.removeCanonicalSessionAttachment)
@@ -122,7 +123,7 @@ func (s *Server) sessionInput(c echo.Context) error {
 	if err != nil {
 		return sessionHTTPError(err)
 	}
-	input := runtime.TurnInput{Content: req.Content, MultiContent: req.MultiContent, RequestID: req.RequestID}
+	input := runtime.TurnInput{GenerateTitle: req.GenerateTitle, Content: req.Content, MultiContent: req.MultiContent, RequestID: req.RequestID}
 	var submission runtime.Submission
 	switch req.Mode {
 	case "", "submit":
@@ -436,6 +437,28 @@ func (s *Server) removeCanonicalSessionAttachment(c echo.Context) error {
 		return sessionHTTPError(err)
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) generateCanonicalSessionTitle(c echo.Context) error {
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	owner, ok := handle.(runtime.SessionTitleGenerator)
+	if !ok {
+		return sessionHTTPError(runtime.ErrUnsupported)
+	}
+	var req struct {
+		Messages []string `json:"messages"`
+		Replace  bool     `json:"replace"`
+	}
+	if err := decodeSessionJSON(c, &req); err != nil {
+		return sessionRequestError("invalid request body")
+	}
+	if err := owner.GenerateSessionTitle(c.Request().Context(), nil, req.Messages, req.Replace); err != nil {
+		return sessionHTTPError(err)
+	}
+	return c.NoContent(http.StatusAccepted)
 }
 
 func (s *Server) updateCanonicalSessionTitle(c echo.Context) error {
@@ -774,7 +797,10 @@ func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 }
 
 func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
-	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
+	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, TitleStatus: snapshot.TitleStatus, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
+	for _, event := range snapshot.Presentation {
+		out.Presentation = append(out.Presentation, event)
+	}
 	if snapshot.Session != nil {
 		out.ParentSessionID = snapshot.Session.ParentID
 	}

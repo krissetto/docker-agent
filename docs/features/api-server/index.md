@@ -81,6 +81,7 @@ The canonical endpoints are:
 | `POST` | `/api/v2/sessions/:id/turns/:turnID/wait` | Wait for this exact turn to settle, including durable completion; `204` on success, typed `404` for unknown/expired turns. Disconnecting cancels only the wait. |
 | `POST` | `/api/v2/sessions/:id/retry` | Retry the last failed settled turn. |
 | `PATCH` | `/api/v2/sessions/:id/title` | Session-ordered durable title change. |
+| `POST` | `/api/v2/sessions/:id/title` | Request session-owned title generation (`messages`, `replace`); completion is reported in the canonical event stream. |
 | `GET` | `/api/v2/sessions/:id/tree` | Authoritative subtree rooted at any session node; metrics are cumulative per node and can be summed for a subtree rollup. |
 | `GET` | `/api/v2/sessions/:id/todos` | Current session-keyed todo snapshot. SQLite-backed runtimes persist it; other stores may provide volatile storage. `shared: true` toolsets use the stable root-session ID so agents in one tree share a list without cross-root leakage. |
 | `POST` | `/api/v2/sessions/:id/compact` | Compact the session at its execution boundary. |
