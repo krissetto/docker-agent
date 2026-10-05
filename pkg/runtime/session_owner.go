@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type sessionOwnerCommand struct {
@@ -102,7 +104,7 @@ func (d *sessionDriver) ownerSnapshot(ctx context.Context) (*session.Session, er
 
 func (d *sessionDriver) executionContext(ctx context.Context, generation uint64) (context.Context, *session.Session, error) {
 	snapshot, err := d.ownerSnapshot(ctx)
-	return context.WithValue(ctx, executionIdentityKey{}, executionIdentity{d, generation}), snapshot, err
+	return context.WithValue(tools.WithResourceOwner(ctx, d.resourceOwner), executionIdentityKey{}, executionIdentity{d, generation}), snapshot, err
 }
 
 // commitExecutionEvent applies only the event's typed delta; concurrent accepted
@@ -370,6 +372,7 @@ func (d *sessionDriver) registerElicitation(ctx context.Context, id string, even
 			return ErrSessionStopped
 		}
 		d.interactions[id] = sessionInteraction{kind: InteractionElicitation, turnID: d.activeRequestID, generation: d.generation, event: event, waiter: waiter}
+		d.events.Publish(d.identityID, event)
 		return nil
 	})
 }
@@ -526,4 +529,53 @@ func (r *LocalRuntime) recordElicitationDecline(ctx context.Context, sessionID, 
 	if sink, ok := ctx.Value(executionEventSinkKey{}).(EventSink); ok {
 		sink.Emit(Warning(message.Message.Content, d.AgentName()))
 	}
+}
+
+// retire keeps failed settlement authoritative and closes the owner only after drain.
+func (d *sessionDriver) retire(ctx context.Context) error {
+	if err := d.drainRetirement(ctx); err != nil {
+		return err
+	}
+	d.closeOwner()
+	return nil
+}
+
+func (d *sessionDriver) drainRetirement(ctx context.Context) error {
+	d.StopAll()
+	select {
+	case <-d.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	d.mu.Lock()
+	settling, generation, runErr := d.settling(), d.generation, d.completionRunErr
+	d.mu.Unlock()
+	if settling {
+		d.finishRunContext(ctx, generation, runErr)
+		d.mu.Lock()
+		err := d.completionErr
+		d.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	if d.r != nil && d.r.team != nil {
+		cleanupCtx := tools.WithResourceOwner(context.WithoutCancel(ctx), d.resourceOwner)
+		var errs []error
+		for _, name := range d.r.team.AgentNames() {
+			a, err := d.r.team.Agent(name)
+			if err != nil {
+				continue
+			}
+			for _, toolset := range a.ToolSets() {
+				if scoped, ok := tools.As[tools.ResourceOwnerStopper](toolset); ok {
+					errs = append(errs, scoped.StopResourceOwner(cleanupCtx))
+				}
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

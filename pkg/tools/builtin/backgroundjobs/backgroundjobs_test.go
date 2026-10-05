@@ -105,15 +105,16 @@ func TestBackgroundJobsTool_ParametersAreObjects(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_Completed(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell semantics; skipped on Windows")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "echo hello"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "echo hello"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -123,7 +124,7 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Completed(t *testing.T) {
 	})
 	require.NotEmpty(t, jobID)
 
-	result, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID})
+	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "completed")
 	assert.Contains(t, result.Output, "Exit Code: 0")
@@ -131,15 +132,16 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Completed(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_FailedExit(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell semantics; skipped on Windows")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "exit 3"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "exit 3"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -149,22 +151,23 @@ func TestBackgroundJobsTool_WaitBackgroundJob_FailedExit(t *testing.T) {
 	})
 	require.NotEmpty(t, jobID)
 
-	result, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID})
+	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "failed")
 	assert.Contains(t, result.Output, "Exit Code: 3")
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_AlreadyCompleted(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell semantics; skipped on Windows")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "echo done"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "echo done"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -174,35 +177,37 @@ func TestBackgroundJobsTool_WaitBackgroundJob_AlreadyCompleted(t *testing.T) {
 	})
 	require.NotEmpty(t, jobID)
 
-	result1, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID})
+	result1, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID})
 	require.NoError(t, err)
 	assert.Contains(t, result1.Output, "completed")
 
-	result2, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID})
+	result2, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID})
 	require.NoError(t, err)
 	assert.Contains(t, result2.Output, "completed")
 	assert.Contains(t, result2.Output, "Exit Code: 0")
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_UnknownID(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
 
-	result, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: "job_does_not_exist"})
+	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: "job_does_not_exist"})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "Job not found")
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_Timeout(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("sleep not available on Windows cmd")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "sleep 30"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "exec sleep 30"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -213,7 +218,7 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Timeout(t *testing.T) {
 	require.NotEmpty(t, jobID)
 
 	start := time.Now()
-	result, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID, Timeout: 1})
+	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID, Timeout: 1})
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
@@ -223,15 +228,16 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Timeout(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_ContextCancelled(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("sleep not available on Windows cmd")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "sleep 30"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "exec sleep 30"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -241,7 +247,7 @@ func TestBackgroundJobsTool_WaitBackgroundJob_ContextCancelled(t *testing.T) {
 	})
 	require.NotEmpty(t, jobID)
 
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(ctx)
 	cancel()
 
 	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID, Timeout: 60})
@@ -250,15 +256,16 @@ func TestBackgroundJobsTool_WaitBackgroundJob_ContextCancelled(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_WaitBackgroundJob_Stopped(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("sleep not available on Windows cmd")
 	}
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "sleep 30"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "exec sleep 30"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
 	var jobID string
@@ -269,10 +276,10 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Stopped(t *testing.T) {
 	require.NotEmpty(t, jobID)
 
 	go func() {
-		_, _ = tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: jobID})
+		_, _ = tool.handler.StopBackgroundJob(ctx, StopBackgroundJobArgs{JobID: jobID})
 	}()
 
-	result, err := tool.handler.WaitBackgroundJob(t.Context(), WaitBackgroundJobArgs{JobID: jobID, Timeout: 10})
+	result, err := tool.handler.WaitBackgroundJob(ctx, WaitBackgroundJobArgs{JobID: jobID, Timeout: 10})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "stopped")
 	assert.NotContains(t, result.Output, "Exit Code:",
@@ -280,14 +287,15 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Stopped(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_StopEscalatesWhenSIGTERMIgnored(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX signals; skipped on Windows")
 	}
 
 	tool := newTestTool(t)
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
-		Cmd: `trap '' TERM; echo ready; while :; do sleep 1; done`,
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{
+		Cmd: `trap '' TERM; echo ready; while :; do sleep 0.1; done`,
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
 
@@ -304,7 +312,7 @@ func TestBackgroundJobsTool_StopEscalatesWhenSIGTERMIgnored(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	started := time.Now()
-	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	result, err := tool.handler.StopBackgroundJob(ctx, StopBackgroundJobArgs{JobID: job.id})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	assert.Less(t, time.Since(started), 5*time.Second)
@@ -315,21 +323,22 @@ func TestBackgroundJobsTool_StopEscalatesWhenSIGTERMIgnored(t *testing.T) {
 	}
 	assert.Equal(t, statusStopped, job.status.Load())
 
-	result, err = tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	result, err = tool.handler.StopBackgroundJob(ctx, StopBackgroundJobArgs{JobID: job.id})
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Output, "not running")
 }
 
 func TestBackgroundJobsTool_StopWaitsForRealExit(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX signals; skipped on Windows")
 	}
 
 	tool := newTestTool(t)
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
-		Cmd: `trap 'sleep 0.1; exit 0' TERM; echo ready; while :; do sleep 1; done`,
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{
+		Cmd: `trap 'sleep 0.1; exit 0' TERM; echo ready; while :; do sleep 0.1; done`,
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
 
@@ -345,7 +354,7 @@ func TestBackgroundJobsTool_StopWaitsForRealExit(t *testing.T) {
 		return strings.Contains(job.output.String(), "ready")
 	}, time.Second, 10*time.Millisecond)
 
-	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	result, err := tool.handler.StopBackgroundJob(ctx, StopBackgroundJobArgs{JobID: job.id})
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	select {
@@ -357,25 +366,27 @@ func TestBackgroundJobsTool_StopWaitsForRealExit(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_RunBackgroundJob(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	result, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "echo test"}, tools.NopRuntime{})
+	result, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "echo test"}, tools.NopRuntime{})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "Background job started with ID:")
 }
 
 func TestBackgroundJobsTool_RunBackgroundJobRecall(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
 	tool.handler.recall = true
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
 	rt := &recallRuntime{recalls: make(chan string, 1)}
-	result, err := tool.handler.RunBackgroundJobWithRecall(t.Context(), RunBackgroundJobRecallArgs{Cmd: "echo recall-output", Recall: true}, rt)
+	result, err := tool.handler.RunBackgroundJobWithRecall(ctx, RunBackgroundJobRecallArgs{Cmd: "echo recall-output", Recall: true}, rt)
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "Recall: requested")
 
@@ -390,10 +401,11 @@ func TestBackgroundJobsTool_RunBackgroundJobRecall(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_RunBackgroundJobRecallRequiresConfig(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
 
-	result, err := tool.handler.RunBackgroundJobWithRecall(t.Context(), RunBackgroundJobRecallArgs{Cmd: "echo test", Recall: true}, &recallRuntime{})
+	result, err := tool.handler.RunBackgroundJobWithRecall(ctx, RunBackgroundJobRecallArgs{Cmd: "echo test", Recall: true}, &recallRuntime{})
 	require.NoError(t, err)
 	require.True(t, result.IsError)
 	assert.Contains(t, result.Output, "recall")
@@ -402,11 +414,12 @@ func TestBackgroundJobsTool_RunBackgroundJobRecallRequiresConfig(t *testing.T) {
 }
 
 func TestBackgroundJobsTool_RunBackgroundJobRecallRequiresCallback(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
 	tool.handler.recall = true
 
-	result, err := tool.handler.RunBackgroundJobWithRecall(t.Context(), RunBackgroundJobRecallArgs{Cmd: "echo test", Recall: true}, tools.NopRuntime{})
+	result, err := tool.handler.RunBackgroundJobWithRecall(ctx, RunBackgroundJobRecallArgs{Cmd: "echo test", Recall: true}, tools.NopRuntime{})
 	require.NoError(t, err)
 	require.True(t, result.IsError)
 	assert.Contains(t, result.Output, "does not support recall")
@@ -475,15 +488,16 @@ func findTool(t *testing.T, toolList []tools.Tool, name string) tools.Tool {
 }
 
 func TestBackgroundJobsTool_ListBackgroundJobs(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	t.Parallel()
 	tool := newTestTool(t)
-	require.NoError(t, tool.Start(t.Context()))
-	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	require.NoError(t, tool.Start(ctx))
+	t.Cleanup(func() { _ = tool.Stop(ctx) })
 
-	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{Cmd: "echo test"}, tools.NopRuntime{})
+	_, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{Cmd: "echo test"}, tools.NopRuntime{})
 	require.NoError(t, err)
 
-	listResult, err := tool.handler.ListBackgroundJobs(t.Context(), nil)
+	listResult, err := tool.handler.ListBackgroundJobs(ctx, nil)
 
 	require.NoError(t, err)
 	assert.Contains(t, listResult.Output, "Background Jobs:")
@@ -539,6 +553,7 @@ func TestResolveWorkDir(t *testing.T) {
 // fraction of the sleep timeout, and correctly interpret ErrWaitDelay as a
 // success if the direct child exited 0.
 func TestBackgroundJobsTool_BackgroundedChildDoesNotBlockReturn(t *testing.T) {
+	ctx := tools.WithResourceOwner(context.WithoutCancel(t.Context()), tools.NewResourceOwner())
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell backgrounding semantics; skipped on Windows")
 	}
@@ -546,10 +561,10 @@ func TestBackgroundJobsTool_BackgroundedChildDoesNotBlockReturn(t *testing.T) {
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
 
 	start := time.Now()
-	result, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
+	result, err := tool.handler.RunBackgroundJob(ctx, RunBackgroundJobArgs{
 		// sleep inherits stdout/stderr from the shell and holds the pipe
-		// open for 30s. The monitor must return as soon as the shell exits + waitDelay.
-		Cmd: "sleep 30 &",
+		// open for 2s. The monitor must return as soon as the shell exits + waitDelay.
+		Cmd: "sleep 2 &",
 	}, nil)
 
 	require.NoError(t, err)
@@ -557,7 +572,7 @@ func TestBackgroundJobsTool_BackgroundedChildDoesNotBlockReturn(t *testing.T) {
 
 	// Wait for the monitor goroutine to mark the job as finished.
 	require.Eventually(t, func() bool {
-		listResult, err := tool.handler.ListBackgroundJobs(t.Context(), nil)
+		listResult, err := tool.handler.ListBackgroundJobs(ctx, nil)
 		require.NoError(t, err)
 		return !strings.Contains(listResult.Output, "Status: running")
 	}, 10*time.Second, 100*time.Millisecond)
@@ -568,7 +583,7 @@ func TestBackgroundJobsTool_BackgroundedChildDoesNotBlockReturn(t *testing.T) {
 
 	// Since the direct child (shell) exited 0, the job should be marked completed
 	// even though the pipes were forcefully closed (ErrWaitDelay).
-	listResult, err := tool.handler.ListBackgroundJobs(t.Context(), nil)
+	listResult, err := tool.handler.ListBackgroundJobs(ctx, nil)
 	require.NoError(t, err)
 	assert.Contains(t, listResult.Output, "Status: completed")
 	assert.Contains(t, listResult.Output, "Exit Code: 0")

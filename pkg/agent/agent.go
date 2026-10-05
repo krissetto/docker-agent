@@ -479,9 +479,9 @@ func (a *Agent) HarnessType() string {
 	return a.harness.Type
 }
 
-// Hooks returns the hooks configuration for this agent.
+// Hooks returns an independent copy of the hooks configuration for this agent.
 func (a *Agent) Hooks() *latest.HooksConfig {
-	return a.hooks
+	return a.hooks.Clone()
 }
 
 // StructuredOutput returns the agent's structured-output configuration, or

@@ -279,7 +279,7 @@ func WithLoadTimeWarnings(warnings []string) Opt {
 
 func WithHooks(hooks *latest.HooksConfig) Opt {
 	return func(a *Agent) {
-		a.hooks = hooks
+		a.hooks = hooks.Clone()
 	}
 }
 

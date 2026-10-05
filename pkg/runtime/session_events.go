@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -48,6 +49,7 @@ type sessionEventHub struct {
 	mu              sync.Mutex
 	subs            map[string]map[*sessionEventSubscriber]struct{}
 	seqSubs         map[string]map[*sequencedSessionEventSubscriber]struct{}
+	publicSubs      map[string]map[*publicSessionEventSubscriber]struct{}
 	inflight        map[string]*inflightAssistant
 	activeTools     map[string][]*inflightTool
 	outputBytes     map[string]int
@@ -95,6 +97,7 @@ func newSessionEventHubWithLimits(capacity, maxBytes int) *sessionEventHub {
 		epoch:       uuid.NewString(),
 		subs:        map[string]map[*sessionEventSubscriber]struct{}{},
 		seqSubs:     map[string]map[*sequencedSessionEventSubscriber]struct{}{},
+		publicSubs:  map[string]map[*publicSessionEventSubscriber]struct{}{},
 		inflight:    map[string]*inflightAssistant{},
 		activeTools: map[string][]*inflightTool{},
 		outputBytes: map[string]int{},
@@ -200,6 +203,12 @@ func (h *sessionEventHub) Publish(sessionID string, event Event) {
 }
 
 func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
+	detached, err := observerEventSnapshot(event)
+	if err != nil {
+		slog.Warn("Cannot detach session event", "error", err)
+		return
+	}
+	event = detached
 	if h.closed[sessionID] {
 		return
 	}
@@ -233,7 +242,7 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- event:
+		case sub.out <- cloneSessionEvent(event):
 			sub.queuedBytes += eventBytes
 			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
@@ -251,11 +260,26 @@ func (h *sessionEventHub) publishLocked(sessionID string, event Event) {
 			continue
 		}
 		select {
-		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: event}:
+		case sub.out <- SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEvent(event)}:
 			sub.queuedBytes += eventBytes
 			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
 		default:
 			h.gapSequencedSubscriberLocked(sessionID, sub)
+		}
+	}
+	for sub := range h.publicSubs[sessionID] {
+		reconcileQueuedBytes(&sub.queuedBytes, &sub.queuedSizes, len(sub.out))
+		if eventBytes > maxSessionEventSubscriberBytes-sub.queuedBytes || (!terminalEvent && len(sub.out) >= sub.limit) {
+			h.gapPublicSubscriberLocked(sessionID, sub)
+			continue
+		}
+		item := SequencedSessionEvent{Epoch: h.epoch, Sequence: sequence, RequestID: h.requestID[sessionID], InteractionID: interactionID, Event: cloneSessionEvent(event)}
+		select {
+		case sub.out <- sessionEnvelope(sessionID, item):
+			sub.queuedBytes += eventBytes
+			sub.queuedSizes = append(sub.queuedSizes, eventBytes)
+		default:
+			h.gapPublicSubscriberLocked(sessionID, sub)
 		}
 	}
 }
@@ -383,7 +407,7 @@ func (h *sessionEventHub) replayLocked(sessionID string, since uint64) []Sequenc
 	}
 	for _, retained := range replay {
 		if retained.sequence > since {
-			out = append(out, SequencedSessionEvent{Epoch: h.epoch, Sequence: retained.sequence, RequestID: retained.requestID, InteractionID: retained.interactionID, Event: retained.event})
+			out = append(out, SequencedSessionEvent{Epoch: h.epoch, Sequence: retained.sequence, RequestID: retained.requestID, InteractionID: retained.interactionID, Event: cloneSessionEvent(retained.event)})
 		}
 	}
 	return out
@@ -419,7 +443,7 @@ func interactionEventID(event Event) string {
 func (h *sessionEventHub) HasSubscribers(sessionID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.subs[sessionID]) != 0 || len(h.seqSubs[sessionID]) != 0
+	return len(h.subs[sessionID]) != 0 || len(h.seqSubs[sessionID]) != 0 || len(h.publicSubs[sessionID]) != 0
 }
 
 func (h *sessionEventHub) FenceDelete(sessionID string) {
@@ -457,6 +481,9 @@ func (h *sessionEventHub) deleteLocked(sessionID string) {
 	for sub := range h.seqSubs[sessionID] {
 		h.removeSequencedSubscriberLocked(sessionID, sub)
 	}
+	for sub := range h.publicSubs[sessionID] {
+		h.removePublicSubscriberLocked(sessionID, sub)
+	}
 	delete(h.inflight, sessionID)
 	delete(h.activeTools, sessionID)
 	delete(h.outputBytes, sessionID)
@@ -481,6 +508,9 @@ func (h *sessionEventHub) Close() {
 		ids[id] = struct{}{}
 	}
 	for id := range h.seqSubs {
+		ids[id] = struct{}{}
+	}
+	for id := range h.publicSubs {
 		ids[id] = struct{}{}
 	}
 	h.mu.Unlock()
@@ -700,4 +730,90 @@ func cloneLiveSchema(value any) any {
 		return nil
 	}
 	return cloned
+}
+
+func cloneSessionEvent(event Event) Event {
+	if event == nil {
+		return nil
+	}
+	detached, err := observerEventSnapshot(event)
+	if err != nil {
+		slog.Warn("Cannot detach session event", "error", err)
+		return nil
+	}
+	return detached
+}
+
+type publicSessionEventSubscriber struct {
+	queuedBytes int
+	queuedSizes []int
+	out         chan SessionEvent
+	limit       int
+	closed      bool
+	done        chan struct{}
+}
+
+// Public observations use the hub's accounted queue directly, without a second buffer.
+func (h *sessionEventHub) SubscribePublic(sessionID string, since *uint64, buffer int) (seed []SequencedSessionEvent, events <-chan SessionEvent, cancel func(), cursor uint64, done <-chan struct{}) {
+	buffer = min(max(buffer, 1), maxSessionEventSubscriberBuffer)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cursor = h.nextSeq[sessionID]
+	if h.closed[sessionID] || h.subscriberCount >= maxSessionEventSubscribers || (since == nil && !h.liveSeedFitsLocked(sessionID)) || (since != nil && !h.replayFitsLocked(sessionID, *since)) {
+		out := make(chan SessionEvent, 1)
+		out <- sessionEnvelope(sessionID, SequencedSessionEvent{Epoch: h.epoch, Gap: true, FirstAvailable: cursor + 1})
+		close(out)
+		closed := make(chan struct{})
+		close(closed)
+		return nil, out, func() {}, cursor, closed
+	}
+	sub := &publicSessionEventSubscriber{done: make(chan struct{}), out: make(chan SessionEvent, buffer+1), limit: buffer}
+	if since == nil {
+		for _, event := range h.liveSeedLocked(sessionID) {
+			seed = append(seed, SequencedSessionEvent{Epoch: h.epoch, Event: event})
+		}
+	} else {
+		seed = h.replayLocked(sessionID, *since)
+	}
+	if h.publicSubs[sessionID] == nil {
+		h.publicSubs[sessionID] = make(map[*publicSessionEventSubscriber]struct{})
+	}
+	h.publicSubs[sessionID][sub] = struct{}{}
+	h.subscriberCount++
+	var once sync.Once
+	cancel = func() {
+		once.Do(func() { h.mu.Lock(); defer h.mu.Unlock(); h.removePublicSubscriberLocked(sessionID, sub) })
+	}
+	return seed, sub.out, cancel, cursor, sub.done
+}
+
+func (h *sessionEventHub) gapPublicSubscriberLocked(sessionID string, sub *publicSessionEventSubscriber) {
+	if sub.closed {
+		return
+	}
+	gap := sessionEnvelope(sessionID, SequencedSessionEvent{Epoch: h.epoch, Gap: true, FirstAvailable: h.nextSeq[sessionID]})
+	select {
+	case sub.out <- gap:
+	default:
+		select {
+		case <-sub.out:
+		default:
+		}
+		sub.out <- gap
+	}
+	h.removePublicSubscriberLocked(sessionID, sub)
+}
+
+func (h *sessionEventHub) removePublicSubscriberLocked(sessionID string, sub *publicSessionEventSubscriber) {
+	if sub.closed {
+		return
+	}
+	sub.closed = true
+	h.subscriberCount--
+	delete(h.publicSubs[sessionID], sub)
+	if len(h.publicSubs[sessionID]) == 0 {
+		delete(h.publicSubs, sessionID)
+	}
+	close(sub.out)
+	close(sub.done)
 }

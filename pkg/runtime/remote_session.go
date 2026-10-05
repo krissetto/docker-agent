@@ -806,6 +806,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 	}
 	snapshots := []SessionSnapshot{snapshot}
 	var replay []SessionEvent
+	replayBytes := 0
 	replaySequences := map[string]uint64{}
 	for _, item := range snapshots {
 		replaySequences[item.Status.SessionID] = item.Cursor
@@ -868,24 +869,26 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		if envelope.Sequence != 0 {
 			replaySequences[envelope.SessionID] = envelope.Sequence
 		}
+		replayBytes += estimateEventBytes(envelope.Event) + len(envelope.TurnID) + len(envelope.InteractionID)
+		if len(replay) >= maxSessionEventSubscriberBuffer || replayBytes > maxSessionEventSubscriberBytes {
+			resp.Body.Close()
+			cancel()
+			return Observation{}, protocolError(errors.New("session replay exceeds observation limits"))
+		}
 		replay = append(replay, envelope)
 	}
 	watchdog.touch(true)
-	buffer := options.Buffer
-	if buffer <= 0 {
-		buffer = defaultEventChannelCapacity
-	}
 	var events chan SessionEvent
 	if !options.Tree || !options.OrderedTree {
-		events = make(chan SessionEvent, buffer)
+		events = make(chan SessionEvent)
 	}
 	var sessionsAdded chan SessionSnapshot
 	var updates chan TreeUpdate
 	if options.Tree {
 		if options.OrderedTree {
-			updates = make(chan TreeUpdate, buffer)
+			updates = make(chan TreeUpdate)
 		} else {
-			sessionsAdded = make(chan SessionSnapshot, buffer)
+			sessionsAdded = make(chan SessionSnapshot)
 		}
 	}
 	errorsCh := make(chan error, 1)

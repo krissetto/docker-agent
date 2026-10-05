@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 
@@ -20,6 +21,10 @@ func (d *sessionDriver) admitInput(ctx context.Context, msg QueuedMessage, op Se
 }
 
 func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, steer bool) (admission inputAdmission, err error) {
+	msg, err = detachQueuedInput(msg)
+	if err != nil {
+		return admission, err
+	}
 	queued := false
 	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if found, existingQueued, existingErr := d.existingInputLocked(msg); found || existingErr != nil {
@@ -231,4 +236,14 @@ func (d *sessionDriver) finishCanceledStart() bool {
 		}
 	}
 	return canceled
+}
+
+func detachQueuedInput(msg QueuedMessage) (QueuedMessage, error) {
+	data, err := json.Marshal(msg.MultiContent)
+	if err != nil {
+		return QueuedMessage{}, err
+	}
+	msg.MultiContent = nil
+	err = json.Unmarshal(data, &msg.MultiContent)
+	return msg, err
 }

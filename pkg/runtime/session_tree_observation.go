@@ -29,6 +29,7 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	if buffer <= 0 {
 		buffer = defaultEventChannelCapacity
 	}
+	buffer = min(buffer, maxSessionEventSubscriberBuffer)
 	h.runtime.subagents.ensureRoot(h.driver.session(), h.agentName)
 	topology, cancelTopology := h.runtime.subagents.tree.Subscribe(buffer)
 	initial, ok := <-topology
@@ -45,14 +46,14 @@ func (h *sessionHandle) observeTreeWith(ctx context.Context, options ObserveOpti
 	obsCtx, cancelCtx := context.WithCancel(ctx)
 	var events chan SessionEvent
 	if !options.Tree || !options.OrderedTree {
-		events = make(chan SessionEvent, buffer)
+		events = make(chan SessionEvent)
 	}
 	var sessionsAdded chan SessionSnapshot
 	var updates chan TreeUpdate
 	if options.OrderedTree {
-		updates = make(chan TreeUpdate, buffer)
+		updates = make(chan TreeUpdate)
 	} else {
-		sessionsAdded = make(chan SessionSnapshot, buffer)
+		sessionsAdded = make(chan SessionSnapshot)
 	}
 	errorsCh := make(chan error, 1)
 	observations := make(map[string]Observation)

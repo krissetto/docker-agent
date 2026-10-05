@@ -82,7 +82,6 @@ type LocalRuntime struct {
 	shutdownMu                sync.Mutex
 	shutdownGate              chan struct{}
 	shutdownFence             sync.Once
-	creationMu                sync.Mutex
 	drainMu                   sync.Mutex
 	drainCtx                  context.Context //nolint:containedctx // supervisor shutdown caller owns bounded durability drain
 	lifecycleCtx              context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
@@ -315,16 +314,18 @@ func WithTracer(t trace.Tracer) Opt {
 	}
 }
 
-// WithSteerQueue sets a custom MessageQueue for mid-turn message injection.
-// If not provided, an in-memory buffered queue is used.
+// WithSteerQueue is retained for source compatibility and does nothing.
+//
+// Deprecated: Custom queues are unsupported. Use SessionHandle.Steer for session-owned delivery.
 func WithSteerQueue(q MessageQueue) Opt {
 	return func(r *LocalRuntime) {
 		_ = q
 	}
 }
 
-// WithFollowUpQueue sets a custom MessageQueue for end-of-turn follow-up
-// messages. If not provided, an in-memory buffered queue is used.
+// WithFollowUpQueue is retained for source compatibility and does nothing.
+//
+// Deprecated: Custom queues are unsupported. Use SessionHandle.Submit for session-owned queued delivery.
 func WithFollowUpQueue(q MessageQueue) Opt {
 	return func(r *LocalRuntime) {
 		_ = q
@@ -519,7 +520,8 @@ func WithBudget(cfg *latest.BudgetConfig) Opt {
 		if cfg.IsZero() {
 			return
 		}
-		r.budgetCfg = cfg
+		clone := *cfg
+		r.budgetCfg = &clone
 	}
 }
 
@@ -531,8 +533,11 @@ func WithNamedBudgets(defs map[string]latest.BudgetConfig, agentBudgets map[stri
 		if len(defs) == 0 || len(agentBudgets) == 0 {
 			return
 		}
-		r.budgetsCfg = defs
-		r.agentBudgets = agentBudgets
+		r.budgetsCfg = maps.Clone(defs)
+		r.agentBudgets = make(map[string][]string, len(agentBudgets))
+		for name, budgets := range agentBudgets {
+			r.agentBudgets[name] = slices.Clone(budgets)
+		}
 	}
 }
 

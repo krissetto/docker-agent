@@ -63,7 +63,10 @@ func (r *LocalRuntime) enforceMaxIterations(
 		"max", runtimeMaxIterations,
 	)
 
-	requestID := "max-iterations"
+	requestID, err := newSessionRequestID()
+	if err != nil {
+		return runtimeMaxIterations, iterationStop
+	}
 	// Install the responder rendezvous before publishing the interaction. An
 	// observer may answer immediately after seeing the event; publishing first
 	// creates a real window where SessionHandle.Respond cannot deliver and
@@ -71,9 +74,6 @@ func (r *LocalRuntime) enforceMaxIterations(
 	var resume <-chan ResumeRequest
 
 	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-		if active := d.ActiveRequestID(); active != "" {
-			requestID = active
-		}
 		if !sess.NonInteractive && ctx.Err() == nil {
 			var err error
 			resume, err = d.registerResume(ctx, requestID, InteractionMaxIterations)

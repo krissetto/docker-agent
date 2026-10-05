@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // sessionStartGate is consulted before a driver starts a run; a non-nil error
@@ -93,6 +94,7 @@ type sessionDriver struct {
 	ownerClose    sync.Once
 	ownerDone     chan struct{}
 	// Stable admission topology; readable without waiting for per-session I/O.
+	resourceOwner  *tools.ResourceOwner
 	identityID     string
 	identityParent string
 	identityAsync  bool
@@ -218,7 +220,7 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
-	d := &sessionDriver{ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
+	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
 		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
 		for position, item := range sess.MessagesSnapshot() {
@@ -756,7 +758,8 @@ func (d *sessionDriver) UpdateTitle(ctx context.Context, title string) error {
 
 type driverObservation struct {
 	seed   []SequencedSessionEvent
-	live   <-chan SequencedSessionEvent
+	live   <-chan SessionEvent
+	done   <-chan struct{}
 	cancel func()
 
 	cursor        uint64
@@ -792,9 +795,9 @@ func (d *sessionDriver) observe(since *uint64, buffer int) driverObservation {
 	if d.reclaiming || (d.stopped && !d.stoppedView) {
 		return driverObservation{}
 	}
-	seed, live, cancel, cursor := d.events.SubscribeSequenced(d.sessionIDLocked(), since, buffer)
+	seed, live, cancel, cursor, done := d.events.SubscribePublic(d.sessionIDLocked(), since, buffer)
 	cloned, status, interactions, pendingInputs, position := d.snapshotLocked()
-	return driverObservation{seed: seed, live: live, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position}
+	return driverObservation{seed: seed, live: live, done: done, cancel: cancel, cursor: cursor, session: cloned, status: status, interactions: interactions, pendingInputs: pendingInputs, position: position}
 }
 
 func (d *sessionDriver) Cancel(turnID string) CancelOutcome {

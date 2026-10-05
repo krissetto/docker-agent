@@ -66,6 +66,7 @@ package builtins
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 
 	"github.com/docker/docker-agent/pkg/hooks"
@@ -165,6 +166,7 @@ type AutoInjector interface {
 // (an [AutoInjector]) so it can be configured by the embedder rather
 // than by another bool on AgentDefaults.
 func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
+	cfg = cfg.Clone()
 	if cfg == nil {
 		cfg = &hooks.Config{}
 	}
@@ -173,7 +175,7 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 		cfg.TurnStart = append(cfg.TurnStart, builtinHook(AddDate))
 	}
 	if len(d.AddPromptFiles) > 0 {
-		args := d.AddPromptFiles
+		args := slices.Clone(d.AddPromptFiles)
 		if d.AddPromptFilesDepth > 0 {
 			args = append([]string{depthArgPrefix + strconv.Itoa(d.AddPromptFilesDepth)}, args...)
 		}

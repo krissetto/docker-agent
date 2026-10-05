@@ -169,8 +169,11 @@ func (v *localSessionRuntimeView) ListSessionSummaries(ctx context.Context, opti
 }
 
 func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
-	v.runtime.creationMu.Lock()
-	defer v.runtime.creationMu.Unlock()
+	release, err := v.runtime.sessionDrivers.reserveCreation(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	return v.loadSession(ctx, sessionID)
 }
 
@@ -274,8 +277,14 @@ type sessionHandle struct {
 // CreateSession returns the stable handle for sess, creating its session if
 // needed. Binding identity is immutable and must match the session.
 func (r *LocalRuntime) CreateSession(ctx context.Context, sess *session.Session, binding SessionBinding) (SessionHandle, error) {
-	r.creationMu.Lock()
-	defer r.creationMu.Unlock()
+	if sess == nil || sess.ID == "" {
+		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "create_session"}
+	}
+	release, err := r.sessionDrivers.reserveCreation(ctx, sess.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return r.createSession(ctx, sess, binding)
 }
 
@@ -1105,28 +1114,15 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	if observed.live == nil || observed.cancel == nil {
 		return Observation{}, &SessionError{Kind: SessionErrorStopped, SessionID: h.sessionID, Operation: "observe"}
 	}
-	out := make(chan SessionEvent, buffer)
 	obsCtx, cancelCtx := context.WithCancel(ctx)
 	var once sync.Once
 	cancel := func() { once.Do(func() { cancelCtx(); observed.cancel() }) }
 	go func() {
-		defer close(out)
-		defer observed.cancel()
-		for {
-			select {
-			case <-obsCtx.Done():
-				return
-			case item, ok := <-observed.live:
-				if !ok {
-					return
-				}
-				envelope := sessionEnvelope(h.sessionID, item)
-				select {
-				case out <- envelope:
-				case <-obsCtx.Done():
-					return
-				}
-			}
+		select {
+		case <-obsCtx.Done():
+			observed.cancel()
+		case <-observed.done:
+			cancelCtx()
 		}
 	}()
 	replay := make([]SessionEvent, len(observed.seed))
@@ -1135,7 +1131,7 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	}
 	return Observation{
 		Initial: []SessionSnapshot{{Epoch: h.driver.events.epoch, Session: observed.session, Status: observed.status, Interactions: observed.interactions, PendingInputs: observed.pendingInputs, Cursor: observed.cursor, TranscriptPosition: observed.position}},
-		Replay:  replay, Events: out, Cancel: cancel,
+		Replay:  replay, Events: observed.live, Cancel: cancel,
 	}, nil
 }
 

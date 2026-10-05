@@ -25,6 +25,7 @@ type sessionDriverRegistry struct {
 	prepareRestoreHook func(string) // test-only barrier before reservation
 	stoppedTrees       map[string]struct{}
 	pendingClaims      map[string]int
+	creating           map[string]chan struct{}
 	closed             bool
 	workOnce           sync.Once
 	work               chan struct{}
@@ -132,6 +133,9 @@ func (g *sessionDriverRegistry) evictSettledForCapacityLocked() bool {
 			continue
 		}
 		d := g.drivers[id]
+		if d != nil && !d.registrySnapshot().active && !driverDrained(d) {
+			return false
+		}
 		if d != nil && g.reclaimDriverLocked(id, d) {
 			return true
 		}
@@ -152,20 +156,24 @@ func (g *sessionDriverRegistry) reclaimDriverLocked(id string, d *sessionDriver)
 		if g.closed || g.drivers[id] != d || g.pendingClaims[id] != 0 || g.reservations[id] != nil || g.ancestorResidentLocked(id) || !d.beginReclaimLocked() {
 			return nil
 		}
+		d.maintenanceRetired = true
+		reclaimed = true
+		return nil
+	})
+	if reclaimed {
+		if err := d.retire(context.WithoutCancel(g.r.lifetime())); err != nil {
+			reclaimed = false
+		}
+	}
+	g.mu.Lock()
+	if reclaimed && g.drivers[id] == d {
 		delete(g.drivers, id)
 		g.releasePersistence(id)
 		if g.r != nil && g.r.sessionEvents != nil {
 			g.r.sessionEvents.Delete(id)
 		}
-		reclaimed = true
-		return nil
-	})
-	g.mu.Lock()
-	if reclaimed {
-		g.mu.Unlock()
-		d.closeOwner()
-		g.mu.Lock()
 	}
+
 	return reclaimed
 }
 
@@ -224,9 +232,10 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "register"}
 	}
 	d := g.drivers[sess.ID]
+	var retired *sessionDriver
 	replacing := 0
 	if d != nil && d.registrySnapshot().stopped {
-		if !d.registrySnapshot().settled {
+		if !d.registrySnapshot().settled || d.registrySnapshot().reclaiming {
 			g.mu.Unlock()
 			return nil, &SessionError{Kind: SessionErrorStopped, SessionID: sess.ID, Operation: "register"}
 		}
@@ -236,6 +245,7 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		// the old stopped driver. Delete is still final because deleted IDs are
 		// rejected above before generation replacement.
 		replacing = 1
+		retired = d
 		d = nil
 	}
 	if d == nil {
@@ -246,6 +256,18 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		if !limitAllows(g.residentAndReservedLocked()-replacing, maxSessions) {
 			g.mu.Unlock()
 			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: sess.ID, Operation: SessionOperationCreateSession, Reason: SessionErrorReasonLimit, Limit: maxSessions}
+		}
+		if retired != nil {
+			retired.maintenanceRetired = true
+			g.mu.Unlock()
+			if err := retired.retire(context.WithoutCancel(g.r.lifetime())); err != nil {
+				return nil, err
+			}
+			g.mu.Lock()
+			if g.closed || g.drivers[sess.ID] != retired {
+				g.mu.Unlock()
+				return nil, ErrSessionClosed
+			}
 		}
 		// Preserve the stopped generation's observation state if admission fails.
 		if replacing != 0 && g.r != nil {
@@ -413,9 +435,33 @@ func (g *sessionDriverRegistry) ActivateRestoreBatch(batch []*restoreDriverReser
 		return &SessionError{Kind: SessionErrorClosed, Operation: "restore_activate"}
 	}
 	for _, reservation := range batch {
-		if reservation == nil || reservation.registry != g || g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != reservation.replaces {
+		if reservation == nil || reservation.registry != g || g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != reservation.replaces || reservation.replaces != nil && (!reservation.replaces.registrySnapshot().replaceable || !driverDrained(reservation.replaces)) {
 			g.mu.Unlock()
 			return &SessionError{Kind: SessionErrorInvalid, Operation: "restore_activate"}
+		}
+	}
+	for _, reservation := range batch {
+		if reservation.replaces != nil {
+			reservation.replaces.maintenanceRetired = true
+		}
+	}
+	g.mu.Unlock()
+	for _, reservation := range batch {
+		if reservation.replaces != nil {
+			if err := reservation.replaces.drainRetirement(context.WithoutCancel(g.r.lifetime())); err != nil {
+				return err
+			}
+		}
+	}
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return ErrSessionClosed
+	}
+	for _, reservation := range batch {
+		if g.reservations[reservation.id] != reservation || g.drivers[reservation.id] != reservation.replaces {
+			g.mu.Unlock()
+			return ErrSessionStopped
 		}
 	}
 	if commit != nil {
@@ -429,6 +475,11 @@ func (g *sessionDriverRegistry) ActivateRestoreBatch(batch []*restoreDriverReser
 		delete(g.reservations, reservation.id)
 	}
 	g.mu.Unlock()
+	for _, reservation := range batch {
+		if reservation.replaces != nil {
+			reservation.replaces.closeOwner()
+		}
+	}
 	return nil
 }
 
@@ -585,36 +636,10 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 			d.StopAll()
 		}
 	}
-	var done <-chan struct{}
-	if d != nil {
-		done = d.Done()
-	}
 	if d != nil {
 		d.refreshAttention()
-	}
-
-	if done != nil {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-
-	// A drained goroutine can still own an uncommitted journal/outcome. Never
-	// discard that authority on release/delete; retry the common barrier first.
-	if d != nil {
-		d.mu.Lock()
-		settling, generation, runErr := d.settling(), d.generation, d.completionRunErr
-		d.mu.Unlock()
-		if settling {
-			d.finishRunContext(ctx, generation, runErr)
-			d.mu.Lock()
-			completionErr := d.completionErr
-			d.mu.Unlock()
-			if completionErr != nil {
-				return completionErr
-			}
+		if err := d.retire(ctx); err != nil {
+			return err
 		}
 	}
 
@@ -628,15 +653,12 @@ func (g *sessionDriverRegistry) remove(ctx context.Context, sessionID string, ex
 	}
 
 	g.mu.Lock()
+	defer g.mu.Unlock()
 	if g.drivers[sessionID] == d {
 		delete(g.drivers, sessionID)
 		g.releasePersistence(sessionID)
 	}
 	delete(g.stoppedTrees, sessionID)
-	g.mu.Unlock()
-	if d != nil {
-		d.closeOwner()
-	}
 	return nil
 }
 
@@ -681,30 +703,11 @@ func (g *sessionDriverRegistry) CloseContext(ctx context.Context) error {
 	}
 
 	for _, d := range drivers {
-		select {
-		case <-d.Done():
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := d.retire(ctx); err != nil {
+			return err
 		}
 	}
-	// Execution has stopped, but a failed journal or child commit still owns
-	// its driver. Reuse the settlement barrier under this drain's context;
-	// a later CloseContext can retry without executing accepted work again.
-	for _, d := range drivers {
-		d.mu.Lock()
-		settling := d.settling()
-		generation, runErr := d.generation, d.completionRunErr
-		d.mu.Unlock()
-		if settling {
-			d.finishRunContext(ctx, generation, runErr)
-			d.mu.Lock()
-			err := d.completionErr
-			d.mu.Unlock()
-			if err != nil {
-				return err
-			}
-		}
-	}
+
 	g.mu.Lock()
 	for id := range g.drivers {
 		g.releasePersistence(id)
@@ -829,5 +832,43 @@ func (g *sessionDriverRegistry) releasePersistence(id string) {
 		if p, ok := observer.(*PersistenceObserver); ok {
 			p.release(id)
 		}
+	}
+}
+
+// Reservations exist only for live creations; waiting callers retain no entries.
+func (g *sessionDriverRegistry) reserveCreation(ctx context.Context, id string) (func(), error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		g.mu.Lock()
+		if g.closed {
+			g.mu.Unlock()
+			return nil, ErrSessionClosed
+		}
+		if done := g.creating[id]; done != nil {
+			g.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		limit := g.maxSessionsLocked()
+		if limit <= 0 {
+			limit = maxSessionEventSubscribers
+		}
+		if len(g.creating) >= limit {
+			g.mu.Unlock()
+			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: SessionOperationCreateSession, Limit: limit}
+		}
+		if g.creating == nil {
+			g.creating = make(map[string]chan struct{})
+		}
+		done := make(chan struct{})
+		g.creating[id] = done
+		g.mu.Unlock()
+		return func() { g.mu.Lock(); defer g.mu.Unlock(); delete(g.creating, id); close(done) }, nil
 	}
 }

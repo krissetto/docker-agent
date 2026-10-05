@@ -18,9 +18,9 @@ func createProcessGroup(_ *os.Process) (*processGroup, error) {
 }
 
 func terminateProcess(proc *os.Process, _ *processGroup, force bool) error {
-	signal := syscall.SIGTERM
 	if force {
-		signal = syscall.SIGKILL
+		return proc.Kill()
 	}
-	return syscall.Kill(-proc.Pid, signal)
+	// Process.Signal coordinates with Wait; a bare group PID can be reused after reaping.
+	return proc.Signal(syscall.SIGTERM)
 }

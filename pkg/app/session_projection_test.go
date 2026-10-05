@@ -129,3 +129,14 @@ func TestProjectionPreservesLiveSeedIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectionOrderedElicitationResolutionDoesNotResurrectPrompt(t *testing.T) {
+	a := newMetadataTestApp(t)
+	sink := &appProjectionSink{app: a, ctx: t.Context(), sessionID: "s"}
+	sink.Reset(runtime.SessionSnapshot{Status: runtime.SessionStatus{SessionID: "s"}})
+	prompt := &runtime.ElicitationRequestEvent{Type: "elicitation_request", SessionID: "s", RequestID: "occurrence", ElicitationID: "elicitation"}
+	sink.Apply(runtime.SessionEvent{Version: 1, SessionID: "s", Sequence: 1, InteractionID: prompt.RequestID, Event: prompt})
+	require.True(t, a.Presentation().HasInteraction(InteractionKey{SessionID: "s", InteractionID: prompt.RequestID}))
+	sink.Apply(runtime.SessionEvent{Version: 1, SessionID: "s", Sequence: 2, InteractionID: prompt.RequestID, Event: &runtime.InteractionResolvedEvent{Type: "interaction_resolved", SessionID: "s", InteractionID: prompt.RequestID, Reason: runtime.InteractionResponded}})
+	require.Empty(t, a.Presentation().Interactions)
+}

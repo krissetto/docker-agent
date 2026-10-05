@@ -916,6 +916,25 @@ func (s *Session) AddMessageAt(msg *Message) int {
 	return s.AddMessage(msg)
 }
 
+// PublishMessageID reconciles a durable append only while its receipt remains current.
+// Previously observed message values stay immutable when the row identity arrives.
+func (s *Session) PublishMessageID(receipt *Message, rowID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if receipt == nil {
+		return false
+	}
+	for i, item := range s.Messages {
+		if item.Message == receipt {
+			persisted := *receipt
+			persisted.ID = rowID
+			s.Messages[i].Message = &persisted
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Session) AcceptPendingUserMessage(content string, multiContent ...chat.MessagePart) int {
 	msg := UserMessage(content, multiContent...)
 	msg.Pending = true

@@ -131,7 +131,9 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 			// Publish through the owning session. Persistence observers and
 			// attached views consume the same ordered transition.
 			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-				d.events.Publish(sess.ID, event)
+				if elicitation, ok := event.(*ElicitationRequestEvent); !ok || !elicitation.ownerPublished {
+					d.events.Publish(sess.ID, event)
+				}
 			}
 			out <- event
 		}
@@ -170,6 +172,24 @@ func observerEventSnapshot(event Event) (Event, error) {
 	copiedContext := reflect.ValueOf(out).Elem().FieldByName("AgentContext")
 	if originalContext.IsValid() && copiedContext.IsValid() && copiedContext.CanSet() {
 		copiedContext.Set(originalContext)
+	}
+	// Tool metadata and execution flags are intentionally absent from wire JSON.
+	switch e := event.(type) {
+	case *PartialToolCallEvent:
+		if e.ToolDefinition != nil {
+			tool := cloneLiveToolDefinition(*e.ToolDefinition)
+			out.(*PartialToolCallEvent).ToolDefinition = &tool
+		}
+	case *ToolCallEvent:
+		out.(*ToolCallEvent).ToolDefinition = cloneLiveToolDefinition(e.ToolDefinition)
+	case *ToolCallConfirmationEvent:
+		out.(*ToolCallConfirmationEvent).ToolDefinition = cloneLiveToolDefinition(e.ToolDefinition)
+	case *ToolCallOutputEvent:
+		out.(*ToolCallOutputEvent).ToolDefinition = cloneLiveToolDefinition(e.ToolDefinition)
+	case *ToolCallResponseEvent:
+		out.(*ToolCallResponseEvent).ToolDefinition = cloneLiveToolDefinition(e.ToolDefinition)
+	case *HookBlockedEvent:
+		out.(*HookBlockedEvent).ToolDefinition = cloneLiveToolDefinition(e.ToolDefinition)
 	}
 	switch e := event.(type) {
 	case *MessageAddedEvent:

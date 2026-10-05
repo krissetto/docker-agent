@@ -340,20 +340,23 @@ func (r *LocalRuntime) budgetRoot(sess *session.Session) string {
 }
 
 func (r *LocalRuntime) rootBudget(sess *session.Session) *budgetSet {
-	if sess == nil || (r.budgetCfg.IsZero() && len(r.budgetsCfg) == 0) {
+	if sess == nil {
 		return nil
 	}
 	root := r.budgetRoot(sess)
 	r.budgetMu.Lock()
 	defer r.budgetMu.Unlock()
+	if b, exists := r.rootBudgets[root]; exists {
+		return b
+	}
+	if r.budgetCfg.IsZero() && len(r.budgetsCfg) == 0 {
+		return nil
+	}
 	if r.rootBudgets == nil {
 		r.rootBudgets = make(map[string]*budgetSet)
 	}
-	b, exists := r.rootBudgets[root]
-	if !exists {
-		b = newBudgetSet(r.budgetCfg, r.budgetsCfg, r.agentBudgets)
-		r.rootBudgets[root] = b
-	}
+	b := newBudgetSet(r.budgetCfg, r.budgetsCfg, r.agentBudgets)
+	r.rootBudgets[root] = b
 	return b
 }
 

@@ -54,12 +54,13 @@ const (
 
 // elicitationWaiter is one pending elicitation request's response slot.
 type elicitationWaiter struct {
-	ch    chan ElicitationResult
-	state atomic.Int32
+	ch       chan ElicitationResult
+	canceled chan struct{}
+	state    atomic.Int32
 }
 
 func newElicitationWaiter() *elicitationWaiter {
-	return &elicitationWaiter{ch: make(chan ElicitationResult, 1)}
+	return &elicitationWaiter{ch: make(chan ElicitationResult, 1), canceled: make(chan struct{})}
 }
 
 // tryResolve attempts to deliver result, winning the terminal-state race
@@ -78,7 +79,11 @@ func (w *elicitationWaiter) tryResolve(result ElicitationResult) bool {
 // the caller must then receive from ch instead of treating this as a
 // cancellation, since a value is already there (or is about to land).
 func (w *elicitationWaiter) tryCancel() bool {
-	return w.state.CompareAndSwap(int32(waiterPending), int32(waiterCanceled))
+	if !w.state.CompareAndSwap(int32(waiterPending), int32(waiterCanceled)) {
+		return false
+	}
+	close(w.canceled)
+	return true
 }
 
 // OnElicitationRequest installs a transport subscription. Requests carry the
@@ -406,23 +411,24 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 		if err := owner.registerElicitation(ctx, correlationID, elicitation, wt); err != nil {
 			return tools.ElicitationResult{}, err
 		}
+		elicitation.ownerPublished = true
 	}
 
-	// Acquire and invoke a reliable route as one operation. For background /
-	// prompt-disabled sessions, failure means the last subscriber disappeared
-	// before delivery; abandon the waiter and fast-decline instead of waiting
-	// forever. Interactive requests also project onto the addressed execution stream.
-	delivered := r.emitElicitationRequest(ev)
-	if backgroundWithoutPrompts && !delivered {
-		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
-		r.recordElicitationDecline(ctx, sessionID, spec.message)
-		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
-	}
-
+	// Publish before invoking a route that may synchronously resolve the prompt.
 	if sink, ok := ctx.Value(executionEventSinkKey{}).(EventSink); ok {
 		sink.Emit(ev)
-	} else {
-		owner.events.Publish(sessionID, ev)
+		if !waitForObserverDelivery(ctx, sink) {
+			if wt.tryCancel() || waiterState(wt.state.Load()) == waiterCanceled {
+				return tools.ElicitationResult{}, ctx.Err()
+			}
+			result := <-wt.ch
+			return tools.ElicitationResult{Action: result.Action, Content: result.Content}, nil
+		}
+	}
+	delivered := r.emitElicitationRequest(cloneSessionEvent(ev))
+	if backgroundWithoutPrompts && !delivered {
+		r.recordElicitationDecline(ctx, sessionID, spec.message)
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
 	}
 
 	// Wait for the response addressed to this specific request. The
@@ -438,9 +444,11 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 			Action:  result.Action,
 			Content: result.Content,
 		}, nil
+	case <-wt.canceled:
+		return tools.ElicitationResult{}, context.Canceled
 	case <-ctx.Done():
 		slog.DebugContext(ctx, "Context cancelled while waiting for elicitation response")
-		if wt.tryCancel() {
+		if wt.tryCancel() || waiterState(wt.state.Load()) == waiterCanceled {
 			return tools.ElicitationResult{}, ctx.Err()
 		}
 		result := <-wt.ch

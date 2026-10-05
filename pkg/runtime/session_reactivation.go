@@ -11,6 +11,10 @@ import (
 
 // Only the manual Submit boundary can consume a stopped-view capability.
 func (h *sessionHandle) reactivateStoppedView(ctx context.Context, msg QueuedMessage) (bool, error) {
+	msg, err := detachQueuedInput(msg)
+	if err != nil {
+		return true, err
+	}
 	d := h.driver
 	if !d.registrySnapshot().stoppedView {
 		return false, nil
@@ -50,7 +54,7 @@ func (h *sessionHandle) reactivateStoppedView(ctx context.Context, msg QueuedMes
 	input.TurnID, input.Pending, input.Accepted = msg.RequestID, true, true
 	var record session.ChildRecord
 	var accepted *session.Message
-	err := d.durableIO(ctx, func() (sessionIOReservation, error) {
+	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if !d.stopped || !d.stoppedView || d.reclaiming || d.editReserved {
 			return sessionIOReservation{}, stopped
 		}

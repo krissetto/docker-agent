@@ -90,7 +90,8 @@ func TestInteractionJournalCarriesImmutableCorrelation(t *testing.T) {
 		driver.events.Publish(sess.ID, event)
 		envelope := <-observation.Events
 		assert.Equal(t, interactionEventID(event), envelope.InteractionID)
-		assert.Same(t, event, envelope.Event)
+		assert.NotSame(t, event, envelope.Event)
+		assert.Equal(t, event, envelope.Event)
 	}
 
 	replayed, err := handle.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: sessionObservationEpoch(t, handle)})

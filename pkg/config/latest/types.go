@@ -2940,6 +2940,16 @@ type HooksConfig struct {
 	WorktreeCreate HookDefinitions `json:"worktree_create,omitempty" yaml:"worktree_create,omitempty"`
 }
 
+// Clone returns an independent hooks configuration, including matcher and argument slices.
+func (h *HooksConfig) Clone() *HooksConfig {
+	if h == nil {
+		return nil
+	}
+	var clone HooksConfig
+	types.CloneThroughJSON(h, &clone)
+	return &clone
+}
+
 // HookMatcherConfig represents a hook matcher with its hooks.
 // Used for tool-related hooks (PreToolUse, PostToolUse).
 type HookMatcherConfig struct {

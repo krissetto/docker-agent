@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/path"
@@ -70,7 +71,7 @@ func withHookEnv(ctx context.Context, env []string) context.Context {
 // they must materialize a concrete slice).
 func EnvFromContext(ctx context.Context) []string {
 	env, _ := ctx.Value(hookEnvKey{}).([]string)
-	return env
+	return slices.Clone(env)
 }
 
 // HandlerFactory builds a [Handler] for a single hook invocation.
@@ -219,7 +220,7 @@ func hookWorkingDir(base, override string) string {
 // environment at fire time (matching script_shell's per-call expansion).
 func hookEnv(base []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
-		return base
+		return slices.Clone(base)
 	}
 	env := slices.Clone(base)
 	if len(env) == 0 {
@@ -255,7 +256,9 @@ type commandHandler struct {
 }
 
 func (h *commandHandler) Run(ctx context.Context, input []byte) (HandlerResult, error) {
-	cmd := exec.CommandContext(ctx, h.shell, append(h.shellArgs, h.command)...)
+	cmd := exec.Command(h.shell, append(h.shellArgs, h.command)...) //nolint:noctx // Cancellation joins the process and pipe workers below.
+	cmd.SysProcAttr = hookSysProcAttr()
+	cmd.WaitDelay = 500 * time.Millisecond
 	cmd.Dir = h.workingDir
 	// Expand nil to os.Environ() so the child inherits the parent env
 	// (matching the pre-OTel cmd.Env=h.env=nil behaviour), and copy
@@ -272,12 +275,36 @@ func (h *commandHandler) Run(ctx context.Context, input []byte) (HandlerResult, 
 	cmd.Env = envCopy
 	cmd.Stdin = bytes.NewReader(input)
 
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr hookOutputBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	if err := ctx.Err(); err != nil {
+		return HandlerResult{ExitCode: -1}, err
+	}
+	if err := cmd.Start(); err != nil {
+		return HandlerResult{ExitCode: -1}, err
+	}
+	group, err := newHookProcessGroup(cmd.Process)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return HandlerResult{ExitCode: -1}, err
+	}
+	defer group.close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		_ = group.kill(cmd.Process)
+		<-done
+		err = ctx.Err()
+	}
 	res := HandlerResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	if stdout.truncated || stderr.truncated {
+		return res, errors.New("hook output exceeded capture limit")
+	}
 	if err != nil {
 		// ExitError → structured exit code; anything else (binary
 		// missing, ...) bubbles up so PreToolUse fails closed.
@@ -312,7 +339,7 @@ func (r *Registry) builtinFactory(env HandlerEnv, hook Hook) (Handler, error) {
 	}
 	return &builtinHandler{
 		fn:         fn,
-		args:       hook.Args,
+		args:       slices.Clone(hook.Args),
 		workingDir: hook.WorkingDir,
 		baseDir:    env.WorkingDir,
 		env:        hookEnv(env.Env, hook.Env),
@@ -341,9 +368,32 @@ func (h *builtinHandler) Run(ctx context.Context, input []byte) (HandlerResult, 
 		in.Cwd = hookWorkingDir(h.baseDir, h.workingDir)
 	}
 	ctx = withHookEnv(ctx, h.env)
-	out, err := h.fn(ctx, &in, h.args)
+	out, err := h.fn(ctx, &in, slices.Clone(h.args))
 	if err != nil {
 		return HandlerResult{ExitCode: -1}, err
 	}
 	return HandlerResult{Output: out}, nil
+}
+
+// Capture a bounded prefix while draining the pipes so noisy hooks cannot exhaust memory.
+const maxHookOutputBytes = 1 << 20
+
+type hookOutputBuffer struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *hookOutputBuffer) Len() int { return b.buffer.Len() }
+
+func (b *hookOutputBuffer) String() string { return b.buffer.String() }
+
+func (b *hookOutputBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n > maxHookOutputBytes-b.Len() {
+		b.truncated = true
+	}
+	if remaining := maxHookOutputBytes - b.Len(); remaining > 0 {
+		_, _ = b.buffer.Write(p[:min(len(p), remaining)])
+	}
+	return n, nil
 }

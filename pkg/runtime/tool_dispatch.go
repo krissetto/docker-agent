@@ -30,6 +30,10 @@ import (
 // halts the *batch* but keeps the loop alive so the synthesised tool
 // error responses can be sent back to the model on the next turn.
 func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Session, calls []tools.ToolCall, agentTools []tools.Tool, events EventSink) (stopRun bool, stopMessage string) {
+	origin, hasOrigin := r.sessionDrivers.Lookup(sess.ID)
+	if hasOrigin {
+		ctx = tools.WithResourceOwner(ctx, origin.resourceOwner)
+	}
 	// Bind runtime-managed handlers (transfer_task, handoff, change_model, ...)
 	// to the current events channel: r.toolMap entries take chan Event,
 	// toolexec.ToolHandler doesn't.
@@ -52,15 +56,15 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		Permissions:             r.permissionCheckers,
 		Handlers:                handlers,
 		Recall: func(ctx context.Context, sess *session.Session, _ *agent.Agent, message string) error {
-			driver, ok := r.sessionDrivers.Lookup(sess.ID)
-			if !ok {
+			resident, ok := r.sessionDrivers.Lookup(sess.ID)
+			if !hasOrigin || !ok || resident != origin {
 				return ErrSessionClosed
 			}
 			id, err := newSessionRequestID()
 			if err != nil {
 				return err
 			}
-			_, err = driver.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputMode: "steer"})
+			_, err = origin.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputMode: "steer"})
 			return err
 		},
 	}
@@ -117,12 +121,18 @@ func (e *sinkEmitter) EmitToolCallResponse(toolCallID string, tool tools.Tool, r
 }
 
 func (e *sinkEmitter) EmitToolCallConfirmation(toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) {
+	e.EmitCorrelatedToolCallConfirmation(toolCall.ID, toolCall, tool, agentName, metadata)
+}
+
+func (*sinkEmitter) ConfirmationID() (string, error) { return newSessionRequestID() }
+
+func (e *sinkEmitter) EmitCorrelatedToolCallConfirmation(requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) {
 	event := ToolCallConfirmation(toolCall, tool, agentName, metadata).(*ToolCallConfirmationEvent)
 	event.SessionID = e.sessionID
-	event.RequestID = toolCall.ID
+	event.RequestID = requestID
 	if e.runtime != nil {
 		if d, ok := e.runtime.sessionDrivers.Lookup(e.sessionID); ok {
-			d.RegisterInteraction(toolCall.ID, InteractionConfirmation, event)
+			d.RegisterInteraction(requestID, InteractionConfirmation, event)
 		}
 	}
 	e.events.Emit(event)

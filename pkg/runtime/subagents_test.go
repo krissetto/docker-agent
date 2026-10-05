@@ -600,8 +600,17 @@ func TestSendMessageRestoresVolatileChildFromLiveSnapshot(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	rec, ok := rt.subagents.Read(id)
 	require.True(t, ok)
-	pressure, err := rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
-	require.NoError(t, err)
+	var pressure SessionHandle
+	// Idle topology can precede the final maintenance worker acknowledgement.
+	require.Eventually(t, func() bool {
+		var err error
+		pressure, err = rt.CreateSession(t.Context(), session.New(session.WithID("pressure")), SessionBinding{})
+		if err != nil {
+			require.ErrorIs(t, err, ErrSessionCapacity)
+			return false
+		}
+		return true
+	}, 2*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool { return pressure.(*sessionHandle).driver.Settled() }, 2*time.Second, 10*time.Millisecond)
 	_, exists := rt.sessionDrivers.Lookup(rec.sessionID)
 	require.False(t, exists)

@@ -809,6 +809,8 @@ func (e *PauseChangedEvent) GetSessionID() string { return e.SessionID }
 type ElicitationRequestEvent struct {
 	AgentContext
 
+	ownerPublished bool
+
 	Type                string         `json:"type"`
 	Message             string         `json:"message"`
 	Mode                string         `json:"mode,omitempty"`

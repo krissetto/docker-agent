@@ -109,6 +109,12 @@ type Emitter interface {
 	EmitMessageAdded(sessionID string, msg *session.Message, agentName string)
 }
 
+// CorrelatedConfirmationEmitter separates prompt occurrence from provider tool identity.
+type CorrelatedConfirmationEmitter interface {
+	ConfirmationID() (string, error)
+	EmitCorrelatedToolCallConfirmation(requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string)
+}
+
 // PositionalEmitter is an optional extension of [Emitter]: emitters that also
 // implement it receive the message's session commit position, which viewers
 // merging a transcript snapshot with the live event stream use as an exact
@@ -872,10 +878,21 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 		return runTool()
 	}
 
+	requestID := c.tc.ID
+	correlated, hasCorrelation := c.em.(CorrelatedConfirmationEmitter)
+	if hasCorrelation {
+		var err error
+		requestID, err = correlated.ConfirmationID()
+		if err != nil {
+			confirmationMu.Unlock()
+			c.errorResponse(ctx, err.Error())
+			return CallOutcome{}
+		}
+	}
 	resume := c.d.Resume
 	if c.d.ResumeFor != nil {
 		var err error
-		resume, err = c.d.ResumeFor(ctx, c.sess, c.tc.ID)
+		resume, err = c.d.ResumeFor(ctx, c.sess, requestID)
 		if err != nil {
 			confirmationMu.Unlock()
 			c.errorResponse(ctx, err.Error())
@@ -884,7 +901,11 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	}
 	slog.DebugContext(ctx, "Tools not approved, waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 	c.prompted = true
-	c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+	if hasCorrelation {
+		correlated.EmitCorrelatedToolCallConfirmation(requestID, c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+	} else {
+		c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+	}
 
 	if c.d.Hooks != nil {
 		c.d.Hooks.NotifyUserInput(ctx, c.a, c.sess.ID, "tool confirmation")
@@ -893,7 +914,7 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	for {
 		select {
 		case req := <-resume:
-			if c.d.RequireResponseIdentity && (req.SessionID != c.sess.ID || req.RequestID != c.tc.ID) {
+			if c.d.RequireResponseIdentity && (req.SessionID != c.sess.ID || req.RequestID != requestID) {
 				continue
 			}
 			confirmationMu.Unlock()
@@ -1162,6 +1183,9 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 		res, duration, err = exec(ctx)
 	}); admissionErr != nil {
 		err = admissionErr
+	}
+	if res == nil && err == nil {
+		err = errors.New("tool handler returned a nil result")
 	}
 	telemetry.RecordToolCall(ctx, c.tc.Function.Name, c.sess.ID, c.a.Name(), duration, err)
 

@@ -960,13 +960,14 @@ func (m *appModel) init() tea.Cmd {
 	// The initial tab's pending restore stays lazy — it will be loaded via
 	// handleSwitchTab when the user eventually opens it, just like every
 	// other non-active restored tab.
-	if m.pendingActiveTab != "" {
+	if m.pendingActiveTab != "" && m.pendingActiveTab != m.supervisor.ActiveID() {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
 		return tea.Batch(m.dialogMgr.Init(), switchCmd, shutdownCmd)
 	}
 
+	m.pendingActiveTab = ""
 	activeID := m.supervisor.ActiveID()
 	if persisted := m.pendingRestores[activeID]; persisted != "" {
 		return tea.Batch(m.dialogMgr.Init(), m.beginHostedLoad(persisted, activeID, nil), shutdownCmd)

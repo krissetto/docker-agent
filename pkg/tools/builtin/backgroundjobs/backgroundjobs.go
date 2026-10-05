@@ -61,9 +61,10 @@ type ToolSet struct {
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*ToolSet)(nil)
-	_ tools.Startable    = (*ToolSet)(nil)
-	_ tools.Instructable = (*ToolSet)(nil)
+	_ tools.ToolSet              = (*ToolSet)(nil)
+	_ tools.Startable            = (*ToolSet)(nil)
+	_ tools.Instructable         = (*ToolSet)(nil)
+	_ tools.ResourceOwnerStopper = (*ToolSet)(nil)
 )
 
 type backgroundJobsHandler struct {
@@ -84,6 +85,7 @@ const (
 )
 
 type backgroundJob struct {
+	owner         *tools.ResourceOwner
 	id            string
 	cmd           string
 	cwd           string
@@ -241,6 +243,11 @@ func (h *backgroundJobsHandler) runBackgroundJob(ctx context.Context, rt tools.R
 		}
 	}
 
+	owner := tools.ResourceOwnerFromContext(ctx)
+	if owner == nil {
+		return tools.ResultError("Error: background jobs require a session resource owner."), nil
+	}
+
 	counter := h.jobCounter.Add(1)
 	jobID := fmt.Sprintf("job_%d_%d", time.Now().Unix(), counter)
 
@@ -251,6 +258,7 @@ func (h *backgroundJobsHandler) runBackgroundJob(ctx context.Context, rt tools.R
 	cmd.WaitDelay = waitDelayAfterJobExit
 
 	job := &backgroundJob{
+		owner:     owner,
 		id:        jobID,
 		cmd:       params.Cmd,
 		cwd:       params.Cwd,
@@ -337,12 +345,19 @@ func (h *backgroundJobsHandler) monitorJob(ctx context.Context, job *backgroundJ
 	}
 }
 
-func (h *backgroundJobsHandler) ListBackgroundJobs(_ context.Context, _ map[string]any) (*tools.ToolCallResult, error) {
+func (h *backgroundJobsHandler) ListBackgroundJobs(ctx context.Context, _ map[string]any) (*tools.ToolCallResult, error) {
+	owner := tools.ResourceOwnerFromContext(ctx)
+	if owner == nil {
+		return tools.ResultError("Error: background jobs require a session resource owner."), nil
+	}
 	var output strings.Builder
 	output.WriteString("Background Jobs:\n\n")
 
 	jobCount := 0
 	h.jobs.Range(func(jobID string, job *backgroundJob) bool {
+		if job.owner != owner {
+			return true
+		}
 		jobCount++
 		status := job.status.Load()
 		elapsed := time.Since(job.startTime).Round(time.Second)
@@ -396,18 +411,30 @@ func renderBackgroundJob(job *backgroundJob) string {
 	return result.String()
 }
 
-func (h *backgroundJobsHandler) ViewBackgroundJob(_ context.Context, params ViewBackgroundJobArgs) (*tools.ToolCallResult, error) {
-	job, exists := h.jobs.Load(params.JobID)
+func (h *backgroundJobsHandler) ViewBackgroundJob(ctx context.Context, params ViewBackgroundJobArgs) (*tools.ToolCallResult, error) {
+	job, exists := h.ownedJob(ctx, params.JobID)
 	if !exists {
 		return tools.ResultError("Job not found: " + params.JobID), nil
 	}
 	return tools.ResultSuccess(renderBackgroundJob(job)), nil
 }
 
+func (h *backgroundJobsHandler) ownedJob(ctx context.Context, jobID string) (*backgroundJob, bool) {
+	owner := tools.ResourceOwnerFromContext(ctx)
+	if owner == nil {
+		return nil, false
+	}
+	job, exists := h.jobs.Load(jobID)
+	if !exists || job.owner != owner {
+		return nil, false
+	}
+	return job, true
+}
+
 const defaultWaitTimeout = 60 * time.Second
 
 func (h *backgroundJobsHandler) WaitBackgroundJob(ctx context.Context, params WaitBackgroundJobArgs) (*tools.ToolCallResult, error) {
-	job, exists := h.jobs.Load(params.JobID)
+	job, exists := h.ownedJob(ctx, params.JobID)
 	if !exists {
 		return tools.ResultError("Job not found: " + params.JobID), nil
 	}
@@ -434,8 +461,8 @@ func (h *backgroundJobsHandler) WaitBackgroundJob(ctx context.Context, params Wa
 	}
 }
 
-func (h *backgroundJobsHandler) StopBackgroundJob(_ context.Context, params StopBackgroundJobArgs) (*tools.ToolCallResult, error) {
-	job, exists := h.jobs.Load(params.JobID)
+func (h *backgroundJobsHandler) StopBackgroundJob(ctx context.Context, params StopBackgroundJobArgs) (*tools.ToolCallResult, error) {
+	job, exists := h.ownedJob(ctx, params.JobID)
 	if !exists {
 		return tools.ResultError("Job not found: " + params.JobID), nil
 	}
@@ -453,7 +480,7 @@ func stopBackgroundJob(job *backgroundJob) error {
 		return fmt.Errorf("job %s is not running (current status: %s)", job.id, statusToString(job.status.Load()))
 	}
 
-	if err := terminateProcess(job.process, job.processGroup, false); err != nil {
+	if err := terminateProcess(job.process, job.processGroup, false); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		if job.status.Load() == statusRunning {
 			return fmt.Errorf("error stopping job %s: %w", job.id, err)
 		}
@@ -461,7 +488,7 @@ func stopBackgroundJob(job *backgroundJob) error {
 	}
 	job.stopRequested.Store(true)
 	if !waitForJob(job.done, gracefulStopTimeout) {
-		if err := terminateProcess(job.process, job.processGroup, true); err != nil && job.status.Load() == statusRunning {
+		if err := terminateProcess(job.process, job.processGroup, true); err != nil && !errors.Is(err, os.ErrProcessDone) && job.status.Load() == statusRunning {
 			return fmt.Errorf("error force-stopping job %s: %w", job.id, err)
 		}
 		if !waitForJob(job.done, forcedStopTimeout) {
@@ -568,7 +595,7 @@ func (h *backgroundJobsHandler) resolveWorkDir(cwd string) string {
 func (t *ToolSet) Instructions() string {
 	instructions := `## Background Job Tools
 
-Use run_background_job for long-running processes (servers, watchers). Output capped at 10MB per job. All jobs auto-terminate when the agent stops.
+Use run_background_job for long-running processes (servers, watchers). Output capped at 10MB per job. Jobs belong to the originating session. Session cleanup stops the direct process and bounds the wait for output pipes. On Unix, child processes may survive; on Windows, cleanup terminates the job object. Daemonized or detached processes are not supported.
 
 Use wait_background_job to block until a job finishes and retrieve its exit code and full output. Pass an optional timeout (seconds) to cap how long to wait; the job keeps running if the timeout fires.`
 	if t.handler.recall {
@@ -616,7 +643,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:                    ToolNameListBackgroundJobs,
 			Category:                "background_jobs",
-			Description:             `Lists all background jobs with their status, runtime, and other information.`,
+			Description:             `Lists background jobs owned by this session with their status, runtime, and other information.`,
 			OutputSchema:            tools.MustSchemaFor[string](),
 			Handler:                 tools.NewHandler(t.handler.ListBackgroundJobs),
 			Annotations:             tools.ToolAnnotations{Title: "List Background Jobs", ReadOnlyHint: true},
@@ -635,7 +662,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:                    ToolNameStopBackgroundJob,
 			Category:                "background_jobs",
-			Description:             `Stops a running background job by job ID. The process and all its child processes will be terminated.`,
+			Description:             `Stops a running background job owned by this session. Terminates the direct process on Unix (children may survive), or the job object on Windows, and waits a bounded time for captured output.`,
 			Parameters:              tools.MustSchemaFor[StopBackgroundJobArgs](),
 			OutputSchema:            tools.MustSchemaFor[string](),
 			Handler:                 tools.NewHandler(t.handler.StopBackgroundJob),
@@ -659,11 +686,43 @@ func (t *ToolSet) Start(context.Context) error {
 	return nil
 }
 
-func (t *ToolSet) Stop(context.Context) error {
+func (t *ToolSet) StopResourceOwner(ctx context.Context) error {
+	owner := tools.ResourceOwnerFromContext(ctx)
+	if owner == nil {
+		return nil
+	}
+	retireErr := t.Stop(ctx)
+	t.handler.jobs.Range(func(id string, job *backgroundJob) bool {
+		if job.owner != owner {
+			return true
+		}
+		timer := time.NewTimer(forcedStopTimeout)
+		defer timer.Stop()
+		select {
+		case <-job.done:
+			job.outputMu.Lock()
+			job.rt = nil
+			job.outputMu.Unlock()
+			t.handler.jobs.Delete(id)
+		case <-ctx.Done():
+			retireErr = errors.Join(retireErr, ctx.Err())
+		case <-timer.C:
+			retireErr = errors.Join(retireErr, fmt.Errorf("timed out retiring job %s", id))
+		}
+		return true
+	})
+	return retireErr
+}
+
+func (t *ToolSet) Stop(ctx context.Context) error {
+	owner := tools.ResourceOwnerFromContext(ctx)
+	if owner == nil {
+		return nil
+	}
 	var wg sync.WaitGroup
 	errs := make(chan error)
 	t.handler.jobs.Range(func(_ string, job *backgroundJob) bool {
-		if job.status.Load() == statusRunning {
+		if job.owner == owner && job.status.Load() == statusRunning {
 			wg.Go(func() {
 				if err := stopBackgroundJob(job); err != nil {
 					errs <- err

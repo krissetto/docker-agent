@@ -369,13 +369,7 @@ func (p *PersistenceObserver) publishMessageID(ctx context.Context, id string, r
 		return nil
 	}
 	return d.ownerCall(context.WithoutCancel(ctx), func() error {
-		// Receipt is opaque outside the owner. A replaced transcript invalidates it.
-		for _, item := range d.sess.Messages {
-			if item.Message == receipt {
-				receipt.ID = rowID
-				return nil
-			}
-		}
+		d.sess.PublishMessageID(receipt, rowID)
 		return nil
 	})
 }

@@ -41,6 +41,7 @@ type Executor struct {
 type matcher struct {
 	pattern *regexp.Regexp
 	hooks   []Hook
+	err     error
 }
 
 func (m *matcher) matches(toolName string) bool {
@@ -63,9 +64,9 @@ func NewExecutorWithRegistry(config *Config, workingDir string, env []string, re
 	}
 	return &Executor{
 		workingDir: workingDir,
-		env:        env,
+		env:        slices.Clone(env),
 		registry:   registry,
-		events:     compileEvents(config),
+		events:     compileEvents(config.Clone()),
 	}
 }
 
@@ -110,10 +111,14 @@ func compileMatchers(configs []MatcherConfig) []matcher {
 	out := make([]matcher, 0, len(configs))
 	for _, mc := range configs {
 		m := matcher{hooks: mc.Hooks}
+		if len(mc.Hooks) == 0 {
+			m.err = errors.New("hook matcher requires at least one hook")
+		}
 		if mc.Matcher != "" && mc.Matcher != "*" {
 			p, err := regexp.Compile("^(?:" + mc.Matcher + ")$")
 			if err != nil {
-				slog.Warn("Invalid hook matcher pattern", "pattern", mc.Matcher, "error", err)
+				m.err = fmt.Errorf("invalid hook matcher %q: %w", mc.Matcher, err)
+				out = append(out, m)
 				continue
 			}
 			m.pattern = p
@@ -145,6 +150,11 @@ func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) 
 	}
 	if input == nil {
 		return nil, errors.New("hook input must not be nil")
+	}
+	for _, m := range e.events[event] {
+		if m.err != nil && m.matches(input.ToolName) {
+			return nil, m.err
+		}
 	}
 	hooks := e.hooksFor(event, input.ToolName)
 	if len(hooks) == 0 {
@@ -315,20 +325,34 @@ type hookResult struct {
 // runHook resolves the hook's [HookType] in the registry, applies its
 // timeout, and returns the structured outcome. JSON-on-stdout is parsed
 // into [Output] when the handler didn't already provide one.
-func (e *Executor) runHook(ctx context.Context, event EventType, hook Hook, inputJSON []byte) hookResult {
+func (e *Executor) runHook(ctx context.Context, event EventType, hook Hook, inputJSON []byte) (result hookResult) {
+	// Recovery belongs inside the worker invoking the extension, not its dispatching caller.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = hookResult{hook: hook, HandlerResult: HandlerResult{ExitCode: -1}, err: fmt.Errorf("hook callback panicked: %v", recovered)}
+		}
+	}()
+
 	factory, ok := e.registry.Lookup(hook.Type)
-	if !ok {
+	if !ok || factory == nil {
 		return hookResult{hook: hook, err: fmt.Errorf("unsupported hook type: %s", hook.Type)}
 	}
-	handler, err := factory(HandlerEnv{WorkingDir: e.workingDir, Env: e.env}, hook)
+	callbackHook := hook
+	callbackHook.Args = slices.Clone(hook.Args)
+	callbackHook.Env = maps.Clone(hook.Env)
+	handler, err := factory(HandlerEnv{WorkingDir: e.workingDir, Env: slices.Clone(e.env)}, callbackHook)
 	if err != nil {
 		return hookResult{hook: hook, err: err}
+	}
+
+	if handler == nil {
+		return hookResult{hook: hook, err: errors.New("hook factory returned a nil handler")}
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, hook.GetTimeout())
 	defer cancel()
 
-	res, err := handler.Run(timeoutCtx, inputJSON)
+	res, err := handler.Run(timeoutCtx, slices.Clone(inputJSON))
 	r := hookResult{HandlerResult: res, hook: hook}
 
 	// markFailed turns r into a "did not complete" outcome: the
