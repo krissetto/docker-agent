@@ -607,8 +607,7 @@ func (g *sessionDriverRegistry) ReplaceSettledSession(sessionID string, expected
 	g.pendingClaims[sessionID]++
 	g.mu.Unlock()
 	defer g.releaseUnpublishedClaim(sessionID)
-	d.replaceSession(sess)
-	return true
+	return d.replaceSession(sess) == nil
 }
 
 func (g *sessionDriverRegistry) ReleaseDriver(ctx context.Context, sessionID string, expected *sessionDriver) error {

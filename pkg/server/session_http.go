@@ -775,6 +775,9 @@ func sessionStatus(status runtime.SessionStatus) sessionStatusDTO {
 
 func sessionSnapshot(snapshot runtime.SessionSnapshot) sessionSnapshotDTO {
 	out := sessionSnapshotDTO{Session: snapshot.Session, Status: sessionStatus(snapshot.Status), Cursor: snapshot.Cursor, Epoch: snapshot.Epoch, TranscriptPosition: snapshot.TranscriptPosition, Interactions: make([]sessionInteractionDTO, len(snapshot.Interactions)), PendingInputs: make([]sessionPendingInputDTO, len(snapshot.PendingInputs))}
+	if snapshot.Session != nil {
+		out.ParentSessionID = snapshot.Session.ParentID
+	}
 	for i, interaction := range snapshot.Interactions {
 		out.Interactions[i] = sessionInteractionDTO{SessionID: interaction.SessionID, InteractionID: interaction.InteractionID, Kind: interaction.Kind, ElicitationID: interaction.ElicitationID, Event: interaction.Event}
 	}

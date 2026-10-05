@@ -3,6 +3,8 @@ package turn
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,8 +26,8 @@ type testHandle struct {
 }
 
 func (h *testHandle) Observe(ctx context.Context, _ runtime.ObserveOptions) (runtime.Observation, error) {
-	if ctx.Done() != nil {
-		panic("observation must outlive caller")
+	if ctx.Done() == nil {
+		panic("observation establishment must be bounded")
 	}
 	return runtime.Observation{Events: h.events, Cancel: func() { h.detached.Add(1) }}, nil
 }
@@ -149,4 +151,97 @@ func TestFailedAdmissionOnlyDetachesObservation(t *testing.T) {
 	require.Nil(t, owned)
 	assert.Equal(t, int32(1), h.detached.Load())
 	assert.Empty(t, h.cancelled)
+}
+
+type blockingObserveHandle struct{ *testHandle }
+
+func (h blockingObserveHandle) Observe(ctx context.Context, _ runtime.ObserveOptions) (runtime.Observation, error) {
+	<-ctx.Done()
+	return runtime.Observation{}, ctx.Err()
+}
+
+func TestStartObservationIsCallerBounded(t *testing.T) {
+	h := blockingObserveHandle{newTestHandle()}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	owned, err := Start(ctx, h, runtime.TurnInput{})
+	require.Nil(t, owned)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(started), time.Second)
+	assert.Empty(t, h.cancelled)
+}
+
+type reconnectHandle struct {
+	*testHandle
+
+	observes       atomic.Int32
+	epoch          string
+	observationErr func() error
+}
+
+func (h *reconnectHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	n := h.observes.Add(1)
+	if n == 1 {
+		h.observationErr = ctx.Err
+		events := make(chan runtime.SessionEvent)
+		close(events)
+		errs := make(chan error)
+		close(errs)
+		return runtime.Observation{Initial: []runtime.SessionSnapshot{{Epoch: "old", Cursor: 3}}, Events: events, Errors: errs, Cancel: func() { h.detached.Add(1) }}, nil
+	}
+	if options.SinceEpoch != "old" || options.Since == nil || *options.Since != 3 {
+		panic("reconnect lost authority cursor")
+	}
+	return runtime.Observation{Initial: []runtime.SessionSnapshot{{Epoch: h.epoch, Cursor: 3}}, Replay: []runtime.SessionEvent{{TurnID: "owned", Sequence: 4, Event: &runtime.StreamStoppedEvent{}}}, Cancel: func() { h.detached.Add(1) }}, nil
+}
+
+func TestOwnedTurnReconnectRetainsExactOwnership(t *testing.T) {
+	for _, epoch := range []string{"old", "changed"} {
+		t.Run(epoch, func(t *testing.T) {
+			h := &reconnectHandle{testHandle: newTestHandle(), epoch: epoch}
+			close(h.settled)
+			admission, cancelAdmission := context.WithCancel(t.Context())
+			owned, err := Start(admission, h, runtime.TurnInput{})
+			require.NoError(t, err)
+			cancelAdmission()
+			require.NoError(t, h.observationErr(), "accepted observation must outlive admission context")
+			result := owned.Consume(t.Context(), func(context.Context, runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+				return runtimeclient.TurnContinue, nil
+			})
+			if epoch == "old" {
+				require.True(t, result.Stopped)
+				require.NoError(t, result.Err)
+				assert.Empty(t, h.cancelled)
+			} else {
+				var discontinuity *runtimeclient.ObservationDiscontinuityError
+				require.ErrorAs(t, result.Err, &discontinuity)
+				assert.Equal(t, "owned", <-h.cancelled)
+			}
+			assert.Equal(t, int32(2), h.observes.Load())
+			assert.Equal(t, int32(2), h.detached.Load())
+		})
+	}
+}
+
+func TestStartRemoteHandshakeHonorsCallerDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client, err := runtime.NewClient(server.URL)
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client)
+	require.NoError(t, err)
+	handle, err := transport.SessionByID("s")
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	owned, err := Start(ctx, handle, runtime.TurnInput{})
+	require.Nil(t, owned)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(started), time.Second)
 }

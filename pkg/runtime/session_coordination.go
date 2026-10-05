@@ -69,6 +69,10 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 		m.mu.Unlock()
 		return nil
 	}
+	if m.sessionStoppingLocked(sess.ID) {
+		m.mu.Unlock()
+		return &SessionError{Kind: SessionErrorPersistence, SessionID: sess.ID, Operation: "complete_turn", Detail: "subtree stop is awaiting authoritative acknowledgement"}
+	}
 	record := rec.durable
 	if turnID != "" && record.LastTurnID == turnID {
 		m.mu.Unlock()

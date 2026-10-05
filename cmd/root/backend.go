@@ -186,6 +186,7 @@ func (b *localBackend) Close() error {
 
 // remoteBackend talks to a docker-agent server.
 type remoteBackend struct {
+	handle        runtime.SessionHandle
 	flags         *runExecFlags
 	agentFileName string
 	model         string
@@ -233,6 +234,7 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	b.handle = handle
 	b.model = handle.Metadata().Model
 	services, err := runtime.NewRemoteServices(client,
 		runtime.WithRemoteCurrentAgent(handle.AgentName()),

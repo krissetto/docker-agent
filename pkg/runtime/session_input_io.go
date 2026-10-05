@@ -27,6 +27,11 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 	}
 	queued := false
 	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.r.subagents != nil {
+			if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
+				return sessionIOReservation{}, err
+			}
+		}
 		if found, existingQueued, existingErr := d.existingInputLocked(msg); found || existingErr != nil {
 			queued = existingQueued
 			admission.idempotent = found
@@ -90,6 +95,11 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			if err != nil {
 				return err
 			}
+			if d.r.subagents != nil {
+				if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
+					return err
+				}
+			}
 			admission.durable = msg.AcceptedPersisted
 			if !msg.Retry && msg.RequestID != "" {
 				msg.AcceptedPosition = d.sess.AddMessageAt(message)
@@ -126,6 +136,11 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 
 func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume func(QueuedMessage)) error {
 	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if d.r.subagents != nil {
+			if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
+				return sessionIOReservation{}, err
+			}
+		}
 		if d.stopped {
 			return sessionIOReservation{}, ErrSessionStopped
 		}

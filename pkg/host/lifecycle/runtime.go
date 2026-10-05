@@ -20,6 +20,7 @@ type supervisor struct {
 
 	team    *team.Team
 	mu      sync.Mutex
+	drained bool
 	stopped bool
 	err     error
 }
@@ -31,10 +32,13 @@ func (s *supervisor) Shutdown(ctx context.Context) error {
 		return s.err
 	}
 	// A timed-out drain is retryable; tools must remain usable until it finishes.
-	if err := s.SessionRuntimeSupervisor.Shutdown(ctx); err != nil {
-		return err
+	if !s.drained {
+		if err := s.SessionRuntimeSupervisor.Shutdown(ctx); err != nil {
+			return err
+		}
+		s.drained = true
 	}
 	s.err = s.team.StopToolSets(ctx)
-	s.stopped = true
+	s.stopped = s.err == nil
 	return s.err
 }

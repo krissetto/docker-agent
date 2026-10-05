@@ -202,9 +202,12 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 			turn, err := h.Steer(t.Context(), TurnInput{Content: "old"})
 			require.NoError(t, err)
 			if transition == "start" {
-				h.driver.pending, h.driver.steering = h.driver.steering, nil
-				h.driver.leave(sessionRunning)
-				h.driver.activeRequestID = ""
+				require.NoError(t, h.driver.ownerCall(t.Context(), func() error {
+					h.driver.pending, h.driver.steering = h.driver.steering, nil
+					h.driver.leave(sessionRunning)
+					h.driver.activeRequestID = ""
+					return nil
+				}))
 			}
 			barrier := &pendingEditBarrierStore{Store: store, entered: make(chan struct{}), release: make(chan struct{})}
 			h.driver.r.sessionStore = barrier

@@ -40,7 +40,7 @@ func defaultHTTPPostClient() httpDoer {
 // An empty URL is a no-op (lenient args contract). A non-http(s) or
 // otherwise unparseable URL surfaces as an error so on_error: warn
 // flags the misconfig. Network errors and non-2xx responses are
-// logged (with credentials redacted) and swallowed so a bad webhook
+// logged (without URL paths, queries or credentials) and swallowed so a bad webhook
 // never breaks the run loop. The hook executor already wraps ctx with
 // [Hook.GetTimeout]; the client's Timeout is a backstop.
 func newHTTPPost(client httpDoer) hooks.BuiltinFunc {
@@ -56,17 +56,17 @@ func newHTTPPost(client httpDoer) hooks.BuiltinFunc {
 		if len(args) >= 2 {
 			body = args[1]
 		}
-		redacted := target.Redacted()
+		destination := target.Scheme + "://" + target.Host
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("http_post: build request: %w", err)
+			return nil, fmt.Errorf("http_post: build request: %w", withoutURL(err))
 		}
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			slog.WarnContext(ctx, "http_post: request failed", "url", redacted, "error", err)
+			slog.WarnContext(ctx, "http_post: request failed", "destination", destination, "error", withoutURL(err))
 			return nil, nil
 		}
 		defer resp.Body.Close()
@@ -74,8 +74,16 @@ func newHTTPPost(client httpDoer) hooks.BuiltinFunc {
 		// an unbounded read; 64 KiB is plenty for a webhook ack.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		if resp.StatusCode >= 400 {
-			slog.WarnContext(ctx, "http_post: non-success response", "url", redacted, "status", resp.StatusCode)
+			slog.WarnContext(ctx, "http_post: non-success response", "destination", destination, "status", resp.StatusCode)
 		}
 		return nil, nil
 	}
+}
+
+func withoutURL(err error) error {
+	var urlErr *url.Error
+	for errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return err
 }

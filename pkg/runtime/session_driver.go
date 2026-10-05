@@ -86,13 +86,14 @@ type sessionDriver struct {
 	r  *LocalRuntime
 	wg *driverWorkGroup
 
-	mu            sync.Mutex
-	sess          *session.Session
-	registryState atomic.Pointer[driverRegistryState]
-	ownerCommands chan *sessionOwnerCommand
-	ownerStop     chan struct{}
-	ownerClose    sync.Once
-	ownerDone     chan struct{}
+	mu             sync.Mutex
+	sess           *session.Session
+	registryState  atomic.Pointer[driverRegistryState]
+	ownerCommands  chan *sessionOwnerCommand
+	ownerStop      chan struct{}
+	ownerClose     sync.Once
+	ownerDone      chan struct{}
+	retirementGate chan struct{}
 	// Stable admission topology; readable without waiting for per-session I/O.
 	resourceOwner  *tools.ResourceOwner
 	identityID     string
@@ -127,6 +128,9 @@ type sessionDriver struct {
 	compactReserved      bool
 	queuedCompaction     *liveCompactionRequest
 	ioLane               *sessionIOLane
+	ioReservations       int
+	ioSealed             bool
+	resourceCleanup      *resourceCleanupAttempt
 	editReserved         bool
 	durableStopRequested bool
 	compactCancel        context.CancelFunc
@@ -220,7 +224,7 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
-	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
+	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), retirementGate: make(chan struct{}, 1), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
 		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
 		for position, item := range sess.MessagesSnapshot() {
@@ -1258,6 +1262,11 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 	var err error
 	for {
 		err = d.ownerCall(ctx, func() error {
+			if d.r.subagents != nil {
+				if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
+					return err
+				}
+			}
 			if d.viewDormant {
 				return &SessionError{Kind: SessionErrorInvalid, Operation: "view_dormant"}
 			}
@@ -1363,6 +1372,11 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 	var generation uint64
 	var callbacks []func()
 	err = d.ownerCall(ctx, func() error {
+		if d.r.subagents != nil {
+			if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
+				return err
+			}
+		}
 		if d.stopped || !d.starting() {
 			return ErrSessionStopped
 		}
@@ -1646,9 +1660,22 @@ func (d *sessionDriver) settledCallbacksLocked() []func() {
 	return callbacks
 }
 
-func (d *sessionDriver) replaceSession(sess *session.Session) {
-	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
-		d.sess = sess.Clone()
+func (d *sessionDriver) replaceSession(sess *session.Session) error {
+	if sess == nil {
+		return ErrSessionClosed
+	}
+	next := sess.Clone()
+	return d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
+		if d.stopped || d.ioSealed {
+			return ErrSessionStopped
+		}
+		if d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.ioReservations != 0 || d.compactReserved || d.editReserved || d.switchReserved || d.skillOperationID != "" || d.retryRunning || d.completionInFlight || len(d.interactions) != 0 || d.pauseCh != nil {
+			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, Operation: "replace_settled_session"}
+		}
+		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName {
+			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "replace_pinned_session"}
+		}
+		d.sess = next
 		return nil
 	})
 }

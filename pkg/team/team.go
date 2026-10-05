@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -13,8 +15,12 @@ import (
 )
 
 type Team struct {
-	agents      []*agent.Agent
-	permissions *permissions.Checker
+	stopMu         sync.Mutex
+	ownedResources []io.Closer
+	closeOnce      sync.Once
+	closeErr       error
+	agents         []*agent.Agent
+	permissions    *permissions.Checker
 	// runtimeSafety is the config-wide safety-mode default declared under
 	// runtime.safety, retained so session constructors can apply it when
 	// neither the user nor the selected agent chose a mode. Empty when the
@@ -34,6 +40,12 @@ func WithAgents(agents ...*agent.Agent) Opt {
 	return func(t *Team) {
 		t.agents = agents
 	}
+}
+
+// WithOwnedResources binds creator-owned resources to final team teardown,
+// independently of session-level toolset retirement.
+func WithOwnedResources(resources ...io.Closer) Opt {
+	return func(t *Team) { t.ownedResources = append(t.ownedResources, resources...) }
 }
 
 func WithPermissions(checker *permissions.Checker) Opt {
@@ -156,6 +168,8 @@ func (t *Team) Size() int {
 }
 
 func (t *Team) StopToolSets(ctx context.Context) error {
+	t.stopMu.Lock()
+	defer t.stopMu.Unlock()
 	var errs []error
 	for _, agent := range t.agents {
 		// One agent failing to stop (e.g. a wedged toolset) must not leave
@@ -165,6 +179,18 @@ func (t *Team) StopToolSets(ctx context.Context) error {
 		}
 	}
 
+	if err := errors.Join(errs...); err != nil {
+		// A failed stop may still own work; retain resources until a successful retry.
+		return err
+	}
+	t.closeOnce.Do(func() {
+		var closeErrs []error
+		for _, resource := range t.ownedResources {
+			closeErrs = append(closeErrs, resource.Close())
+		}
+		t.closeErr = errors.Join(closeErrs...)
+	})
+	errs = append(errs, t.closeErr)
 	return errors.Join(errs...)
 }
 

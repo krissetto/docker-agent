@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -27,18 +28,19 @@ func TestRunTurnRemoteReconnectNeverResubmitsAcceptedTurn(t *testing.T) {
 		}
 		n := observes.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"cursor\":%d}}\n\n", n-1)
-		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"ready\",\"cursor\":%d}\n\n", n-1)
+		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"epoch\":\"authority-epoch\",\"cursor\":%d}}\n\n", n-1)
+		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"ready\",\"epoch\":\"authority-epoch\",\"cursor\":%d}\n\n", n-1)
 		w.(http.Flusher).Flush()
 		<-accepted
 		if n > 1 {
 			assert.Equal(t, fmt.Sprint(n-1), r.URL.Query().Get("since"))
+			assert.Equal(t, "authority-epoch", r.URL.Query().Get("since_epoch"))
 		}
 		event := `{"type":"agent_choice","session_id":"s","content":"piece"}`
 		if n == 7 {
 			event = `{"type":"stream_stopped","session_id":"s","reason":"normal"}`
 		}
-		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"accepted\",\"sequence\":%d,\"event\":%s}}\n\n", n, event)
+		fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"accepted\",\"sequence\":%d,\"epoch\":\"authority-epoch\",\"event\":%s}}\n\n", n, event)
 		if n < 7 {
 			// Cut a following frame mid-line. Reconnect must replay from the
 			// last complete event without submitting the accepted turn again.
@@ -101,4 +103,130 @@ func TestConsumeTurnDrainsFinalQueuedStopBeforeTransportFailure(t *testing.T) {
 		require.True(t, result.Stopped)
 		require.NoError(t, result.Err)
 	}
+}
+
+func TestAcceptedTurnEpochChangeIsTerminal(t *testing.T) {
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	errs := make(chan error)
+	close(errs)
+	initial := obs(7, nil, events)
+	initial.Initial[0].Epoch = "old"
+	initial.Errors = errs
+	var detached atomic.Int32
+	calls := 0
+	observer := observerFunc(func(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		require.Equal(t, "old", options.SinceEpoch)
+		require.Equal(t, uint64(7), *options.Since)
+		next := obs(8, []runtime.SessionEvent{{TurnID: "accepted", Sequence: 8, Event: runtime.StreamStopped("s", "root", "normal")}}, events)
+		next.Initial[0].Epoch = "new"
+		next.Cancel = func() { detached.Add(1) }
+		return next, nil
+	})
+	result := consumeAcceptedTurn(t.Context(), observer, initial, "accepted", func(context.Context, runtime.SessionEvent) (TurnDecision, error) {
+		t.Fatal("must not apply another authority's output")
+		return TurnContinue, nil
+	}, observationRetryPolicy{now: time.Now, wait: func(context.Context, int) bool { return true }})
+	var discontinuity *ObservationDiscontinuityError
+	require.ErrorAs(t, result.Err, &discontinuity)
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, int32(1), detached.Load())
+}
+
+func TestRunTurnRemoteReconnectRecoversInteractionAndStopReplay(t *testing.T) {
+	var submits, observes, responses, cancels atomic.Int32
+	accepted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/messages"):
+			submits.Add(1)
+			close(accepted)
+			fmt.Fprint(w, `{"session_id":"s","turn_id":"accepted"}`)
+		case strings.HasSuffix(r.URL.Path, "/responses"):
+			responses.Add(1)
+			var response struct {
+				InteractionID string `json:"interaction_id"`
+			}
+			// The wire response deliberately retains the interaction's identity.
+			if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&response)) {
+				http.Error(w, "invalid response", http.StatusBadRequest)
+				return
+			}
+			assert.Equal(t, "approval", response.InteractionID)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/cancel"):
+			cancels.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			n := observes.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			cursor := 0
+			if n > 1 {
+				cursor = 3
+				assert.Equal(t, "owner", r.URL.Query().Get("since_epoch"))
+				assert.Equal(t, "1", r.URL.Query().Get("since"))
+			}
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":\"s\"},\"status\":{\"session_id\":\"s\"},\"epoch\":\"owner\",\"cursor\":%d}}\n\n", cursor)
+			if n > 1 {
+				fmt.Fprint(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"accepted\",\"interaction_id\":\"approval\",\"sequence\":2,\"epoch\":\"owner\",\"event\":{\"type\":\"tool_call_confirmation\",\"tool_call\":{\"id\":\"tool\"}}}}\n\n")
+				fmt.Fprint(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"accepted\",\"sequence\":3,\"epoch\":\"owner\",\"event\":{\"type\":\"stream_stopped\",\"session_id\":\"s\",\"reason\":\"normal\"}}}\n\n")
+			}
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"ready\",\"cursor\":%d}\n\n", cursor)
+			w.(http.Flusher).Flush()
+			if n == 1 {
+				select {
+				case <-accepted:
+				case <-r.Context().Done():
+					return
+				}
+				fmt.Fprint(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"turn_id\":\"accepted\",\"sequence\":1,\"epoch\":\"owner\",\"event\":{\"type\":\"agent_choice\",\"session_id\":\"s\",\"content\":\"once\"}}}\n\ndata: {")
+			}
+		}
+	}))
+	defer server.Close()
+	remote, err := runtime.NewClient(server.URL)
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(remote)
+	require.NoError(t, err)
+	handle, err := transport.SessionByID("s")
+	require.NoError(t, err)
+	var output []uint64
+	_, err = RunTurnFunc(t.Context(), handle, runtime.TurnInput{Content: "once"}, func(_ context.Context, event runtime.SessionEvent) error {
+		output = append(output, event.Sequence)
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{1, 3}, output)
+	assert.Equal(t, int32(1), submits.Load())
+	assert.Equal(t, int32(2), observes.Load())
+	assert.Equal(t, int32(1), responses.Load())
+	assert.Zero(t, cancels.Load())
+}
+
+type detachOnlyTurnHandle struct {
+	*turnHandleStub
+
+	cancels atomic.Int32
+	cancel  context.CancelFunc
+}
+
+func (s *detachOnlyTurnHandle) Cancel(context.Context, string) (runtime.CancelResult, error) {
+	s.cancels.Add(1)
+	return runtime.CancelResult{}, nil
+}
+
+func (s *detachOnlyTurnHandle) Submit(ctx context.Context, input runtime.TurnInput) (runtime.Submission, error) {
+	submission, err := s.turnHandleStub.Submit(ctx, input)
+	s.cancel()
+	return submission, err
+}
+
+func TestRunTurnCallerCancellationOnlyDetaches(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	handle := &detachOnlyTurnHandle{turnHandleStub: &turnHandleStub{observation: runtime.Observation{Events: make(chan runtime.SessionEvent)}}, cancel: cancel}
+	_, err := RunTurnFunc(ctx, handle, runtime.TurnInput{}, func(context.Context, runtime.SessionEvent) error { return nil })
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, handle.cancels.Load())
+	assert.Equal(t, []string{"observe", "submit", "cancel"}, handle.calls)
 }

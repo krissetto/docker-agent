@@ -67,6 +67,20 @@ func (e *ObservationGapError) Error() string {
 	return fmt.Sprintf("observation gap: first available sequence %d", e.FirstAvailable)
 }
 
+// ObservationDiscontinuityError means a reconnect cannot recover the accepted
+// turn's contiguous output from its previous observation baseline.
+type ObservationDiscontinuityError struct {
+	PreviousEpoch string
+	CurrentEpoch  string
+	Cursor        uint64
+}
+
+func (*ObservationDiscontinuityError) Retryable() bool { return false }
+
+func (e *ObservationDiscontinuityError) Error() string {
+	return fmt.Sprintf("turn observation discontinuity at sequence %d: epoch %q changed to %q", e.Cursor, e.PreviousEpoch, e.CurrentEpoch)
+}
+
 // RunTurn runs one turn with default event handling. Runtime ErrorEvents are
 // returned as *TurnEventError.
 func RunTurn(ctx context.Context, session runtime.SessionHandle, input runtime.TurnInput) (TurnResult, error) {
@@ -301,13 +315,31 @@ func observationEnded(errs <-chan error) TurnTermination {
 
 // observeTurnStartup retries only observation establishment, never submission.
 func observeTurnStartup(ctx context.Context, session Observer, policy observationRetryPolicy) (runtime.Observation, error) {
-	startup, cancel := context.WithCancel(ctx)
+	startup, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopCaller := context.AfterFunc(ctx, cancel)
+	defer stopCaller()
 	timer := time.AfterFunc(30*time.Second, cancel)
 	started := policy.now()
 	attempt := 0
 	for {
+		if ctx.Err() != nil {
+			timer.Stop()
+			cancel()
+			return runtime.Observation{}, ctx.Err()
+		}
 		observation, err := session.Observe(startup, runtime.ObserveOptions{})
 		if err == nil {
+			if !stopCaller() || ctx.Err() != nil || startup.Err() != nil {
+				if observation.Cancel != nil {
+					observation.Cancel()
+				}
+				timer.Stop()
+				cancel()
+				if ctx.Err() != nil {
+					return runtime.Observation{}, ctx.Err()
+				}
+				return runtime.Observation{}, context.DeadlineExceeded
+			}
 			timer.Stop()
 			original := observation.Cancel
 			observation.Cancel = func() {
@@ -321,6 +353,9 @@ func observeTurnStartup(ctx context.Context, session Observer, policy observatio
 		if startup.Err() != nil || !retryObservation(err) || policy.now().Sub(started) >= 30*time.Second || !policy.wait(startup, attempt) {
 			timer.Stop()
 			cancel()
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
 			return runtime.Observation{}, err
 		}
 		attempt = min(attempt+1, 8)
@@ -336,6 +371,7 @@ func consumeAcceptedTurn(ctx context.Context, session Observer, observation runt
 	startup := time.AfterFunc(30*time.Second, cancel)
 	defer startup.Stop()
 	cursor := observation.Primary().Cursor
+	epoch := observation.Primary().Epoch
 	attempt := 0
 	for {
 		before := cursor
@@ -359,8 +395,14 @@ func consumeAcceptedTurn(ctx context.Context, session Observer, observation runt
 				return TurnTermination{Terminated: true, Err: ctx.Err()}
 			}
 			attempt = min(attempt+1, 8)
-			next, err := session.Observe(ctx, runtime.ObserveOptions{Since: &cursor})
+			next, err := session.Observe(ctx, runtime.ObserveOptions{Since: &cursor, SinceEpoch: epoch})
 			if err == nil {
+				if next.Primary().Epoch != epoch || next.Primary().Cursor < cursor {
+					if next.Cancel != nil {
+						next.Cancel()
+					}
+					return TurnTermination{ObservationError: true, Err: &ObservationDiscontinuityError{PreviousEpoch: epoch, CurrentEpoch: next.Primary().Epoch, Cursor: cursor}}
+				}
 				observation = next
 				break
 			}
@@ -372,4 +414,16 @@ func consumeAcceptedTurn(ctx context.Context, session Observer, observation runt
 			}
 		}
 	}
+}
+
+// ObserveTurnStartup establishes a caller-bounded observation, detaching its
+// lifetime from the caller once established. The owner must cancel it.
+func ObserveTurnStartup(ctx context.Context, session Observer) (runtime.Observation, error) {
+	return observeTurnStartup(ctx, session, observationRetryPolicy{wait: waitRetry, now: time.Now})
+}
+
+// ConsumeAcceptedTurn retries only transient observation failures for an already
+// accepted turn. It never submits or cancels execution; settlement is host-owned.
+func ConsumeAcceptedTurn(ctx context.Context, session Observer, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error)) TurnTermination {
+	return consumeAcceptedTurn(ctx, session, observation, turnID, handler, observationRetryPolicy{wait: waitRetry, now: time.Now})
 }

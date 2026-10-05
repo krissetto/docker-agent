@@ -40,20 +40,23 @@ func (d *sessionDriver) durableIOContext(ctx context.Context, reserve func() (se
 		return ctx.Err()
 	}
 	var reservation sessionIOReservation
-	if err := d.ownerCall(context.WithoutCancel(ctx), func() (err error) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		reservation, err = reserve()
+	if err := d.ownerCall(context.WithoutCancel(ctx), func() error {
+		var err error
+		reservation, err = d.reserveDurableIO(ctx, reserve)
 		return err
 	}); err != nil {
 		<-lane.slot
 		return err
 	}
 	done := make(chan error, 1)
-	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
+		defer func() {
+			_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+				d.ioReservations--
+				return nil
+			})
+		}()
 		defer func() { <-lane.slot }()
 		var err error
 		if reservation.write != nil {
@@ -100,4 +103,22 @@ func (d *sessionDriver) durableIOContext(ctx context.Context, reserve func() (se
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (d *sessionDriver) reserveDurableIO(ctx context.Context, reserve func() (sessionIOReservation, error)) (sessionIOReservation, error) {
+	if err := ctx.Err(); err != nil {
+		return sessionIOReservation{}, err
+	}
+	if d.ioSealed {
+		if d.stopped {
+			return sessionIOReservation{}, ErrSessionStopped
+		}
+		return sessionIOReservation{}, ErrSessionClosed
+	}
+	reservation, err := reserve()
+	if err == nil {
+		d.ioReservations++
+		d.wg.Add(1)
+	}
+	return reservation, err
 }

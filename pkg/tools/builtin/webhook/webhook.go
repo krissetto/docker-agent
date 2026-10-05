@@ -33,6 +33,7 @@ const (
 	defaultMaxAttempts  = 4
 	defaultDedupeWindow = 30 * time.Second
 	defaultMinInterval  = time.Second
+	maxRecentDeliveries = 1024
 )
 
 type httpDoer interface {
@@ -104,6 +105,11 @@ const (
 	permanent
 )
 
+type deliveryState struct {
+	at      time.Time
+	pending bool
+}
+
 type ToolSet struct {
 	cfg      latest.WebhookToolConfig
 	expander *js.Expander
@@ -117,13 +123,14 @@ type ToolSet struct {
 	sleep func(ctx context.Context, d time.Duration) bool
 
 	mu       sync.Mutex
-	recent   map[string]time.Time
+	recent   map[string]deliveryState
 	lastSent time.Time
 
 	// Delivery lifetime is owned by the team toolset; each job retains its invoking runtime.
-	cancels []context.CancelFunc
-	stopped bool
-	wg      sync.WaitGroup
+	lifecycle sync.Mutex
+	cancels   map[string]context.CancelFunc
+	stopped   bool
+	wg        sync.WaitGroup
 }
 
 var (
@@ -142,7 +149,8 @@ func New(cfg latest.WebhookToolConfig, expander *js.Expander, timeout time.Durat
 		minInterval:  defaultMinInterval,
 		now:          time.Now,
 		sleep:        backoff.SleepWithContext,
-		recent:       make(map[string]time.Time),
+		recent:       make(map[string]deliveryState),
+		cancels:      make(map[string]context.CancelFunc),
 	}
 }
 
@@ -177,36 +185,27 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 		return tools.ResultError("Error: message is required."), nil
 	}
 
-	now := t.now()
-	if t.isDuplicate(args, now) {
-		return tools.ResultSuccess("Suppressed: an identical message was already delivered to the " +
-			normalizeProvider(t.cfg.Provider) + " webhook within the last " + t.dedupeWindow.String() + "."), nil
+	async := rt != nil && rt.Supports(tools.CapabilityRecall)
+	jobCtx, finish, rejected := t.admit(ctx, args, async)
+	if rejected != nil {
+		return rejected, nil
 	}
-	if wait, limited := t.rateLimited(now); limited {
-		return tools.ResultError(fmt.Sprintf(
-			"Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond),
+	if async {
+		go func() {
+			msg, failed := t.deliver(jobCtx, args)
+			defer finish(!failed)
+			if failed {
+				t.recall(jobCtx, msg, rt)
+			}
+		}()
+		return tools.ResultSuccess(fmt.Sprintf(
+			"Queued delivery to the %s webhook. You will only be notified if it ultimately fails.",
+			normalizeProvider(t.cfg.Provider),
 		)), nil
 	}
-	t.markSent(args, now)
 
-	if rt != nil && rt.Supports(tools.CapabilityRecall) {
-		bg, cancel, ok := t.deliveryContext(ctx)
-		if ok {
-			t.wg.Go(func() {
-				defer cancel()
-				if msg, failed := t.deliver(bg, args); failed {
-					t.recall(bg, msg, rt)
-				}
-			})
-			return tools.ResultSuccess(fmt.Sprintf(
-				"Queued delivery to the %s webhook. You will only be notified if it ultimately fails.",
-				normalizeProvider(t.cfg.Provider),
-			)), nil
-		}
-		cancel()
-	}
-
-	msg, failed := t.deliver(ctx, args)
+	msg, failed := t.deliver(jobCtx, args)
+	finish(!failed)
 	if failed {
 		return tools.ResultError(msg), nil
 	}
@@ -330,35 +329,52 @@ func dedupeKey(args SendArgs) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func (t *ToolSet) isDuplicate(args SendArgs, now time.Time) bool {
+// Admission consumes the rate budget even if delivery fails; only successful
+// delivery consumes the dedupe window. Pending duplicates never start a second job.
+func (t *ToolSet) admit(callCtx context.Context, args SendArgs, async bool) (context.Context, func(bool), *tools.ToolCallResult) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for k, at := range t.recent {
-		if now.Sub(at) > t.dedupeWindow {
-			delete(t.recent, k)
+	if t.stopped {
+		return nil, nil, tools.ResultError("Error: webhook toolset is stopped.")
+	}
+	now := t.now()
+	for key, state := range t.recent {
+		if !state.pending && now.Sub(state.at) > t.dedupeWindow {
+			delete(t.recent, key)
 		}
 	}
-	at, ok := t.recent[dedupeKey(args)]
-	return ok && now.Sub(at) <= t.dedupeWindow
-}
-
-func (t *ToolSet) rateLimited(now time.Time) (time.Duration, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.lastSent.IsZero() {
-		return 0, false
+	key := dedupeKey(args)
+	if _, ok := t.recent[key]; ok {
+		return nil, nil, tools.ResultSuccess("Suppressed: an identical message is pending or was already delivered within the last " + t.dedupeWindow.String() + ".")
 	}
-	if elapsed := now.Sub(t.lastSent); elapsed < t.minInterval {
-		return t.minInterval - elapsed, true
+	if !t.lastSent.IsZero() && now.Sub(t.lastSent) < t.minInterval {
+		wait := t.minInterval - now.Sub(t.lastSent)
+		return nil, nil, tools.ResultError(fmt.Sprintf("Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond)))
 	}
-	return 0, false
-}
-
-func (t *ToolSet) markSent(args SendArgs, now time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.recent[dedupeKey(args)] = now
+	if len(t.recent) >= maxRecentDeliveries {
+		return nil, nil, tools.ResultError("Error: webhook delivery capacity reached; try again later.")
+	}
+	base := callCtx
+	if async {
+		base = context.WithoutCancel(callCtx)
+	}
+	ctx, cancel := context.WithCancel(base)
+	t.recent[key] = deliveryState{pending: true}
 	t.lastSent = now
+	t.cancels[key] = cancel
+	t.wg.Add(1)
+	return ctx, func(success bool) {
+		cancel()
+		t.mu.Lock()
+		delete(t.cancels, key)
+		if success {
+			t.recent[key] = deliveryState{at: t.now()}
+		} else {
+			delete(t.recent, key)
+		}
+		t.mu.Unlock()
+		t.wg.Done()
+	}, nil
 }
 
 func (t *ToolSet) recall(ctx context.Context, message string, rt tools.Runtime) {
@@ -367,18 +383,9 @@ func (t *ToolSet) recall(ctx context.Context, message string, rt tools.Runtime) 
 	}
 }
 
-func (t *ToolSet) deliveryContext(callCtx context.Context) (context.Context, context.CancelFunc, bool) {
-	ctx, cancel := context.WithCancel(context.WithoutCancel(callCtx))
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.stopped {
-		return ctx, cancel, false
-	}
-	t.cancels = append(t.cancels, cancel)
-	return ctx, cancel, true
-}
-
 func (t *ToolSet) Start(context.Context) error {
+	t.lifecycle.Lock()
+	defer t.lifecycle.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.stopped = false
@@ -386,15 +393,14 @@ func (t *ToolSet) Start(context.Context) error {
 }
 
 func (t *ToolSet) Stop(context.Context) error {
+	t.lifecycle.Lock()
+	defer t.lifecycle.Unlock()
 	t.mu.Lock()
 	t.stopped = true
-	cancels := t.cancels
-	t.cancels = nil
-	t.mu.Unlock()
-
-	for _, cancel := range cancels {
+	for _, cancel := range t.cancels {
 		cancel()
 	}
+	t.mu.Unlock()
 	t.wg.Wait()
 	return nil
 }

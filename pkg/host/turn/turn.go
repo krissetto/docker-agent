@@ -38,7 +38,7 @@ type Turn struct {
 
 // Start observes before admission. Observation detachment never cancels execution.
 func Start(ctx context.Context, handle Handle, input runtime.TurnInput) (*Turn, error) {
-	observation, err := handle.Observe(context.WithoutCancel(ctx), runtime.ObserveOptions{})
+	observation, err := runtimeclient.ObserveTurnStartup(ctx, handle)
 	if err != nil {
 		return nil, fmt.Errorf("observe session: %w", err)
 	}
@@ -65,7 +65,7 @@ func (t *Turn) Consume(ctx context.Context, handler func(context.Context, runtim
 		})
 	}
 	stopCancel := context.AfterFunc(ctx, cancelTurn)
-	termination := runtimeclient.ConsumeTurn(ctx, t.observation, t.Submission.TurnID, handler)
+	termination := runtimeclient.ConsumeAcceptedTurn(ctx, t.handle, t.observation, t.Submission.TurnID, handler)
 	if !stopCancel() || !termination.Stopped {
 		cancelTurn()
 	}

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -27,15 +29,17 @@ type subagentManager struct {
 	cancel context.CancelFunc
 	wg     *driverWorkGroup
 
-	mu        sync.Mutex
-	metricsMu sync.Mutex
-	persistMu sync.Mutex
-	persist   *subagentPersistence
-	coord     session.CoordinationStore
-	closed    bool
-	stopping  map[string]bool
-	sessions  map[string]*sessionSubagents
-	children  map[subagent.NodeID]*childRecord
+	mu           sync.Mutex
+	metricsMu    sync.Mutex
+	persistMu    sync.Mutex
+	persist      *subagentPersistence
+	coord        session.CoordinationStore
+	closed       bool
+	stopping     map[string]bool
+	stopFence    atomic.Pointer[map[string]bool]
+	pendingStops map[subagent.NodeID][]session.ChildCommit
+	sessions     map[string]*sessionSubagents
+	children     map[subagent.NodeID]*childRecord
 
 	transitionMu sync.Mutex
 	transitions  map[string]*sync.Mutex
@@ -599,8 +603,41 @@ func (m *subagentManager) sessionDepthLocked(sessionID string) int {
 	return depth
 }
 
+// sessionAdmissionError is lock-free: actor admission may hold driver.mu.
+func (m *subagentManager) sessionAdmissionError(sessionID string) error {
+	if fence := m.stopFence.Load(); fence != nil && (*fence)[sessionID] {
+		return &SessionError{Kind: SessionErrorStopped, SessionID: sessionID, Operation: "stop_subtree", Detail: "subtree stop is awaiting authoritative acknowledgement"}
+	}
+	return nil
+}
+
+func (m *subagentManager) publishStopFenceLocked() {
+	fence := make(map[string]bool, len(m.stopping))
+	maps.Copy(fence, m.stopping)
+	m.stopFence.Store(&fence)
+}
+
+func (m *subagentManager) sessionStoppingLocked(sessionID string) bool {
+	seen := map[string]bool{}
+	for sessionID != "" && !seen[sessionID] {
+		if m.stopping[sessionID] {
+			return true
+		}
+		seen[sessionID] = true
+		parent := ""
+		for _, rec := range m.children {
+			if rec.sessionID == sessionID {
+				parent = rec.parentSession
+				break
+			}
+		}
+		sessionID = parent
+	}
+	return false
+}
+
 func (m *subagentManager) parentAcceptsSpawnLocked(sessionID string) bool {
-	if m.closed || m.stopping[sessionID] {
+	if m.closed || m.sessionStoppingLocked(sessionID) {
 		return false
 	}
 	if m.r.sessionDrivers != nil {
@@ -690,12 +727,22 @@ func (m *subagentManager) stopChildContext(ctx context.Context, parentID string,
 		}
 	}
 	collect(rec)
+	if _, retry := m.pendingStops[id]; !retry {
+		for _, child := range stopped {
+			if m.stopping[child.sessionID] {
+				m.mu.Unlock()
+				transition.Unlock()
+				return "", &SessionError{Kind: SessionErrorPersistence, SessionID: child.sessionID, Operation: "stop_subtree", Detail: "retry the unresolved subtree stop before stopping an overlapping subtree"}
+			}
+		}
+	}
 	if m.stopping == nil {
 		m.stopping = make(map[string]bool)
 	}
 	for _, child := range stopped {
 		m.stopping[child.sessionID] = true
 	}
+	m.publishStopFenceLocked()
 	commits := make([]session.ChildCommit, 0, len(stopped))
 	for _, child := range stopped {
 		if child.durable.Node.State == subagent.NodeStopped {
@@ -717,17 +764,22 @@ func (m *subagentManager) stopChildContext(ctx context.Context, parentID string,
 		record.Node.State, record.Node.NeedsAttention, record.Node.WaitingOn = subagent.NodeStopped, false, ""
 		commits = append(commits, session.ChildCommit{ExpectedRevision: record.Revision, Record: record})
 	}
+	if pending, ok := m.pendingStops[id]; ok {
+		commits = pending
+	}
 	m.mu.Unlock()
 	err := m.commitChildren(ctx, commits)
 	m.mu.Lock()
-	for _, child := range stopped {
-		delete(m.stopping, child.sessionID)
-	}
 	if err != nil {
+		if m.pendingStops == nil {
+			m.pendingStops = make(map[subagent.NodeID][]session.ChildCommit)
+		}
+		m.pendingStops[id] = commits
 		m.mu.Unlock()
 		transition.Unlock()
 		return "", err
 	}
+	delete(m.pendingStops, id)
 	for _, commit := range commits {
 		record := commit.Record
 		record.Revision++
@@ -753,6 +805,12 @@ func (m *subagentManager) stopChildContext(ctx context.Context, parentID string,
 	for _, child := range stopped {
 		m.r.sessionDrivers.StopAll(child.sessionID)
 	}
+	m.mu.Lock()
+	for _, child := range stopped {
+		delete(m.stopping, child.sessionID)
+	}
+	m.publishStopFenceLocked()
+	m.mu.Unlock()
 	for _, child := range stopped {
 		d, ok := m.r.sessionDrivers.Lookup(child.sessionID)
 		if !ok {
@@ -879,7 +937,7 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 		m.mu.Unlock()
 		return fmt.Errorf("no subagent with id %q", id)
 	}
-	if rec.durable.Node.State == subagent.NodeStopped {
+	if rec.durable.Node.State == subagent.NodeStopped || m.sessionStoppingLocked(rec.sessionID) {
 		m.mu.Unlock()
 		return fmt.Errorf("subagent %q has been stopped; spawn a new one", id)
 	}
@@ -931,7 +989,7 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 
 	m.mu.Lock()
 	current := m.children[id]
-	if m.closed || current == nil || current.durable.Node.State == subagent.NodeStopped {
+	if m.closed || current == nil || current.durable.Node.State == subagent.NodeStopped || m.sessionStoppingLocked(sessionID) {
 		m.mu.Unlock()
 		unwatch()
 		_ = m.r.sessionDrivers.ReleaseDriver(context.WithoutCancel(ctx), sessionID, driver)
@@ -995,7 +1053,7 @@ func (m *subagentManager) sendCommunicationToChild(ctx context.Context, parentID
 		receipt.Rejection = "unauthorized"
 		return receipt, &SessionError{Kind: SessionErrorInvalid, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q is not one of yours", id)}
 	}
-	if rec.durable.Node.State == subagent.NodeStopped {
+	if rec.durable.Node.State == subagent.NodeStopped || m.sessionStoppingLocked(rec.sessionID) {
 		m.mu.Unlock()
 		return receipt, &SessionError{Kind: SessionErrorStopped, RequestID: requestID, Operation: SessionOperationSend, Detail: fmt.Sprintf("subagent %q has been stopped; spawn a new one", id)}
 	}
@@ -1090,7 +1148,6 @@ func (m *subagentManager) Read(id subagent.NodeID) (childRead, bool) {
 }
 
 func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) error {
-	rootID := m.rootSessionLockedSafe(sessionID)
 	m.mu.Lock()
 	var stopped []*childRecord
 	var unwatches []func()
@@ -1181,11 +1238,6 @@ func (m *subagentManager) deleteSession(ctx context.Context, sessionID string) e
 	m.persistSnapshot()
 	if p := m.persistence(); p != nil {
 		return p.flushNow()
-	}
-	if rootID == sessionID {
-		m.r.budgetMu.Lock()
-		delete(m.r.rootBudgets, rootID)
-		m.r.budgetMu.Unlock()
 	}
 	return nil
 }

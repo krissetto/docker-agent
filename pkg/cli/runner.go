@@ -73,6 +73,7 @@ func handleMaxIterationsAutoApprove(autoApprove bool, autoExtensions *int, maxIt
 
 // Config holds configuration for running an agent in CLI mode
 type Config struct {
+	SessionHandle  runtime.SessionHandle
 	AppName        string
 	AttachmentPath string
 	AutoApprove    bool
@@ -97,9 +98,15 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 		ctx = telemetry.WithClient(ctx, telemetryClient)
 	}
 
-	handle, err := sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName})
-	if err != nil {
-		return fmt.Errorf("bind CLI session: %w", err)
+	handle := cfg.SessionHandle
+	if handle == nil {
+		var err error
+		handle, err = sessionRuntime.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName})
+		if err != nil {
+			return fmt.Errorf("bind CLI session: %w", err)
+		}
+	} else if handle.ID() != sess.ID {
+		return errors.New("CLI session handle differs from resolved session")
 	}
 
 	if err := handle.UpdateTitle(ctx, "Running agent"); err != nil {

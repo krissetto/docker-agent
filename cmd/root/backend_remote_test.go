@@ -1,6 +1,7 @@
 package root
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui"
@@ -235,5 +238,101 @@ func TestRemoteSpawnerRequiresBorrowedResources(t *testing.T) {
 		assert.Nil(t, b.Spawner(nil, nil))
 		_, err := b.Restorer(nil, nil)(t.Context(), "saved", "")
 		require.ErrorIs(t, err, runtime.ErrUnsupported)
+	}
+}
+
+func TestRemoteExecUsesCanonicalSession(t *testing.T) {
+	for _, mode := range []string{"selected", "fresh", "missing", "forbidden"} {
+		t.Run(mode, func(t *testing.T) {
+			id := "selected"
+			if mode == "fresh" {
+				id = "fresh-server-id"
+			}
+			if mode == "missing" {
+				id = "caller-owned"
+			}
+			sess := session.New(session.WithID(id), session.WithAgentName("bound-agent"), session.WithAttributes(map[string]string{sessionActorSourceAttribute: "team.yaml"}), session.WithUserMessage("previous history"))
+			var creates atomic.Int32
+			accepted := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == api.ServerInfoPath:
+					fmt.Fprint(w, `{"version":1,"session_api_version":2,"instance_id":"test","capabilities":["session_explicit_ids"]}`)
+				case r.URL.Path == "/api/agents/team.yaml":
+					fmt.Fprint(w, `{"agents":[{"name":"bound-agent"}]}`)
+				case strings.HasSuffix(r.URL.Path, "/status"):
+					if mode == "missing" {
+						w.WriteHeader(http.StatusNotFound)
+						fmt.Fprint(w, `{"error":"not_found"}`)
+						return
+					}
+					if mode == "forbidden" {
+						w.WriteHeader(http.StatusForbidden)
+						fmt.Fprint(w, `{"error":"forbidden"}`)
+						return
+					}
+					fmt.Fprintf(w, `{"metadata":{"session_id":%q,"agent_name":"bound-agent","model":"saved-model"},"status":{"session_id":%q}}`, id, id)
+				case r.URL.Path == api.SessionAPIPath && r.Method == http.MethodPost:
+					creates.Add(1)
+					var request api.SessionCreateRequest
+					if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&request)) {
+						return
+					}
+					if mode == "missing" {
+						assert.Equal(t, id, request.SessionID)
+					} else {
+						assert.Empty(t, request.SessionID)
+					}
+					fmt.Fprintf(w, `{"session_id":%q,"agent_name":"bound-agent","model":"saved-model"}`, id)
+				case strings.HasSuffix(r.URL.Path, "/snapshot"):
+					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"session": sess, "status": map[string]any{"session_id": id}}))
+				case strings.HasSuffix(r.URL.Path, "/events"):
+					assert.Equal(t, api.SessionAPIPath+"/"+id+"/events", r.URL.Path)
+					fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"snapshot\",\"snapshot\":{\"session\":{\"id\":%q},\"status\":{\"session_id\":%q},\"epoch\":\"owner\",\"cursor\":0}}\n\ndata: {\"version\":2,\"type\":\"ready\",\"cursor\":0}\n\n", id, id)
+					w.(http.Flusher).Flush()
+					select {
+					case <-accepted:
+					case <-r.Context().Done():
+						return
+					}
+					fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":%q,\"turn_id\":\"accepted\",\"epoch\":\"owner\",\"sequence\":1,\"event\":{\"type\":\"stream_stopped\",\"session_id\":%q,\"reason\":\"normal\"}}}\n\n", id, id)
+				case strings.HasSuffix(r.URL.Path, "/messages"):
+					assert.Equal(t, api.SessionAPIPath+"/"+id+"/messages", r.URL.Path)
+					close(accepted)
+					fmt.Fprintf(w, `{"session_id":%q,"turn_id":"accepted"}`, id)
+				case strings.HasSuffix(r.URL.Path, "/title"), strings.HasSuffix(r.URL.Path, "/turns/accepted/wait"):
+					assert.True(t, strings.HasPrefix(r.URL.Path, api.SessionAPIPath+"/"+id+"/"))
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			flags := &runExecFlags{remoteAddress: server.URL, agentName: "bound-agent", outputJSON: true}
+			if mode != "fresh" {
+				flags.sessionID = id
+			}
+			b := &remoteBackend{flags: flags, agentFileName: "team.yaml"}
+			services, sessions, got, cleanup, err := b.CreateSession(t.Context(), nil, b.CreateSessionRequest(""))
+			if mode == "forbidden" {
+				require.Error(t, err)
+				assert.Zero(t, creates.Load())
+				return
+			}
+			require.NoError(t, err)
+			defer cleanup()
+			require.Equal(t, "bound-agent", b.handle.AgentName())
+			require.Equal(t, "saved-model", b.handle.Metadata().Model)
+			require.Len(t, got.GetAllMessages(), 1)
+			var output bytes.Buffer
+			require.NoError(t, flags.handleExecMode(t.Context(), cli.NewPrinter(&output), services, sessions, got, []string{"team.yaml", "follow up"}, b.handle))
+			wantCreates := int32(0)
+			if mode != "selected" {
+				wantCreates = 1
+			}
+			assert.Equal(t, wantCreates, creates.Load())
+			require.Len(t, sess.GetAllMessages(), 1, "history remains server-owned")
+		})
 	}
 }

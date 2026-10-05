@@ -1155,6 +1155,7 @@ func sessionEnvelope(sessionID string, item SequencedSessionEvent) SessionEvent 
 // DeleteSession cascades through the topology manager, driver/interactions,
 // observers, session row, and persisted topology. It is idempotent.
 func (r *LocalRuntime) DeleteSession(ctx context.Context, sessionID string) error {
+	rootID := r.subagents.rootSessionLockedSafe(sessionID)
 	// The driver registry owns the admission fence and observer finalization.
 	// Runtime topology and durable state are cleared only after that completes.
 	if err := r.sessionDrivers.Delete(ctx, sessionID); err != nil {
@@ -1168,6 +1169,11 @@ func (r *LocalRuntime) DeleteSession(ctx context.Context, sessionID string) erro
 		if err := r.sessionStore.DeleteSession(ctx, sessionID); err != nil && !errors.Is(err, session.ErrNotFound) {
 			return err
 		}
+	}
+	if rootID == sessionID {
+		r.budgetMu.Lock()
+		delete(r.rootBudgets, rootID)
+		r.budgetMu.Unlock()
 	}
 	return nil
 }

@@ -284,6 +284,9 @@ func (s *remoteSession) Snapshot(ctx context.Context) (*session.Session, error) 
 	if err != nil {
 		return nil, err
 	}
+	if decoded.Session.ID != s.ID() {
+		return nil, protocolError(fmt.Errorf("snapshot identity differs from requested session %q", s.ID()))
+	}
 	return decoded.Session, nil
 }
 
@@ -799,12 +802,54 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		return Observation{}, protocolError(errors.New("session stream did not begin with a versioned snapshot"))
 	}
 	snapshot, err := c.decodeSessionSnapshot(*first.Snapshot)
+	if err == nil && snapshot.Status.SessionID != id {
+		err = fmt.Errorf("observation identity differs from requested session %q", id)
+	}
 	if err != nil {
 		resp.Body.Close()
 		cancel()
 		return Observation{}, protocolError(err)
 	}
 	snapshots := []SessionSnapshot{snapshot}
+	witnessParents := map[string]string{}
+	if options.Tree && snapshot.Session.SubagentTree != nil {
+		root, found := subtreeForSession(*snapshot.Session.SubagentTree, id)
+		if !found {
+			resp.Body.Close()
+			cancel()
+			return Observation{}, protocolError(errors.New("tree snapshot does not contain requested root"))
+		}
+		var witnessErr error
+		var collect func(subagent.NodeSnapshot, string)
+		collect = func(node subagent.NodeSnapshot, parent string) {
+			member := node.Node.SessionID
+			if rootID, ok := nodeRootSessionID(node.Node.ID); ok {
+				if member != "" && member != rootID {
+					witnessErr = errors.New("inconsistent tree root identity")
+				}
+				member = rootID
+			}
+			if member != "" {
+				if _, duplicate := witnessParents[member]; duplicate {
+					witnessErr = errors.New("duplicate tree witness session")
+				}
+				witnessParents[member] = parent
+				parent = member
+			}
+			for _, child := range node.Children {
+				collect(child, parent)
+			}
+		}
+		collect(root, "")
+		if _, containsRoot := witnessParents[id]; !containsRoot || witnessParents[id] != "" {
+			witnessErr = errors.New("invalid tree witness root")
+		}
+		if witnessErr != nil {
+			resp.Body.Close()
+			cancel()
+			return Observation{}, protocolError(witnessErr)
+		}
+	}
 	var replay []SessionEvent
 	replayBytes := 0
 	replaySequences := map[string]uint64{}
@@ -830,6 +875,16 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 		if options.Tree && message.Type == "snapshot" && message.Snapshot != nil {
 			additional, decodeErr := c.decodeSessionSnapshot(*message.Snapshot)
+			if decodeErr == nil {
+				_, duplicate := replaySequences[additional.Status.SessionID]
+				witnessParent, witnessed := witnessParents[additional.Session.ID]
+				if additional.Session.ParentID == "" {
+					additional.Session.ParentID = witnessParent
+				}
+				if duplicate || (witnessed && additional.Session.ParentID != witnessParent) {
+					decodeErr = errors.New("invalid tree session membership")
+				}
+			}
 			if decodeErr != nil {
 				resp.Body.Close()
 				cancel()
@@ -841,6 +896,23 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 			continue
 		}
 		if message.Type == "ready" {
+			if options.Tree {
+				parents := make(map[string]string, len(snapshots))
+				for _, item := range snapshots {
+					parents[item.Session.ID] = item.Session.ParentID
+				}
+				for _, item := range snapshots[1:] {
+					seen := map[string]bool{}
+					for current := item.Session.ID; current != id; current = parents[current] {
+						if current == "" || seen[current] {
+							resp.Body.Close()
+							cancel()
+							return Observation{}, protocolError(errors.New("invalid tree session membership"))
+						}
+						seen[current] = true
+					}
+				}
+			}
 			if !options.Tree && message.Cursor != snapshot.Cursor {
 				resp.Body.Close()
 				cancel()
@@ -861,7 +933,7 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 		previous, known := replaySequences[envelope.SessionID]
 		zeroSeed := baseline && known && envelope.IsLiveSeed()
-		if envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
+		if !known || envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
 			resp.Body.Close()
 			cancel()
 			return Observation{}, protocolError(errors.New("invalid session replay sequence or session"))
@@ -931,8 +1003,12 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 					errorsCh <- protocolError(decodeErr)
 					return
 				}
-				if _, exists := lastSequences[additional.Status.SessionID]; exists {
-					errorsCh <- protocolError(errors.New("duplicate tree session snapshot"))
+				if additional.Session.ParentID == "" {
+					additional.Session.ParentID = witnessParents[additional.Session.ID]
+				}
+				_, parentKnown := lastSequences[additional.Session.ParentID]
+				if _, exists := lastSequences[additional.Status.SessionID]; exists || !parentKnown {
+					errorsCh <- protocolError(errors.New("invalid tree session membership"))
 					return
 				}
 				var seeds []SessionEvent
@@ -1115,6 +1191,7 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 	if in.Session == nil || in.Session.ID == "" || in.Status.SessionID != in.Session.ID {
 		return SessionSnapshot{}, errors.New("invalid session snapshot identity")
 	}
+	in.Session.ParentID = in.ParentSessionID
 	out := SessionSnapshot{Session: in.Session, Status: SessionStatus(in.Status), Cursor: in.Cursor, Epoch: in.Epoch, TranscriptPosition: in.TranscriptPosition}
 	for _, pending := range in.PendingInputs {
 		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, ReportOutcome: pending.ReportOutcome, InputMode: pending.InputMode})

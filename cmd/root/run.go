@@ -569,7 +569,11 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		// Non-interactive (--exec) runs never clean up the worktree: there
 		// is no safe moment to prompt, and silently discarding work would
 		// be surprising. The worktree is left in place for later inspection.
-		return f.handleExecMode(ctx, out, rt, sessions, sess, args)
+		var handle runtime.SessionHandle
+		if remote, ok := b.(*remoteBackend); ok {
+			handle = remote.handle
+		}
+		return f.handleExecMode(ctx, out, rt, sessions, sess, args, handle)
 	}
 
 	binding := sessionSessionBinding(ctx, rt, sess)
@@ -1084,7 +1088,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 	return localRt, sess, nil
 }
 
-func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, args []string) error {
+func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt app.Services, sessions runtime.SessionRuntime, sess *session.Session, args []string, resolved ...runtime.SessionHandle) error {
 	if f.sessionReadOnly {
 		return errors.New("--session-read-only cannot be used with --exec: there is nothing to display without a TUI")
 	}
@@ -1099,7 +1103,11 @@ func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt 
 	if !ok {
 		return errors.New("runtime services do not provide immutable commands")
 	}
-	err := cli.Run(ctx, out, f.execCLIConfig(sess), commandSource, sessions, sess, userMessages)
+	cfg := f.execCLIConfig(sess)
+	if len(resolved) > 0 {
+		cfg.SessionHandle = resolved[0]
+	}
+	err := cli.Run(ctx, out, cfg, commandSource, sessions, sess, userMessages)
 	if cliErr, ok := errors.AsType[cli.RuntimeError](err); ok {
 		return RuntimeError{Err: cliErr.Err}
 	}

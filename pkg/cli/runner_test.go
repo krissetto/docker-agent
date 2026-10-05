@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -602,4 +603,36 @@ func TestRunEditsCanonicalTitleAndAttachmentNotOriginalSession(t *testing.T) {
 	assert.Equal(t, rt.edits[0].AttachmentPath, path)
 	assert.Equal(t, original.TitleSnapshot(), "original")
 	assert.Equal(t, len(original.AttachedFilesSnapshot()), 0)
+}
+
+type trackingCLISessions struct {
+	cliSessions
+
+	creates int
+}
+
+func (r *trackingCLISessions) CreateSession(ctx context.Context, sess *session.Session, binding runtime.SessionBinding) (runtime.SessionHandle, error) {
+	r.creates++
+	return r.cliSessions.CreateSession(ctx, sess, binding)
+}
+
+func TestRunBindsOnlyUnresolvedLocalTemplate(t *testing.T) {
+	for _, resolved := range []bool{false, true} {
+		t.Run(strconv.FormatBool(resolved), func(t *testing.T) {
+			rt := &mockRuntime{}
+			sessions := &trackingCLISessions{cliSessions: cliSessions{rt: rt}}
+			sess := session.New(session.WithID("session"), session.WithAgentName("test"))
+			cfg := Config{OutputJSON: true}
+			if resolved {
+				cfg.SessionHandle = cliSession{rt: rt}
+			}
+			var output bytes.Buffer
+			assert.NilError(t, Run(t.Context(), NewPrinter(&output), cfg, rt, sessions, sess, []string{"hello"}))
+			wantCreates := 1
+			if resolved {
+				wantCreates = 0
+			}
+			assert.Equal(t, wantCreates, sessions.creates)
+		})
+	}
 }

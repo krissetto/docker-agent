@@ -281,15 +281,7 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 		m.mu.Unlock()
 		return subagent.Snapshot{}, nil
 	}
-	if tracked := m.sessions[sess.ID]; tracked != nil {
-		// A root may receive a report while the durable descendants are preflighted.
-		// Replace only its synthetic projection, never a published child graph.
-		if tracked.unwatch != nil {
-			tracked.unwatch()
-		}
-		delete(m.sessions, sess.ID)
-		_ = m.tree.Remove(root.ID)
-	}
+	existingRoot := m.sessions[sess.ID]
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
 		if _, exists := m.tree.Node(node.ID); exists {
@@ -342,16 +334,21 @@ func (m *subagentManager) restoreLockedRecords(ctx context.Context, sess *sessio
 	// Add this root and its descendants as one atomic tree update. Existing
 	// roots remain untouched, including their timestamps.
 	treeNodes := make([]subagent.Node, 0, len(prepared)+1)
-	treeNodes = append(treeNodes, root)
+	if existingRoot == nil {
+		treeNodes = append(treeNodes, root)
+	}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
 		node.State = entry.state
 		treeNodes = append(treeNodes, node)
 	}
 
-	insertedSessions := []string{sess.ID}
+	var insertedSessions []string
 	insertedChildren := make([]subagent.NodeID, 0, len(prepared))
-	m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true, sess: sess}
+	if existingRoot == nil {
+		m.sessions[sess.ID] = &sessionSubagents{node: root.ID, topLevel: true, sess: sess}
+		insertedSessions = append(insertedSessions, sess.ID)
+	}
 	for _, entry := range prepared {
 		node := entry.snapshot.Node
 		rec := &childRecord{name: node.DisplayName(), parentSession: entry.parentSessionID, sessionID: node.SessionID, agent: entry.childAgent, durable: session.ChildRecord{Node: node}, unwatch: entry.unwatch}

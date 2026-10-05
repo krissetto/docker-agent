@@ -533,14 +533,44 @@ func (r *LocalRuntime) recordElicitationDecline(ctx context.Context, sessionID, 
 
 // retire keeps failed settlement authoritative and closes the owner only after drain.
 func (d *sessionDriver) retire(ctx context.Context) error {
-	if err := d.drainRetirement(ctx); err != nil {
+	if err := d.acquireRetirement(ctx); err != nil {
+		return err
+	}
+	defer d.releaseRetirement()
+	if err := d.drainRetirementOwned(ctx); err != nil {
 		return err
 	}
 	d.closeOwner()
 	return nil
 }
 
+func (d *sessionDriver) acquireRetirement(ctx context.Context) error {
+	select {
+	case d.retirementGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (d *sessionDriver) releaseRetirement() { <-d.retirementGate }
+
 func (d *sessionDriver) drainRetirement(ctx context.Context) error {
+	if err := d.acquireRetirement(ctx); err != nil {
+		return err
+	}
+	defer d.releaseRetirement()
+	return d.drainRetirementOwned(ctx)
+}
+
+func (d *sessionDriver) drainRetirementOwned(ctx context.Context) error {
+	select {
+	case <-d.ownerDone:
+		return nil
+	default:
+	}
+	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
+	defer cancel()
 	d.StopAll()
 	select {
 	case <-d.Done():
@@ -559,23 +589,84 @@ func (d *sessionDriver) drainRetirement(ctx context.Context) error {
 			return err
 		}
 	}
-	if d.r != nil && d.r.team != nil {
-		cleanupCtx := tools.WithResourceOwner(context.WithoutCancel(ctx), d.resourceOwner)
-		var errs []error
-		for _, name := range d.r.team.AgentNames() {
-			a, err := d.r.team.Agent(name)
-			if err != nil {
-				continue
+	if err := d.ownerCall(ctx, func() error {
+		d.ioSealed = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	select {
+	case <-d.Done():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	cleanupErr := d.cleanupResources(ctx)
+	select {
+	case <-d.Done():
+		return cleanupErr
+	case <-ctx.Done():
+		return errors.Join(cleanupErr, ctx.Err())
+	}
+}
+
+type resourceCleanupAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+func (d *sessionDriver) cleanupResources(ctx context.Context) error {
+	var attempt *resourceCleanupAttempt
+	var start bool
+	if err := d.ownerCall(ctx, func() error {
+		attempt = d.resourceCleanup
+		if attempt != nil {
+			select {
+			case <-attempt.done:
+				if attempt.err == nil {
+					return nil
+				}
+			default:
+				return nil
 			}
-			for _, toolset := range a.ToolSets() {
-				if scoped, ok := tools.As[tools.ResourceOwnerStopper](toolset); ok {
-					errs = append(errs, scoped.StopResourceOwner(cleanupCtx))
+		}
+		attempt = &resourceCleanupAttempt{done: make(chan struct{})}
+		d.resourceCleanup = attempt
+		d.wg.Add(1)
+		start = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	if start {
+		cleanupCtx, cancel := context.WithTimeout(tools.WithResourceOwner(ctx, d.resourceOwner), defaultSubagentPersistenceTimeout)
+		go func() {
+			defer d.wg.Done()
+			defer cancel()
+			var errs []error
+			if d.r != nil && d.r.team != nil {
+				for _, name := range d.r.team.AgentNames() {
+					a, err := d.r.team.Agent(name)
+					if err != nil {
+						continue
+					}
+					for _, toolset := range a.ToolSets() {
+						if scoped, ok := tools.As[tools.ResourceOwnerStopper](toolset); ok {
+							errs = append(errs, scoped.StopResourceOwner(cleanupCtx))
+						}
+					}
 				}
 			}
-		}
-		if err := errors.Join(errs...); err != nil {
-			return err
-		}
+			_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+				attempt.err = errors.Join(errs...)
+				close(attempt.done)
+				return nil
+			})
+		}()
 	}
-	return nil
+	select {
+	case <-attempt.done:
+		return attempt.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

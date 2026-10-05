@@ -3,6 +3,7 @@ package memory
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 type BackendFactory func(path string) (DB, error)
 
 // CreateToolSetWithBackend lets embedders use a portable backend without opening SQLite.
+// A returned backend is owned by the toolset, including on factory failure.
 func CreateToolSetWithBackend(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string, open BackendFactory) (tools.ToolSet, error) {
 	if open == nil {
 		return nil, errors.New("memory backend factory is required")
@@ -45,6 +47,9 @@ func CreateToolSetWithBackend(toolset latest.Toolset, parentDir string, runConfi
 
 	db, err := open(validatedMemoryPath)
 	if err != nil {
+		if closer, ok := db.(io.Closer); ok {
+			err = errors.Join(err, closer.Close())
+		}
 		return nil, fmt.Errorf("failed to create memory database: %w", err)
 	}
 
@@ -52,7 +57,7 @@ func CreateToolSetWithBackend(toolset latest.Toolset, parentDir string, runConfi
 		return nil, errors.New("memory backend factory returned nil")
 	}
 
-	return NewWithPath(db, validatedMemoryPath), nil
+	return NewOwnedWithPath(db, validatedMemoryPath), nil
 }
 
 // sanitizePathSegment replaces characters that are illegal in a single path

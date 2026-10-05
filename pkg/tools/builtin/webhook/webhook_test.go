@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -430,4 +431,120 @@ func TestBackgroundDeliveryRetainsInvokingRuntime(t *testing.T) {
 	require.Len(t, first.messages(), 1)
 	require.Len(t, second.messages(), 1)
 	require.NoError(t, ts.Stop(t.Context()))
+}
+
+func TestStoppedSendIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, recall := range []bool{false, true} {
+		fd := &fakeDoer{}
+		ts, _ := newTS(t, fd)
+		require.NoError(t, ts.Stop(t.Context()))
+		res, err := ts.send(t.Context(), SendArgs{Message: "after stop"}, &fakeRuntime{recall: recall})
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		require.Contains(t, res.Output, "stopped")
+		require.Zero(t, fd.calls())
+	}
+}
+
+func TestFailedDeliveryReleasesDedupeButConsumesRateBudget(t *testing.T) {
+	t.Parallel()
+	fd := &fakeDoer{statuses: []int{400, 200}}
+	ts, _ := newTS(t, fd)
+	args := SendArgs{Message: "retry"}
+	res, err := ts.send(t.Context(), args, nil)
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	res, err = ts.send(t.Context(), args, nil)
+	require.NoError(t, err)
+	require.Contains(t, res.Output, "rate limited")
+	ts.minInterval = 0
+	res, err = ts.send(t.Context(), args, nil)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	require.Equal(t, 2, fd.calls())
+	require.Empty(t, ts.cancels)
+}
+
+func TestAdmissionAtomicallySuppressesPendingAndRateLimits(t *testing.T) {
+	t.Parallel()
+	for _, same := range []bool{false, true} {
+		ts, _ := newTS(t, &fakeDoer{})
+		const workers = 32
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		accepted := 0
+		finishes := []func(bool){}
+		for i := range workers {
+			wg.Go(func() {
+				<-start
+				message := strconv.Itoa(i)
+				if same {
+					message = "same"
+				}
+				_, finish, res := ts.admit(t.Context(), SendArgs{Message: message}, true)
+				mu.Lock()
+				defer mu.Unlock()
+				if res == nil {
+					accepted++
+					finishes = append(finishes, finish)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		require.Equal(t, 1, accepted)
+		for _, finish := range finishes {
+			finish(true)
+		}
+		require.NoError(t, ts.Stop(t.Context()))
+		require.Empty(t, ts.cancels)
+	}
+}
+
+func TestStopJoinsReservationBeforeWorkerLaunch(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTS(t, &fakeDoer{})
+	ctx, finish, res := ts.admit(t.Context(), SendArgs{Message: "reserved"}, true)
+	require.Nil(t, res)
+	stopped := make(chan struct{})
+	go func() { _ = ts.Stop(t.Context()); close(stopped) }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stop did not cancel reservation")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stop returned before accepted job completed")
+	default:
+	}
+	finish(false)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not join completed job")
+	}
+	require.Empty(t, ts.cancels)
+	require.Empty(t, ts.recent)
+}
+
+func TestDeliveryStateIsBounded(t *testing.T) {
+	t.Parallel()
+	ts, _ := newTS(t, &fakeDoer{})
+	ts.minInterval = 0
+	for i := range maxRecentDeliveries {
+		_, finish, res := ts.admit(t.Context(), SendArgs{Message: strconv.Itoa(i)}, false)
+		require.Nil(t, res)
+		finish(true)
+	}
+	_, _, res := ts.admit(t.Context(), SendArgs{Message: "overflow"}, false)
+	require.True(t, res.IsError)
+	require.Len(t, ts.recent, maxRecentDeliveries)
+	ts.now = func() time.Time { return testNow.Add(ts.dedupeWindow + time.Second) }
+	_, finish, res := ts.admit(t.Context(), SendArgs{Message: "after expiry"}, false)
+	require.Nil(t, res)
+	finish(true)
+	require.Len(t, ts.recent, 1)
 }

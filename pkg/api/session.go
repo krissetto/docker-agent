@@ -177,10 +177,11 @@ type SessionInteraction[Kind ~string, Event any] struct {
 }
 
 type SessionSnapshot[State ~string, Kind ~string, Event any] struct {
-	Session       *session.Session                  `json:"session"`
-	Status        SessionStatus[State]              `json:"status"`
-	Interactions  []SessionInteraction[Kind, Event] `json:"interactions"`
-	PendingInputs []SessionPendingInput             `json:"pending_inputs"`
+	ParentSessionID string                            `json:"parent_session_id,omitempty"`
+	Session         *session.Session                  `json:"session"`
+	Status          SessionStatus[State]              `json:"status"`
+	Interactions    []SessionInteraction[Kind, Event] `json:"interactions"`
+	PendingInputs   []SessionPendingInput             `json:"pending_inputs"`
 	// LiveSeeds supplements a dynamically admitted tree snapshot before its live tail.
 	LiveSeeds          []SessionEnvelope[Event] `json:"live_seeds,omitempty"`
 	Epoch              string                   `json:"epoch,omitempty"`

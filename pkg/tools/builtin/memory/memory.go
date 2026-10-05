@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/memory/database"
@@ -28,8 +30,11 @@ type DB interface {
 }
 
 type ToolSet struct {
-	db   DB
-	path string
+	db        DB
+	path      string
+	owned     io.Closer
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Verify interface compliance
@@ -39,6 +44,7 @@ var (
 	_ tools.Instructable = (*ToolSet)(nil)
 )
 
+// New borrows manager; the caller remains responsible for its lifetime.
 func New(manager DB) *ToolSet {
 	return &ToolSet{
 		db: manager,
@@ -46,12 +52,28 @@ func New(manager DB) *ToolSet {
 }
 
 // NewWithPath creates a ToolSet and records the database path for
-// user-visible identification in warnings and error messages.
+// user-visible identification in warnings and error messages. It borrows manager.
 func NewWithPath(manager DB, dbPath string) *ToolSet {
 	return &ToolSet{
 		db:   manager,
 		path: dbPath,
 	}
+}
+
+// NewOwnedWithPath transfers backend ownership to the toolset.
+func NewOwnedWithPath(manager DB, dbPath string) *ToolSet {
+	t := NewWithPath(manager, dbPath)
+	t.owned, _ = manager.(io.Closer)
+	return t
+}
+
+func (t *ToolSet) Close() error {
+	t.closeOnce.Do(func() {
+		if t.owned != nil {
+			t.closeErr = t.owned.Close()
+		}
+	})
+	return t.closeErr
 }
 
 // Describe returns a short, user-visible description of this toolset instance.

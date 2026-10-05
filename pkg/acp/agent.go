@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
@@ -912,6 +913,16 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session, inputs ...runtim
 			toolCallArgs[e.ToolCall.ID] = e.ToolCall.Function.Arguments
 			if err := a.handleToolCallConfirmation(ctx, acpSess, envelope.InteractionID, e); err != nil {
 				return runtimeclient.TurnTerminate, err
+			}
+
+		case *runtime.ElicitationRequestEvent:
+			if err := acpSess.session.Respond(ctx, runtime.InteractionResponse{
+				InteractionID: envelope.InteractionID,
+				Kind:          runtime.InteractionElicitation,
+				ElicitationID: e.ElicitationID,
+				Elicitation:   runtime.ElicitationResult{Action: tools.ElicitationActionDecline},
+			}); err != nil {
+				return runtimeclient.TurnTerminate, fmt.Errorf("decline unsupported ACP elicitation: %w", err)
 			}
 
 		case *runtime.ToolCallEvent:

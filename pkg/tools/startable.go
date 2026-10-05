@@ -719,14 +719,16 @@ func (s *StartableToolSet) StopIfStarted(ctx context.Context) error {
 // stopLocked implements the stop sequence shared by Stop, StopIfStarted and
 // the unlock release handshake; s.mu must be held.
 func (s *StartableToolSet) stopLocked(ctx context.Context) error {
+	if startable, ok := As[Startable](s.ToolSet); ok {
+		if err := startable.Stop(ctx); err != nil {
+			return err
+		}
+	}
 	s.started = false
 	s.startStreak.reset()
 	s.listStreak.reset()
 	s.recoveryStreak.reset()
 	s.resetStartBackoff()
-	if startable, ok := As[Startable](s.ToolSet); ok {
-		return startable.Stop(ctx)
-	}
 	return nil
 }
 

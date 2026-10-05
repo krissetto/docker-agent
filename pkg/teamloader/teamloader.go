@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
@@ -40,6 +41,7 @@ import (
 var defaultMaxTokens int64 = 32000
 
 type loadOptions struct {
+	ownedResources   *[]io.Closer
 	workingDir       string
 	modelOverrides   []string
 	promptFiles      []string
@@ -253,6 +255,18 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		if err := o(&loadOpts); err != nil {
 			return nil, err
 		}
+	}
+
+	ownsResources := loadOpts.ownedResources == nil
+	if ownsResources {
+		loadOpts.ownedResources = new([]io.Closer)
+		defer func() {
+			if err != nil {
+				for _, resource := range *loadOpts.ownedResources {
+					err = errors.Join(err, resource.Close())
+				}
+			}
+		}()
 	}
 
 	// Loading resolves per-load state into RuntimeConfig for toolset creators.
@@ -632,9 +646,14 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		runtimeSafety = cfg.Runtime.Safety
 	}
 
+	var ownedResources []io.Closer
+	if ownsResources {
+		ownedResources = *loadOpts.ownedResources
+	}
 	return &LoadResult{
 		Team: team.New(
 			team.WithAgents(agents...),
+			team.WithOwnedResources(ownedResources...),
 			team.WithPermissions(permChecker),
 			team.WithAgentConfigs(agentConfigs),
 			team.WithRuntimeSafety(runtimeSafety),
@@ -959,6 +978,10 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 			continue
 		}
 
+		if closer, ok := tools.As[io.Closer](tool); ok && loadOpts.ownedResources != nil {
+			*loadOpts.ownedResources = append(*loadOpts.ownedResources, closer)
+		}
+
 		wrapped := WithToolsFilter(tool, toolset.Tools...)
 		wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly)
 		wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
@@ -1128,6 +1151,9 @@ func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 				slog.WarnContext(ctx, "Skill toolset configuration failed; skipping", "skill", skill.Name, "toolset", ref, "error", err)
 				warnings = append(warnings, fmt.Sprintf("skill %s toolset %s failed: %v", skill.Name, ref, err))
 				continue
+			}
+			if closer, ok := tools.As[io.Closer](tool); ok && loadOpts.ownedResources != nil {
+				*loadOpts.ownedResources = append(*loadOpts.ownedResources, closer)
 			}
 			wrapped := WithToolsFilter(tool, toolset.Tools...)
 			// Honor the agent-level readonly flag, exactly like getToolsForAgent:
@@ -1336,6 +1362,7 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 // inherited.
 func inheritOptions(parent *loadOptions) Opt {
 	return func(opts *loadOptions) error {
+		opts.ownedResources = parent.ownedResources
 		opts.toolsetRegistry = parent.toolsetRegistry
 		opts.providerRegistry = parent.providerRegistry
 		opts.sourceResolver = parent.sourceResolver
