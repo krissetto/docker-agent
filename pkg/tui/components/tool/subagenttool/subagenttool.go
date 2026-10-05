@@ -37,7 +37,7 @@ func NewSpawn(ar *animation.Runtime, msg *types.Message, sessionState service.Se
 func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
 	m := &sendModel{msg: msg, disclosure: agentmessage.New(ar), width: 80, lookup: lookup, references: references}
 	m.Base = toolcommon.NewBaseWithCollapsed(ar, msg, sessionState, renderer(func(msg *types.Message, s spinner.Spinner, state service.SessionStateReader, width, height int, lookup NameLookup) string {
-		header := renderSendHeader(msg, s, width, lookup, " "+m.disclosure.Chevron())
+		header := m.header(msg, s, width)
 		m.headerLines = strings.Count(header, "\n") + 1
 		return header
 	}, lookup, references...), toolcommon.CollapsedRenderer(renderer(renderSend, lookup, references...)))

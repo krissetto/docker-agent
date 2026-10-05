@@ -452,22 +452,15 @@ func (mv *messageModel) isAgentMessage() bool {
 func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 
 func (mv *messageModel) replyHeader(width int) string {
-	chevron := ">"
-	if mv.expanded {
-		chevron = "v"
-	}
-	icon := styles.ToolCompletedIcon.Render("✓")
-	action := " has replied "
+	status := "has replied"
 	if !mv.message.IsSubagentReply() {
-		action = " sent a message "
+		status = "sent a message"
 	}
 	if mv.message.Type == types.MessageTypeRuntimeNotice {
-		var label string
-		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
-		action = " · " + label + " "
+		icon, label := subagenttool.CompletionPresentation(mv.message.ReportOutcome)
+		status = icon + " " + label
 	}
-	return agentidentity.Wrap(icon+" ", mv.message.InputReference,
-		styles.MutedStyle.Render(action+chevron), width)
+	return agentmessage.Header(mv.message.InputReference, mv.disclosure.Chevron(), status, width)
 }
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
@@ -675,7 +668,7 @@ func (mv *messageModel) render(width int) string {
 			content = msg.ReceivedBody
 		}
 		actions := actionRow(agentmessage.InnerWidth(width), mv.hovered || mv.selected, types.MessageCopyLabel)
-		body := agentmessage.Body(content, msg.InputReference, width, mv.selected, actions)
+		body := agentmessage.Body(content, width, mv.selected, actions)
 		return mv.disclosure.Render(header, body)
 	}
 	switch msg.Type {

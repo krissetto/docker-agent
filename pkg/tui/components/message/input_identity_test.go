@@ -37,11 +37,14 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 			normal := bodyStyle.PaddingTop(0).Width(width).Render(actionRow(innerWidth, false, types.MessageCopyLabel) + "\n" + content)
 			require.Equal(t, input.Message.Content, msg.Content)
 			require.Equal(t, strings.Split(normal, "\n")[1:], got[1:], "only inherited bold changes; USER body colors, padding and ANSI remain exact")
-			assert.Equal(t, width, ansi.StringWidth(got[0]))
-			assert.True(t, strings.HasPrefix(ansi.Strip(got[0]), "┏"), "identity joins the USER left border")
-			if width >= 28 {
-				assert.Contains(t, ansi.Strip(got[0]), "━ worker (abcde) ━")
+			header := view.replyHeader(width)
+			for line := range strings.SplitSeq(header, "\n") {
+				assert.LessOrEqual(t, ansi.StringWidth(line), width)
 			}
+			if width >= 28 {
+				assert.Contains(t, ansi.Strip(header), "━ worker (abcde) v")
+			}
+
 			view.SetHovered(true)
 			assert.Equal(t, len(got)+strings.Count(view.replyHeader(width), "\n")+1, view.Height(width), "hover cannot change geometry")
 			view.SetHovered(false)

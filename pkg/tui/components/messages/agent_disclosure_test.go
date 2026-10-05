@@ -87,8 +87,8 @@ func TestSendRequestNestedChevronAndStatusReplacement(t *testing.T) {
 	found := false
 	for y, line := range m.renderedLines {
 		plain := strings.TrimRight(ansi.Strip(line), " ")
-		if strings.HasSuffix(plain, "Messaged parent >") {
-			col := ansi.StringWidth(plain) - 1
+		if before, _, hasLabel := strings.Cut(plain, "parent >"); hasLabel {
+			col := ansi.StringWidth(before) + len("parent ")
 			require.True(t, block.IsToggleAt(y, col))
 			block.ToggleAt(y, col)
 			found = true
@@ -100,8 +100,8 @@ func TestSendRequestNestedChevronAndStatusReplacement(t *testing.T) {
 	// Child identity remains navigation, not the disclosure target.
 	for y, line := range m.renderedLines {
 		plain := ansi.Strip(line)
-		if pos := strings.Index(plain, "Messaged parent"); pos >= 0 {
-			require.False(t, block.IsToggleAt(y, pos+len("Messaged ")))
+		if pos := strings.Index(plain, "parent >"); pos >= 0 {
+			require.False(t, block.IsToggleAt(y, pos))
 		}
 	}
 	// Collapsing the outer block releases the hidden child's transition.

@@ -41,6 +41,10 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				require.Contains(t, body, "Literal **request**")
 				require.Equal(t, 1, strings.Count(body, "Literal"))
 				require.Contains(t, body, "━", "expanded body uses agent-input border")
+				if to != "parent" {
+					require.Equal(t, 1, strings.Count(body, "worker (abcde)"), "one recipient identity")
+					require.Contains(t, body, "worker (abcde) v")
+				}
 				old := view
 				view = NewSend(ar, msg, nil, nil).(*sendModel)
 				animation.StopView(old)

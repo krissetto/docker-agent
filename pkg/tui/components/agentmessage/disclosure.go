@@ -73,22 +73,42 @@ func (d *Disclosure) Render(header, body string) string {
 	return header + "\n" + strings.Join(lines[:rows], "\n")
 }
 
-func ToggleAt(header string, line, col int) bool {
+const toggleLink = "docker-agent:disclosure"
+
+func Header(ref lifecycle.InputReference, chevron, status string, width int) string {
+	style := styles.UserMessageStyle.Bold(false)
+	surface := styles.NoStyle.Foreground(style.GetForeground()).Background(style.GetBackground())
+	rule := surface.Foreground(style.GetBorderLeftForeground())
+	control := ansi.SetHyperlink(toggleLink) + styles.MutedStyle.Render(chevron) + ansi.ResetHyperlink()
+	border := style.GetBorderStyle()
+	header := agentidentity.Wrap(rule.Render(border.TopLeft+border.Top+" "), ref, " "+control+styles.MutedStyle.Render(" "+status), width)
 	lines := strings.Split(header, "\n")
-	if line != len(lines)-1 {
-		return false
+	for i, line := range lines {
+		tail := max(0, width-ansi.StringWidth(line))
+		if tail > 0 {
+			line += rule.Render(" " + strings.Repeat(border.Top, tail-1))
+		}
+		lines[i] = styles.RenderComposite(surface, line)
 	}
-	return col == ansi.StringWidth(strings.TrimRight(ansi.Strip(lines[line]), " "))-1
+	return strings.Join(lines, "\n")
 }
 
-func Body(content string, ref lifecycle.InputReference, width int, selected bool, actions string) string {
+func ToggleAt(header string, line, col int) bool {
+	lines := strings.Split(header, "\n")
+	if line < 0 || line >= len(lines) {
+		return false
+	}
+	prefix, _, found := strings.Cut(lines[line], ansi.SetHyperlink(toggleLink))
+	return found && col == ansi.StringWidth(prefix)
+}
+
+func Body(content string, width int, selected bool, actions string) string {
 	style := styles.UserMessageStyle.Bold(false)
 	if selected {
 		style = styles.SelectedUserMessageStyle.Bold(false)
 	}
 	content = strings.ReplaceAll(content, "\t", "    ")
-	rendered := style.PaddingTop(0).Width(width).Render(actions + "\n" + strings.TrimRight(content, "\n\r\t "))
-	return agentidentity.Border(rendered, ref, width, style)
+	return style.PaddingTop(0).Width(width).Render(actions + "\n" + strings.TrimRight(content, "\n\r\t "))
 }
 
 func InnerWidth(width int) int {

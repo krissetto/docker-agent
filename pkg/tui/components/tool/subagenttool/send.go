@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/types"
@@ -42,15 +43,7 @@ func (m *sendModel) View() string {
 	if err != nil {
 		return header
 	}
-	name, id := attribution(m.msg, params.To, m.lookup)
-	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: id, Name: name, Agent: name, DisplayID: subagent.ShortID(id)}
-	if params.To == subagent.ParentAlias {
-		ref = lifecycle.InputReference{Kind: lifecycle.InputReferenceParent, Name: "parent"}
-	}
-	if len(m.references) > 0 && m.references[0] != nil && params.To != subagent.ParentAlias {
-		ref.Agent = m.references[0](subagent.NodeID(id)).Agent
-	}
-	body := agentmessage.Body(params.Message, ref, m.width, false, "")
+	body := agentmessage.Body(params.Message, m.width, false, "")
 	return m.disclosure.Render(header, body)
 }
 
@@ -88,4 +81,22 @@ func (m *sendModel) SetExpanded(expanded bool) {
 func (m *sendModel) InputReferenceOnLine(line int) bool {
 	m.Base.View()
 	return line >= 0 && line < m.headerLines
+}
+
+func (m *sendModel) reference(msg *types.Message, to string) lifecycle.InputReference {
+	name, id := attribution(msg, to, m.lookup)
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: id, Name: name, Agent: name, DisplayID: subagent.ShortID(id)}
+	if to == subagent.ParentAlias {
+		return lifecycle.InputReference{Kind: lifecycle.InputReferenceParent, Name: "parent"}
+	}
+	if len(m.references) > 0 && m.references[0] != nil {
+		ref.Agent = m.references[0](subagent.NodeID(id)).Agent
+	}
+	return ref
+}
+
+func (m *sendModel) header(msg *types.Message, s spinner.Spinner, width int) string {
+	params, _ := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
+	status := statusIcon(msg, s) + " " + verb(msg, "Messaging", "Messaged")
+	return agentmessage.Header(m.reference(msg, params.To), m.disclosure.Chevron(), status, width)
 }

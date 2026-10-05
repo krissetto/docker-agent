@@ -108,10 +108,12 @@ func clickReplyChevron(t *testing.T, m *model, glyph string) {
 	m.scrollOffset, m.userHasScrolled = 0, true
 	m.scrollview.SetScrollOffset(0)
 	m.View()
+	view := m.views[0].(interface{ IsToggleAt(line, col int) bool })
 	for y, line := range m.renderedLines {
-		plain := strings.TrimRight(ansi.Strip(line), " ")
-		if strings.HasSuffix(plain, "has replied "+glyph) || strings.HasSuffix(plain, "· report received "+glyph) || plain == glyph || strings.HasSuffix(plain, " "+glyph) {
-			x := ansi.StringWidth(plain) - 1
+		for x := range ansi.StringWidth(line) {
+			if !view.IsToggleAt(y, x) || ansi.Strip(ansi.Cut(line, x, x+1)) != glyph {
+				continue
+			}
 			_, linked := m.InputReferenceAt(m.xPos+x, m.yPos+y)
 			require.False(t, linked, "chevron is not navigation")
 			m.handleMouseClick(tea.MouseClickMsg{X: m.xPos + x, Y: m.yPos + y, Button: tea.MouseLeft})
