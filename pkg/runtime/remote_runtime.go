@@ -86,9 +86,8 @@ func (r *RemoteServices) CurrentAgentTools(context.Context) ([]tools.Tool, error
 func (r *RemoteServices) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
 func (r *RemoteServices) RestartToolset(context.Context, string) error       { return ErrUnsupported }
 
-func (r *RemoteServices) EmitStartupInfo(ctx context.Context, _ *session.Session, sink EventSink) {
-	r.EmitAgentInfo(ctx, sink)
-}
+// Remote session presentation comes from the canonical observation snapshot.
+func (r *RemoteServices) EmitStartupInfo(context.Context, *session.Session, EventSink) {}
 
 func (r *RemoteServices) EmitAgentInfo(ctx context.Context, sink EventSink) {
 	name, cfg := r.resolvedAgent(ctx)

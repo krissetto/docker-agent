@@ -714,6 +714,9 @@ func (p *chatPage) applyProjectionMetadata(snapshot runtime.SessionSnapshot) tea
 
 func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript bool) tea.Cmd {
 	p.lifecycle = lifecycle.FromSnapshot(snapshot)
+	if snapshot.Status.AgentName != "" {
+		p.sessionState.SetCurrentAgentName(snapshot.Status.AgentName)
+	}
 	if transcript {
 		p.inputReplay.Reset(snapshot.Session)
 	}
@@ -746,6 +749,9 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 		}
 	}
 	for _, event := range snapshot.Presentation {
+		if team, ok := event.(*runtime.TeamInfoEvent); ok {
+			p.sessionState.SetAvailableAgents(team.AvailableAgents)
+		}
 		_, cmd := p.handleRuntimeEvent(event)
 		cmds = append(cmds, cmd)
 	}

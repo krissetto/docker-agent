@@ -51,6 +51,7 @@ func TestLauncherTeamSelection(t *testing.T) {
 		{name: "special path", args: []string{"--team", "team\n$(touch INJECTED);*.yaml"}, team: workspace + "/team\n$(touch INJECTED);*.yaml"},
 		{name: "dash path", args: []string{"--team", "-team.yaml"}, team: workspace + "/-team.yaml"},
 		{name: "agent args", args: []string{"--team", "team.yaml", "--model", "openai/example", "--exec", "--session", "session id", "--", "--team", "line one\n$(touch INJECTED); *", ""}, team: workspace + "/team.yaml", forwarded: []string{"--model", "openai/example", "--exec", "--session", "session id", "--", "--team", "line one\n$(touch INJECTED); *", ""}},
+		{name: "explicit workdir", args: []string{"--working-dir", "chosen workspace"}, forwarded: []string{"--working-dir", "chosen workspace"}},
 		{name: "sentinel", args: []string{"--", "--team", "missing.yaml"}, forwarded: []string{"--", "--team", "missing.yaml"}},
 		{name: "headless prompt", args: []string{"--exec", "--", "--team"}, forwarded: []string{"--exec", "--", "--team"}},
 		{name: "resume", args: []string{"--session", "--team"}, forwarded: []string{"--session", "--team"}},
@@ -85,7 +86,7 @@ func TestLauncherTeamSelection(t *testing.T) {
 			if team == "" {
 				team = filepath.Join(workspace, "hackerspace.yaml")
 			}
-			expected := append([]string{"run", team, "--managed-api", "--working-dir", workspace}, tc.forwarded...)
+			expected := append([]string{"run", team, "--managed-api"}, tc.forwarded...)
 			assert.Equal(t, expected, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
 			assert.NoFileExists(t, filepath.Join(workspace, "INJECTED"))
 		})

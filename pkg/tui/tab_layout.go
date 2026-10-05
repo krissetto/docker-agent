@@ -29,6 +29,9 @@ func (m *appModel) tabAgentIdentity(tab messages.TabInfo) (name, nodeID string) 
 	}
 	application := runner.App
 	name = application.Binding().AgentName
+	if sess := application.Session(); sess != nil && sess.AgentName != "" {
+		name = sess.AgentName
+	}
 	if state := m.sessionStates[tab.SessionID]; state != nil && state.CurrentAgentName() != "" {
 		name = state.CurrentAgentName()
 	}

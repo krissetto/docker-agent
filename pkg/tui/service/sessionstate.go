@@ -96,6 +96,7 @@ func NewSessionState(s *session.Session) *SessionState {
 		state.yoloMode = s.IsToolsApproved()
 		state.hideToolResults = s.HideToolResults
 		state.sessionTitle = s.Title
+		state.currentAgentName = s.AgentName
 	}
 	return state
 }

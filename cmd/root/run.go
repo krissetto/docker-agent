@@ -609,7 +609,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}); ok {
 		tuiOptions = append(tuiOptions, tui.WithSessionRestorer(restorer.Restorer(rt, sessions)))
 	}
-	if f.remoteAddress != "" {
+	if f.remoteAddress != "" && !f.managedAPI {
 		tuiOptions = append(tuiOptions, tui.WithRemoteWorkspace(sess.WorkingDir))
 	}
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
@@ -1178,7 +1178,7 @@ func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
 // working dir, then process CWD) so new tabs open exactly where the initial
 // session did — the worktree or resume directory, not the raw flag value.
 func (f *runExecFlags) explicitDefaultWorkingDir(sess *session.Session) string {
-	if f.remoteAddress != "" {
+	if f.remoteAddress != "" && !f.managedAPI {
 		return sess.WorkingDir
 	}
 	if !f.workingDirChanged {

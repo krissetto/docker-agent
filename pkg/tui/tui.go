@@ -450,7 +450,7 @@ func WithSessionRestorer(restorer SessionRestorer) Option {
 	return func(m *appModel) { m.sessionRestorer = restorer }
 }
 
-// WithRemoteWorkspace binds new-session paths to the server workspace, including
+// WithRemoteWorkspace keeps new-session paths opaque to the client, including
 // an explicitly workspace-less server. Client filesystem checks never apply.
 func WithRemoteWorkspace(dir string) Option {
 	return func(m *appModel) { m.remoteWorkspace = true; m.defaultNewSessionDir = dir }
@@ -2359,8 +2359,8 @@ func (m *appModel) handleNewSession(msg messages.NewSessionMsg) (tea.Model, tea.
 	return m.handleSpawnSession(workingDir)
 }
 
-// resolveNewSessionDir turns a user-supplied /new argument into an absolute,
-// existing directory. ~ and environment variables are expanded; a relative
+// resolveNewSessionDir preserves remote server paths; local /new arguments
+// resolve to absolute, existing directories. ~ and environment variables are expanded; a relative
 // path resolves against the active session's working directory rather than
 // the process CWD.
 func (m *appModel) resolveNewSessionDir(requested string) (string, error) {
@@ -2368,7 +2368,7 @@ func (m *appModel) resolveNewSessionDir(requested string) (string, error) {
 		if requested == "" || requested == "." || requested == m.defaultNewSessionDir {
 			return m.defaultNewSessionDir, nil
 		}
-		return "", fmt.Errorf("remote sessions use server workspace %q", m.defaultNewSessionDir)
+		return requested, nil
 	}
 	dir := path.ExpandPath(requested)
 	if dir == "" {

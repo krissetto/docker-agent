@@ -332,7 +332,7 @@ func TestLauncher(t *testing.T) {
 		}
 		expected := []string{
 			"0", "run", filepath.Join(configDir, "hackerspace.yaml"),
-			"--managed-api", "--working-dir", workspace,
+			"--managed-api",
 			"--model", "openai/example", "--dry-run",
 		}
 		assert.Equal(t, expected, strings.Split(strings.TrimSpace(string(out)), "\n"))

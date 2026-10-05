@@ -12,9 +12,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/help"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -132,4 +136,27 @@ func TestTabFramePointerRoutes(t *testing.T) {
 			require.Equal(t, 8, layer.X, "release retains the exact drop position")
 		})
 	}
+}
+
+func TestTabAgentIdentityStartsWithActiveSessionAgent(t *testing.T) {
+	spy := &spySpawner{}
+	root := newSpawnTestModel(t, spy)
+	sess := session.New(session.WithAgentName("worker"))
+	application := app.New(t.Context(), nil, sess, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(stubRuntime{}))
+	id, err := root.supervisor.AddSession(t.Context(), application, sess, "/workspace", nil)
+	require.NoError(t, err)
+	tab := messages.TabInfo{SessionID: id}
+	name, node := root.tabAgentIdentity(tab)
+	require.Equal(t, "worker", name)
+	require.NotEmpty(t, node)
+	root.tabBar.SetWidth(120)
+	root.setTabs([]messages.TabInfo{{SessionID: id, Title: "Idle attachment"}}, 0)
+	require.Contains(t, ansi.Strip(root.tabBar.View()), " W ")
+	require.NotContains(t, ansi.Strip(root.tabBar.View()), " R ")
+	root.sessionStates[id] = service.NewSessionState(sess)
+	name, _ = root.tabAgentIdentity(tab)
+	require.Equal(t, "worker", name)
+	root.sessionStates[id].SetCurrentAgentName("reviewer")
+	name, _ = root.tabAgentIdentity(tab)
+	require.Equal(t, "reviewer", name)
 }
