@@ -33,7 +33,6 @@ func TestKitTaskPublicationCommand(t *testing.T) {
 	require.Len(t, kit.Cmds, 1)
 	assert.Equal(t, "{{.CLI_ARGS}}", kit.Env["KIT_REPOSITORY"])
 	assert.Equal(t, "1", kit.Env["BUILDX_GIT_CHECK_DIRTY"])
-	assert.Contains(t, kit.Cmds[0], "top-level Kit metadata promotion after push")
 
 	const sha = "0123456789abcdef0123456789abcdef01234567"
 	for _, tc := range []struct {

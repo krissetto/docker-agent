@@ -20,7 +20,8 @@ full current Git commit SHA and must be 40 lowercase hexadecimal characters.
 Pass only a repository after `--`, without a tag or digest; it is quoted, not
 evaluated as shell input. The task builds the working tree, including allowed
 untracked sources: a SHA tag alone does not establish a clean-commit build.
-**A successful push still requires the Kit metadata checks below before use.**
+A successful task publishes the multiarch Kit; no separate metadata promotion or
+verification command is required.
 
 For a build-only local archive instead, invoke Buildx directly:
 
@@ -51,25 +52,20 @@ metadata: do not publish that image with `docker push` as a Kit. Use a repositor
 ending in **`kagent`**, not `docker-agent`: v3 registration uses the final repository
 component and otherwise collides with built-in `docker-agent`.
 
-The pinned frontend emits Kit annotations on platform manifests; consumers also
-need descriptor, schema-version and capabilities annotations on the top-level
-index. **`task kit` performs the push, not this top-level metadata promotion.**
-Plain `buildx --push` is not proof of a usable Kit. Before declaring a release,
-the maintainer must promote matching frontend/spec metadata with expanded build
-arguments to the index, preserve both platforms and provenance, and point both
-`:latest` and the full-SHA tag at the final index. Verify the remote index and
-referenced blobs before sharing its immutable digest reference. The task contains
-no annotation-repair or publisher framework.
-
-The descriptor pins the frontend matching spec
-`v3.0.0-m.6.0.20260929191907-34df175ec869`; use a compatible Kit v3 consumer.
+The descriptor pins the frontend published with
+[`v3.0.0-m.8`](https://github.com/docker/sandbox-kit-spec/releases/tag/v3.0.0-m.8):
+`docker/sandbox-kit:3.0.0-m.8@sha256:e6a397771e865625047cf84256a914c7974b3e749d858259b5bc9c653ddb6f0d`.
+This frontend emits the expanded descriptor, schema-version and capabilities
+annotations on both platform manifests and the top-level index. `task kit`
+builds and publishes that index directly, preserving Buildx's provenance defaults;
+it does not rewrite the index or run the Kit. Use a compatible Kit v3 consumer.
 Do not strip derived package metadata for an older consumer or silently widen
 optional permissions.
 
 ## Run
 
-Use a **verified release containing these sources**. Set `KIT_REF` to its immutable
-registry reference, for example `namespace/kagent@sha256:<verified-digest>`; the
+Use a **published release containing these sources**. Set `KIT_REF` to its immutable
+registry reference, for example `namespace/kagent@sha256:<published-digest>`; the
 placeholder is not a published artifact. You need compatible SBX, pull access if
 private, and approved credentials in **SBX's host credential store**. Model calls
 incur charges. Use a fresh workspace and sandbox name for changed builds:
