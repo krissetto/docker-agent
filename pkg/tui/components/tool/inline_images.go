@@ -85,3 +85,35 @@ func (m *inlineImagesModel) render(content string) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+func (m *inlineImagesModel) NeedsTick() bool {
+	view, ok := m.model.(interface{ NeedsTick() bool })
+	return ok && view.NeedsTick()
+}
+
+func (m *inlineImagesModel) IsExpanded() bool {
+	view, ok := m.model.(interface{ IsExpanded() bool })
+	return ok && view.IsExpanded()
+}
+
+func (m *inlineImagesModel) SetExpanded(expanded bool) {
+	if view, ok := m.model.(interface{ SetExpanded(expanded bool) }); ok {
+		view.SetExpanded(expanded)
+	}
+}
+
+func (m *inlineImagesModel) IsToggleLine(line int) bool {
+	view, ok := m.model.(interface{ IsToggleLine(line int) bool })
+	return ok && view.IsToggleLine(line)
+}
+
+func (m *inlineImagesModel) IsToggleAt(line, col int) bool {
+	view, ok := m.model.(interface{ IsToggleAt(line, col int) bool })
+	return ok && view.IsToggleAt(line, col)
+}
+
+func (m *inlineImagesModel) Toggle() {
+	if view, ok := m.model.(interface{ Toggle() }); ok {
+		view.Toggle()
+	}
+}

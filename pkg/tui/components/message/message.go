@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/subagenttool"
@@ -70,14 +71,15 @@ type messageModel struct {
 	message  *types.Message
 	previous *types.Message
 
-	width    int
-	height   int
-	focused  bool
-	selected bool
-	hovered  bool
-	expanded bool
-	ar       *animation.Runtime
-	spinner  spinner.Spinner
+	width      int
+	height     int
+	focused    bool
+	selected   bool
+	hovered    bool
+	expanded   bool
+	disclosure agentmessage.Disclosure
+	ar         *animation.Runtime
+	spinner    spinner.Spinner
 
 	// renderCache memoizes the output of Render(width) keyed by the inputs
 	// that affect its output. During streaming, View() and Height() are called
@@ -180,6 +182,7 @@ func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
 		focused:         false,
 		imageScanOffset: imageScanOffset,
 		ar:              ar,
+		disclosure:      agentmessage.New(ar),
 	}
 	mv.syncSpinner()
 	return mv
@@ -383,6 +386,10 @@ func (mv *messageModel) ensureTheme() {
 
 // Update handles messages and updates the message view state
 func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if tick, ok := msg.(animation.TickMsg); ok && mv.disclosure.NeedsTick() {
+		mv.disclosure.Tick(tick)
+		mv.invalidateOutput()
+	}
 	if _, ok := msg.(messages.ThemeChangedMsg); ok {
 		mv.InvalidateRenderCache()
 	}
@@ -413,30 +420,36 @@ func (mv *messageModel) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // Toggle switches between expanded and collapsed state.
 func (mv *messageModel) Toggle() {
-	mv.expanded = !mv.expanded
+	if mv.isAgentMessage() {
+		mv.disclosure.Toggle()
+		mv.expanded = mv.disclosure.Expanded()
+	} else {
+		mv.expanded = !mv.expanded
+	}
 	mv.invalidateOutput()
 }
 
 // IsToggleAt preserves existing line-wide controls, but replies toggle only at the chevron.
 func (mv *messageModel) IsToggleAt(lineIdx, col int) bool {
-	if !mv.message.IsSubagentReply() {
+	if !mv.isAgentMessage() {
 		return mv.IsToggleLine(lineIdx)
 	}
-	lines := strings.Split(mv.replyHeader(mv.width), "\n")
-	if lineIdx != len(lines)-1 {
-		return false
-	}
-	line := strings.TrimRight(ansi.Strip(lines[lineIdx]), " ")
-	return col == ansi.StringWidth(line)-1
+	return agentmessage.ToggleAt(mv.replyHeader(mv.width), lineIdx, col)
 }
 
 // InputReferenceOnLine excludes body hyperlinks, including literal identity OSCs.
 func (mv *messageModel) InputReferenceOnLine(lineIdx int) bool {
-	if mv.message.IsSubagentReply() {
+	if mv.isAgentMessage() {
 		return lineIdx >= 0 && lineIdx <= strings.Count(mv.replyHeader(mv.width), "\n")
 	}
 	return mv.message.Type == types.MessageTypeRuntimeNotice || lineIdx == 0
 }
+
+func (mv *messageModel) isAgentMessage() bool {
+	return mv.message != nil && (mv.message.Type == types.MessageTypeAgentInput || mv.message.IsSubagentReply())
+}
+
+func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 
 func (mv *messageModel) replyHeader(width int) string {
 	chevron := ">"
@@ -445,6 +458,9 @@ func (mv *messageModel) replyHeader(width int) string {
 	}
 	icon := styles.ToolCompletedIcon.Render("✓")
 	action := " has replied "
+	if !mv.message.IsSubagentReply() {
+		action = " sent a message "
+	}
 	if mv.message.Type == types.MessageTypeRuntimeNotice {
 		var label string
 		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
@@ -456,7 +472,7 @@ func (mv *messageModel) replyHeader(width int) string {
 
 // IsToggleLine returns true if the line contains the expand/collapse affordance.
 func (mv *messageModel) IsToggleLine(lineIdx int) bool {
-	if mv.message == nil || mv.message.IsSubagentReply() || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
+	if mv.message == nil || mv.isAgentMessage() || (mv.message.Type != types.MessageTypeUser && mv.message.Type != types.MessageTypeAgentInput) {
 		return false
 	}
 	content := strings.TrimRight(mv.message.Content, "\n\r\t ")
@@ -649,13 +665,18 @@ func (mv *messageModel) isSpinnerDriven() bool {
 // render is the uncached rendering core. Render() wraps it with memoization.
 func (mv *messageModel) render(width int) string {
 	msg := mv.message
-	if msg.IsSubagentReply() {
+	if mv.isAgentMessage() {
 		header := mv.replyHeader(width)
-		if !mv.expanded {
+		if !mv.disclosure.Visible() {
 			return header
 		}
-		body := strings.ReplaceAll(msg.ReceivedBody, "\t", "    ")
-		return header + "\n" + styles.UserMessageStyle.Bold(false).Width(width).Render(body)
+		content := msg.Content
+		if msg.IsSubagentReply() {
+			content = msg.ReceivedBody
+		}
+		actions := actionRow(agentmessage.InnerWidth(width), mv.hovered || mv.selected, types.MessageCopyLabel)
+		body := agentmessage.Body(content, msg.InputReference, width, mv.selected, actions)
+		return mv.disclosure.Render(header, body)
 	}
 	switch msg.Type {
 	case types.MessageTypeSpinner:
@@ -1071,6 +1092,8 @@ func (mv *messageModel) CodeBlocks() []markdown.CodeBlock {
 // StopAnimation stops the spinner animation and unregisters from the animation coordinator.
 // This must be called when the view is removed from the UI to avoid leaked animation subscriptions.
 func (mv *messageModel) StopAnimation() {
+	mv.disclosure.Settle()
+	mv.invalidateOutput()
 	if mv.spinner != nil {
 		mv.spinner.Stop()
 	}
@@ -1142,6 +1165,7 @@ func (mv *messageModel) HasLiveRenderState() bool {
 // SetSize sets the dimensions of the message view
 func (mv *messageModel) SetSize(width, height int) tea.Cmd {
 	if mv.width != width {
+		mv.disclosure.Settle()
 		mv.invalidateOutput()
 	}
 	mv.width = width
@@ -1187,4 +1211,20 @@ func preserveIndentation(line string) string {
 		return line
 	}
 	return strings.Repeat("\u00A0", leadingSpaces) + line[leadingSpaces:]
+}
+
+func (mv *messageModel) IsExpanded() bool { return mv.expanded }
+func (mv *messageModel) SetExpanded(expanded bool) {
+	if expanded != mv.expanded {
+		mv.Toggle()
+	}
+	mv.disclosure.Settle()
+	mv.invalidateOutput()
+}
+
+func (mv *messageModel) CopyActionLine() int {
+	if !mv.isAgentMessage() || !mv.disclosure.Visible() {
+		return -1
+	}
+	return strings.Count(mv.replyHeader(mv.width), "\n") + 1
 }

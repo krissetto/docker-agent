@@ -40,12 +40,15 @@ func (m *model) referenceForMessage(index, localLine int) (lifecycle.InputRefere
 	}
 	msg := m.messages[index]
 	if msg.Type == types.MessageTypeAgentInput || msg.Type == types.MessageTypeRuntimeNotice {
-		if view, ok := m.views[index].(interface{ InputReferenceOnLine(int) bool }); ok && !view.InputReferenceOnLine(localLine) {
+		if view, ok := m.views[index].(interface{ InputReferenceOnLine(line int) bool }); ok && !view.InputReferenceOnLine(localLine) {
 			return lifecycle.InputReference{}, false
 		}
 		return msg.InputReference, msg.InputReference.Kind != lifecycle.InputReferenceUnknown
 	}
 	if id, ok := subagenttool.NodeIDFor(msg); ok {
+		if view, ok := m.views[index].(interface{ InputReferenceOnLine(line int) bool }); ok && !view.InputReferenceOnLine(localLine) {
+			return lifecycle.InputReference{}, false
+		}
 		ref := m.subagents.Resolve("", string(id), "")
 		// The tool's stamped node ID is already a canonical node reference.
 		ref.Kind, ref.ID = lifecycle.InputReferenceNode, string(id)

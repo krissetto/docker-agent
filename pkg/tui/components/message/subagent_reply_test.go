@@ -43,7 +43,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				require.Equal(t, 1, hits)
 				assert.False(t, view.InputReferenceOnLine(len(lines)))
 			}
-			view.Toggle()
+			view.SetExpanded(!view.IsExpanded())
 			other := New(animation.NewRuntime(), msg, nil)
 			assert.NotContains(t, other.View(), "Delivered", "expansion belongs to each view")
 			for _, width := range []int{100, 90, 100} {
@@ -63,7 +63,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				assert.False(t, view.InputReferenceOnLine(1), "expanded body is not navigation")
 				assert.False(t, view.IsToggleAt(1, 0))
 			}
-			view.Toggle()
+			view.SetExpanded(!view.IsExpanded())
 			msg.ReceivedBody = strings.Repeat("expensive hidden payload\n", 100000)
 			assert.Nil(t, PrepareRender(view), "collapsed replies need no asynchronous body preparation")
 			assert.Less(t, len(view.View()), 4096)
@@ -92,7 +92,9 @@ func TestSubagentReplyGateExcludesInstructionsAndGenericNotices(t *testing.T) {
 			msg := types.Input(input)
 			msg.InputReference = lifecycle.InputReference{Kind: tc.kind, Name: "sender"}
 			assert.False(t, msg.IsSubagentReply())
-			out := New(animation.NewRuntime(), msg, nil).View()
+			view := New(animation.NewRuntime(), msg, nil)
+			view.SetExpanded(true)
+			out := view.View()
 			assert.NotContains(t, out, "has replied")
 			if tc.origin == session.InputOriginRuntime {
 				assert.NotContains(t, out, "unchanged body")

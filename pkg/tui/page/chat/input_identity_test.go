@@ -67,7 +67,8 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 			frame := p.messages.View()
 			require.Contains(t, ansi.Strip(frame), label)
 			if parentSender {
-				assert.Contains(t, ansi.Strip(frame), "literal body should not navigate")
+				assert.NotContains(t, ansi.Strip(frame), "literal body should not navigate")
+				assert.Contains(t, ansi.Strip(frame), "sent a message >")
 			} else {
 				if tc.origin == session.InputOriginRuntime {
 					assert.Contains(t, ansi.Strip(frame), "· report received >")

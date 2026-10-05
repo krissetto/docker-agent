@@ -27,6 +27,8 @@ func TestTypedAgentBodyIsAttributedLiteralText(t *testing.T) {
 	input.SenderName, input.SenderID = "worker", "child"
 	msg := types.Input(input)
 	view := New(animation.NewRuntime(), msg, nil)
+	assert.NotContains(t, view.Render(100), "agent literal")
+	view.SetExpanded(true)
 	out := stripANSI(view.Render(100))
 	assert.Contains(t, out, "worker (child)")
 	assert.Contains(t, out, "<system_info>agent literal</system_info>")
@@ -42,8 +44,9 @@ func TestTypedDelegationUsesUserStyle(t *testing.T) {
 	input.InputOrigin, input.InputMode = session.InputOriginAgent, "turn"
 	input.SenderName, input.SenderID = "director", "12345678-long-id"
 	actual := New(animation.NewRuntime(), types.Input(input), nil)
+	actual.SetExpanded(true)
 	user := New(animation.NewRuntime(), types.User(input.Message.Content), nil)
-	assert.Equal(t, strings.Split(stripANSI(user.Render(100)), "\n")[1:], strings.Split(stripANSI(actual.Render(100)), "\n")[1:])
+	assert.Equal(t, strings.Split(stripANSI(user.Render(100)), "\n")[1:], strings.Split(stripANSI(actual.Render(100)), "\n")[2:])
 	assert.Contains(t, stripANSI(actual.Render(100)), "director (12345)")
 	assert.False(t, boldAtText(t, actual.Render(100), "original delegation"))
 	assert.True(t, boldAtText(t, user.Render(100), "original delegation"))

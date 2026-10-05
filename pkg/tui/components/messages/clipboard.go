@@ -328,7 +328,7 @@ func (m *model) copySelectedMessageToClipboard() tea.Cmd {
 	}
 
 	msg := m.messages[m.selectedMessageIndex]
-	content := msg.Content
+	content := copyableMessageContent(msg)
 
 	if content == "" {
 		return nil

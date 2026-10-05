@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -216,12 +217,16 @@ func (m *Model) Reasoning() string {
 func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	// Check if tool already exists (update case)
 	for i, entry := range m.toolEntries {
-		if entry.msg.ToolCall.ID == msg.ToolCall.ID {
-			m.toolEntries[i].msg = msg
-			m.toolEntries[i].view = tool.New(m.ar, msg, m.sessionState, m.subagents)
-			m.toolEntries[i].view.SetSize(m.contentWidth(), 0)
-			return m.toolEntries[i].view.Init()
+		if entry.msg.ToolCall.ID != msg.ToolCall.ID {
+			continue
 		}
+		m.toolEntries[i].msg = msg
+		next := tool.New(m.ar, msg, m.sessionState, m.subagents)
+		next.SetSize(m.contentWidth(), 0)
+		animation.StopView(entry.view)
+		agentmessage.PreserveExpansion(entry.view, next)
+		m.toolEntries[i].view = next
+		return next.Init()
 	}
 
 	// New tool call - add to entries and track position in content sequence
@@ -309,6 +314,8 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		// Recreate view to pick up new state
 		view := tool.New(m.ar, entry.msg, m.sessionState, m.subagents)
 		view.SetSize(m.contentWidth(), 0)
+		animation.StopView(entry.view)
+		agentmessage.PreserveExpansion(entry.view, view)
 		m.toolEntries[i] = entry
 		m.toolEntries[i].view = view
 
@@ -424,6 +431,9 @@ func (m *Model) hasFadingTools() bool {
 // Use fadeProgress (updated on ticks) to stay consistent with renderCollapsed/hasFadingTools.
 func (m *Model) NeedsTick() bool {
 	for _, entry := range m.toolEntries {
+		if view, ok := entry.view.(interface{ NeedsTick() bool }); ok && view.NeedsTick() {
+			return true
+		}
 		// Check for in-progress tools (need spinner)
 		if entry.msg.ToolStatus == types.ToolStatusPending ||
 			entry.msg.ToolStatus == types.ToolStatusRunning {
@@ -460,11 +470,20 @@ func (m *Model) IsExpanded() bool {
 // Toggle switches between expanded and collapsed state.
 func (m *Model) Toggle() {
 	m.expanded = !m.expanded
+	if !m.expanded {
+		for _, entry := range m.toolEntries {
+			if view, ok := entry.view.(interface{ SetExpanded(expanded bool) }); ok {
+				view.SetExpanded(false)
+			}
+		}
+	}
 }
 
 // SetExpanded sets the expanded state directly.
 func (m *Model) SetExpanded(expanded bool) {
-	m.expanded = expanded
+	if m.expanded != expanded {
+		m.Toggle()
+	}
 }
 
 // SetSelected sets the selected state for visual highlighting.
@@ -854,4 +873,52 @@ func (m *Model) IsHeaderLine(lineIdx int) bool {
 // Only the header is toggleable.
 func (m *Model) IsToggleLine(lineIdx int) bool {
 	return m.IsHeaderLine(lineIdx) && (m.expanded || m.hasExtraContent())
+}
+
+func (m *Model) childToggleAt(line, col int) (interface{ Toggle() }, bool) {
+	if !m.expanded {
+		return nil, false
+	}
+	rendered := m.View()
+	cursor := 0
+	for _, item := range m.contentItems {
+		if item.kind != contentItemTool || item.toolIndex >= len(m.toolEntries) {
+			continue
+		}
+		entry := m.toolEntries[item.toolIndex]
+		content := m.renderToolExpanded(entry)
+		offset := strings.Index(rendered[cursor:], content)
+		if offset < 0 {
+			continue
+		}
+		start := cursor + offset
+		local := line - strings.Count(rendered[:start], "\n")
+		cursor = start + len(content)
+		view, ok := entry.view.(interface {
+			IsToggleAt(line, col int) bool
+			Toggle()
+		})
+		if ok && view.IsToggleAt(local, col) {
+			return view, true
+		}
+	}
+	return nil, false
+}
+
+func (m *Model) IsToggleAt(line, col int) bool {
+	if m.IsToggleLine(line) {
+		return true
+	}
+	_, ok := m.childToggleAt(line, col)
+	return ok
+}
+
+func (m *Model) ToggleAt(line, col int) {
+	if m.IsToggleLine(line) {
+		m.Toggle()
+		return
+	}
+	if view, ok := m.childToggleAt(line, col); ok {
+		view.Toggle()
+	}
 }

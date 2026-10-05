@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -164,7 +165,9 @@ func (t *Transcript) refreshToolView(i int, status types.ToolStatus) tea.Cmd {
 	if i > 0 {
 		prev = t.msgs[i-1]
 	}
-	t.views[i] = t.newView(msg, prev)
+	next := t.newView(msg, prev)
+	agentmessage.PreserveExpansion(t.views[i], next)
+	t.views[i] = next
 	return t.views[i].Init()
 }
 

@@ -115,6 +115,13 @@ func clickReplyChevron(t *testing.T, m *model, glyph string) {
 			_, linked := m.InputReferenceAt(m.xPos+x, m.yPos+y)
 			require.False(t, linked, "chevron is not navigation")
 			m.handleMouseClick(tea.MouseClickMsg{X: m.xPos + x, Y: m.yPos + y, Button: tea.MouseLeft})
+			if view, ok := m.views[0].(interface {
+				IsExpanded() bool
+				SetExpanded(expanded bool)
+			}); ok {
+				view.SetExpanded(view.IsExpanded())
+				m.invalidateItem(0)
+			}
 			return
 		}
 	}

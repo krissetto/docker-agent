@@ -55,7 +55,10 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 		assert.Equal(t, color.NRGBAModel.Convert(want), color.NRGBAModel.Convert(cell.fg), "name and ID keep independent semantic colors")
 	}
 	input := &types.Message{Type: types.MessageTypeAgentInput, Content: "literal **body**", InputReference: ref}
-	border := message.New(animation.NewRuntime(), input, nil).Render(80)
+	inputView := message.New(animation.NewRuntime(), input, nil)
+	assert.NotContains(t, inputView.Render(80), "literal **body**")
+	inputView.SetExpanded(true)
+	border := inputView.Render(80)
 	assert.Contains(t, border, ansi.SetHyperlink(agentidentity.Link))
 	assert.Contains(t, border, ansi.ResetHyperlink())
 	// The border reapplies its USER background after each inner style reset.
@@ -69,7 +72,7 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.Contains(t, ansi.Strip(view.View()), ref.Label())
 	assert.Contains(t, view.View(), label, "tool uses canonical name color and neutral ID despite display alias")
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
-	rows := strings.Split(border, "\n")
+	rows := strings.Split(border, "\n")[1:]
 	prefix := "┏━ "
 	header := prefix + ref.Label() + " "
 	assert.Equal(t, header+strings.Repeat("━", 80-ansi.StringWidth(header)), ansi.Strip(rows[0]), "canonical identity is embedded in the top border")

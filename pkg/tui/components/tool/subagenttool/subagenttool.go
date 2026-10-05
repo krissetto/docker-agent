@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentidentity"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -34,7 +35,13 @@ func NewSpawn(ar *animation.Runtime, msg *types.Message, sessionState service.Se
 }
 
 func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
-	return toolcommon.NewBase(ar, msg, sessionState, renderer(renderSend, lookup, references...))
+	m := &sendModel{msg: msg, disclosure: agentmessage.New(ar), width: 80, lookup: lookup, references: references}
+	m.Base = toolcommon.NewBaseWithCollapsed(ar, msg, sessionState, renderer(func(msg *types.Message, s spinner.Spinner, state service.SessionStateReader, width, height int, lookup NameLookup) string {
+		header := renderSendHeader(msg, s, width, lookup, " "+m.disclosure.Chevron())
+		m.headerLines = strings.Count(header, "\n") + 1
+		return header
+	}, lookup, references...), toolcommon.CollapsedRenderer(renderer(renderSend, lookup, references...)))
+	return m
 }
 
 func NewRead(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader, lookup NameLookup, references ...ReferenceLookup) layout.Model {
@@ -68,17 +75,21 @@ func renderSpawn(msg *types.Message, s spinner.Spinner, _ service.SessionStateRe
 }
 
 func renderSend(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
+	return renderSendHeader(msg, s, width, lookup, "")
+}
+
+func renderSendHeader(msg *types.Message, s spinner.Spinner, width int, lookup NameLookup, suffix string) string {
 	v := verb(msg, "Messaging", "Messaged")
 	params, err := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
 	if err == nil && params.To == subagent.ParentAlias {
-		return statusIcon(msg, s) + " " + styles.MutedStyle.Render(v+" parent")
+		return ansi.Hardwrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(v+" parent"+suffix), max(1, width), true)
 	}
 	var argID string
 	if err == nil {
 		argID = params.To
 	}
 	name, id := attribution(msg, argID, lookup)
-	return line(msg, s, v, name, id, width)
+	return identityLine(msg, s, v, name, id, suffix, width)
 }
 
 func renderRead(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, lookup NameLookup) string {
@@ -164,6 +175,10 @@ func attribution(msg *types.Message, argID string, lookup NameLookup) (name, id 
 
 // line keeps the stamped display name while resolving its canonical agent color.
 func line(msg *types.Message, s spinner.Spinner, verb, name, id string, width int) string {
+	return identityLine(msg, s, verb, name, id, "", width)
+}
+
+func identityLine(msg *types.Message, s spinner.Spinner, verb, name, id, suffix string, width int) string {
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: id, Name: name, Agent: name, DisplayID: subagent.ShortID(id)}
 	if id == "" {
 		ref.Kind = lifecycle.InputReferenceUnknown
@@ -171,7 +186,7 @@ func line(msg *types.Message, s spinner.Spinner, verb, name, id string, width in
 	if msg.InputReference.Kind != lifecycle.InputReferenceUnknown {
 		ref.Agent = msg.InputReference.Agent
 	}
-	return agentidentity.Wrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(verb)+" ", ref, "", width)
+	return agentidentity.Wrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(verb)+" ", ref, styles.MutedStyle.Render(suffix), width)
 }
 
 // CompletionPresentation uses only the immutable report outcome. Missing legacy

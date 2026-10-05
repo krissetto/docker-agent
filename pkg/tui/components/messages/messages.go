@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
@@ -563,13 +564,17 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) (model layout.Model, cmd
 		// Check for toggleable blocks (e.g. reasoning block, collapsed long messages)
 		if t, ok := m.views[msgIdx].(toggleableView); ok {
 			var toggle bool
-			if precise, ok := t.(interface{ IsToggleAt(int, int) bool }); ok {
+			if precise, ok := t.(interface{ IsToggleAt(line, col int) bool }); ok {
 				toggle = precise.IsToggleAt(localLine, col)
 			} else {
 				toggle = t.IsToggleLine(localLine)
 			}
 			if toggle {
-				t.Toggle()
+				if nested, ok := t.(interface{ ToggleAt(line, col int) }); ok {
+					nested.ToggleAt(localLine, col)
+				} else {
+					t.Toggle()
+				}
 				m.bottomSlack = 0
 				m.invalidateItem(msgIdx)
 				return m, nil
@@ -847,6 +852,15 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		if m.focused && m.selectedMessageIndex >= 0 {
 			cmd := m.copySelectedMessageToClipboard()
 			return m, cmd
+		}
+		return m, nil
+	case "enter", "space":
+		if m.focused && m.selectedMessageIndex >= 0 {
+			if view, ok := m.views[m.selectedMessageIndex].(toggleableView); ok {
+				view.Toggle()
+				m.bottomSlack = 0
+				m.invalidateItem(m.selectedMessageIndex)
+			}
 		}
 		return m, nil
 	case "e":
@@ -2328,6 +2342,7 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 			// The replaced view may still hold a running-spinner subscription.
 			animation.StopView(m.views[i])
 			view := m.createToolCallView(toolMessage)
+			agentmessage.PreserveExpansion(m.views[i], view)
 			m.views[i] = view
 			return view.Init()
 		}
@@ -2951,6 +2966,11 @@ func (m *model) isCopyLabelClick(msgIdx, localLine, col int) bool {
 		if localLine != 0 {
 			return false
 		}
+	case types.MessageTypeAgentInput, types.MessageTypeRuntimeNotice:
+		view, ok := m.views[msgIdx].(interface{ CopyActionLine() int })
+		if !ok || localLine != view.CopyActionLine() {
+			return false
+		}
 	case types.MessageTypeAssistant:
 	default:
 		return false
@@ -2972,7 +2992,7 @@ func (m *model) copyMessageToClipboard(msgIdx int) tea.Cmd {
 	if msgIdx < 0 || msgIdx >= len(m.messages) {
 		return nil
 	}
-	content := m.messages[msgIdx].Content
+	content := copyableMessageContent(m.messages[msgIdx])
 	if content == "" {
 		return nil
 	}
@@ -3056,6 +3076,11 @@ func (m *model) hasAnimatedContent() bool {
 }
 
 func (m *model) itemNeedsTick(i int) bool {
+	if i < len(m.views) {
+		if view, ok := m.views[i].(interface{ NeedsTick() bool }); ok && view.NeedsTick() {
+			return true
+		}
+	}
 	msg := m.messages[i]
 	switch msg.Type {
 	case types.MessageTypeSpinner, types.MessageTypeLoading:
@@ -3265,4 +3290,11 @@ func (m *model) RemovePendingSessionPosition(position int) {
 	if position < m.loadedItemCount {
 		m.loadedItemCount--
 	}
+}
+
+func copyableMessageContent(msg *types.Message) string {
+	if msg.IsSubagentReply() {
+		return msg.ReceivedBody
+	}
+	return msg.Content
 }

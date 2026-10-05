@@ -22,9 +22,11 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 		msg := types.Input(input)
 		msg.InputReference = lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: input.SenderID, Name: "worker", Agent: "worker", DisplayID: "abcde"}
 		view := New(animation.NewRuntime(), msg, nil)
+		view.SetExpanded(true)
 		user := New(animation.NewRuntime(), types.User(input.Message.Content), nil)
 		for _, width := range []int{1, 2, 3, 4, 8, 12, 28, 80} {
-			got := strings.Split(view.Render(width), "\n")
+			view.SetSize(width, 0)
+			got := strings.Split(view.Render(width), "\n")[strings.Count(view.replyHeader(width), "\n")+1:]
 			want := strings.Split(user.Render(width), "\n")
 			require.Equal(t, ansi.Strip(strings.Join(want[1:], "\n")), ansi.Strip(strings.Join(got[1:], "\n")), "agent body keeps USER text and layout: mode=%q width=%d", mode, width)
 			bodyStyle := styles.UserMessageStyle.Bold(false)
@@ -41,7 +43,7 @@ func TestInputIdentityUserBodyBackgroundAndNarrowBorder(t *testing.T) {
 				assert.Contains(t, ansi.Strip(got[0]), "━ worker (abcde) ━")
 			}
 			view.SetHovered(true)
-			assert.Equal(t, len(got), view.Height(width), "hover cannot change geometry")
+			assert.Equal(t, len(got)+strings.Count(view.replyHeader(width), "\n")+1, view.Height(width), "hover cannot change geometry")
 			view.SetHovered(false)
 		}
 	}
@@ -53,6 +55,7 @@ func TestAgentBodyNormalWeightPreservesLiteralTextAndExplicitANSI(t *testing.T) 
 	input.InputOrigin, input.SenderName = session.InputOriginAgent, "worker"
 	msg := types.Input(input)
 	view := New(animation.NewRuntime(), msg, nil)
+	view.SetExpanded(true)
 	for _, selected := range []bool{false, true} {
 		position := 0
 		msg.SessionPosition = &position
