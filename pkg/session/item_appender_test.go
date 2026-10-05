@@ -69,3 +69,41 @@ func TestSQLiteItemAppenderRetryAfterRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, loaded.Messages, 1)
 }
+
+func TestWithdrawnAppendReceiptSurvivesPayloadRemoval(t *testing.T) {
+	for _, kind := range []string{"memory", "sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			store := NewInMemorySessionStore()
+			path := filepath.Join(t.TempDir(), "withdrawn.db")
+			if kind == "sqlite" {
+				var err error
+				store, err = newSQLiteStoreForTest(t, path)
+				require.NoError(t, err)
+			}
+			sess := New(WithID("withdrawn"))
+			require.NoError(t, store.AddSession(t.Context(), sess))
+			message := UserMessage("original")
+			message.Pending, message.Accepted, message.TurnID = true, true, "turn"
+			item := NewMessageItem(message)
+			_, err := store.(ItemAppender).AppendItem(t.Context(), sess.ID, "input:turn", item)
+			require.NoError(t, err)
+			require.NoError(t, store.(PendingInputWithdrawer).WithdrawPendingUserMessage(t.Context(), sess.ID, "turn"))
+			require.NoError(t, store.(PendingInputWithdrawer).WithdrawPendingUserMessage(t.Context(), sess.ID, "turn"), "lost acknowledgment retry")
+			if kind == "sqlite" {
+				require.NoError(t, store.Close())
+				store, err = newSQLiteStoreForTest(t, path)
+				require.NoError(t, err)
+			}
+			t.Cleanup(func() { require.NoError(t, store.Close()) })
+			_, err = store.(ItemAppender).AppendItem(t.Context(), sess.ID, "input:turn", item)
+			require.ErrorIs(t, err, ErrInputWithdrawn)
+			different := cloneMessage(message)
+			different.Message.Content = "different"
+			_, err = store.(ItemAppender).AppendItem(t.Context(), sess.ID, "input:turn", NewMessageItem(different))
+			require.ErrorIs(t, err, ErrWriteConflict)
+			loaded, err := store.GetSession(t.Context(), sess.ID)
+			require.NoError(t, err)
+			require.Empty(t, loaded.MessagesSnapshot())
+		})
+	}
+}

@@ -418,7 +418,8 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	if sink, ok := ctx.Value(executionEventSinkKey{}).(EventSink); ok {
 		sink.Emit(ev)
 		if !waitForObserverDelivery(ctx, sink) {
-			if wt.tryCancel() || waiterState(wt.state.Load()) == waiterCanceled {
+			owner.abandonElicitation(correlationID, wt)
+			if waiterState(wt.state.Load()) == waiterCanceled {
 				return tools.ElicitationResult{}, ctx.Err()
 			}
 			result := <-wt.ch
@@ -437,7 +438,7 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	// to (or have already) delivered into wt.ch, in which case
 	// ResumeElicitation already reported success to its caller and this
 	// handler must not silently discard that response (#3584 review item
-	// 2b). cancel() decides the winner atomically.
+	// 2b). The owner claims cancellation and journals it atomically.
 	select {
 	case result := <-wt.ch:
 		return tools.ElicitationResult{
@@ -448,7 +449,8 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 		return tools.ElicitationResult{}, context.Canceled
 	case <-ctx.Done():
 		slog.DebugContext(ctx, "Context cancelled while waiting for elicitation response")
-		if wt.tryCancel() || waiterState(wt.state.Load()) == waiterCanceled {
+		owner.abandonElicitation(correlationID, wt)
+		if waiterState(wt.state.Load()) == waiterCanceled {
 			return tools.ElicitationResult{}, ctx.Err()
 		}
 		result := <-wt.ch

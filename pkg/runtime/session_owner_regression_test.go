@@ -78,6 +78,21 @@ func TestSessionOwnerRegressionMaxIterationsReusesPromptIdentity(t *testing.T) {
 	response.InteractionID = e2.RequestID
 	require.NoError(t, h.Respond(t.Context(), response))
 	require.Equal(t, iterationContinue, <-second)
+	zero := uint64(0)
+	observation, err := h.Observe(t.Context(), ObserveOptions{Since: &zero, SinceEpoch: d.events.epoch})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	var interactionEvents []string
+	for _, envelope := range observation.Replay {
+		switch envelope.Event.(type) {
+		case *MaxIterationsReachedEvent:
+			interactionEvents = append(interactionEvents, "opened:"+envelope.InteractionID)
+		case *InteractionResolvedEvent:
+			interactionEvents = append(interactionEvents, "resolved:"+envelope.InteractionID)
+		}
+	}
+	require.Equal(t, []string{"opened:" + e1.RequestID, "resolved:" + e1.RequestID, "opened:" + e2.RequestID, "resolved:" + e2.RequestID}, interactionEvents)
+	require.Empty(t, observation.Primary().Interactions)
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionIdle; return nil }))
 }
 

@@ -49,7 +49,6 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		MaxParallel:             r.maxTools,
 		AcquireTool:             r.acquireTool,
 		Hooks:                   &hookDispatcher{r: r, events: events},
-		ResumeFor:               r.interactionResume,
 		RequireResponseIdentity: true,
 		ApprovalEffect:          r.commitApproval,
 		AgentFor:                r.resolveSessionAgent,
@@ -127,15 +126,23 @@ func (e *sinkEmitter) EmitToolCallConfirmation(toolCall tools.ToolCall, tool too
 func (*sinkEmitter) ConfirmationID() (string, error) { return newSessionRequestID() }
 
 func (e *sinkEmitter) EmitCorrelatedToolCallConfirmation(requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) {
+	_, _ = e.RegisterToolCallConfirmation(context.WithoutCancel(e.runtime.lifetime()), requestID, toolCall, tool, agentName, metadata)
+}
+
+func (e *sinkEmitter) RegisterToolCallConfirmation(ctx context.Context, requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) (<-chan ResumeRequest, error) {
 	event := ToolCallConfirmation(toolCall, tool, agentName, metadata).(*ToolCallConfirmationEvent)
-	event.SessionID = e.sessionID
-	event.RequestID = requestID
-	if e.runtime != nil {
-		if d, ok := e.runtime.sessionDrivers.Lookup(e.sessionID); ok {
-			d.RegisterInteraction(requestID, InteractionConfirmation, event)
-		}
+	event.SessionID, event.RequestID = e.sessionID, requestID
+	d, ok := e.runtime.sessionDrivers.Lookup(e.sessionID)
+	if !ok {
+		return nil, ErrSessionClosed
 	}
+	resume, err := d.registerResumeInteraction(ctx, requestID, InteractionConfirmation, event)
+	if err != nil {
+		return nil, err
+	}
+	event.ownerPublished = true
 	e.events.Emit(event)
+	return resume, nil
 }
 
 func (e *sinkEmitter) EmitHookBlocked(toolCall tools.ToolCall, tool tools.Tool, message, agentName string) {

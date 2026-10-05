@@ -43,7 +43,7 @@ func TestSpawnerOwnsRuntimeForAnotherWorkingDir(t *testing.T) {
 	agentSource, err := sources.Resolve(agentFile, nil)
 	require.NoError(t, err)
 
-	flags := &runExecFlags{}
+	flags := &runExecFlags{sessionDB: filepath.Join(t.TempDir(), "session.db")}
 	flags.runConfig = config.RuntimeConfig{
 		WorkingDir:          baseDir,
 		EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),

@@ -132,7 +132,11 @@ type Session struct {
 	// workingDir captures the workspace provenance once at initialization.
 	workingDir string
 
+	lifecycleMu         sync.Mutex
 	mu                  sync.Mutex
+	transitioning       bool
+	activeTurn          *turn.Turn
+	activeDone          chan struct{}
 	activeCancel        context.CancelFunc
 	activeRun           int
 	drainErr            error
@@ -288,24 +292,63 @@ func (s *Session) Conversation(ctx context.Context) (*session.Session, error) {
 // Restart cancels any active run and replaces the conversation with a fresh
 // session, preserving the runtime and loaded agent.
 func (s *Session) Restart() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return ErrClosed
-	}
-	s.cancelActiveLocked()
 	// Restart has no caller context; cleanup must outlive the cancelled Send.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) //rubocop:disable Lint/ContextConnectivity
 	defer cancel()
-	if s.handle != nil && s.supervisor != nil {
-		if err := s.handle.Release(ctx); err != nil {
+	return s.restart(ctx)
+}
+
+func (s *Session) restart(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	s.transitioning = true
+	s.cancelActiveLocked()
+	handle, active, done := s.handle, s.activeTurn, s.activeDone
+	s.pendingConfirmation, s.pendingHandle = "", nil
+	s.pendingInteractions = nil
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.transitioning = false
+	}()
+
+	// The forwarder finalizes under mu, so settlement must happen outside it.
+	quarantine := func(err error) error {
+		drainErr := &turn.DrainError{Err: err}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.drainErr = drainErr
+		return drainErr
+	}
+	if active != nil {
+		if _, err := handle.Cancel(ctx, active.Submission.TurnID); err != nil {
+			return quarantine(err)
+		}
+		if err := handle.AwaitTurn(ctx, active.Submission.TurnID); err != nil {
+			return quarantine(err)
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return quarantine(ctx.Err())
+		}
+	}
+	if handle != nil && s.supervisor != nil {
+		if err := handle.Release(ctx); err != nil {
 			return fmt.Errorf("embeddedchat: release previous session: %w", err)
 		}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.drainErr = nil
-	s.pendingConfirmation, s.pendingHandle = "", nil
-	s.pendingInteractions = nil
-	agentName := s.handle.AgentName()
+	s.activeTurn, s.activeDone = nil, nil
+	agentName := handle.AgentName()
 	s.resetConversationLocked()
 	s.conversation.AgentName = agentName
 	return s.bindConversationLocked(ctx)
@@ -313,6 +356,8 @@ func (s *Session) Restart() error {
 
 // Close cancels any active run and releases runtime resources.
 func (s *Session) Close() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	s.closed = true
 	s.cancelActiveLocked()
@@ -361,7 +406,7 @@ func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error)
 		s.mu.Unlock()
 		return nil, s.drainErr
 	}
-	if s.activeCancel != nil {
+	if s.activeCancel != nil || s.transitioning {
 		s.mu.Unlock()
 		return nil, ErrRunActive
 	}
@@ -377,10 +422,13 @@ func (s *Session) Send(ctx context.Context, prompt string) (<-chan Event, error)
 		return nil, fmt.Errorf("embeddedchat: start message: %w", err)
 	}
 	sessionHandle := s.handle
+	s.activeTurn = ownedTurn
+	s.activeDone = make(chan struct{})
+	done := s.activeDone
 	s.mu.Unlock()
 
 	out := make(chan Event, eventBufferSize(s.cfg.EventBuffer))
-	go s.forwardEvents(runCtx, ownedTurn, sessionHandle, out, cancel, runID)
+	go s.forwardEvents(runCtx, ownedTurn, sessionHandle, out, cancel, runID, done)
 	return out, nil
 }
 
@@ -393,34 +441,24 @@ func (s *Session) Confirm(ctx context.Context, req dagentruntime.ResumeRequest) 
 		s.mu.Unlock()
 		return ErrClosed
 	}
-	handle := s.handle
+	if s.handle == nil {
+		s.mu.Unlock()
+		return ErrNotInitialized
+	}
 	if req.RequestID == "" {
 		req.RequestID = s.pendingConfirmation
 	}
-	if req.RequestID != "" && req.RequestID == s.pendingConfirmation {
-		handle = s.pendingHandle
-	}
 	s.mu.Unlock()
-	if handle == nil {
-		return ErrNotInitialized
-	}
-	err := handle.Respond(ctx, dagentruntime.InteractionResponse{
+	return s.Respond(ctx, dagentruntime.InteractionResponse{
 		InteractionID: req.RequestID,
 		Kind:          dagentruntime.InteractionConfirmation,
 		Resume:        req,
 	})
-	if err == nil {
-		s.mu.Lock()
-		if s.pendingHandle == handle && s.pendingConfirmation == req.RequestID {
-			s.pendingConfirmation, s.pendingHandle = "", nil
-		}
-		s.mu.Unlock()
-	}
-	return err
 }
 
-func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessionHandle dagentruntime.SessionHandle, out chan<- Event, cancel context.CancelFunc, runID int) {
+func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessionHandle dagentruntime.SessionHandle, out chan<- Event, cancel context.CancelFunc, runID int, done chan struct{}) {
 	defer close(out)
+	defer close(done)
 	defer cancel()
 	defer func() {
 		s.mu.Lock()
@@ -430,6 +468,9 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				s.pendingConfirmation, s.pendingHandle = "", nil
 			}
 			s.activeCancel = nil
+			if s.drainErr == nil {
+				s.activeTurn = nil
+			}
 			for id, handle := range s.pendingInteractions {
 				if handle == sessionHandle {
 					delete(s.pendingInteractions, id)
@@ -456,14 +497,7 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 				_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
 				return true
 			}
-			s.mu.Lock()
-			if s.handle == sessionHandle && !s.closed {
-				s.pendingConfirmation, s.pendingHandle = envelope.InteractionID, sessionHandle
-			}
-			s.mu.Unlock()
-			if !emit(Event{RuntimeEvent: event, Tool: &ToolActivity{Call: e.ToolCall, Def: e.ToolDefinition, NeedsConfirmation: true, RequestID: envelope.InteractionID}}) {
-				_ = sessionHandle.Respond(ctx, dagentruntime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Resume: dagentruntime.ResumeReject("The run was aborted.")})
-			}
+			return s.forwardInteraction(ctx, sessionHandle, dagentruntime.InteractionSnapshot{SessionID: envelope.SessionID, InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionConfirmation, Event: event}, emit)
 		case *dagentruntime.ElicitationRequestEvent:
 			return s.forwardInteraction(ctx, sessionHandle, dagentruntime.InteractionSnapshot{SessionID: envelope.SessionID, InteractionID: envelope.InteractionID, Kind: dagentruntime.InteractionElicitation, ElicitationID: e.ElicitationID, Event: event}, emit)
 		case *dagentruntime.MaxIterationsReachedEvent:
@@ -522,33 +556,44 @@ func (s *Session) forwardEvents(ctx context.Context, ownedTurn *turn.Turn, sessi
 // Respond answers an emitted interaction using its canonical correlation token.
 func (s *Session) Respond(ctx context.Context, response dagentruntime.InteractionResponse) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
 		return ErrClosed
 	}
 	handle := s.pendingInteractions[response.InteractionID]
-	s.mu.Unlock()
-	if handle == nil {
+	if handle == nil || s.transitioning || handle != s.handle {
 		return &dagentruntime.SessionError{Kind: dagentruntime.SessionErrorStale, Operation: dagentruntime.SessionOperationRespond}
 	}
 	if err := handle.Respond(ctx, response); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.pendingInteractions, response.InteractionID)
+	if s.pendingHandle == handle && s.pendingConfirmation == response.InteractionID {
+		s.pendingConfirmation, s.pendingHandle = "", nil
+	}
 	return nil
 }
 
 func (s *Session) forwardInteraction(ctx context.Context, handle dagentruntime.SessionHandle, interaction dagentruntime.InteractionSnapshot, emit func(Event) bool) bool {
 	s.mu.Lock()
+	if s.closed || s.transitioning || s.handle != handle || ctx.Err() != nil {
+		s.mu.Unlock()
+		return false
+	}
+	if interaction.Kind == dagentruntime.InteractionConfirmation {
+		s.pendingConfirmation, s.pendingHandle = interaction.InteractionID, handle
+	}
 	if s.pendingInteractions == nil {
 		s.pendingInteractions = make(map[string]dagentruntime.SessionHandle)
 	}
 	s.pendingInteractions[interaction.InteractionID] = handle
 	s.mu.Unlock()
 	if s.cfg.InteractionHandler == nil {
-		return emit(Event{RuntimeEvent: interaction.Event, Interaction: &interaction})
+		event := Event{RuntimeEvent: interaction.Event, Interaction: &interaction}
+		if confirmation, ok := interaction.Event.(*dagentruntime.ToolCallConfirmationEvent); ok {
+			event.Tool = &ToolActivity{Call: confirmation.ToolCall, Def: confirmation.ToolDefinition, NeedsConfirmation: true, RequestID: interaction.InteractionID}
+		}
+		return emit(event)
 	}
 	response, err := s.cfg.InteractionHandler(ctx, interaction)
 	if err == nil {

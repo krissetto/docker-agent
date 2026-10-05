@@ -83,6 +83,9 @@ func (g *driverWorkGroup) Wait() { <-g.DoneChan() }
 type sessionDriver struct {
 	sessionLifecycle
 
+	withdrawnInputs   map[string]string
+	inputFingerprints map[string]string
+
 	r  *LocalRuntime
 	wg *driverWorkGroup
 
@@ -775,6 +778,9 @@ type driverObservation struct {
 }
 
 func (d *sessionDriver) beginReclaimLocked() bool {
+	if len(d.withdrawnInputs) != 0 && d.r.sessionStore == nil {
+		return false
+	}
 	// Maintenance owns storage/report delivery even when no turn is executing.
 	select {
 	case <-d.wg.DoneChan():
@@ -1734,6 +1740,9 @@ func (d *sessionDriver) closeSettledLocked() {
 func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, error) {
 	if msg.RequestID == "" || d.sess == nil {
 		return false, false, nil
+	}
+	if _, withdrawn := d.withdrawnInputs[msg.RequestID]; withdrawn {
+		return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: msg.RequestID, Operation: "submit", Detail: "input identity was withdrawn"}
 	}
 	for _, queued := range d.pending {
 		if queued.RequestID != msg.RequestID {

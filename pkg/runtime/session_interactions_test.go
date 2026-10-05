@@ -15,7 +15,7 @@ func TestSessionRespondNormalizesResumeForSession(t *testing.T) {
 	require.NoError(t, err)
 	driver, ok := rt.sessionDrivers.Lookup(sess.ID)
 	require.True(t, ok)
-	ch, err := driver.registerResume(t.Context(), "request", InteractionConfirmation)
+	ch, err := driver.registerResume(t.Context(), "request")
 	require.NoError(t, err)
 	require.NoError(t, h.Respond(t.Context(), InteractionResponse{InteractionID: "request", Kind: InteractionConfirmation, Resume: ResumeRequest{Type: ResumeTypeApproveSafe}}))
 	assert.Equal(t, ResumeTypeApproveBalanced, (<-ch).Type)

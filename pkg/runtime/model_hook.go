@@ -26,6 +26,7 @@ import (
 // otherwise, a sync.Map keyed on modelSpec would be a drop-in.
 type providerModelClient struct {
 	registry *provider.Registry
+	runtime  *LocalRuntime
 }
 
 // Ask implements [hooks.ModelClient].
@@ -58,10 +59,18 @@ func (c providerModelClient) Ask(
 		return "", fmt.Errorf("create provider: %w", err)
 	}
 
-	stream, err := p.CreateChatCompletionStream(ctx, []chat.Message{
+	messages := []chat.Message{
 		{Role: chat.MessageRoleSystem, Content: system},
 		{Role: chat.MessageRoleUser, Content: user},
-	}, nil)
+	}
+	if c.runtime == nil {
+		return "", errors.New("model hook requires a runtime outbound boundary")
+	}
+	messages, err = c.runtime.prepareOutboundMessages(ctx, c.runtime.contextMessageOrigin(ctx, "model_hook"), p.ID().String(), nil, messages)
+	if err != nil {
+		return "", err
+	}
+	stream, err := p.CreateChatCompletionStream(ctx, messages, nil)
 	if err != nil {
 		return "", fmt.Errorf("start stream: %w", err)
 	}
@@ -86,6 +95,6 @@ func (c providerModelClient) Ask(
 // registerModelHook installs the [hooks.HookTypeModel] factory on r
 // using the runtime's default [hooks.ModelClient]. It is called once
 // from [NewLocalRuntime] alongside the builtins.
-func registerModelHook(r *hooks.Registry, registry *provider.Registry) {
-	r.Register(hooks.HookTypeModel, hooks.NewModelFactory(providerModelClient{registry: registry}))
+func registerModelHook(r *LocalRuntime) {
+	r.hooksRegistry.Register(hooks.HookTypeModel, hooks.NewModelFactory(providerModelClient{registry: r.providerRegistry, runtime: r}))
 }

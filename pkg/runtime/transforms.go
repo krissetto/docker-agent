@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // MessageTransform is the in-process-only handler signature for a
@@ -69,9 +70,9 @@ func WithMessageTransform(name string, fn MessageTransform) Opt {
 }
 
 // WithMessagePolicy registers an authoritative outbound rewrite/check. Policies
-// run after projections on every provider attempt (including fallbacks), and on
-// harness input. An error or panic prevents delivery; use WithMessageTransform
-// only for best-effort projections, never for redaction or authorization.
+// run after projections on every provider attempt (including fallbacks), auxiliary
+// completions, and harness input. An error or panic prevents delivery; use
+// WithMessageTransform only for best-effort projections, never for redaction or authorization.
 func WithMessagePolicy(name string, fn MessageTransform) Opt {
 	return func(r *LocalRuntime) {
 		if name == "" || fn == nil {
@@ -117,21 +118,75 @@ func invokeMessageTransform(ctx context.Context, fn MessageTransform, in *hooks.
 	return out, err
 }
 
-func (r *LocalRuntime) applyMessagePolicies(ctx context.Context, sess *session.Session, a *agent.Agent, modelID string, caps *modelinfo.ModelCapabilities, msgs []chat.Message) ([]chat.Message, error) {
-	in := &hooks.Input{SessionID: sess.ID, RootSessionID: r.todoRootSessionID(sess.ID), AgentName: a.Name(), ModelID: modelID, ModelCapabilities: caps, HookEventName: hooks.EventBeforeLLMCall, Cwd: r.workingDir}
-	for _, t := range r.transforms {
+type outboundOrigin struct {
+	sessionID, rootSessionID, agentName, cwd, purpose string
+}
+
+type outboundOriginKey struct{}
+
+func (r *LocalRuntime) messageOrigin(sess *session.Session, a *agent.Agent, purpose string) outboundOrigin {
+	if sess == nil || a == nil {
+		return outboundOrigin{purpose: purpose}
+	}
+	cwd := sess.WorkingDir
+	if cwd == "" {
+		cwd = r.workingDir
+	}
+	return outboundOrigin{sess.ID, r.todoRootSessionID(sess.ID), a.Name(), cwd, purpose}
+}
+
+func (r *LocalRuntime) contextMessageOrigin(ctx context.Context, purpose string) outboundOrigin {
+	if origin, ok := ctx.Value(outboundOriginKey{}).(outboundOrigin); ok {
+		origin.purpose = purpose
+		return origin
+	}
+	if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok && identity.driver != nil {
+		sess := identity.driver.session()
+		return r.messageOrigin(sess, r.resolveSessionAgent(sess), purpose)
+	}
+	if id := genai.ConversationIDFromContext(ctx); id != "" {
+		if driver, ok := r.sessionDrivers.Lookup(id); ok {
+			sess := driver.session()
+			return r.messageOrigin(sess, r.resolveSessionAgent(sess), purpose)
+		}
+	}
+	return outboundOrigin{purpose: purpose}
+}
+
+func (r *LocalRuntime) mandatoryMessagePolicies() []registeredTransform {
+	if r.messagePolicies != nil {
+		return r.messagePolicies
+	}
+	return r.transforms
+}
+
+// prepareOutboundMessages is the mandatory boundary, without optional hook dispatch.
+func (r *LocalRuntime) prepareOutboundMessages(ctx context.Context, origin outboundOrigin, modelID string, caps *modelinfo.ModelCapabilities, msgs []chat.Message) ([]chat.Message, error) {
+	in := &hooks.Input{SessionID: origin.sessionID, RootSessionID: origin.rootSessionID, AgentName: origin.agentName, ModelID: modelID, ModelCapabilities: caps, HookEventName: hooks.EventBeforeLLMCall, Cwd: origin.cwd, CallPurpose: origin.purpose}
+	for _, t := range r.mandatoryMessagePolicies() {
 		if !t.policy {
 			continue
+		}
+		if origin.sessionID == "" || origin.agentName == "" {
+			return nil, errors.New("message policy requires an originating session and agent")
 		}
 		input, snapshot, err := copyTransformInput(in, msgs)
 		if err == nil {
 			msgs, err = invokeMessageTransform(ctx, t.fn, input, snapshot)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("message policy %q for session %q: %w", t.name, sess.ID, err)
+			return nil, fmt.Errorf("message policy %q for session %q: %w", t.name, origin.sessionID, err)
 		}
 	}
 	return msgs, nil
+}
+
+func (r *LocalRuntime) applyMessagePolicies(ctx context.Context, sess *session.Session, a *agent.Agent, modelID string, caps *modelinfo.ModelCapabilities, msgs []chat.Message) ([]chat.Message, error) {
+	origin, ok := ctx.Value(outboundOriginKey{}).(outboundOrigin)
+	if !ok {
+		origin = r.messageOrigin(sess, a, "ordinary")
+	}
+	return r.prepareOutboundMessages(ctx, origin, modelID, caps, msgs)
 }
 
 // applyBeforeLLMCallTransforms runs every registered

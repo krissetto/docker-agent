@@ -9,7 +9,10 @@ import (
 	"errors"
 )
 
-var ErrWriteConflict = errors.New("session append write ID reused with different content")
+var (
+	ErrWriteConflict  = errors.New("session append write ID reused with different content")
+	ErrInputWithdrawn = errors.New("session input identity was withdrawn")
+)
 
 // ItemAppender makes retries of one immutable append safe after an uncertain
 // acknowledgment. Later message updates do not change the original fingerprint.
@@ -19,8 +22,9 @@ type ItemAppender interface {
 }
 
 type itemAppendReceipt struct {
-	id   int64
-	hash string
+	id        int64
+	hash      string
+	withdrawn bool
 }
 
 type itemAppendKey struct{ sessionID, writeID string }
@@ -66,6 +70,9 @@ func (s *InMemorySessionStore) AppendItem(ctx context.Context, sessionID, writeI
 		if receipt.hash != hash {
 			return 0, ErrWriteConflict
 		}
+		if receipt.withdrawn {
+			return 0, ErrInputWithdrawn
+		}
 		return receipt.id, nil
 	}
 	stored, ok := s.sessions.Load(sessionID)
@@ -101,10 +108,14 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var originalHash string
-	err = tx.QueryRowContext(ctx, `SELECT id, write_hash FROM session_items WHERE session_id = ? AND write_id = ?`, sessionID, writeID).Scan(&id, &originalHash)
+	var withdrawn bool
+	err = tx.QueryRowContext(ctx, `SELECT item_id, content_hash, withdrawn FROM session_append_receipts WHERE session_id = ? AND write_id = ?`, sessionID, writeID).Scan(&id, &originalHash, &withdrawn)
 	if err == nil {
 		if originalHash != hash {
 			return 0, ErrWriteConflict
+		}
+		if withdrawn {
+			return 0, ErrInputWithdrawn
 		}
 		return id, nil
 	}
@@ -130,6 +141,9 @@ func (s *SQLiteSessionStore) AppendItem(ctx context.Context, sessionID, writeID 
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE session_items SET write_id = ?, write_hash = ? WHERE id = ? AND session_id = ?`, writeID, hash, id, sessionID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO session_append_receipts(session_id, write_id, item_id, content_hash) VALUES (?, ?, ?, ?)`, sessionID, writeID, id, hash); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit()

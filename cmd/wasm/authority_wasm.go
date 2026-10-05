@@ -30,8 +30,26 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 	var mu sync.Mutex
 	subscriptions := map[uint64]context.CancelFunc{}
 	var next uint64
+	var disconnected bool
+	var resources sync.WaitGroup
+	var methods []js.Func
 	object := js.Global().Get("Object").New()
-	object.Set("request", js.FuncOf(func(_ js.Value, args []js.Value) any {
+	setMethod := func(name string, callback func(js.Value, []js.Value) any) {
+		handle := js.FuncOf(func(this js.Value, args []js.Value) any {
+			mu.Lock()
+			if disconnected {
+				mu.Unlock()
+				return throwingError("authority disconnected")
+			}
+			resources.Add(1)
+			mu.Unlock()
+			defer resources.Done()
+			return callback(this, args)
+		})
+		methods = append(methods, handle)
+		object.Set("_"+name, handle)
+	}
+	setMethod("request", func(_ js.Value, args []js.Value) any {
 		if len(args) < 2 {
 			return rejectedPromise("request: expected method and session-relative path")
 		}
@@ -46,17 +64,18 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 			}
 		}
 		return newPromise(func(resolve, reject func(any)) {
-			go func() {
+			resources.Go(func() {
+				defer rejectJSPanic(reject)
 				data, err := client.request(clientCtx, method, path, body)
 				if err != nil {
 					reject(jsError(err))
 					return
 				}
 				resolve(jsonJS(data))
-			}()
+			})
 		})
-	}))
-	object.Set("observe", js.FuncOf(func(_ js.Value, args []js.Value) any {
+	})
+	setMethod("observe", func(_ js.Value, args []js.Value) any {
 		if len(args) < 2 || args[1].Type() != js.TypeFunction {
 			return throwingError("observe: expected session ID, callback, and optional {since, epoch}")
 		}
@@ -88,13 +107,14 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 		subscription := js.Global().Get("Object").New()
 		closeFunc := js.FuncOf(func(_ js.Value, _ []js.Value) any { cancel(); return nil })
 		subscription.Set("_close", closeFunc)
-		js.Global().Call("eval", `(s => {s.close = () => {if (s._close) s._close();};})`).Invoke(subscription)
+		js.Global().Call("eval", `(s => {s.close = () => {const close = s._close; delete s._close; if (close) close();};})`).Invoke(subscription)
 		subscription.Set("done", newPromise(func(resolve, reject func(any)) {
-			go func() {
+			resources.Go(func() {
+				defer rejectJSPanic(reject)
 				defer func() {
 					cancel()
 					subscription.Delete("_close")
-					closeFunc.Release()
+					releaseJSFunctions(closeFunc)
 					mu.Lock()
 					defer mu.Unlock()
 					delete(subscriptions, key)
@@ -116,18 +136,51 @@ func connectAuthorityJS(_ js.Value, args []js.Value) any {
 					return
 				}
 				resolve(nil)
-			}()
+			})
 		}))
 		return subscription
-	}))
-	object.Set("disconnect", js.FuncOf(func(_ js.Value, _ []js.Value) any {
+	})
+	setMethod("disconnect", func(_ js.Value, _ []js.Value) any {
 		disconnect()
 		mu.Lock()
 		defer mu.Unlock()
+		disconnected = true
 		for _, cancel := range subscriptions {
 			cancel()
 		}
+		go func() {
+			resources.Wait()
+			releaseJSFunctions(methods...)
+		}()
 		return nil
-	}))
+	})
+	js.Global().Call("eval", `(a => {
+		a.request = (...args) => a._request ? a._request(...args) : Promise.reject(new Error("authority disconnected"));
+		a.observe = (...args) => {if (!a._observe) throw new Error("authority disconnected"); return a._observe(...args);};
+		a.disconnect = () => {
+			const disconnect = a._disconnect;
+			delete a._request; delete a._observe; delete a._disconnect;
+			if (disconnect) disconnect();
+		};
+	})`).Invoke(object)
 	return object
+}
+
+func rejectJSPanic(reject func(any)) {
+	if failure := recover(); failure != nil {
+		reject(jsError(fmt.Errorf("JavaScript callback: %v", failure)))
+	}
+}
+
+func releaseJSFunctions(handles ...js.Func) {
+	var release js.Func
+	release = js.FuncOf(func(js.Value, []js.Value) any {
+		defer release.Release()
+		for _, handle := range handles {
+			handle.Release()
+		}
+		return nil
+	})
+	// Release only after active callbacks have returned to JavaScript.
+	js.Global().Get("Promise").Call("resolve").Call("then", release)
 }

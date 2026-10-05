@@ -102,6 +102,9 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Fetch body reads do not observe request cancellation after headers arrive.
+	stopClose := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
+	defer stopClose()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("observe: %s", resp.Status)
 	}
@@ -173,8 +176,19 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 				if interaction.SessionID != id || interaction.InteractionID == "" {
 					return false, errors.New("invalid snapshot interaction identity")
 				}
+				var event struct {
+					SessionID string `json:"session_id"`
+					RequestID string `json:"request_id"`
+				}
+				if err := json.Unmarshal(interaction.Event, &event); err != nil {
+					return false, err
+				}
+				if (event.SessionID != "" && event.SessionID != id) || (event.RequestID != "" && event.RequestID != interaction.InteractionID) {
+					return false, errors.New("invalid snapshot event identity")
+				}
 			}
 			baseline = snap
+			lastSequence = snap.Cursor
 			if since != nil && epoch == snap.Epoch {
 				lastSequence = *since
 			}
@@ -188,14 +202,25 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 				return false, nil
 			}
 			var event struct {
-				Type      string `json:"type"`
-				SessionID string `json:"session_id"`
+				Type          string `json:"type"`
+				SessionID     string `json:"session_id"`
+				RequestID     string `json:"request_id"`
+				InteractionID string `json:"interaction_id"`
 			}
 			if err := json.Unmarshal(envelope.Event, &event); err != nil {
 				return false, err
 			}
 			if event.Type == "" || (event.SessionID != "" && event.SessionID != id) {
 				return false, errors.New("invalid event session identity")
+			}
+			switch event.Type {
+			case "tool_call_confirmation", "max_iterations_reached", "elicitation_request", "interaction_resolved":
+				if envelope.InteractionID == "" || (event.RequestID != "" && event.RequestID != envelope.InteractionID) || (event.InteractionID != "" && event.InteractionID != envelope.InteractionID) {
+					return false, errors.New("invalid event interaction identity")
+				}
+			}
+			if event.Type == "interaction_resolved" && (event.SessionID != id || event.InteractionID != envelope.InteractionID) {
+				return false, errors.New("invalid interaction resolution identity")
 			}
 			if envelope.Sequence == 0 {
 				if ready || envelope.TurnID != "" || envelope.InteractionID != "" || envelope.TranscriptPosition != -1 {
@@ -207,7 +232,7 @@ func (c *authorityClient) observe(ctx context.Context, id string, since *uint64,
 					return false, errors.New("invalid live seed event")
 				}
 			} else {
-				if envelope.Sequence <= lastSequence || (lastSequence > 0 && envelope.Sequence != lastSequence+1) {
+				if envelope.Sequence != lastSequence+1 {
 					return false, errors.New("invalid authority event sequence")
 				}
 				if ready && envelope.Sequence <= baseline.Cursor {

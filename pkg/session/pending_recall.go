@@ -13,6 +13,12 @@ type PendingMessageDeleter interface {
 	DeletePendingUserMessage(ctx context.Context, sessionID, turnID string) error
 }
 
+// PendingInputWithdrawer atomically retains the admission receipt and removes
+// pending payload. Repeated withdrawal is safe after an uncertain acknowledgment.
+type PendingInputWithdrawer interface {
+	WithdrawPendingUserMessage(ctx context.Context, sessionID, turnID string) error
+}
+
 // RemovePendingUserMessageByTurnID removes only unconsumed user input. Stable
 // turn identity, rather than a remembered position, survives FIFO promotion.
 func (s *Session) RemovePendingUserMessageByTurnID(turnID string) bool {
@@ -43,11 +49,41 @@ func (s *InMemorySessionStore) DeletePendingUserMessage(ctx context.Context, ses
 	if sessionID == "" {
 		return ErrEmptyID
 	}
+	s.coordinationMu.Lock()
+	defer s.coordinationMu.Unlock()
 	sess, ok := s.sessions.Load(sessionID)
-	if !ok || !sess.RemovePendingUserMessageByTurnID(turnID) {
+	if !ok {
 		return ErrNotFound
 	}
+	var messageID int64
+	for _, item := range sess.MessagesSnapshot() {
+		if item.Message != nil && item.Message.Pending && item.Message.TurnID == turnID {
+			messageID = item.Message.ID
+			break
+		}
+	}
+	if !sess.RemovePendingUserMessageByTurnID(turnID) {
+		return ErrNotFound
+	}
+	for key, receipt := range s.appendReceipts {
+		if key.sessionID == sessionID && receipt.id == messageID {
+			receipt.withdrawn = true
+			s.appendReceipts[key] = receipt
+		}
+	}
 	return nil
+}
+
+func (s *InMemorySessionStore) WithdrawPendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	err := s.DeletePendingUserMessage(ctx, sessionID, turnID)
+	if errors.Is(err, ErrNotFound) {
+		s.coordinationMu.Lock()
+		defer s.coordinationMu.Unlock()
+		if receipt, ok := s.appendReceipts[itemAppendKey{sessionID, "input:" + turnID}]; ok && receipt.withdrawn {
+			return nil
+		}
+	}
+	return err
 }
 
 func (s *SQLiteSessionStore) DeletePendingUserMessage(ctx context.Context, sessionID, turnID string) error {
@@ -72,6 +108,9 @@ func (s *SQLiteSessionStore) DeletePendingUserMessage(ctx context.Context, sessi
 		}
 		return classifySQLiteError(err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session_append_receipts SET withdrawn = 1 WHERE session_id = ? AND item_id = ?`, sessionID, id); err != nil {
+		return classifySQLiteError(err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_items WHERE id = ? AND session_id = ? AND actor_pending = 1`, id, sessionID); err != nil {
 		return classifySQLiteError(err)
 	}
@@ -82,4 +121,19 @@ func (s *SQLiteSessionStore) DeletePendingUserMessage(ctx context.Context, sessi
 		return classifySQLiteError(err)
 	}
 	return classifySQLiteError(tx.Commit())
+}
+
+func (s *SQLiteSessionStore) WithdrawPendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	err := s.DeletePendingUserMessage(ctx, sessionID, turnID)
+	if errors.Is(err, ErrNotFound) {
+		var withdrawn bool
+		lookupErr := s.db.QueryRowContext(ctx, `SELECT withdrawn FROM session_append_receipts WHERE session_id = ? AND write_id = ?`, sessionID, "input:"+turnID).Scan(&withdrawn)
+		if lookupErr == nil && withdrawn {
+			return nil
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			return classifySQLiteContextError(ctx, lookupErr)
+		}
+	}
+	return err
 }

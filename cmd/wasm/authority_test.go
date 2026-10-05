@@ -72,16 +72,20 @@ func TestAuthorityRejectsMalformedObservation(t *testing.T) {
 		return authorityMessage{Version: 2, Type: "event", Envelope: &api.SessionEnvelope[json.RawMessage]{Version: 2, SessionID: id, Epoch: epoch, Sequence: sequence, Event: json.RawMessage(`{"type":"user_message"}`)}}
 	}
 	for name, messages := range map[string][]authorityMessage{
-		"wrong version":           {{Version: 1, Type: "snapshot"}},
-		"wrong snapshot identity": {{Version: 2, Type: "snapshot", Snapshot: &authoritySnapshot{Session: session.New(session.WithID("other")), Epoch: "epoch"}}},
-		"chunk cursor mismatch":   {{Version: 2, Type: "snapshot_begin", Cursor: 3}, {Version: 2, Type: "snapshot_chunk", Cursor: 4, Chunk: []byte("{}")}},
-		"chunk version mismatch":  {{Version: 2, Type: "snapshot_begin", Cursor: 3}, {Version: 1, Type: "snapshot_end", Cursor: 3}},
-		"event before snapshot":   {envelope("s", "epoch", 4)},
-		"wrong envelope identity": {snapshot, envelope("other", "epoch", 4)},
-		"wrong envelope epoch":    {snapshot, envelope("s", "old", 4)},
-		"duplicate sequence":      {snapshot, envelope("s", "epoch", 2), envelope("s", "epoch", 2)},
-		"wrong ready cursor":      {snapshot, {Version: 2, Type: "ready", Cursor: 4}},
-		"seed after ready":        {snapshot, {Version: 2, Type: "ready", Cursor: 3}, envelope("s", "epoch", 0)},
+		"wrong version":             {{Version: 1, Type: "snapshot"}},
+		"wrong snapshot identity":   {{Version: 2, Type: "snapshot", Snapshot: &authoritySnapshot{Session: session.New(session.WithID("other")), Epoch: "epoch"}}},
+		"chunk cursor mismatch":     {{Version: 2, Type: "snapshot_begin", Cursor: 3}, {Version: 2, Type: "snapshot_chunk", Cursor: 4, Chunk: []byte("{}")}},
+		"chunk version mismatch":    {{Version: 2, Type: "snapshot_begin", Cursor: 3}, {Version: 1, Type: "snapshot_end", Cursor: 3}},
+		"event before snapshot":     {envelope("s", "epoch", 4)},
+		"wrong envelope identity":   {snapshot, envelope("other", "epoch", 4)},
+		"wrong envelope epoch":      {snapshot, envelope("s", "old", 4)},
+		"baseline sequence hole":    {snapshot, envelope("s", "epoch", 5)},
+		"live sequence hole":        {snapshot, {Version: 2, Type: "ready", Cursor: 3}, envelope("s", "epoch", 5)},
+		"foreign event identity":    {snapshot, {Version: 2, Type: "event", Envelope: &api.SessionEnvelope[json.RawMessage]{Version: 2, SessionID: "s", Epoch: "epoch", Sequence: 4, Event: json.RawMessage(`{"type":"agent_choice","session_id":"other","content":"foreign"}`)}}},
+		"foreign interaction token": {snapshot, {Version: 2, Type: "event", Envelope: &api.SessionEnvelope[json.RawMessage]{Version: 2, SessionID: "s", Epoch: "epoch", Sequence: 4, InteractionID: "token", Event: json.RawMessage(`{"type":"tool_call_confirmation","session_id":"s","request_id":"other"}`)}}},
+		"duplicate sequence":        {snapshot, envelope("s", "epoch", 2), envelope("s", "epoch", 2)},
+		"wrong ready cursor":        {snapshot, {Version: 2, Type: "ready", Cursor: 4}},
+		"seed after ready":          {snapshot, {Version: 2, Type: "ready", Cursor: 3}, envelope("s", "epoch", 0)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

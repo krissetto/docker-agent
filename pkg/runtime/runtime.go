@@ -146,7 +146,8 @@ type LocalRuntime struct {
 	// [NewLocalRuntime] (for the runtime-shipped strip transform) and by
 	// [WithMessageTransform] (for embedder-supplied transforms).
 	// Read-only after construction.
-	transforms []registeredTransform
+	transforms      []registeredTransform
+	messagePolicies []registeredTransform
 
 	fallback *fallbackExecutor
 
@@ -793,7 +794,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		}
 		r.hooksRegistry.RegisterDefaults(defaults)
 	}
-	registerModelHook(r.hooksRegistry, r.providerRegistry)
+	registerModelHook(r)
 
 	// cache_response is registered here (not in pkg/hooks/builtins)
 	// because it needs to capture the runtime to resolve the agent
@@ -860,6 +861,13 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		obs.owner = func(id string) *sessionDriver { d, _ := r.sessionDrivers.Lookup(id); return d }
 		obs.lifetime = r.lifetime()
 		r.observers = append([]EventObserver{obs}, r.observers...)
+	}
+
+	r.messagePolicies = make([]registeredTransform, 0)
+	for _, transform := range r.transforms {
+		if transform.policy {
+			r.messagePolicies = append(r.messagePolicies, transform)
+		}
 	}
 
 	if err := r.sessionService.register(r); err != nil {

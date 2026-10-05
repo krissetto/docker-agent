@@ -339,3 +339,7 @@ func TestPendingEditSameContentAndTextCAS(t *testing.T) {
 	assert.Equal(t, "C", h.driver.steering[0].Content)
 	assert.Len(t, h.driver.events.replay[h.ID()], 5, "same-content saves retain successful edit event semantics")
 }
+
+func (s *pendingEditBarrierStore) WithdrawPendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	return s.Store.(session.PendingInputWithdrawer).WithdrawPendingUserMessage(ctx, sessionID, turnID)
+}

@@ -120,6 +120,9 @@ func (r *LocalRuntime) dispatchHook(
 	if events != nil {
 		events.Emit(HookStarted(event, input.SessionID, a.Name()))
 	}
+	if input != nil {
+		ctx = context.WithValue(ctx, outboundOriginKey{}, outboundOrigin{input.SessionID, input.RootSessionID, a.Name(), input.Cwd, "model_hook"})
+	}
 	result, err := exec.Dispatch(ctx, event, input)
 	if events != nil {
 		events.Emit(HookFinished(event, input.SessionID, result, err, time.Since(started), a.Name()))

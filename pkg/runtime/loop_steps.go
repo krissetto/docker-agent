@@ -67,29 +67,19 @@ func (r *LocalRuntime) enforceMaxIterations(
 	if err != nil {
 		return runtimeMaxIterations, iterationStop
 	}
-	// Install the responder rendezvous before publishing the interaction. An
-	// observer may answer immediately after seeing the event; publishing first
-	// creates a real window where SessionHandle.Respond cannot deliver and
-	// incorrectly reports the freshly observed interaction as stale.
 	var resume <-chan ResumeRequest
-
-	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-		if !sess.NonInteractive && ctx.Err() == nil {
-			var err error
-			resume, err = d.registerResume(ctx, requestID, InteractionMaxIterations)
-			if err != nil {
-				return runtimeMaxIterations, iterationStop
-			}
-		}
-		event := MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID)
-		d.RegisterInteraction(requestID, InteractionMaxIterations, event)
-		events.Emit(event)
-	} else {
-		events.Emit(MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID))
-		if !sess.NonInteractive {
+	event := MaxIterationsReachedForSession(runtimeMaxIterations, sess.ID, requestID).(*MaxIterationsReachedEvent)
+	if d, ok := r.sessionDrivers.Lookup(sess.ID); ok && !sess.NonInteractive && ctx.Err() == nil {
+		resume, err = d.registerResumeInteraction(ctx, requestID, InteractionMaxIterations, event)
+		if err != nil {
 			return runtimeMaxIterations, iterationStop
 		}
+		event.ownerPublished = true
+	} else if !sess.NonInteractive {
+		events.Emit(event)
+		return runtimeMaxIterations, iterationStop
 	}
+	events.Emit(event)
 
 	maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)
 	r.notifyMaxIterations(ctx, a, sess.ID, maxIterMsg)

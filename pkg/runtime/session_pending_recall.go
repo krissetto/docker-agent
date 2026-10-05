@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"slices"
 
 	"github.com/docker/docker-agent/pkg/session"
@@ -70,11 +71,23 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 		}
 		var write func(context.Context) error
 		if msg.AcceptedPersisted {
-			store, ok := d.r.sessionStore.(session.PendingMessageDeleter)
+			store, ok := d.r.sessionStore.(session.PendingInputWithdrawer)
 			if !ok {
 				return sessionIOReservation{}, &SessionError{Kind: SessionErrorUnsupported, Operation: "cancel_pending_message"}
 			}
-			write = func(ctx context.Context) error { return store.DeletePendingUserMessage(ctx, d.identityID, turnID) }
+			write = func(ctx context.Context) error {
+				err := store.WithdrawPendingUserMessage(ctx, d.identityID, turnID)
+				if err == nil {
+					return nil
+				}
+				// Retry the atomic operation to reconcile a lost acknowledgment.
+				if !errors.Is(err, session.ErrNotFound) && ctx.Err() == nil {
+					if retryErr := store.WithdrawPendingUserMessage(ctx, d.identityID, turnID); retryErr == nil {
+						return nil
+					}
+				}
+				return err
+			}
 		}
 		d.editReserved = true
 		return sessionIOReservation{write: write, commit: func(err error) error {
@@ -82,6 +95,10 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 			if err != nil {
 				return err
 			}
+			if d.withdrawnInputs == nil {
+				d.withdrawnInputs = make(map[string]string)
+			}
+			d.withdrawnInputs[turnID] = d.inputFingerprints[turnID]
 			d.sess.RemovePendingUserMessageByTurnID(turnID)
 			*queue = slices.DeleteFunc(*queue, func(value QueuedMessage) bool { return value.RequestID == turnID })
 			d.completeTurnLocked(turnID)

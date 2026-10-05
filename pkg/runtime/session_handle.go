@@ -424,7 +424,7 @@ func (r *LocalRuntime) createClientChild(ctx context.Context, requested *session
 	child.Permissions = session.ClonePermissionsConfig(permissions)
 	child.ID, child.AsyncSubagent = requested.ID, true
 	requested = child
-	if err := r.subagents.registerIdleChild(parent, parentAgent.Name(), requested, childAgent, ref); err != nil {
+	if _, err := r.subagents.admitChildContext(ctx, parent, parentAgent.Name(), requested, childAgent, ref, "", false); err != nil {
 		return nil, err
 	}
 	return r.SessionByID(requested.ID)

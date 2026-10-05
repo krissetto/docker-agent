@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -81,6 +83,9 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				} else {
 					id, err = d.r.sessionStore.AddMessage(ctx, d.identityID, message)
 				}
+				if errors.Is(err, session.ErrInputWithdrawn) {
+					return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: msg.RequestID, Operation: op, Detail: "input identity was withdrawn"}
+				}
 				if errors.Is(err, session.ErrNotFound) {
 					return nil
 				}
@@ -101,6 +106,14 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				}
 			}
 			admission.durable = msg.AcceptedPersisted
+			if msg.RequestID != "" {
+				if d.inputFingerprints == nil {
+					d.inputFingerprints = make(map[string]string)
+				}
+				data, _ := json.Marshal(msg.sessionMessage())
+				hash := sha256.Sum256(data)
+				d.inputFingerprints[msg.RequestID] = hex.EncodeToString(hash[:])
+			}
 			if !msg.Retry && msg.RequestID != "" {
 				msg.AcceptedPosition = d.sess.AddMessageAt(message)
 				d.events.PublishForRequest(d.identityID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.identityID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))

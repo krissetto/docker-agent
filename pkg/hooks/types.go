@@ -280,6 +280,9 @@ type Input struct {
 	// model-call-scoped.
 	ModelID string `json:"model_id,omitempty"`
 
+	// CallPurpose identifies mandatory outbound delivery: ordinary, compaction, sampling, or model_hook.
+	CallPurpose string `json:"call_purpose,omitempty"`
+
 	// ModelCapabilities is the resolved attachment-capability set for
 	// [Input.ModelID], with any explicit `capabilities:` config override
 	// already applied — the same resolution providers use for attachment

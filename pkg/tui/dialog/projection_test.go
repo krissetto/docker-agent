@@ -35,3 +35,16 @@ func TestReconcileInteractionsPreservesLiveDraftAndUnrelatedDialogs(t *testing.T
 	assert.Len(t, mgr.stack, 2, "vanished root and dependent rejection dialog are removed, unrelated modals remain")
 	assert.Same(t, modal, mgr.stack[0].dialog)
 }
+
+func TestCanonicalConfirmationResolutionClosesAndRejectsMirror(t *testing.T) {
+	mgr := New(newDialogRuntime()).(*manager)
+	prompt := &runtime.ToolCallConfirmationEvent{SessionID: "s", RequestID: "approval"}
+	opened := &lifecycle.Projection{Interactions: []runtime.InteractionSnapshot{{Event: prompt}}}
+	mgr.Update(ReconcileInteractionsMsg{SessionID: "s", Projection: opened})
+	mgr.handleOpen(OpenDialogMsg{Model: NewToolConfirmationDialog(nil, prompt, nil), OriginatingEvent: prompt})
+	assert.Len(t, mgr.stack, 1)
+	mgr.Update(ReconcileInteractionsMsg{SessionID: "s", Projection: &lifecycle.Projection{}})
+	assert.Empty(t, mgr.stack)
+	mgr.handleOpen(OpenDialogMsg{Model: NewToolConfirmationDialog(nil, prompt, nil), OriginatingEvent: prompt})
+	assert.Empty(t, mgr.stack, "resolved canonical projection rejects a delayed dialog command")
+}

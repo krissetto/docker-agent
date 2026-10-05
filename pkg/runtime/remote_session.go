@@ -933,12 +933,14 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		}
 		previous, known := replaySequences[envelope.SessionID]
 		zeroSeed := baseline && known && envelope.IsLiveSeed()
-		if !known || envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && known && envelope.Sequence <= previous) {
+		if !known || envelope.Epoch != replayEpochs[envelope.SessionID] || (!options.Tree && envelope.SessionID != id) || (!envelope.Gap && !zeroSeed && envelope.Sequence == 0) || (envelope.Sequence != 0 && !envelope.Gap && envelope.Sequence != previous+1) {
 			resp.Body.Close()
 			cancel()
 			return Observation{}, protocolError(errors.New("invalid session replay sequence or session"))
 		}
-		if envelope.Sequence != 0 {
+		if envelope.Gap && envelope.FirstAvailable > 0 {
+			replaySequences[envelope.SessionID] = envelope.FirstAvailable - 1
+		} else if envelope.Sequence != 0 {
 			replaySequences[envelope.SessionID] = envelope.Sequence
 		}
 		replayBytes += estimateEventBytes(envelope.Event) + len(envelope.TurnID) + len(envelope.InteractionID)
@@ -980,6 +982,9 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 		lastSequences := make(map[string]uint64, len(snapshots))
 		for _, item := range snapshots {
 			lastSequences[item.Status.SessionID] = item.Cursor
+		}
+		for sessionID, sequence := range replaySequences {
+			lastSequences[sessionID] = max(lastSequences[sessionID], sequence)
 		}
 		lastSequence := snapshot.Cursor
 		for _, envelope := range replay {
@@ -1054,11 +1059,13 @@ func (c *Client) attachSession(ctx context.Context, id string, options ObserveOp
 				return
 			}
 			previous, known := lastSequences[env.SessionID]
-			if !known || env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && env.Sequence <= previous) {
+			if !known || env.Epoch != replayEpochs[env.SessionID] || (!options.Tree && env.SessionID != id) || (!env.Gap && env.Sequence == 0) || (env.Sequence != 0 && !env.Gap && env.Sequence != previous+1) {
 				errorsCh <- protocolError(fmt.Errorf("invalid session observation sequence %d after %d", env.Sequence, previous))
 				return
 			}
-			if env.Sequence != 0 {
+			if env.Gap && env.FirstAvailable > 0 {
+				lastSequences[env.SessionID] = env.FirstAvailable - 1
+			} else if env.Sequence != 0 {
 				lastSequences[env.SessionID], lastSequence = env.Sequence, env.Sequence
 			}
 			if updates != nil {
@@ -1197,12 +1204,18 @@ func (c *Client) decodeSessionSnapshot(in remoteSessionSnapshot) (SessionSnapsho
 		out.PendingInputs = append(out.PendingInputs, PendingInput{TurnID: pending.TurnID, Content: pending.Content, MultiContent: pending.MultiContent, SessionPosition: pending.SessionPosition, InputOrigin: pending.InputOrigin, SenderID: pending.SenderID, SenderName: pending.SenderName, ReportOutcome: pending.ReportOutcome, InputMode: pending.InputMode})
 	}
 	for _, v := range in.Interactions {
-		if v.SessionID != in.Session.ID {
+		if v.SessionID != in.Session.ID || v.InteractionID == "" {
 			return out, errors.New("invalid session interaction identity")
 		}
 		e, err := c.decodeSessionEvent(v.Event)
 		if err != nil {
 			return out, err
+		}
+		if scoped, ok := e.(SessionScoped); ok && scoped.GetSessionID() != "" && scoped.GetSessionID() != v.SessionID {
+			return out, errors.New("snapshot event session identity mismatch")
+		}
+		if token := interactionEventID(e); token != "" && token != v.InteractionID {
+			return out, errors.New("snapshot interaction token mismatch")
 		}
 		out.Interactions = append(out.Interactions, InteractionSnapshot{SessionID: v.SessionID, InteractionID: v.InteractionID, ElicitationID: v.ElicitationID, Kind: v.Kind, Event: e})
 	}
@@ -1219,10 +1232,13 @@ func (c *Client) decodeSessionEnvelope(in remoteSessionEnvelope) (SessionEvent, 
 		if err != nil {
 			return out, err
 		}
+		if scoped, ok := e.(SessionScoped); ok && scoped.GetSessionID() != "" && scoped.GetSessionID() != in.SessionID {
+			return out, errors.New("event session identity mismatch")
+		}
 		switch e.(type) {
 		case *ToolCallConfirmationEvent, *MaxIterationsReachedEvent, *ElicitationRequestEvent, *InteractionResolvedEvent:
-			if in.InteractionID == "" {
-				return out, errors.New("interaction event is missing interaction_id")
+			if in.InteractionID == "" || (interactionEventID(e) != "" && interactionEventID(e) != in.InteractionID) {
+				return out, errors.New("interaction event identity mismatch")
 			}
 		}
 		if resolved, ok := e.(*InteractionResolvedEvent); ok {

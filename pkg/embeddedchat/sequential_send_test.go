@@ -200,36 +200,12 @@ func TestRealToolConfirmationRoundTrip(t *testing.T) {
 	}
 }
 
-type blockedResponseHandle struct {
-	runtime.SessionHandle
-
-	entered chan struct{}
-	proceed chan struct{}
-}
-
-func (h *blockedResponseHandle) Respond(ctx context.Context, response runtime.InteractionResponse) error {
-	close(h.entered)
-	<-h.proceed
-	return h.SessionHandle.Respond(ctx, response)
-}
-
-func TestConfirmRacingRestartKeepsCapturedBinding(t *testing.T) {
+func TestConfirmRacingRestartRejectsStaleBinding(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	s, err := New(ctx, Config{Team: newCodeBuiltTeam()})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	original := s.handle
-	blocked := &blockedResponseHandle{SessionHandle: original, entered: make(chan struct{}), proceed: make(chan struct{})}
-	s.handle = blocked
-	result := make(chan error, 1)
-	go func() { req := runtime.ResumeApprove(); req.RequestID = "stale"; result <- s.Confirm(ctx, req) }()
-	<-blocked.entered
-	require.NoError(t, s.Restart())
-	require.NotEqual(t, original.ID(), s.handle.ID())
-	close(blocked.proceed)
-	require.Error(t, <-result)
-	// Exercise the lock capture/write boundary under the race detector as well.
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for range 50 {

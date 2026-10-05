@@ -20,7 +20,7 @@ func TestOwnerApprovalHasOneWinnerWhileReceiverDrains(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionRunning; d.generation = 1; d.activeRequestID = "turn"; return nil }))
-	resume, err := d.registerResume(t.Context(), "approval", InteractionConfirmation)
+	resume, err := d.registerResume(t.Context(), "approval")
 	require.NoError(t, err)
 	var winners atomic.Int32
 	var workers sync.WaitGroup
@@ -129,9 +129,9 @@ func TestRuntimeReportDoesNotInterruptProviderAttempt(t *testing.T) {
 func TestSameSessionInteractionResponsesCannotConsumeOtherRequest(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
-	first, err := d.registerResume(t.Context(), "first", InteractionConfirmation)
+	first, err := d.registerResume(t.Context(), "first")
 	require.NoError(t, err)
-	second, err := d.registerResume(t.Context(), "second", InteractionConfirmation)
+	second, err := d.registerResume(t.Context(), "second")
 	require.NoError(t, err)
 	require.NoError(t, d.Respond(InteractionResponse{InteractionID: "second", Kind: InteractionConfirmation, Resume: ResumeReject("second only")}))
 	select {
@@ -222,4 +222,37 @@ func TestExecutionRefreshPromotesAlreadySnapshottedSteering(t *testing.T) {
 	require.NoError(t, refreshExecutionInput(ctx, scratch))
 	require.Len(t, scratch.Messages, 1, "promotion must not duplicate the input")
 	assert.False(t, scratch.Messages[0].Message.Pending, "provider scratch must consume owner-promoted guidance")
+}
+
+func TestOwnerElicitationAbandonHasOneTerminalWinner(t *testing.T) {
+	for range 32 {
+		r := newDriverTestRuntime(t)
+		d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
+		waiter := newElicitationWaiter()
+		event := ElicitationRequest("question", "form", nil, "", "question", "", d.identityID, nil, "root").(*ElicitationRequestEvent)
+		event.RequestID = "question"
+		require.NoError(t, d.registerElicitation(t.Context(), "question", event, waiter))
+		d.abandonElicitation("question", newElicitationWaiter())
+		var workers sync.WaitGroup
+		workers.Go(func() { d.abandonElicitation("question", waiter) })
+		workers.Go(func() {
+			_ = d.Respond(InteractionResponse{InteractionID: "question", Kind: InteractionElicitation, ElicitationID: "question", Elicitation: ElicitationResult{Action: tools.ElicitationActionAccept}})
+		})
+		workers.Go(func() {
+			assert.NoError(t, d.ownerCall(t.Context(), func() error { d.resolveInteractionsLocked(); return nil }))
+		})
+		workers.Wait()
+		d.abandonElicitation("question", waiter)
+		require.NoError(t, d.ownerCall(t.Context(), func() error { d.stopped = true; d.resolveInteractionsLocked(); return nil }))
+		zero := uint64(0)
+		replay, _, cancel, _ := d.events.SubscribeSequenced(d.identityID, &zero, 8)
+		cancel()
+		resolutions := 0
+		for _, envelope := range replay {
+			if _, ok := envelope.Event.(*InteractionResolvedEvent); ok {
+				resolutions++
+			}
+		}
+		assert.Equal(t, 1, resolutions)
+	}
 }

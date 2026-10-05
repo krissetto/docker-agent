@@ -232,6 +232,8 @@ func ToolCall(toolCall tools.ToolCall, toolDefinition tools.Tool, agentName stri
 type ToolCallConfirmationEvent struct {
 	AgentContext
 
+	ownerPublished bool
+
 	Type           string         `json:"type"`
 	ToolCall       tools.ToolCall `json:"tool_call"`
 	ToolDefinition tools.Tool     `json:"tool_definition"`
@@ -857,6 +859,8 @@ func Authorization(confirmation tools.ElicitationAction, agentName string) Event
 
 type MaxIterationsReachedEvent struct {
 	AgentContext
+
+	ownerPublished bool
 
 	Type          string `json:"type"`
 	MaxIterations int    `json:"max_iterations"`

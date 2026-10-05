@@ -431,22 +431,26 @@ func TestSessionCloseCancelsActiveRunAndClosesRuntime(t *testing.T) {
 	close(rt.events)
 }
 
-func TestSessionRestartKeepsRunActiveUntilRuntimeStops(t *testing.T) {
+func TestSessionRestartWaitsUntilRuntimeStops(t *testing.T) {
 	t.Parallel()
 	rt := newFakeRuntime()
 	s := newTestSession(rt)
-
 	out, err := s.Send(t.Context(), "first")
 	require.NoError(t, err)
-	require.NoError(t, s.Restart())
-
-	next, err := s.Send(t.Context(), "second")
+	finished := make(chan error, 1)
+	go func() { finished <- s.Restart() }()
+	require.Eventually(t, func() bool { return rt.stopWakeCalls.Load() > 0 }, time.Second, time.Millisecond)
+	next, err := s.Send(t.Context(), "too soon")
 	require.Nil(t, next)
 	require.ErrorIs(t, err, ErrRunActive)
-
+	select {
+	case <-finished:
+		t.Fatal("Restart returned before settlement")
+	default:
+	}
 	close(rt.events)
+	require.NoError(t, <-finished)
 	assertClosed(t, out)
-
 	next, err = s.Send(t.Context(), "second")
 	require.NoError(t, err)
 	require.True(t, receiveEvent(t, next).Done)
@@ -460,16 +464,15 @@ func TestSessionRestartCancelsRunAndReplacesConversation(t *testing.T) {
 	_, err := s.Send(t.Context(), "hi")
 	require.NoError(t, err)
 	oldSession := s.conversation
+	close(rt.events)
 
 	require.NoError(t, s.Restart())
-	require.Eventually(t, func() bool { return rt.stopWakeCalls.Load() == 1 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return rt.stopWakeCalls.Load() >= 1 }, time.Second, time.Millisecond)
 	require.NotSame(t, oldSession, s.conversation)
 	require.Empty(t, s.conversation.Messages)
 	require.Eventually(t, func() bool {
 		return errors.Is(rt.runCtxs[0].Err(), context.Canceled)
 	}, time.Second, time.Millisecond)
-
-	close(rt.events)
 }
 
 func receiveEvent(t *testing.T, ch <-chan Event) Event {
@@ -523,7 +526,7 @@ type failedDrainRuntime struct{ *fakeRuntime }
 
 func (*failedDrainRuntime) AwaitTurn(context.Context, string) error { return context.DeadlineExceeded }
 
-func TestSessionQuarantinesFailedDrainUntilRestart(t *testing.T) {
+func TestSessionRestartRetainsFailedDrainQuarantine(t *testing.T) {
 	t.Parallel()
 	rt := newFakeRuntime()
 	s := newTestSession(rt)
@@ -536,11 +539,10 @@ func TestSessionQuarantinesFailedDrainUntilRestart(t *testing.T) {
 	next, err := s.Send(t.Context(), "unsafe successor")
 	require.Nil(t, next)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.NoError(t, s.Restart())
-	next, err = s.Send(t.Context(), "safe successor")
-	require.NoError(t, err)
-	require.True(t, receiveEvent(t, next).Done)
-	assertClosed(t, next)
+	require.ErrorIs(t, s.Restart(), context.DeadlineExceeded)
+	next, err = s.Send(t.Context(), "still unsafe")
+	require.Nil(t, next)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 type retryShutdownSupervisor struct {

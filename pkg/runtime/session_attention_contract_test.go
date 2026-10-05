@@ -29,7 +29,7 @@ func resolveConfirmation(t *testing.T, d *sessionDriver, h SessionHandle, id str
 	d.mu.Lock()
 	delete(d.interactions, id)
 	d.mu.Unlock()
-	resume, err := d.registerResume(t.Context(), id, InteractionConfirmation)
+	resume, err := d.registerResume(t.Context(), id)
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() {
@@ -93,4 +93,20 @@ func TestAttentionFailureOverridesOutstandingInteraction(t *testing.T) {
 	node, _ := m.tree.Node(id)
 	assert.True(t, node.NeedsAttention)
 	assert.Equal(t, "failed", node.WaitingOn)
+}
+
+func TestAttentionAbandonedElicitationClearsExactWaiter(t *testing.T) {
+	m, d, _, id := attentionFixture(t)
+	waiter := newElicitationWaiter()
+	event := ElicitationRequest("question", "form", nil, "", "question", "", d.identityID, nil, "worker").(*ElicitationRequestEvent)
+	require.NoError(t, d.registerElicitation(t.Context(), "question", event, waiter))
+	d.refreshAttention()
+	node, _ := m.tree.Node(id)
+	require.True(t, node.NeedsAttention)
+	d.abandonElicitation("question", newElicitationWaiter())
+	node, _ = m.tree.Node(id)
+	assert.True(t, node.NeedsAttention)
+	d.abandonElicitation("question", waiter)
+	node, _ = m.tree.Node(id)
+	assert.False(t, node.NeedsAttention)
 }

@@ -134,7 +134,7 @@ func TestPendingRecallSQLiteRestoreDoesNotReplay(t *testing.T) {
 	store, err := sqlitestore.New(t.Context(), path)
 	require.NoError(t, err)
 	h := pendingRecallHandle(t, store)
-	turn, err := h.Submit(t.Context(), TurnInput{Content: "never replay"})
+	turn, err := h.Submit(t.Context(), TurnInput{Content: "never replay", RequestID: "withdrawn-reopen"})
 	require.NoError(t, err)
 	ok, err := h.CancelPendingMessage(t.Context(), turn.TurnID)
 	require.NoError(t, err)
@@ -151,6 +151,11 @@ func TestPendingRecallSQLiteRestoreDoesNotReplay(t *testing.T) {
 		restored := newSessionDriver(r, loaded)
 		assert.False(t, restored.HasPending(), "restore must not re-admit recalled input")
 		assert.Empty(t, restored.DrainSteering())
+		restoredHandle := &sessionHandle{runtime: r, driver: restored, sessionID: loaded.ID}
+		_, err = restoredHandle.Submit(t.Context(), TurnInput{Content: "never replay", RequestID: "withdrawn-reopen"})
+		require.ErrorIs(t, err, &SessionError{Kind: SessionErrorConflict})
+		require.False(t, restored.HasPending())
+		restored.closeOwner()
 		require.NoError(t, reopened.Close())
 	}
 }

@@ -423,10 +423,19 @@ func (d *sessionDriver) closeOwner() {
 func (d *sessionDriver) abandonElicitation(id string, waiter *elicitationWaiter) {
 	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
 		if interaction, ok := d.interactions[id]; ok && interaction.waiter == waiter {
+			if !waiter.tryCancel() && waiterState(waiter.state.Load()) != waiterCanceled {
+				return nil
+			}
 			delete(d.interactions, id)
+			reason := InteractionCanceled
+			if d.stopped {
+				reason = InteractionStopped
+			}
+			d.events.Publish(d.identityID, &InteractionResolvedEvent{Type: "interaction_resolved", SessionID: d.identityID, InteractionID: id, Reason: reason})
 		}
 		return nil
 	})
+	d.refreshAttention()
 }
 
 func (r *LocalRuntime) runOwnerQueuedCompaction(ctx context.Context, scratch *session.Session) {
@@ -458,7 +467,32 @@ func (r *LocalRuntime) runOwnerQueuedCompaction(ctx context.Context, scratch *se
 	})
 }
 
-func (d *sessionDriver) registerResume(ctx context.Context, id string, kind InteractionKind) (<-chan ResumeRequest, error) {
+func (d *sessionDriver) registerResumeInteraction(ctx context.Context, id string, kind InteractionKind, event Event) (<-chan ResumeRequest, error) {
+	payload, err := observerEventSnapshot(event)
+	if err != nil {
+		return nil, err
+	}
+	var channel chan ResumeRequest
+	err = d.ownerCall(ctx, func() error {
+		if d.stopped {
+			return ErrSessionStopped
+		}
+		if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok && (identity.driver != d || identity.generation != d.generation) {
+			return ErrSessionStopped
+		}
+		if _, exists := d.interactions[id]; exists {
+			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: id, Operation: "register_interaction"}
+		}
+		channel = make(chan ResumeRequest, 1)
+		d.interactions[id] = sessionInteraction{kind: kind, turnID: d.activeRequestID, generation: d.generation, resume: channel, event: payload}
+		d.events.Publish(d.identityID, payload)
+		return nil
+	})
+	d.refreshAttention()
+	return channel, err
+}
+
+func (d *sessionDriver) registerResume(ctx context.Context, id string) (<-chan ResumeRequest, error) {
 	var channel chan ResumeRequest
 	err := d.ownerCall(ctx, func() error {
 		if d.stopped {
@@ -471,18 +505,10 @@ func (d *sessionDriver) registerResume(ctx context.Context, id string, kind Inte
 			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: id, Operation: "register_interaction"}
 		}
 		channel = make(chan ResumeRequest, 1)
-		d.interactions[id] = sessionInteraction{kind: kind, turnID: d.activeRequestID, generation: d.generation, resume: channel}
+		d.interactions[id] = sessionInteraction{kind: InteractionConfirmation, turnID: d.activeRequestID, generation: d.generation, resume: channel}
 		return nil
 	})
 	return channel, err
-}
-
-func (r *LocalRuntime) interactionResume(ctx context.Context, scratch *session.Session, id string) (<-chan ResumeRequest, error) {
-	d, ok := r.sessionDrivers.Lookup(scratch.ID)
-	if !ok {
-		return nil, ErrSessionClosed
-	}
-	return d.registerResume(ctx, id, InteractionConfirmation)
 }
 
 func (r *LocalRuntime) recordElicitationDecline(ctx context.Context, sessionID, question string) {

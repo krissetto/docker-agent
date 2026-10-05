@@ -79,6 +79,10 @@ func (r *LocalRuntime) samplingHandler(ctx context.Context, req *mcp.CreateMessa
 
 	model := provider.CloneWithOptions(ctx, baseModel, samplingModelOptions(req)...)
 
+	messages, err = r.prepareOutboundMessages(ctx, r.contextMessageOrigin(ctx, "sampling"), model.ID().String(), nil, messages)
+	if err != nil {
+		return nil, err
+	}
 	stream, err := model.CreateChatCompletionStream(ctx, messages, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating sampling completion stream: %w", err)
@@ -330,6 +334,10 @@ func (r *LocalRuntime) samplingWithToolsHandler(ctx context.Context, req *mcp.Cr
 
 	model := provider.CloneWithOptions(ctx, baseModel, samplingModelOptionsFor(req.MaxTokens)...)
 
+	messages, err = r.prepareOutboundMessages(ctx, r.contextMessageOrigin(ctx, "sampling"), model.ID().String(), nil, messages)
+	if err != nil {
+		return nil, err
+	}
 	stream, err := model.CreateChatCompletionStream(ctx, messages, chatTools)
 	if err != nil {
 		return nil, fmt.Errorf("creating sampling completion stream: %w", err)

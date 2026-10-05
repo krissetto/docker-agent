@@ -115,6 +115,11 @@ type CorrelatedConfirmationEmitter interface {
 	EmitCorrelatedToolCallConfirmation(requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string)
 }
 
+// ConfirmationRegistrar installs the response slot and publishes the complete prompt atomically.
+type ConfirmationRegistrar interface {
+	RegisterToolCallConfirmation(ctx context.Context, requestID string, toolCall tools.ToolCall, tool tools.Tool, agentName string, metadata map[string]string) (<-chan ResumeRequest, error)
+}
+
 // PositionalEmitter is an optional extension of [Emitter]: emitters that also
 // implement it receive the message's session commit position, which viewers
 // merging a transcript snapshot with the live event stream use as an exact
@@ -890,9 +895,14 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 		}
 	}
 	resume := c.d.Resume
-	if c.d.ResumeFor != nil {
+	registrar, atomicRegistration := c.em.(ConfirmationRegistrar)
+	if atomicRegistration || c.d.ResumeFor != nil {
 		var err error
-		resume, err = c.d.ResumeFor(ctx, c.sess, requestID)
+		if atomicRegistration {
+			resume, err = registrar.RegisterToolCallConfirmation(ctx, requestID, c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+		} else {
+			resume, err = c.d.ResumeFor(ctx, c.sess, requestID)
+		}
 		if err != nil {
 			confirmationMu.Unlock()
 			c.errorResponse(ctx, err.Error())
@@ -901,10 +911,12 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	}
 	slog.DebugContext(ctx, "Tools not approved, waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 	c.prompted = true
-	if hasCorrelation {
-		correlated.EmitCorrelatedToolCallConfirmation(requestID, c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
-	} else {
-		c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+	if !atomicRegistration {
+		if hasCorrelation {
+			correlated.EmitCorrelatedToolCallConfirmation(requestID, c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+		} else {
+			c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
+		}
 	}
 
 	if c.d.Hooks != nil {

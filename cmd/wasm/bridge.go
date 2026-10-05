@@ -49,12 +49,7 @@ func newPromise(executor func(resolve, reject func(any))) js.Value {
 		)
 		return nil
 	})
-	// Note: handler is a one-shot Func. The Promise executor is invoked
-	// synchronously from the constructor, so it is safe to Release the
-	// handler immediately afterwards. We don't, because the executor
-	// captures goroutines that may continue to call resolve/reject — which
-	// only invoke the captured `resolve`/`reject` js.Values, not the handler
-	// itself, so leaking the handler is OK and avoids a subtle race.
+	defer handler.Release()
 	return promiseCtor.New(handler)
 }
 

@@ -36,7 +36,23 @@ func (m *subagentManager) admitDurableChild(parent, child *session.Session, reco
 			_ = volatile.AddSession(m.ctx, session.New(session.WithID(record.RootSessionID)))
 		}
 	}
-	return store.AdmitChild(m.ctx, session.ChildAdmission{Child: child, Record: record})
+	err := store.AdmitChild(m.ctx, session.ChildAdmission{Child: child, Record: record})
+	if err == nil {
+		return nil
+	}
+	records, loadErr := store.LoadChildren(m.ctx, record.RootSessionID)
+	if loadErr != nil {
+		return err
+	}
+	for _, persisted := range records {
+		if persisted.Node.ID == record.Node.ID && persisted.Node.SessionID == child.ID {
+			return nil
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.admissions, child.ID)
+	return err
 }
 
 func (m *subagentManager) completeSessionTurn(d *sessionDriver, turnID, runErr string) error {

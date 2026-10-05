@@ -22,9 +22,8 @@ type EventObserver interface {
 	// OnRunStart fires once when [LocalRuntime.RunStream] begins, before
 	// any event is dispatched. Use it for one-shot projection setup; it cannot change session metadata.
 	OnRunStart(ctx context.Context, sess *session.Session)
-	// OnEvent fires once per event, after the runtime emits it but
-	// before the consumer's channel receives it. Observers cannot
-	// modify or suppress the authoritative payload or affect persistence.
+	// OnEvent fires after canonical publication and before execution-stream delivery.
+	// Observers cannot modify or suppress the authoritative payload or affect persistence.
 	OnEvent(ctx context.Context, sess *session.Session, event Event)
 }
 
@@ -111,14 +110,21 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 			}
 			for _, obs := range r.observers {
 				if persistence, ok := obs.(*PersistenceObserver); ok {
-					// Storage is authoritative: it receives the owner payload and
-					// failures remain visible to the driver's completion barrier.
+					// Storage remains part of the driver's completion barrier.
 					persistence.OnEvent(ctx, sess, event)
 					if err := persistence.pendingError(sess.ID); err != nil {
 						if d, found := r.sessionDrivers.Lookup(sess.ID); found {
 							d.cancelForPersistence(err)
 						}
 					}
+				}
+			}
+			// Detached callbacks must not delay the canonical journal.
+			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok && !interactionOwnerPublished(event) {
+				d.events.Publish(sess.ID, event)
+			}
+			for _, obs := range r.observers {
+				if _, ok := obs.(*PersistenceObserver); ok {
 					continue
 				}
 				snapshot, err := observerEventSnapshot(event)
@@ -128,17 +134,23 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 				}
 				observeBestEffort(ctx, func() { obs.OnEvent(ctx, sess.Clone(), snapshot) })
 			}
-			// Publish through the owning session. Persistence observers and
-			// attached views consume the same ordered transition.
-			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-				if elicitation, ok := event.(*ElicitationRequestEvent); !ok || !elicitation.ownerPublished {
-					d.events.Publish(sess.ID, event)
-				}
-			}
 			out <- event
 		}
 	}()
 	return out
+}
+
+func interactionOwnerPublished(event Event) bool {
+	switch e := event.(type) {
+	case *ToolCallConfirmationEvent:
+		return e.ownerPublished
+	case *MaxIterationsReachedEvent:
+		return e.ownerPublished
+	case *ElicitationRequestEvent:
+		return e.ownerPublished
+	default:
+		return false
+	}
 }
 
 func observeBestEffort(ctx context.Context, fn func()) {

@@ -390,3 +390,7 @@ func TestEmptyIdentityGuidancePublishesOwnedTranscriptWithoutDuplicatingSeed(t *
 	require.Equal(t, "guidance", snapshot.Messages[1].Message.Message.Content)
 	require.Equal(t, int64(123), snapshot.Messages[1].Message.ID)
 }
+
+func (s *laneBlockedStore) WithdrawPendingUserMessage(ctx context.Context, sessionID, turnID string) error {
+	return s.Store.(session.PendingInputWithdrawer).WithdrawPendingUserMessage(ctx, sessionID, turnID)
+}

@@ -108,7 +108,10 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 			Agent:            a,
 			AdditionalPrompt: additionalPrompt,
 			ContextLimit:     contextLimit,
-			RunAgent:         r.runCompactionAgent,
+			RunAgent: func(ctx context.Context, summaryAgent *agent.Agent, summarySession *session.Session) error {
+				ctx = context.WithValue(ctx, outboundOriginKey{}, r.messageOrigin(sess, a, "compaction"))
+				return r.runCompactionAgent(ctx, summaryAgent, summarySession)
+			},
 		})
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
@@ -330,8 +333,22 @@ func providerContextLimit(p provider.Provider) int64 {
 // compaction cost recorded on the summary item would silently be 0 whenever
 // the default lazy store cannot price the model the configured store can.
 func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) (retErr error) {
+	origin, ok := ctx.Value(outboundOriginKey{}).(outboundOrigin)
+	if !ok || origin.sessionID == "" || origin.agentName == "" {
+		for _, policy := range r.mandatoryMessagePolicies() {
+			if policy.policy {
+				return errors.New("compaction requires an originating session and agent")
+			}
+		}
+	}
 	t := team.New(team.WithAgents(a))
-	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore))
+	policies := make([]registeredTransform, 0, len(r.mandatoryMessagePolicies()))
+	for _, transform := range r.mandatoryMessagePolicies() {
+		if transform.policy {
+			policies = append(policies, transform)
+		}
+	}
+	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore), func(child *LocalRuntime) { child.transforms = append(child.transforms, policies...) })
 	if err != nil {
 		return err
 	}
