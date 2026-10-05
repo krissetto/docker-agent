@@ -29,12 +29,12 @@ var ErrGeneratedFileUnavailable = errors.New("generated file unavailable")
 type GeneratedFileRef struct {
 	// OwnerSessionID is the session the file was materialized under — the
 	// owning session, never the viewing one.
-	OwnerSessionID string
+	OwnerSessionID string `json:"owner_session_id"`
 	// Root is the root kind Path is interpreted against. Only
 	// chat.ArtifactRootWorkspace resolves; all other kinds are unavailable.
-	Root chat.ArtifactRootKind
+	Root chat.ArtifactRootKind `json:"root"`
 	// Path is the recorded workspace-relative slash-separated final path.
-	Path string
+	Path string `json:"path"`
 }
 
 // ResolvedGeneratedFile carries the resolved bytes and a display path.
@@ -103,6 +103,9 @@ func (r *LocalRuntime) ResolveGeneratedFile(ctx context.Context, ref GeneratedFi
 	if blobs, ok := r.sessionStore.(session.GeneratedMediaBlobStore); ok {
 		data, err := blobs.LookupGeneratedBlob(ctx, ref.OwnerSessionID, ref.Path)
 		if err == nil {
+			if len(data) > MaxGeneratedFileBytes {
+				return nil, ErrGeneratedFileUnavailable
+			}
 			return &ResolvedGeneratedFile{Data: data, Path: generatedFileDisplayPath(ctx, r, ref)}, nil
 		}
 		if !errors.Is(err, session.ErrGeneratedBlobNotFound) {
@@ -247,7 +250,13 @@ func readRegularGeneratedFile(f *os.File, lstat func() (os.FileInfo, error)) ([]
 	if lfi.Mode()&os.ModeSymlink != 0 || !os.SameFile(lfi, st) {
 		return nil, errors.New("recorded path no longer names the opened file")
 	}
-	data, err := io.ReadAll(f)
+	if st.Size() > MaxGeneratedFileBytes {
+		return nil, ErrGeneratedFileUnavailable
+	}
+	data, err := io.ReadAll(io.LimitReader(f, MaxGeneratedFileBytes+1))
+	if len(data) > MaxGeneratedFileBytes {
+		return nil, ErrGeneratedFileUnavailable
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading recorded file: %w", err)
 	}

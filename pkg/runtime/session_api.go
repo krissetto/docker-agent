@@ -200,12 +200,13 @@ type PreparedSessionView interface {
 }
 
 type PreparedSessionViewInfo struct {
-	SessionID     string              `json:"session_id"`
-	RootSessionID string              `json:"root_session_id"`
-	Session       *session.Session    `json:"session"`
-	Binding       SessionBinding      `json:"binding"`
-	WorkingDir    string              `json:"working_dir"`
-	Attach        *SubagentAttachInfo `json:"attach,omitempty"`
+	ActiveAgentName string              `json:"active_agent_name,omitempty"`
+	SessionID       string              `json:"session_id"`
+	RootSessionID   string              `json:"root_session_id"`
+	Session         *session.Session    `json:"session"`
+	Binding         SessionBinding      `json:"binding"`
+	WorkingDir      string              `json:"working_dir"`
+	Attach          *SubagentAttachInfo `json:"attach,omitempty"`
 }
 
 type CommittedSessionView struct {
@@ -423,6 +424,7 @@ type SessionBinding struct {
 // SessionCapabilities are read-only facts; false capabilities must return a
 // typed unsupported error rather than silently mutating shared runtime state.
 type SessionCapabilities struct {
+	Snapshots             bool
 	DelegationPolicy      bool
 	StopSubtree           bool
 	ToolInspection        bool

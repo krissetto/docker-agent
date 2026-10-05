@@ -84,6 +84,7 @@ type SessionMetadata struct {
 }
 
 type SessionCapabilities struct {
+	Snapshots             bool     `json:"snapshots,omitempty"`
 	DelegationPolicy      bool     `json:"delegation_policy,omitempty"`
 	StopSubtree           bool     `json:"stop_subtree"`
 	ToolInspection        bool     `json:"tool_inspection,omitempty"`

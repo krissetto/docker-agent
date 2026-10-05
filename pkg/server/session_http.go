@@ -51,6 +51,8 @@ const (
 )
 
 func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
+	s.registerWorkspaceSnapshotRoutes(group)
+	s.registerGeneratedMediaRoutes(group)
 	group.GET("", s.sessionCatalog)
 	group.POST("", s.createCanonicalSession)
 	group.POST("/start", s.startCanonicalSession)
@@ -74,6 +76,7 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.DELETE("/:id/todos/:todoID", s.canonicalRemoveTodo)
 	group.GET("/:id/tools", s.canonicalSessionTools)
 	group.GET("/:id/agent-info", s.canonicalSessionAgentInfo)
+	group.GET("/:id/agent-config", s.canonicalSessionAgentConfig)
 	group.POST("/:id/toolsets/restart", s.canonicalRestartToolset)
 	group.GET("/:id/permissions", s.canonicalSessionPermissions)
 	group.GET("/:id/mcp/prompts", s.canonicalSessionPrompts)
@@ -781,6 +784,7 @@ func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamM
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 	capabilities := meta.Capabilities
 	return sessionMetadataDTO{SessionID: meta.SessionID, AgentName: meta.AgentName, Model: meta.Model, ThinkingLevels: meta.ThinkingLevels, ThinkingLevel: meta.ThinkingLevel, Capabilities: sessionCapabilitiesDTO{
+		Snapshots:      capabilities.Snapshots,
 		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: capabilities.AvailableModels, Durability: string(capabilities.Durability), Compaction: capabilities.Compaction,
 		TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching, ContextInspection: capabilities.ContextInspection,
@@ -818,14 +822,6 @@ func sessionEnvelope(envelope runtime.SessionEvent) sessionEnvelopeDTO {
 }
 
 func sessionEventDTO(event runtime.Event) any {
-	if added, ok := event.(*runtime.MessageAddedEvent); ok {
-		return struct {
-			Type            string           `json:"type"`
-			SessionID       string           `json:"session_id"`
-			Message         *session.Message `json:"message"`
-			SessionPosition int              `json:"session_position"`
-		}{Type: added.Type, SessionID: added.SessionID, Message: added.Message, SessionPosition: added.SessionPosition}
-	}
 	return event
 }
 

@@ -27,6 +27,14 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 	if err != nil {
 		return admission, err
 	}
+	if err := d.ownerCall(ctx, func() error {
+		if d.switchReserved {
+			return &SessionError{Kind: SessionErrorCapacity, SessionID: d.identityID, RequestID: msg.RequestID, Operation: SessionOperationSwitchAgent, Reason: SessionErrorReasonBusy}
+		}
+		return nil
+	}); err != nil {
+		return admission, err
+	}
 	queued := false
 	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if d.r.subagents != nil {

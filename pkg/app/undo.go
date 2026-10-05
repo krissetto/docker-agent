@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -15,10 +16,13 @@ type UndoSnapshotResult struct {
 	RestoredFiles int
 }
 
-// SnapshotsEnabled reports whether automatic shadow-git snapshots are
-// active. The answer is a controller-level capability check and does
-// not depend on having an active session attached.
+// SnapshotsEnabled reports the bound session capability, or the legacy
+// controller capability when no canonical handle is attached.
 func (a *App) SnapshotsEnabled() bool {
+	state := a.state()
+	if state.handle != nil {
+		return state.handle.Metadata().Capabilities.Snapshots
+	}
 	return a.snapshotController != nil && a.snapshotController.Enabled()
 }
 
@@ -26,6 +30,17 @@ func (a *App) SnapshotsEnabled() bool {
 // snapshot checkpoint for the current session.
 func (a *App) UndoLastSnapshot(ctx context.Context) (UndoSnapshotResult, error) {
 	state := a.state()
+	if capability, ok := state.handle.(runtime.SessionWorkspaceSnapshots); ok && state.handle.Metadata().Capabilities.Snapshots {
+		history, err := capability.WorkspaceSnapshots(ctx)
+		if err != nil {
+			return UndoSnapshotResult{}, err
+		}
+		result, err := capability.UndoWorkspaceSnapshot(ctx, history.Proof)
+		return snapshotResult(result.RestoredFiles, result.Restored, err)
+	}
+	if state.handle != nil {
+		return UndoSnapshotResult{}, runtime.UnsupportedSessionOperation(state.handle.ID(), "workspace_snapshots")
+	}
 	if a.snapshotController == nil || state.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}
@@ -37,6 +52,16 @@ func (a *App) UndoLastSnapshot(ctx context.Context) (UndoSnapshotResult, error) 
 // or when no controller is configured.
 func (a *App) ListSnapshots() []int {
 	state := a.state()
+	if capability, ok := state.handle.(runtime.SessionWorkspaceSnapshots); ok && state.handle.Metadata().Capabilities.Snapshots {
+		history, err := capability.WorkspaceSnapshots(a.ctx())
+		if err != nil {
+			return nil
+		}
+		return history.Files
+	}
+	if state.handle != nil {
+		return nil
+	}
 	if a.snapshotController == nil || state.session == nil {
 		return nil
 	}
@@ -53,6 +78,17 @@ func (a *App) ListSnapshots() []int {
 // the original pre-agent state.
 func (a *App) ResetSnapshot(ctx context.Context, keep int) (UndoSnapshotResult, error) {
 	state := a.state()
+	if capability, ok := state.handle.(runtime.SessionWorkspaceSnapshots); ok && state.handle.Metadata().Capabilities.Snapshots {
+		history, err := capability.WorkspaceSnapshots(ctx)
+		if err != nil {
+			return UndoSnapshotResult{}, err
+		}
+		result, err := capability.ResetWorkspaceSnapshot(ctx, history.Proof, keep)
+		return snapshotResult(result.RestoredFiles, result.Restored, err)
+	}
+	if state.handle != nil {
+		return UndoSnapshotResult{}, runtime.UnsupportedSessionOperation(state.handle.ID(), "workspace_snapshots")
+	}
 	if a.snapshotController == nil || state.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}

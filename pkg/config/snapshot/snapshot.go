@@ -50,6 +50,7 @@ const (
 // EnvFiles identify ordered, absolute paths only; their values remain live.
 // Runtime.EncryptedConfig is preserved but excluded from configuration identity.
 type Startup struct {
+	Snapshots      bool          `json:"snapshots,omitempty"`
 	Workspace      string        `json:"workspace"`
 	SourceKey      string        `json:"source_key"`
 	ModelOverrides []string      `json:"model_overrides,omitempty"`

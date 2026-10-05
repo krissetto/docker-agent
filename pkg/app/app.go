@@ -210,10 +210,14 @@ func New(ctx context.Context, sessions runtime.SessionRuntime, sess *session.Ses
 // It never hydrates, creates, restores or reconciles that owner's model binding.
 func NewResolved(ctx context.Context, sessions runtime.SessionRuntime, committed runtime.CommittedSessionView, opts ...Opt) (*App, error) {
 	info, handle := committed.Info, committed.SessionHandle
+	activeAgent := info.ActiveAgentName
+	if activeAgent == "" {
+		activeAgent = info.Binding.AgentName
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if handle == nil || info.Session == nil || info.SessionID == "" || handle.ID() != info.SessionID || info.Session.ID != info.SessionID || info.Binding.AgentName == "" || handle.AgentName() != info.Binding.AgentName || info.WorkingDir != info.Session.WorkingDir {
+	if handle == nil || info.Session == nil || info.SessionID == "" || handle.ID() != info.SessionID || info.Session.ID != info.SessionID || info.Binding.AgentName == "" || handle.AgentName() != activeAgent || info.WorkingDir != info.Session.WorkingDir {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: info.SessionID, Operation: "resolved_view"}
 	}
 	return newApp(ctx, sessions, sessionState{session: info.Session, handle: handle, binding: info.Binding}, true, opts...), nil
@@ -482,19 +486,23 @@ func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	return info.Tools, err
 }
 
-// agentConfigProvider is an optional runtime capability: exposing an agent's
-// static configuration (toolsets, sub-agents, handoffs, fallbacks) by name.
-// Only the local runtime (which holds the team) implements it; remote runtimes
-// don't, so the agent-details config sections are simply omitted for them.
+// agentConfigProvider exposes static configuration for legacy local callers.
 type agentConfigProvider interface {
 	AgentConfigInfo(ctx context.Context, agentName string) runtime.AgentConfigInfo
 }
 
-// AgentConfigInfo returns the named agent's static configuration for the
-// read-only agent-details dialog, or the zero value when it can't be resolved
-// (remote runtime or unknown agent). It reads resolved config only and starts
-// no toolsets.
+// AgentConfigInfo returns display-only metadata from the active session's
+// owning team, without starting toolsets or exposing the source configuration.
 func (a *App) AgentConfigInfo(ctx context.Context, agentName string) runtime.AgentConfigInfo {
+	if h := a.SessionHandle(); h != nil {
+		if reader, ok := h.(runtime.SessionAgentConfigReader); ok {
+			info, err := reader.SessionAgentConfig(ctx, agentName)
+			if err == nil && a.SessionHandle() == h && info.SessionID == h.ID() && info.AgentName == agentName {
+				return info.Info
+			}
+		}
+		return runtime.AgentConfigInfo{}
+	}
 	cp, ok := a.runtime.(agentConfigProvider)
 	if !ok {
 		return runtime.AgentConfigInfo{}
@@ -1478,9 +1486,9 @@ type contextBreakdownProvider interface {
 // generatedFileResolver is an optional runtime capability: resolving one
 // recorded generated-media reference to its bytes and validated canonical
 // path, gated on the generated-media manifest and the owning session's
-// workspace (see [runtime.LocalRuntime.ResolveGeneratedFile]). Only the
-// local runtime implements it; remote runtimes never deliver generated-file
-// payloads, so UIs treat the missing capability as "nothing to resolve".
+// workspace (see [runtime.LocalRuntime.ResolveGeneratedFile]). Both
+// local and remote session handles implement it, keeping retrieval scoped to
+// the canonical viewing session.
 type generatedFileResolver interface {
 	ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error)
 }
@@ -1489,15 +1497,24 @@ type generatedFileResolver interface {
 // generated-media references at all, letting UIs skip resolution work
 // entirely on runtimes without the capability.
 func (a *App) CanResolveGeneratedFiles() bool {
+	if handle := a.SessionHandle(); handle != nil {
+		_, ok := handle.(generatedFileResolver)
+		return ok
+	}
 	_, ok := a.runtime.(generatedFileResolver)
 	return ok
 }
 
 // ResolveGeneratedFile resolves one recorded generated-media reference.
 // Returns an error wrapping [runtime.ErrUnsupported] when the runtime does
-// not own local generated media (e.g. remote runtimes). Callers must treat
-// any error as "unavailable" — never surface its text to the user.
+// not support generated media. Treat errors as "unavailable", never user text.
 func (a *App) ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error) {
+	if handle := a.SessionHandle(); handle != nil {
+		if resolver, ok := handle.(generatedFileResolver); ok {
+			return resolver.ResolveGeneratedFile(ctx, ref)
+		}
+		return nil, fmt.Errorf("generated file resolution: %w", runtime.ErrUnsupported)
+	}
 	resolver, ok := a.runtime.(generatedFileResolver)
 	if !ok {
 		return nil, fmt.Errorf("generated file resolution: %w", runtime.ErrUnsupported)
@@ -2121,9 +2138,22 @@ func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []any) (*
 // ExportHTML exports the current session as a standalone HTML file.
 // If filename is empty, a default name based on the session title and timestamp is used.
 func (a *App) ExportHTML(ctx context.Context, filename string) (string, error) {
-	agentInfo := a.runtime.CurrentAgentInfo(ctx)
 	state := a.state()
-	return export.SessionToFile(state.session, agentInfo.Description, filename)
+	var description string
+	if state.handle != nil {
+		if provider, ok := state.handle.(runtime.SessionAgentInfoProvider); ok {
+			info, err := provider.SessionAgentInfo(ctx)
+			if err != nil {
+				return "", err
+			}
+			if info.Agent != nil && info.Agent.AgentName == state.handle.AgentName() {
+				description = info.Agent.Description
+			}
+		}
+	} else if a.runtime != nil {
+		description = a.runtime.CurrentAgentInfo(ctx).Description
+	}
+	return export.SessionToFile(state.session, description, filename)
 }
 
 // ErrTitleGenerating is returned when attempting to set a title while generation is in progress.

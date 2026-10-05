@@ -193,7 +193,7 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 	if _, err := r.team.Agent(selected.AgentName); err != nil {
 		return nil, err
 	}
-	p.info = PreparedSessionViewInfo{SessionID: id, RootSessionID: root.ID, Session: selected, Binding: SessionBinding{AgentName: selectedAgent, Model: selected.AgentModelOverrides[selectedAgent], ParentSessionID: selected.ParentID, Durability: r.sessionDurability()}, WorkingDir: selected.WorkingDir}
+	p.info = PreparedSessionViewInfo{ActiveAgentName: selected.AgentName, SessionID: id, RootSessionID: root.ID, Session: selected, Binding: SessionBinding{AgentName: selectedAgent, Model: selected.AgentModelOverrides[selectedAgent], ParentSessionID: selected.ParentID, Durability: r.sessionDurability()}, WorkingDir: selected.WorkingDir}
 	if selected.ParentID != "" {
 		for _, entry := range p.nodes {
 			if entry.snapshot.Node.SessionID != id {
@@ -358,14 +358,15 @@ func (p *preparedSessionView) canonicalResult() (CommittedSessionView, error) {
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
 	}
-	info.Binding.AgentName, info.Binding.Model = info.Session.AgentName, modelRef
+	info.ActiveAgentName = info.Session.AgentName
+	info.Binding.Model = modelRef
 	info.WorkingDir = info.Session.WorkingDir
 	if info.Attach != nil {
 		// Copy attach metadata without cloning the stale session it replaces.
 		attach := *info.Attach
 		info.Attach = &attach
 		info.Attach.Session = info.Session.Clone()
-		info.Attach.Agent = info.Binding.AgentName
+		info.Attach.Agent = info.ActiveAgentName
 	}
 	return CommittedSessionView{SessionHandle: handle, Info: info}, nil
 }
@@ -593,14 +594,15 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
 	}
-	info.Binding.AgentName, info.Binding.Model = info.Session.AgentName, modelRef
+	info.ActiveAgentName = info.Session.AgentName
+	info.Binding.Model = modelRef
 	info.WorkingDir = info.Session.WorkingDir
 	if info.Attach != nil {
 		// Copy attach metadata without cloning the stale session it replaces.
 		attach := *info.Attach
 		info.Attach = &attach
 		info.Attach.Session = info.Session.Clone()
-		info.Attach.Agent = info.Binding.AgentName
+		info.Attach.Agent = info.ActiveAgentName
 	}
 	result := CommittedSessionView{SessionHandle: &sessionHandle{runtime: p.r, driver: driver, sessionID: info.SessionID, agentName: info.Binding.AgentName}, Info: info}
 	p.committed = &result

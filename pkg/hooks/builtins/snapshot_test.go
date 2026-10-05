@@ -1,6 +1,7 @@
 package builtins_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,6 +128,15 @@ func TestSnapshotBuiltinListAndReset(t *testing.T) {
 	assert.Equal(t, 1, snaps[0].Files)
 	assert.Equal(t, 1, snaps[1].Files)
 	assert.Equal(t, 1, snaps[2].Files)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err = ctrl.UndoLast(ctx, "s", dir)
+	require.Error(t, err)
+	assert.Equal(t, snaps, ctrl.List("s"), "failed undo preserves checkpoints")
+	_, _, err = ctrl.Reset(ctx, "s", dir, 0)
+	require.Error(t, err)
+	assert.Equal(t, snaps, ctrl.List("s"), "failed reset preserves checkpoints")
 
 	// Reset to snapshot 2: revert turn 3 only, leaving a.txt and b.txt intact.
 	files, restored, err := ctrl.Reset(t.Context(), "s", dir, 2)

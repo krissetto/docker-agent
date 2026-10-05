@@ -63,8 +63,10 @@ type ModelStore interface {
 	GetDatabase(ctx context.Context) (*modelsdev.Database, error)
 }
 
-const maxStartupToolSubscribers = 64
-const maxStartupToolEvents = 128
+const (
+	maxStartupToolSubscribers = 64
+	maxStartupToolEvents      = 128
+)
 
 type startupToolSeed struct {
 	events      []Event
@@ -133,6 +135,7 @@ type LocalRuntime struct {
 	// snapshot via [builtins.SnapshotController]) without the runtime
 	// hard-coding their wiring. Set via [WithAutoInjector].
 	autoInjectors []builtins.AutoInjector
+	snapshots     *workspaceSnapshots
 
 	// hooksExecByAgent holds the per-agent [hooks.Executor], keyed by
 	// agent name. Built once in [NewLocalRuntime.buildHooksExecutors]

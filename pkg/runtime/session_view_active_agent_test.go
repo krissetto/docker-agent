@@ -47,6 +47,8 @@ func TestSessionViewPreservesActiveAgentSeparateFromBinding(t *testing.T) {
 			}
 			committed, err := prepared.Commit(t.Context())
 			require.NoError(t, err)
+			require.Equal(t, tc.binding, committed.Info.Binding.AgentName)
+			require.Equal(t, "active", committed.Info.ActiveAgentName)
 			snapshot, err := committed.SessionHandle.Snapshot(t.Context())
 			require.NoError(t, err)
 			require.Equal(t, "active", snapshot.AgentName)

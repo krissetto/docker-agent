@@ -634,3 +634,23 @@ func TestCollectRestoredGeneratedMedia_NoCapability(t *testing.T) {
 	require.Equal(t, 3, rec.MessageTypeCount(types.MessageTypeAssistant))
 	assert.Nil(t, p.TakeRoutedTimers())
 }
+
+func TestGeneratedMediaPortableBoundaryLiveAndReplay(t *testing.T) {
+	rt := &resolverTestRuntime{results: map[string]resolverResult{"cat.png": {data: testPNGBytes(t), path: "cat.png"}}}
+	p, rec := newGeneratedMediaTestPage(t, rt)
+	event := assistantMessageAdded("owner", workspaceImagePart("cat.png", "cat.png", "owner"))
+	event.Message = nil
+	p.handleMessageAdded(event)
+	require.Len(t, rec.mediaCalls, 1)
+	resolved := resolveArmedMedia(t, p)
+	require.Len(t, resolved.media, 1)
+	require.NotNil(t, resolved.media[0].Image)
+	sess := session.New()
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, MultiContent: event.GeneratedMedia}))
+	placeholders, requests := collectGeneratedMedia(sess)
+	require.Len(t, placeholders, 1)
+	require.Len(t, requests, 1)
+	replay := resolveGeneratedImage(t.Context(), p.app, requests[0])
+	require.NotNil(t, replay.Image)
+	assert.Equal(t, resolved.media[0].Image.PNGData, replay.Image.PNGData)
+}

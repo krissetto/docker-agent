@@ -55,3 +55,20 @@ func TestApp_ResolveGeneratedFile_UnsupportedWithoutCapability(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, runtime.ErrUnsupported)
 }
+
+func TestApp_ResolveGeneratedFile_BoundHandleNeverFallsBack(t *testing.T) {
+	t.Parallel()
+	rt := &resolvingRuntime{resolved: &runtime.ResolvedGeneratedFile{Data: []byte("private media")}}
+	a := New(t.Context(), nil, session.New(), runtime.SessionBinding{}, WithRuntimeServices(rt))
+	state := a.state()
+	state.handle = &projectionSession{id: state.session.ID}
+	a.replaceSessionState(state)
+
+	assert.False(t, a.CanResolveGeneratedFiles())
+	resolved, err := a.ResolveGeneratedFile(t.Context(), runtime.GeneratedFileRef{
+		OwnerSessionID: "foreign", Root: chat.ArtifactRootWorkspace, Path: "cat.png",
+	})
+	require.ErrorIs(t, err, runtime.ErrUnsupported)
+	assert.Nil(t, resolved)
+	assert.Empty(t, rt.refs)
+}

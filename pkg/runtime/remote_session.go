@@ -639,6 +639,7 @@ type remoteSessionMetadata api.SessionMetadata
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
 	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
+		Snapshots:      capabilities.Snapshots,
 		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: slices.Clone(capabilities.AvailableModels), Durability: subagent.Durability(capabilities.Durability),
 		Compaction: capabilities.Compaction, TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching,
@@ -1293,34 +1294,71 @@ func (c *Client) decodeSessionEvent(raw json.RawMessage) (Event, error) {
 }
 
 var (
-	_ SessionRuntime = (*SessionTransport)(nil)
-	_ SessionHandle  = (*remoteSession)(nil)
+	_ SessionRuntime        = (*SessionTransport)(nil)
+	_ SessionViewInfoReader = (*SessionTransport)(nil)
+	_ SessionViewPreparer   = (*SessionTransport)(nil)
+	_ SessionHandle         = (*remoteSession)(nil)
 )
 
 func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {
 	return s.runtime.client.sessionWaitJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
 }
 
-// PrepareSessionView holds only confirmed information on the client. The server
-// owns no reservation across HTTP requests; Commit revalidates and publishes in
-// one authenticated open_view request.
-func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (PreparedSessionView, error) {
+// ConfirmedSessionViewInfo reads the server's confirmed identity without
+// reserving, publishing, or starting a session owner.
+func (r *SessionTransport) ConfirmedSessionViewInfo(ctx context.Context, id string) (PreparedSessionViewInfo, error) {
 	var response struct {
 		Version int                     `json:"version"`
 		View    string                  `json:"view"`
 		Info    PreparedSessionViewInfo `json:"info"`
 	}
 	if err := r.client.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"/"+url.PathEscape(id)+"?view=prepare-info", nil, &response); err != nil {
-		return nil, err
+		return PreparedSessionViewInfo{}, err
 	}
 	if response.Version != sessionWireVersion || response.View != "prepare-info" {
-		return nil, UnsupportedSessionOperation(id, "prepare_view")
+		return PreparedSessionViewInfo{}, UnsupportedSessionOperation(id, "prepare_view")
 	}
-	if response.Info.SessionID != id || response.Info.Session == nil || response.Info.Session.ID != id || response.Info.Binding.AgentName == "" || response.Info.WorkingDir != response.Info.Session.WorkingDir {
-		return nil, errors.New("invalid prepared session view identity")
+	info := response.Info
+	if info.SessionID != id || info.Session == nil || info.Session.ID != id || info.Binding.AgentName == "" || info.WorkingDir != info.Session.WorkingDir || info.RootSessionID == "" {
+		return PreparedSessionViewInfo{}, errors.New("invalid prepared session view identity")
+	}
+	if r.source != "" && info.Session.AttributesSnapshot()["docker-agent.actor.source"] != r.source {
+		return PreparedSessionViewInfo{}, &SessionError{Kind: SessionErrorWrongSession, SessionID: id, Operation: "prepare_view", Detail: "session belongs to a different source"}
+	}
+	// Session JSON omits execution identity; confirmed metadata carries it.
+	info.Session.ParentID = info.Binding.ParentSessionID
+	info.Session.AgentName = info.ActiveAgentName
+	if info.Session.AgentName == "" {
+		info.Session.AgentName = info.Binding.AgentName
+		if info.Attach != nil {
+			info.Session.AgentName = info.Attach.Agent
+		}
+	}
+	info.ActiveAgentName = info.Session.AgentName
+	if info.Session.ParentID == "" {
+		if info.RootSessionID != id || info.Attach != nil {
+			return PreparedSessionViewInfo{}, errors.New("invalid prepared root view identity")
+		}
+	} else if info.RootSessionID == id || info.Attach == nil || info.Attach.NodeID == "" || info.Attach.Session == nil || info.Attach.Session.ID != id || info.Attach.ParentSessionID != info.Session.ParentID || info.Attach.Agent != info.Session.AgentName {
+		return PreparedSessionViewInfo{}, errors.New("invalid prepared child view identity")
+	}
+	if info.Attach != nil {
+		info.Attach.Session.ParentID = info.Binding.ParentSessionID
+		info.Attach.Session.AgentName = info.ActiveAgentName
+	}
+	return cloneSessionViewInfo(info), nil
+}
+
+// PrepareSessionView holds only confirmed information on the client. The server
+// owns no reservation across HTTP requests; Commit revalidates and publishes in
+// one authenticated open_view request.
+func (r *SessionTransport) PrepareSessionView(ctx context.Context, id string) (PreparedSessionView, error) {
+	info, err := r.ConfirmedSessionViewInfo(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
-	return &remotePreparedView{runtime: r, info: cloneSessionViewInfo(response.Info), ctx: func() context.Context { return child }, cancel: cancel}, nil
+	return &remotePreparedView{runtime: r, info: info, ctx: func() context.Context { return child }, cancel: cancel}, nil
 }
 
 type remotePreparedView struct {
@@ -1364,9 +1402,18 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 	if err := p.runtime.client.sessionJSON(requestCtx, http.MethodPatch, api.SessionAPIPath+"/"+url.PathEscape(p.info.SessionID), SessionEdit{Kind: SessionEditOpenView}, &snapshot); err != nil {
 		return CommittedSessionView{}, err
 	}
-	if snapshot.ID != p.info.SessionID || snapshot.ParentID != p.info.Session.ParentID {
+	if snapshot.ID != p.info.SessionID || snapshot.AttributesSnapshot()["docker-agent.actor.source"] != p.info.Session.AttributesSnapshot()["docker-agent.actor.source"] {
 		return CommittedSessionView{}, errors.New("committed session view identity changed")
 	}
+	confirmed, err := p.runtime.ConfirmedSessionViewInfo(requestCtx, snapshot.ID)
+	if err != nil {
+		return CommittedSessionView{}, err
+	}
+	if confirmed.RootSessionID != p.info.RootSessionID || confirmed.WorkingDir != p.info.WorkingDir || confirmed.Binding.ParentSessionID != p.info.Binding.ParentSessionID || confirmed.Binding.AgentName != p.info.Binding.AgentName || (confirmed.Attach != nil && (p.info.Attach == nil || confirmed.Attach.NodeID != p.info.Attach.NodeID)) {
+		return CommittedSessionView{}, errors.New("committed session view binding changed")
+	}
+	snapshot.ParentID = confirmed.Binding.ParentSessionID
+	snapshot.AgentName = confirmed.ActiveAgentName
 	handle, err := p.runtime.SessionByID(snapshot.ID)
 	if err != nil {
 		return CommittedSessionView{}, err
@@ -1377,16 +1424,17 @@ func (p *remotePreparedView) Commit(ctx context.Context) (CommittedSessionView, 
 		}
 	}
 	metadata := handle.Metadata()
-	info := cloneSessionViewInfo(p.info)
+	info := cloneSessionViewInfo(confirmed)
 	info.Session = &snapshot
-	info.Binding.AgentName, info.Binding.Model = metadata.AgentName, metadata.Model
+	info.ActiveAgentName = snapshot.AgentName
+	info.Binding.Model = metadata.Model
 	info.WorkingDir = snapshot.WorkingDir
-	if info.Binding.AgentName == "" {
-		return CommittedSessionView{}, errors.New("committed session view binding is missing")
+	if metadata.AgentName == "" || metadata.AgentName != info.ActiveAgentName {
+		return CommittedSessionView{}, errors.New("committed session view binding changed")
 	}
 	if info.Attach != nil {
 		info.Attach.Session = snapshot.Clone()
-		info.Attach.Agent = metadata.AgentName
+		info.Attach.Agent = snapshot.AgentName
 	}
 	result := CommittedSessionView{SessionHandle: handle, Info: info}
 	p.committed = &result

@@ -1343,11 +1343,12 @@ func HookBlocked(toolCall tools.ToolCall, toolDefinition tools.Tool, message, ag
 type MessageAddedEvent struct {
 	AgentContext
 
-	Type         string           `json:"type"`
-	SessionID    string           `json:"session_id"`
-	Message      *session.Message `json:"-"`
-	boundaryOnly bool
-	ownerMessage *session.Message
+	Type           string             `json:"type"`
+	SessionID      string             `json:"session_id"`
+	Message        *session.Message   `json:"-"`
+	GeneratedMedia []chat.MessagePart `json:"generated_media,omitempty"`
+	boundaryOnly   bool
+	ownerMessage   *session.Message
 	// SessionPosition is the index in session.Messages the message was
 	// committed at, -1 when unknown. Emission happens synchronously after
 	// the commit and the event stream preserves order, so viewers merging a
@@ -1371,6 +1372,7 @@ func MessageAddedAt(sessionID string, msg *session.Message, agentName string, po
 		SessionPosition: position, AgentContext: newAgentContext(agentName),
 	}
 	if msg != nil {
+		event.GeneratedMedia = generatedMediaParts(msg)
 		event.MessageRole = msg.Message.Role
 		for _, call := range msg.Message.ToolCalls {
 			event.ToolCallIDs = append(event.ToolCallIDs, call.ID)

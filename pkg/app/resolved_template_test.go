@@ -22,7 +22,7 @@ type selectedTemplateHandle struct {
 func (*selectedTemplateHandle) AgentName() string             { return "worker" }
 func (*selectedTemplateHandle) Hydrate(context.Context) error { panic("unexpected hydrate") }
 func (*selectedTemplateHandle) Metadata() runtime.SessionMetadata {
-	panic("unexpected metadata lookup")
+	return runtime.SessionMetadata{Capabilities: runtime.SessionCapabilities{}}
 }
 
 func (*selectedTemplateHandle) SetModel(context.Context, string) error {
@@ -81,14 +81,14 @@ func TestResolvedTemplatePreservesConfigurationNotSessionOrInputState(t *testing
 	assert.Empty(t, view.firstMessageAttach)
 	assert.Empty(t, view.cancelledRequests)
 	assert.Empty(t, view.latestRequestID)
-	assert.True(t, view.SnapshotsEnabled())
-	assert.Equal(t, []int{2}, view.ListSnapshots())
+	assert.False(t, view.SnapshotsEnabled())
+	assert.Empty(t, view.ListSnapshots())
 	_, err = view.UndoLastSnapshot(t.Context())
-	require.NoError(t, err)
+	require.ErrorIs(t, err, runtime.ErrUnsupported)
 	_, err = view.ResetSnapshot(t.Context(), 0)
-	require.NoError(t, err)
-	assert.Equal(t, []string{selected.ID, selected.ID, selected.ID}, controller.sessions)
-	assert.Equal(t, []string{selected.WorkingDir, selected.WorkingDir}, controller.workingDirs)
+	require.ErrorIs(t, err, runtime.ErrUnsupported)
+	assert.Empty(t, controller.sessions)
+	assert.Empty(t, controller.workingDirs)
 	view.generateTitle(t.Context(), view.state(), []string{"selected conversation"})
 	select {
 	case title := <-handle.titles:

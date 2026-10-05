@@ -15,14 +15,15 @@ const Snapshot = "snapshot"
 
 // SnapshotInfo summarises one completed snapshot checkpoint for display.
 type SnapshotInfo struct {
+	ID uint64
 	// Files is the number of unique files captured in the checkpoint.
 	Files int
 }
 
 // SnapshotController exposes the operations the embedder uses to drive
 // shadow-git snapshot commands (/undo, /snapshots, /reset). It is
-// returned by [RegisterSnapshot] and intentionally narrow: the runtime
-// no longer brokers snapshot operations on the embedder's behalf.
+// returned by [RegisterSnapshot]. The runtime exposes its operations through
+// canonical session handles; legacy embedders may also use it directly.
 //
 // Enabled() reports whether snapshot auto-injection (capturing
 // checkpoints at session/turn boundaries) is configured. The other
@@ -47,10 +48,9 @@ type SnapshotController interface {
 // false to keep the hook resolvable for users who wire it manually via
 // YAML without auto-capturing checkpoints.
 //
-// Embedders typically pass the same controller to both the runtime
-// (via runtime.WithAutoInjector) and the App (via
-// app.WithSnapshotController) so /undo et al. drive the same instance
-// that captures the checkpoints.
+// Pass the same controller to runtime.WithAutoInjector and
+// runtime.WithSnapshotController so canonical handles restore the checkpoints
+// captured by hooks. Legacy embedders may use app.WithSnapshotController.
 func RegisterSnapshot(r *hooks.Registry, enabled bool) (SnapshotController, error) {
 	b := newSnapshotBuiltin()
 	if err := r.RegisterBuiltin(Snapshot, b.hook); err != nil {
@@ -117,18 +117,21 @@ func (c *snapshotController) AutoInject(cfg *hooks.Config) {
 // [snapshotController] for /undo, /snapshots, and /reset. Construct
 // with [newSnapshotBuiltin]; the zero value is not usable.
 type snapshotBuiltin struct {
-	manager *snapshot.Manager
-	mu      sync.Mutex
-	session map[string]*snapshotSession
+	manager        *snapshot.Manager
+	mu             sync.Mutex
+	session        map[string]*snapshotSession
+	nextCheckpoint uint64
 }
 
 type snapshotSession struct {
-	turn    string
-	tools   map[string]string
-	history []snapshotCheckpoint
+	restoreMu sync.Mutex
+	turn      string
+	tools     map[string]string
+	history   []snapshotCheckpoint
 }
 
 type snapshotCheckpoint struct {
+	id    uint64
 	hash  string
 	files []string
 }
@@ -278,34 +281,27 @@ func (b *snapshotBuiltin) pushCheckpoint(sessionID string, checkpoint snapshotCh
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.getSession(sessionID)
+	b.nextCheckpoint++
+	checkpoint.id = b.nextCheckpoint
 	s.history = append(s.history, checkpoint)
-}
-
-func (b *snapshotBuiltin) popCheckpoint(sessionID string) (snapshotCheckpoint, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	s := b.session[sessionID]
-	if s == nil || len(s.history) == 0 {
-		return snapshotCheckpoint{}, false
-	}
-	last := len(s.history) - 1
-	checkpoint := s.history[last]
-	s.history[last] = snapshotCheckpoint{}
-	s.history = s.history[:last]
-	return checkpoint, true
 }
 
 // undoLast restores the files captured by the most recent checkpoint.
 // Returns (filesRestored, true, nil) on success, (0, false, nil) when
 // there is nothing to undo.
 func (b *snapshotBuiltin) undoLast(ctx context.Context, sessionID, cwd string) (files int, ok bool, err error) {
-	checkpoint, ok := b.popCheckpoint(sessionID)
-	if !ok {
+	b.mu.Lock()
+	s := b.getSession(sessionID)
+	b.mu.Unlock()
+	s.restoreMu.Lock()
+	defer s.restoreMu.Unlock()
+	b.mu.Lock()
+	if len(s.history) == 0 {
+		b.mu.Unlock()
 		return 0, false, nil
 	}
-	if len(checkpoint.files) == 0 {
-		return 0, true, nil
-	}
+	checkpoint := s.history[len(s.history)-1]
+	b.mu.Unlock()
 	repo, err := b.manager.Open(ctx, cwd)
 	if err != nil {
 		return 0, true, err
@@ -313,6 +309,14 @@ func (b *snapshotBuiltin) undoLast(ctx context.Context, sessionID, cwd string) (
 	patch := snapshot.Patch{Hash: checkpoint.hash, Files: checkpoint.files}
 	if err := repo.Revert(ctx, []snapshot.Patch{patch}); err != nil {
 		return 0, true, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, entry := range s.history {
+		if entry.id == checkpoint.id {
+			s.history = append(s.history[:i], s.history[i+1:]...)
+			break
+		}
 	}
 	return len(checkpoint.files), true, nil
 }
@@ -328,7 +332,7 @@ func (b *snapshotBuiltin) listSnapshots(sessionID string) []SnapshotInfo {
 	}
 	out := make([]SnapshotInfo, len(s.history))
 	for i, c := range s.history {
-		out[i] = SnapshotInfo{Files: len(c.files)}
+		out[i] = SnapshotInfo{ID: c.id, Files: len(c.files)}
 	}
 	return out
 }
@@ -339,10 +343,21 @@ func (b *snapshotBuiltin) listSnapshots(sessionID string) []SnapshotInfo {
 // equal to the snapshot count is a no-op. Reverted checkpoints are
 // dropped from the session history.
 func (b *snapshotBuiltin) resetSnapshot(ctx context.Context, sessionID, cwd string, keep int) (files int, ok bool, err error) {
-	tail := b.popHistoryTail(sessionID, keep)
-	if len(tail) == 0 {
+	b.mu.Lock()
+	s := b.getSession(sessionID)
+	b.mu.Unlock()
+	s.restoreMu.Lock()
+	defer s.restoreMu.Unlock()
+	b.mu.Lock()
+	if keep < 0 {
+		keep = 0
+	}
+	if keep >= len(s.history) {
+		b.mu.Unlock()
 		return 0, false, nil
 	}
+	tail := append([]snapshotCheckpoint(nil), s.history[keep:]...)
+	b.mu.Unlock()
 	repo, err := b.manager.Open(ctx, cwd)
 	if err != nil {
 		return 0, true, err
@@ -358,30 +373,13 @@ func (b *snapshotBuiltin) resetSnapshot(ctx context.Context, sessionID, cwd stri
 	if err := repo.Revert(ctx, patches); err != nil {
 		return 0, true, err
 	}
-	return len(seen), true, nil
-}
-
-// popHistoryTail removes and returns checkpoints with index >= keep, leaving
-// the surviving prefix in the session history. keep is clamped to [0, len].
-// The popped slots in the backing array are zeroed so the dropped file lists
-// can be garbage-collected before the slice grows past them again.
-func (b *snapshotBuiltin) popHistoryTail(sessionID string, keep int) []snapshotCheckpoint {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	s := b.session[sessionID]
-	if s == nil {
-		return nil
-	}
-	if keep < 0 {
-		keep = 0
-	}
-	if keep >= len(s.history) {
-		return nil
-	}
-	tail := append([]snapshotCheckpoint(nil), s.history[keep:]...)
-	clear(s.history[keep:])
-	s.history = s.history[:keep]
-	return tail
+	// Hooks may append while a legacy embedder restores; retain those checkpoints.
+	copy(s.history[keep:], s.history[keep+len(tail):])
+	clear(s.history[len(s.history)-len(tail):])
+	s.history = s.history[:len(s.history)-len(tail)]
+	return len(seen), true, nil
 }
 
 func logPatch(ctx context.Context, scope, sessionID, label string, patch snapshot.Patch, after string) {

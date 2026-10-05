@@ -119,6 +119,9 @@ func TestRemoteViewResolvesOpensAndStopsDescendantOverSessionAPI(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(childView.Close)
 	assert.Equal(t, child.ID(), childView.SessionHandle().ID())
+	assert.Equal(t, rootSession.ID, childView.Session().ParentID, "remote views retain canonical child ancestry")
+	require.NotNil(t, childView.AttachedSubagent())
+	assert.Equal(t, rootSession.ID, childView.AttachedSubagent().Session.ParentID)
 
 	// Use subagents is the canonical tree policy: the child view reads the root's.
 	require.True(t, view.CanSetDelegationPolicy())

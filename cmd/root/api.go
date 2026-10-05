@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 type apiFlags struct {
@@ -195,10 +196,14 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 			slog.ErrorContext(ctx, "Failed to shut down session service", "error", err)
 		}
 	}()
+	snapshotsEnabled := userconfig.Get().SnapshotsEnabled()
+	if f.manifest != nil {
+		snapshotsEnabled = f.manifest.Startup().Snapshots
+	}
 	serverOpts := []server.SessionManagerOpt{
 		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
 		server.WithSessionRuntimeFactory(func(ctx context.Context, source config.Source, workingDir string) (runtime.SessionRuntimeSupervisor, error) {
-			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{SessionService: sessionService, LoaderOptions: loaderOptions, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
+			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{Snapshots: snapshotsEnabled, SessionService: sessionService, LoaderOptions: loaderOptions, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
 		}),
 	}
 

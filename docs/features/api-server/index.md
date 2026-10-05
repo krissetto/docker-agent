@@ -100,6 +100,11 @@ The canonical endpoints are:
 
 | `GET` | `/api/v2/server` | Authenticated server identity, readiness and portable capability discovery without reading session history. |
 | `GET` | `/api/v2/sessions/:id/agent-info` | Session-bound agent presentation metadata. |
+| `GET` | `/api/v2/sessions/:id/agent-config` | Sanitized static details for an agent in the session owner; optional `agent` query selects a named team agent. |
+| `GET` | `/api/v2/sessions/:id/workspace-snapshots` | Server-owned checkpoint history and a proof identifying the current history. |
+| `POST` | `/api/v2/sessions/:id/workspace-snapshots/undo` | Restore the last session checkpoint using `expected_proof`; rejects active turns and stale history. |
+| `POST` | `/api/v2/sessions/:id/workspace-snapshots/reset` | Restore session checkpoints using `expected_proof` and `keep`; server workspace paths remain server-owned. |
+| `POST` | `/api/v2/sessions/:id/generated-media` | Fetch a bounded artifact using its portable reference; only canonical session/tree-owned media is accessible. |
 | `GET` | `/api/v2/sessions/:id/tools` | Tool definitions and lifecycle statuses. |
 | `POST` | `/api/v2/sessions/:id/toolsets/restart` | Restart an eligible toolset at a safe session boundary. |
 | `GET` | `/api/v2/sessions/:id/permissions` | Effective session permissions. |

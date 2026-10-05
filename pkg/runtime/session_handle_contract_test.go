@@ -211,6 +211,17 @@ func assertUnavailableCapabilities(t *testing.T, handle SessionHandle, _ []strin
 			}},
 		},
 
+		"Snapshots": {
+			{"workspace_snapshots", func() error { _, err := handle.(SessionWorkspaceSnapshots).WorkspaceSnapshots(t.Context()); return err }},
+			{"workspace_snapshots", func() error {
+				_, err := handle.(SessionWorkspaceSnapshots).UndoWorkspaceSnapshot(t.Context(), "proof")
+				return err
+			}},
+			{"workspace_snapshots", func() error {
+				_, err := handle.(SessionWorkspaceSnapshots).ResetWorkspaceSnapshot(t.Context(), "proof", 0)
+				return err
+			}},
+		},
 		"ToolInspection": {{"inspect_tools", func() error { _, err := handle.(SessionToolInspector).InspectTools(t.Context()); return err }}},
 		"ToolsetRestart": {{"restart_toolset", func() error { return handle.(SessionToolsetController).RestartToolset(t.Context(), "missing") }}},
 		"PermissionsInspection": {{"permissions", func() error {

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
@@ -194,5 +196,52 @@ func TestCanonicalNewResolvedStartDoesNotRestoreOrWakeArchivedTree(t *testing.T)
 		assert.True(t, status.Dormant)
 		assert.Equal(t, 1, status.Pending)
 		assert.NotEqual(t, runtime.SessionStateRunning, status.State)
+	}
+}
+
+func TestCanonicalNewResolvedSwitchedChildPreservesCreationBinding(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("switched-root"), session.WithAgentName("root"), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
+	child := session.New(session.WithID("switched-child"), session.WithAgentName("active"), session.WithParentID(root.ID), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "worker", runtime.SessionParentAgentAttribute: "root"}))
+	for _, sess := range []*session.Session{root, child} {
+		require.NoError(t, store.AddSession(t.Context(), sess))
+	}
+	topology := subagent.NewInMemoryStore()
+	rootNode := subagent.SessionRootID(root.ID)
+	require.NoError(t, topology.SaveTree(t.Context(), root.ID, subagent.Snapshot{Version: subagent.SnapshotVersion, Root: rootNode, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootNode, Agent: "root"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "switched-node", Parent: rootNode, SessionID: child.ID, Agent: "worker", State: subagent.NodeIdle}}}}}}))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
+		agent.New("root", "prompt", agent.WithModel(stubProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "worker"})),
+		agent.New("worker", "prompt", agent.WithModel(stubProvider{})),
+		agent.New("active", "prompt", agent.WithModel(stubProvider{})),
+	)), runtime.WithSessionStore(store), runtime.WithSubagentStore(topology))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+
+	serverCtx, stopServer := context.WithCancel(t.Context())
+	defer stopServer()
+	listener, err := (&net.ListenConfig{}).Listen(serverCtx, "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	api := server.NewWithManager(server.NewSessionManager(serverCtx, nil, store, 0, nil, server.WithSessionRuntime(owner.Runtime())), "")
+	go func() { _ = api.Serve(serverCtx, listener) }()
+	client, err := runtime.NewClient("http://" + listener.Addr().String())
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client)
+	require.NoError(t, err)
+	for _, sessions := range []runtime.SessionRuntime{owner.Runtime(), owner.Runtime(), transport} {
+		prepared, err := sessions.(runtime.SessionViewPreparer).PrepareSessionView(t.Context(), child.ID)
+		require.NoError(t, err)
+		committed, err := prepared.Commit(t.Context())
+		require.NoError(t, err)
+		prepared.Abort()
+		require.Equal(t, "worker", committed.Info.Binding.AgentName)
+		require.Equal(t, "active", committed.Info.ActiveAgentName)
+		require.Equal(t, "active", committed.SessionHandle.AgentName())
+		view, err := NewResolved(t.Context(), sessions, committed, WithRuntimeServices(&mockRuntime{}), WithSubagentAttach(*committed.Info.Attach))
+		require.NoError(t, err)
+		require.Equal(t, "worker", view.Binding().AgentName)
+		require.Equal(t, "active", view.Session().AgentName)
+		require.Equal(t, "active", view.AttachedSubagent().Agent)
+		view.Close()
 	}
 }

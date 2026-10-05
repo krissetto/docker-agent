@@ -1005,6 +1005,7 @@ func (f *runExecFlags) snapshotRuntimeOpts() ([]runtime.Opt, builtins.SnapshotCo
 	return []runtime.Opt{
 		runtime.WithHooksRegistry(reg),
 		runtime.WithAutoInjector(ctrl),
+		runtime.WithSnapshotController(ctrl),
 	}, ctrl, nil
 }
 

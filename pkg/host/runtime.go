@@ -8,6 +8,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/host/lifecycle"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -18,6 +20,7 @@ import (
 // RuntimeOptions controls host-specific session runtime behavior while keeping
 // canonical loader/model/budget wiring consistent across CLI and embedders.
 type RuntimeOptions struct {
+	Snapshots                 bool
 	SessionService            *runtime.SessionService
 	WorkingDir                string
 	ManagedOAuth              bool
@@ -60,6 +63,14 @@ func NewSessionRuntime(ctx context.Context, source config.Source, runConfig *con
 		slog.WarnContext(ctx, "Failed to obtain shared models.dev store", "error", storeErr)
 	}
 	runtimeOpts := []runtime.Opt{runtime.WithSessionStore(store), runtime.WithCurrentAgent(defaultAgent.Name()), runtime.WithWorkingDir(cfg.WorkingDir), runtime.WithManagedOAuth(options.ManagedOAuth), runtime.WithUnmanagedOAuthRedirectURI(options.UnmanagedOAuthRedirectURI), runtime.WithModelSwitcherConfig(modelSwitcher), runtime.WithBudget(loaded.Budget), runtime.WithNamedBudgets(loaded.Budgets, loaded.AgentBudgets)}
+	if options.Snapshots {
+		registry := hooks.NewRegistry()
+		controller, err := builtins.RegisterSnapshot(registry, true)
+		if err != nil {
+			return fail(err)
+		}
+		runtimeOpts = append(runtimeOpts, runtime.WithHooksRegistry(registry), runtime.WithAutoInjector(controller), runtime.WithSnapshotController(controller))
+	}
 	if options.SessionService != nil {
 		runtimeOpts = append(runtimeOpts, runtime.WithSessionService(options.SessionService))
 	}

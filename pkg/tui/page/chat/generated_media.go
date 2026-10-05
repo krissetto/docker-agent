@@ -55,28 +55,26 @@ type generatedMediaResolvedMsg struct {
 // MessageAddedEvent; without this handler the file sits in the workspace
 // with nothing visible in the chat.
 func (p *chatPage) handleMessageAdded(msg *runtime.MessageAddedEvent) tea.Cmd {
-	if msg.Message == nil {
-		// The payload is process-local (json:"-"): events decoded from a
-		// remote runtime carry only IDs. Nothing to resolve or render.
-		return nil
-	}
-	if p.streamCancelled || msg.Message.Message.Role != chat.MessageRoleAssistant {
+	if p.streamCancelled || msg.CommittedRole() != chat.MessageRoleAssistant {
 		return nil
 	}
 	if !p.app.CanResolveGeneratedFiles() {
 		return nil
 	}
-	placeholders, requests := generatedImageMedia(msg.Message.Message.MultiContent)
+	parts, agentName := msg.GeneratedMedia, msg.AgentName
+	if msg.Message != nil {
+		parts = msg.Message.Message.MultiContent
+		if msg.Message.AgentName != "" {
+			agentName = msg.Message.AgentName
+		}
+	}
+	placeholders, requests := generatedImageMedia(parts)
 	if len(placeholders) == 0 {
 		return nil
 	}
 
 	p.hasReceivedAssistantContent = true
 	p.setPendingResponse(false)
-	agentName := msg.Message.AgentName
-	if agentName == "" {
-		agentName = msg.AgentName
-	}
 	return tea.Batch(
 		p.sidebar.SetAgentActivity(agentName),
 		p.messages.AppendAssistantMedia(agentName, placeholders),

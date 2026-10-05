@@ -87,14 +87,14 @@ func managedPrivateDir(path string) error {
 			}
 		}
 	}
-	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm() != 0700 || !managedOwned(info) {
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || !managedOwned(info) {
 		return fmt.Errorf("managed state directory must be owned and private (0700): %s", path)
 	}
 	return nil
@@ -105,11 +105,12 @@ func managedCheckFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !managedOwned(info) {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !managedOwned(info) {
 		return fmt.Errorf("managed state file must be owned and private (0600): %s", path)
 	}
 	return nil
 }
+
 func managedRead(path string) ([]byte, error) {
 	f, err := managedOpenPrivate(path, os.O_RDONLY)
 	if err != nil {
@@ -118,6 +119,7 @@ func managedRead(path string) ([]byte, error) {
 	defer f.Close()
 	return io.ReadAll(f)
 }
+
 func managedAtomicWrite(path string, data []byte) error {
 	if err := managedCheckFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -140,6 +142,7 @@ func managedAtomicWrite(path string, data []byte) error {
 	}
 	return os.Rename(f.Name(), path)
 }
+
 func managedReadManifest(dir string) (*snapshot.Manifest, error) {
 	data, err := managedRead(filepath.Join(dir, "manifest.json"))
 	if err != nil {
@@ -147,6 +150,7 @@ func managedReadManifest(dir string) (*snapshot.Manifest, error) {
 	}
 	return snapshot.Parse(data)
 }
+
 func managedReadDescriptor(dir string) (managedDescriptor, error) {
 	var d managedDescriptor
 	data, err := managedRead(filepath.Join(dir, "server.json"))
@@ -155,6 +159,7 @@ func managedReadDescriptor(dir string) (managedDescriptor, error) {
 	}
 	return d, err
 }
+
 func managedPause(ctx context.Context) error {
 	t := time.NewTimer(50 * time.Millisecond)
 	defer t.Stop()
@@ -165,6 +170,7 @@ func managedPause(ctx context.Context) error {
 		return nil
 	}
 }
+
 func managedLaunchLock(ctx context.Context, dir string) (*os.File, error) {
 	for {
 		f, ok, err := managedTryLock(filepath.Join(dir, "launch.lock"))
@@ -197,7 +203,7 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	if err != nil {
 		return "", err
 	}
-	startup := snapshot.Startup{Workspace: workspace, SourceKey: agentFileName, ModelOverrides: f.modelOverrides, Runtime: f.runConfig.Config}
+	startup := snapshot.Startup{Snapshots: f.snapshotsEnabled, Workspace: workspace, SourceKey: agentFileName, ModelOverrides: f.modelOverrides, Runtime: f.runConfig.Config}
 	startup.Runtime.WorkingDir = workspace
 	manifest, err := snapshot.Snapshot(ctx, source, snapshot.Options{Startup: startup, Environment: f.runConfig.EnvProvider(), Resolve: func(ref string, env environment.Provider) (config.Source, error) { return sources.Resolve(ref, env) }})
 	if err != nil {
@@ -356,6 +362,7 @@ func managedValidAddress(address string) bool {
 	host, port, err := net.SplitHostPort(strings.TrimPrefix(address, "http://"))
 	return err == nil && net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback() && port != "0" && port != ""
 }
+
 func managedProbe(ctx context.Context, dir string, d managedDescriptor, m *snapshot.Manifest) error {
 	digest, err := m.Digest()
 	if err != nil {
@@ -375,6 +382,7 @@ func managedProbe(ctx context.Context, dir string, d managedDescriptor, m *snaps
 	}
 	return managedVerifyInfo(info, d)
 }
+
 func managedVerifyInfo(info api.ServerInfo, d managedDescriptor) error {
 	if info.Version != 1 || info.SessionAPIVersion != api.SessionAPIVersion || !info.Ready || info.InstanceID != d.InstanceID || info.ConfigFingerprint != d.Fingerprint || info.WorkspaceRoot != d.Workspace || info.Source != d.Source {
 		return errors.New("managed API authenticated readiness identity mismatch")
@@ -386,6 +394,7 @@ func managedVerifyInfo(info api.ServerInfo, d managedDescriptor) error {
 	}
 	return nil
 }
+
 func managedWaitReady(ctx context.Context, dir string, m *snapshot.Manifest) (managedDescriptor, error) {
 	var last error
 	for {

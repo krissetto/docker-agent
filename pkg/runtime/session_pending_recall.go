@@ -113,8 +113,12 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 
 func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOutcome, error) {
 	outcome := CancelNotActive
+	var noPendingMatch bool
 	var cancel context.CancelFunc
 	err := d.ownerCall(ctx, func() error {
+		if d.switchReserved {
+			noPendingMatch = !slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool { return msg.RequestID == turnID }) && !slices.ContainsFunc(d.steering, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
+		}
 		if turnID != "" && d.activeRequestID == turnID && d.starting() {
 			if d.startCanceled {
 				outcome = CancelAlreadyCancelling
@@ -147,6 +151,9 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 			d.refreshAttention()
 		}
 		return outcome, nil
+	}
+	if noPendingMatch {
+		return CancelNotActive, nil
 	}
 	withdrawn, err := d.cancelPendingMessage(ctx, turnID)
 	if withdrawn {
