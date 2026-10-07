@@ -22,6 +22,7 @@ var _ responseEventStream = (*ssestream.Stream[responses.ResponseStreamEventUnio
 type ResponseStreamAdapter struct {
 	stream         responseEventStream
 	trackUsage     bool
+	done           bool
 	itemCallIDMap  map[string]string
 	itemHasContent map[string]bool
 	// outputIndexHasContent mirrors itemHasContent keyed by output_index.
@@ -82,6 +83,9 @@ func (a *ResponseStreamAdapter) hasEmittedContent(event responses.ResponseStream
 
 // Recv gets the next completion chunk
 func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
+	if a.done {
+		return chat.MessageStreamResponse{}, io.EOF
+	}
 	if !a.stream.Next() {
 		if err := a.stream.Err(); err != nil {
 			return chat.MessageStreamResponse{}, oaistream.WrapOpenAIError(err)
@@ -348,6 +352,8 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		}
 
 	case "response.done", "response.completed":
+		// Semantic completion includes final usage; transport EOF may arrive later.
+		a.done = true
 		slog.Info("Response done received", "event_type", event.Type)
 		// Extract usage
 		u := event.Response.Usage
