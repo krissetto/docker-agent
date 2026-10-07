@@ -45,10 +45,10 @@ func (h *sessionHandle) stopRootTree(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 	transition.Unlock()
-	if err := h.driver.ownerCall(ctx, func() error { h.driver.durableStopRequested = true; return nil }); err != nil {
+	h.driver.requestStopWithIntent(false, true)
+	if err := h.driver.awaitStop(ctx); err != nil {
 		return err
 	}
-	h.driver.StopAll()
 	var result error
 	result = errors.Join(result, h.driver.withdrawStoppedInputs(ctx))
 	for _, id := range children {

@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
+	"github.com/docker/docker-agent/pkg/subagent"
 )
 
 type executionLease struct {
@@ -149,7 +150,7 @@ func (r *LocalRuntime) acquireTool(ctx context.Context, sessionID, toolName stri
 		return nil, executionCapacityError(sessionID, "tool", r.maxTools)
 	}
 	switch toolName {
-	case "transfer_task", "handoff":
+	case "transfer_task", "handoff", subagent.ToolSpawnSubagent, subagent.ToolStopSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent:
 		return func() {}, nil
 	}
 	select {

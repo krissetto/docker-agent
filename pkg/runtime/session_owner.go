@@ -84,6 +84,15 @@ func (d *sessionDriver) runOwner() {
 			d.publishRegistryStateLocked()
 			d.mu.Unlock()
 			command.done <- err
+		case <-d.treeWake:
+			d.mu.Lock()
+			d.applyTreeProjectionLocked()
+			d.mu.Unlock()
+		case <-d.stopWake:
+			d.mu.Lock()
+			d.applyStopLocked()
+			d.publishRegistryStateLocked()
+			d.mu.Unlock()
 		case <-d.ownerStop:
 			return
 		}

@@ -301,11 +301,7 @@ func (m *subagentManager) persistSnapshotLocked(alreadyLocked bool) {
 				}
 				node, _ := subtreeForSession(item.snap, id)
 				tree := subagent.Snapshot{Version: item.snap.Version, Durability: item.snap.Durability, Root: node.Node.ID, Nodes: []subagent.NodeSnapshot{node}}
-				_ = d.ownerCall(m.r.lifetime(), func() error {
-					d.sess.SetSubagentTree(&tree)
-					d.events.Publish(d.identityID, SubagentTree(tree))
-					return nil
-				})
+				d.enqueueTreeProjection(tree)
 				if id == item.id {
 					item.sess = nil
 				}
@@ -365,6 +361,10 @@ func (m *subagentManager) registerIdleChild(parent *session.Session, parentAgent
 }
 
 func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
+	return m.spawnContext(m.ctx, parent, parentAgent, ref, task)
+}
+
+func (m *subagentManager) spawnContext(ctx context.Context, parent *session.Session, parentAgent string, ref subagent.AllowedSubagent, task string) (subagent.NodeID, error) {
 	if !m.r.sessionDelegationEnabled(parent) {
 		return "", errSubagentsDisabled
 	}
@@ -390,7 +390,7 @@ func (m *subagentManager) Spawn(parent *session.Session, parentAgent string, ref
 	input.Pending, input.Accepted, input.TurnID = true, true, turnID
 	input.InputOrigin, input.SenderID, input.SenderName, input.InputMode = session.InputOriginAgent, parent.ID, parentAgent, "turn"
 	child.AddMessage(input)
-	id, err := m.admitChild(parent, parentAgent, child, target, ref, task, true)
+	id, err := m.admitChildContext(ctx, parent, parentAgent, child, target, ref, task, true)
 	if err != nil {
 		return "", err
 	}
@@ -530,11 +530,7 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 		return "", err
 	}
 	m.persistSnapshot()
-	if persistence := m.persistence(); persistence != nil {
-		if err := persistence.flushNow(); err != nil {
-			slog.WarnContext(m.ctx, "Failed to checkpoint admitted topology", "error", err)
-		}
-	}
+
 	return id, nil
 }
 
@@ -896,7 +892,9 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 		unwatch()
 	}
 	for _, child := range stopped {
-		m.r.sessionDrivers.StopAll(child.sessionID)
+		if d, ok := m.r.sessionDrivers.Lookup(child.sessionID); ok {
+			d.requestStop(false)
+		}
 	}
 	m.mu.Lock()
 	for _, child := range stopped {
@@ -908,6 +906,9 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 		d, ok := m.r.sessionDrivers.Lookup(child.sessionID)
 		if !ok {
 			continue
+		}
+		if err := d.awaitStop(ctx); err != nil {
+			return "", err
 		}
 		select {
 		case <-d.Done():
@@ -929,6 +930,34 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 	}
 	m.signalCapacityRelease()
 	m.persistSnapshot()
+	// Stop's receipt includes its own root and descendant journals, never
+	// unrelated dirty owners. Each acknowledgement applies the newest view.
+	rootID := m.rootSessionLockedSafe(parentID)
+	ids := []string{rootID}
+	m.mu.Lock()
+	for current := parentID; current != "" && current != rootID; {
+		ids = append(ids, current)
+		tracked := m.sessions[current]
+		if tracked == nil {
+			break
+		}
+		ancestor := m.children[tracked.node]
+		if ancestor == nil {
+			break
+		}
+		current = ancestor.parentSession
+	}
+	m.mu.Unlock()
+	for _, child := range stopped {
+		ids = append(ids, child.sessionID)
+	}
+	for _, sessionID := range ids {
+		if d, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
+			if err := d.ownerCall(ctx, d.applyTreeProjectionLocked); err != nil {
+				return "", err
+			}
+		}
+	}
 	return name, nil
 }
 

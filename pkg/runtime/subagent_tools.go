@@ -15,7 +15,7 @@ import (
 // immediately. The subagent's settled turns are reported to the parent when
 // its subtree is quiet; the agent uses read_subagent to inspect details on
 // demand.
-func (r *LocalRuntime) handleSpawnSubagent(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleSpawnSubagent(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	if !r.UseSubagents() {
 		return tools.ResultError(errSubagentsDisabled.Error()), nil
 	}
@@ -41,7 +41,7 @@ func (r *LocalRuntime) handleSpawnSubagent(_ context.Context, sess *session.Sess
 		return tools.ResultError(fmt.Sprintf("agent %q is not one of your subagents. Available: %s", args.Agent, strings.Join(names, ", "))), nil
 	}
 
-	id, err := r.subagents.Spawn(sess, a.Name(), ref, args.Task)
+	id, err := r.subagents.spawnContext(ctx, sess, a.Name(), ref, args.Task)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
 	}
@@ -169,7 +169,7 @@ func (r *LocalRuntime) handleSendMessage(ctx context.Context, sess *session.Sess
 // handleStopSubagent explicitly finalizes one of the caller's subagents:
 // interrupts any in-flight run and dismisses it (and its own subagents). The
 // transcript stays readable via read_subagent.
-func (r *LocalRuntime) handleStopSubagent(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleStopSubagent(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args subagent.StopArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -178,7 +178,7 @@ func (r *LocalRuntime) handleStopSubagent(_ context.Context, sess *session.Sessi
 	if id == "" {
 		return tools.ResultError("subagent_id is required"), nil
 	}
-	name, err := r.subagents.stopChild(sess.ID, subagent.NodeID(id))
+	name, err := r.subagents.stopChildAuthorized(ctx, sess.ID, subagent.NodeID(id), true)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
 	}

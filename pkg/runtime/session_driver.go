@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -96,6 +97,10 @@ type sessionDriver struct {
 	ownerStop      chan struct{}
 	ownerClose     sync.Once
 	ownerDone      chan struct{}
+	treeProjection atomic.Pointer[subagent.Snapshot]
+	treeWake       chan struct{}
+	stopRequest    atomic.Pointer[driverStopRequest]
+	stopWake       chan struct{}
 	retirementGate chan struct{}
 	// Stable admission topology; readable without waiting for per-session I/O.
 	resourceOwner  *tools.ResourceOwner
@@ -188,7 +193,8 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 		return &SessionError{Kind: SessionErrorCapacity, SessionID: sessionID, Operation: operation, Reason: SessionErrorReasonBusy}
 	}
 
-	if d.stopped {
+	request := d.stopRequest.Load()
+	if d.stopped || (request != nil && !request.applied.Load()) {
 		reason := SessionErrorReason("")
 		if op == SessionOperationRunSkill || op == SessionOperationSwitchAgent {
 			reason = SessionErrorReasonBusy
@@ -231,7 +237,7 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 func newSessionDriver(r *LocalRuntime, sess *session.Session) *sessionDriver {
 	settled := make(chan struct{})
 	close(settled)
-	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), retirementGate: make(chan struct{}, 1), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
+	d := &sessionDriver{resourceOwner: tools.NewResourceOwner(), ownerCommands: make(chan *sessionOwnerCommand, 64), ownerStop: make(chan struct{}), ownerDone: make(chan struct{}), treeWake: make(chan struct{}, 1), stopWake: make(chan struct{}, 1), retirementGate: make(chan struct{}, 1), r: r, turnChanged: make(chan struct{}), wg: newDriverWorkGroup(), sess: sess, events: newSessionEventHubWithLimits(r.maxReplayEvents, r.maxReplayBytes), settled: settled, lastActive: time.Now(), interactions: map[string]sessionInteraction{}, onStarted: map[int]func(){}, onSettled: map[int]func(){}}
 	if sess != nil {
 		d.identityID, d.identityParent, d.identityAsync = sess.ID, sess.ParentID, sess.AsyncSubagent
 		for position, item := range sess.MessagesSnapshot() {
@@ -850,46 +856,9 @@ func (d *sessionDriver) StopAllForDelete() bool {
 }
 
 func (d *sessionDriver) stopAll(deleting bool) bool {
-	var cancel, compactCancel, skillCancel context.CancelFunc
-	var pauseCh chan struct{}
-	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
-		if deleting {
-			d.events.FenceDelete(d.sessionIDLocked())
-		}
-		cancel = d.cancel
-
-		compactCancel = d.compactCancel
-		skillCancel = d.skillCancel
-		pauseCh = d.pauseCh
-		d.pauseCh = nil
-		d.pending = nil
-		d.stopped = true
-		d.invalidateTitleLocked()
-		d.stoppedView = false
-		d.resolveInteractionsLocked()
-		d.notifyTurnChangedLocked()
-		d.skillGeneration++
-		d.skillOperationID = ""
-		d.skillCancel = nil
-		d.signalStartDoneLocked()
-		return nil
-	})
-	if pauseCh != nil {
-		close(pauseCh)
-	}
-	if skillCancel != nil {
-		skillCancel()
-	}
-	if compactCancel != nil {
-		compactCancel()
-	}
-	if cancel == nil && compactCancel == nil {
-		return false
-	}
-	if cancel != nil {
-		cancel()
-	}
-	return true
+	active := d.requestStop(deleting)
+	_ = d.awaitStop(context.WithoutCancel(d.r.lifetime()))
+	return active
 }
 
 func (d *sessionDriver) isStopped() bool {

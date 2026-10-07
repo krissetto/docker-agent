@@ -1,20 +1,30 @@
 package runtime
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type driverRegistryState struct {
-	agentName   string
-	stopped     bool
-	settled     bool
-	active      bool
-	reclaiming  bool
-	replaceable bool
-	stoppedView bool
-	lastActive  time.Time
+	cancel        context.CancelFunc
+	compactCancel context.CancelFunc
+	skillCancel   context.CancelFunc
+	agentName     string
+	stopped       bool
+	settled       bool
+	active        bool
+	reclaiming    bool
+	replaceable   bool
+	stoppedView   bool
+	lastActive    time.Time
 }
 
 func (d *sessionDriver) publishRegistryStateLocked() {
+	if request := d.stopRequest.Load(); request != nil && request.withdraw.Swap(false) {
+		d.durableStopRequested = true
+	}
 	state := &driverRegistryState{
+		cancel: d.cancel, compactCancel: d.compactCancel, skillCancel: d.skillCancel,
 		stopped:     d.stopped,
 		settled:     !d.running() && !d.starting() && !d.settling(),
 		active:      d.running() || d.starting() || d.settling(),
@@ -27,6 +37,9 @@ func (d *sessionDriver) publishRegistryStateLocked() {
 	}
 	state.replaceable = state.stopped && state.settled && !d.compactReserved && !d.switchReserved && !d.retryRunning && !d.completionInFlight
 	d.registryState.Store(state)
+	if request := d.stopRequest.Load(); request != nil && (!request.applied.Load() || d.stopped) {
+		state.cancelExecution()
+	}
 }
 
 func driverDrained(d *sessionDriver) bool {
@@ -43,4 +56,16 @@ func (d *sessionDriver) registrySnapshot() driverRegistryState {
 		return *state
 	}
 	return driverRegistryState{active: true}
+}
+
+func (s driverRegistryState) cancelExecution() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.compactCancel != nil {
+		s.compactCancel()
+	}
+	if s.skillCancel != nil {
+		s.skillCancel()
+	}
 }
