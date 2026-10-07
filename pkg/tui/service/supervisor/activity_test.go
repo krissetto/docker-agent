@@ -45,7 +45,10 @@ func TestDeriveTabActivityPrecedenceAndTerminalClear(t *testing.T) {
 		deriveTabActivity(activitySnapshot(subagent.NodeStarting, ""), "child", messages.TabActivityPending))
 	assert.Equal(t, messages.TabActivityDescendantRunning,
 		deriveTabActivity(activitySnapshot(subagent.NodeRunning, subagent.NodeRunning), "child", messages.TabActivityNone),
-		"descendant activity wins without stacking ambiguous spinners")
+		"an idle owner shows descendant activity without spinning")
+	assert.Equal(t, messages.TabActivityRunning,
+		deriveTabActivity(activitySnapshot(subagent.NodeRunning, subagent.NodeRunning), "child", messages.TabActivityRunning),
+		"canonical own work must not be hidden by running descendants")
 
 	for _, state := range []subagent.NodeState{subagent.NodeIdle, subagent.NodeCompleted, subagent.NodeFailed, subagent.NodeStopped} {
 		assert.Equal(t, messages.TabActivityRunning,
@@ -218,4 +221,57 @@ func TestTabAttentionFromPortableTreeAndRecoveryUncertainty(t *testing.T) {
 	s.runners[sess.ID].projection = &app.PresentationState{Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled, InterruptedTurns: 1}}
 	tabs, _ = s.GetTabs()
 	assert.True(t, tabs[0].NeedsAttention, "uncertain recovery is not presented as a normal idle tab")
+}
+
+func TestCanonicalOwnTabActivityWithRunningDescendantsLocalAndRemote(t *testing.T) {
+	for _, portable := range []bool{false, true} {
+		name := "local tree"
+		if portable {
+			name = "remote portable tree"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, services := sharedTreeSupervisor(t, 2)
+			rootID := subagent.SessionRootID("tab-0")
+			require.NoError(t, services.tree.AddSubtree([]subagent.Node{
+				{ID: "child", Parent: rootID, SessionID: "tab-1", Agent: "agent", State: subagent.NodeRunning},
+				{ID: "grandchild", Parent: "child", SessionID: "grandchild-session", Agent: "agent", State: subagent.NodeRunning},
+			}))
+			for _, id := range s.order {
+				runner := s.runners[id]
+				sess := runner.App.Session()
+				options := []app.Opt{app.WithRuntimeServices(services)}
+				if id == "tab-1" {
+					options = append(options, app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: "child"}))
+				}
+				if portable {
+					snapshot := services.tree.Snapshot()
+					sess.SetSubagentTree(&snapshot)
+					options[0] = app.WithRuntimeServices(nil)
+				}
+				runner.App = app.New(t.Context(), nil, sess, runtime.SessionBinding{}, options...)
+			}
+			for _, active := range s.order {
+				s.SwitchTo(active)
+				for _, id := range s.order {
+					runner := s.GetRunner(id)
+					for _, state := range []runtime.SessionState{runtime.SessionStateRunning, runtime.SessionStateSettled} {
+						head := &app.PresentationState{Status: runtime.SessionStatus{SessionID: id, State: state}}
+						s.applyPresentation(id, runner.App, runner.routeGeneration, head, nil)
+						tabs, _ := s.GetTabs()
+						for _, tab := range tabs {
+							if tab.SessionID != id {
+								continue
+							}
+							expected := messages.TabActivityDescendantRunning
+							if state == runtime.SessionStateRunning {
+								expected = messages.TabActivityRunning
+							}
+							require.Equal(t, expected, tab.Activity, "owner=%s active=%s state=%s", id, active, state)
+							require.Equal(t, id == "tab-1", tab.IsAttached)
+						}
+					}
+				}
+			}
+		})
+	}
 }

@@ -205,3 +205,29 @@ func TestRepeatedViewDoesNotAdvanceTabbarState(t *testing.T) {
 	assert.Equal(t, generation, tb.VisualGeneration())
 	assert.False(t, tb.TakeVisualDirty(), "settled output stays idle")
 }
+
+func TestOwnWorkingTabAnimatesUntilDescendantOnlyState(t *testing.T) {
+	ar := newMotionRuntime()
+	tb := New(ar, 8)
+	t.Cleanup(tb.StopAnimations)
+	tb.SetWidth(80)
+	tabs := motionTabs(1, 0)
+	tabs[0].Activity = messages.TabActivityRunning
+	tabs[0].IsRunning = true
+	tb.SetTabs(tabs, 0)
+	require.True(t, tb.indicatorSub.IsActive(), "active owner leases visible spinner frames")
+	first := tb.View()
+	advanceTabRuntime(t, ar, tb, ar.Now()+animation.Card.DefaultFrameDuration())
+	require.NotEqual(t, first, tb.View())
+	require.True(t, tb.TakeVisualDirty())
+
+	tabs[0].Activity = messages.TabActivityDescendantRunning
+	tabs[0].IsRunning = false
+	tb.SetTabs(tabs, 0)
+	require.False(t, tb.indicatorSub.IsActive(), "idle owner with running descendants stays static")
+	require.Zero(t, ar.ActiveCount())
+	settled := tb.View()
+	tb.Tick()
+	require.Equal(t, settled, tb.View())
+	require.Nil(t, ar.Continue())
+}

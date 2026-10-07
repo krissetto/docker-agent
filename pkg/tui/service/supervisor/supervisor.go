@@ -517,14 +517,14 @@ func tabActivity(runner *SessionTab, snapshots map[*subagent.Tree]subagent.Snaps
 }
 
 func deriveTabActivity(snapshot subagent.Snapshot, nodeID subagent.NodeID, own messages.TabActivity) messages.TabActivity {
+	if own == messages.TabActivityRunning {
+		return own
+	}
 	node, found := subagentview.Find(snapshot.Nodes, nodeID)
 	if found {
 		descendant := strictDescendantState(node)
 		if descendant == messages.TabActivityDescendantRunning {
 			return descendant
-		}
-		if own == messages.TabActivityRunning {
-			return own
 		}
 		if descendant == messages.TabActivityPending {
 			return descendant
