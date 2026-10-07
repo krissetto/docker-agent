@@ -157,21 +157,121 @@ func TestMetadataRetryPreservesAcknowledgedPermissions(t *testing.T) {
 	require.Equal(t, permissions, loaded.ClonePermissions())
 }
 
-func TestEvictedTurnTerminalEvidenceRestoresUncertainty(t *testing.T) {
+func TestRetainedTurnTerminalEvidenceSurvivesRestart(t *testing.T) {
+	const completedTurns = 4096
+	path := filepath.Join(t.TempDir(), "retained.db")
+	store, err := sqlitestore.New(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	sess := session.New(session.WithID("retained"))
-	message := session.UserMessage("old work")
-	message.TurnID, message.Accepted = "old", true
-	sess.AddMessage(message)
-	sess.SetTurnOutcome("old", string(TurnCompleted))
-	for i := range session.MaxRetainedTurnOutcomes {
-		sess.SetTurnOutcome(strconv.Itoa(i), string(TurnCompleted))
+	addTurn := func(id, outcome string) {
+		message := session.UserMessage("work")
+		message.TurnID, message.Accepted = id, true
+		sess.AddMessage(message)
+		if outcome != "" {
+			sess.SetTurnOutcome(id, outcome)
+		}
 	}
-	require.Len(t, sess.TurnOutcomesSnapshot(), session.MaxRetainedTurnOutcomes)
-	require.Empty(t, sess.TurnOutcome("old"))
-	driver := newSessionDriver(newDriverTestRuntime(t), sess)
-	require.Equal(t, 1, driver.Status().InterruptedTurns)
+	addTurn("unfinished", "")
+	addTurn("failed", string(TurnFailed))
+	addTurn("canceled", string(TurnCanceled))
+	for i := range completedTurns {
+		addTurn(strconv.Itoa(i), string(TurnCompleted))
+	}
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	require.NoError(t, store.Close())
+	store, err = sqlitestore.New(t.Context(), path)
+	require.NoError(t, err)
+	loaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.TurnOutcomesSnapshot(), completedTurns+2)
+	require.Equal(t, sess.TurnOutcomesSnapshot(), loaded.TurnOutcomesSnapshot())
+	require.Len(t, loaded.MessagesSnapshot(), completedTurns+3)
+	driver := newSessionDriver(newDriverTestRuntime(t), loaded)
+	status := driver.Status()
+	require.Equal(t, SessionStateSettled, status.State)
+	require.Zero(t, status.Pending)
+	require.Equal(t, 1, status.InterruptedTurns)
+	require.Empty(t, driver.pending)
+	require.Empty(t, driver.steering)
 	handle := &sessionHandle{driver: driver, sessionID: sess.ID}
-	require.ErrorIs(t, handle.AwaitTurn(t.Context(), "old"), &SessionError{Kind: SessionErrorInterrupted})
+	for i := range completedTurns {
+		require.NoError(t, handle.AwaitTurn(t.Context(), strconv.Itoa(i)))
+	}
+	require.NoError(t, handle.AwaitTurn(t.Context(), "failed"))
+	require.NoError(t, handle.AwaitTurn(t.Context(), "canceled"))
+	require.Empty(t, loaded.TurnOutcome("unfinished"))
+	require.ErrorIs(t, handle.AwaitTurn(t.Context(), "unfinished"), &SessionError{Kind: SessionErrorInterrupted})
+	require.ErrorIs(t, handle.AwaitTurn(t.Context(), "unknown"), &SessionError{Kind: SessionErrorNotFound})
+}
+
+func TestBranchedTurnTerminalEvidenceMatchesRetainedAdmissions(t *testing.T) {
+	parent := session.New()
+	for _, id := range []string{"completed", "unfinished", "excluded", "unaccepted"} {
+		message := session.UserMessage("work")
+		message.TurnID, message.Accepted = id, id != "unaccepted"
+		parent.AddMessage(message)
+		if id != "unfinished" {
+			parent.SetTurnOutcome(id, string(TurnCompleted))
+		}
+	}
+	parent.SetTurnOutcome("unrelated", string(TurnCompleted))
+	child := session.New()
+	childMessage := session.UserMessage("child work")
+	childMessage.TurnID, childMessage.Accepted = "child-completed", true
+	child.AddMessage(childMessage)
+	child.SetTurnOutcome(childMessage.TurnID, string(TurnCompleted))
+	child.SetTurnOutcome("child-unrelated", string(TurnCompleted))
+	parent.AddSubSession(child)
+
+	for name, branch := range map[string]func(*session.Session, int) (*session.Session, error){
+		"branch": session.BranchSession,
+		"fork":   session.ForkSession,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "branch.db"))
+			require.NoError(t, err)
+			defer store.Close()
+			for _, cut := range []int{0, 1, 2, 5} {
+				t.Run(strconv.Itoa(cut), func(t *testing.T) {
+					branched, err := branch(parent, cut)
+					require.NoError(t, err)
+					require.NoError(t, store.AddSession(t.Context(), branched))
+					loaded, err := store.GetSession(t.Context(), branched.ID)
+					require.NoError(t, err)
+					var expected map[string]string
+					if cut >= 1 {
+						expected = map[string]string{"completed": string(TurnCompleted)}
+					}
+					if cut >= 3 {
+						expected["excluded"] = string(TurnCompleted)
+					}
+					require.Equal(t, expected, loaded.TurnOutcomesSnapshot())
+					driver := newSessionDriver(newDriverTestRuntime(t), loaded)
+					handle := &sessionHandle{driver: driver, sessionID: loaded.ID}
+					require.Zero(t, driver.Status().Pending)
+					if cut >= 1 {
+						require.NoError(t, handle.AwaitTurn(t.Context(), "completed"))
+					} else {
+						require.ErrorIs(t, handle.AwaitTurn(t.Context(), "completed"), &SessionError{Kind: SessionErrorNotFound})
+					}
+					if cut >= 2 {
+						require.Equal(t, 1, driver.Status().InterruptedTurns)
+						require.ErrorIs(t, handle.AwaitTurn(t.Context(), "unfinished"), &SessionError{Kind: SessionErrorInterrupted})
+					} else {
+						require.Zero(t, driver.Status().InterruptedTurns)
+					}
+					if cut == 5 {
+						branchedChild := loaded.MessagesSnapshot()[4].SubSession
+						require.NotNil(t, branchedChild)
+						require.Equal(t, map[string]string{"child-completed": string(TurnCompleted)}, branchedChild.TurnOutcomesSnapshot())
+					}
+					branched.SetTurnOutcome("completed", string(TurnFailed))
+					require.Equal(t, string(TurnCompleted), parent.TurnOutcome("completed"))
+				})
+			}
+		})
+	}
 }
 
 func TestPendingTurnRestoreIsNotInterrupted(t *testing.T) {

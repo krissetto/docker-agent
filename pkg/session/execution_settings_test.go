@@ -62,19 +62,32 @@ func TestTurnOutcomesPersistAndClone(t *testing.T) {
 }
 
 func TestTurnOutcomeRetentionSurvivesReload(t *testing.T) {
-	store := openMemoryStore(t)
-	sess := New()
-	sess.SetTurnOutcome("old", "completed")
-	for i := range MaxRetainedTurnOutcomes {
-		sess.SetTurnOutcome(strconv.Itoa(i), "completed")
+	const completedTurns = 4096
+	for _, store := range []Store{openMemoryStore(t), NewInMemorySessionStore()} {
+		sess := New()
+		for i := range completedTurns {
+			sess.SetTurnOutcome(strconv.Itoa(i), "completed")
+		}
+		require.Len(t, sess.TurnOutcomesSnapshot(), completedTurns)
+		require.Len(t, sess.TurnOutcomeOrderSnapshot(), completedTurns)
+		require.NoError(t, store.AddSession(t.Context(), sess))
+		loaded, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.Equal(t, sess.TurnOutcomesSnapshot(), loaded.TurnOutcomesSnapshot())
+		require.Equal(t, sess.TurnOutcomeOrderSnapshot(), loaded.TurnOutcomeOrderSnapshot())
+		for _, clone := range []*Session{loaded.Clone(), loaded.OwnSnapshot()} {
+			require.Equal(t, loaded.TurnOutcomesSnapshot(), clone.TurnOutcomesSnapshot())
+			require.Equal(t, loaded.TurnOutcomeOrderSnapshot(), clone.TurnOutcomeOrderSnapshot())
+			clone.SetTurnOutcome("0", "failed")
+			clone.SetTurnOutcome("new", "canceled")
+			require.Equal(t, "completed", loaded.TurnOutcome("0"))
+			require.Empty(t, loaded.TurnOutcome("new"))
+			require.Len(t, clone.TurnOutcomeOrderSnapshot(), completedTurns+1)
+			require.NoError(t, store.UpdateSession(t.Context(), clone))
+			updated, err := store.GetSession(t.Context(), sess.ID)
+			require.NoError(t, err)
+			require.Equal(t, clone.TurnOutcomesSnapshot(), updated.TurnOutcomesSnapshot())
+			require.Equal(t, clone.TurnOutcomeOrderSnapshot(), updated.TurnOutcomeOrderSnapshot())
+		}
 	}
-	require.Len(t, sess.TurnOutcomesSnapshot(), MaxRetainedTurnOutcomes)
-	require.Empty(t, sess.TurnOutcome("old"))
-	require.NoError(t, store.AddSession(t.Context(), sess))
-	loaded, err := store.GetSession(t.Context(), sess.ID)
-	require.NoError(t, err)
-	loaded.SetTurnOutcome("new", "failed")
-	require.Len(t, loaded.TurnOutcomesSnapshot(), MaxRetainedTurnOutcomes)
-	require.Empty(t, loaded.TurnOutcome("0"))
-	require.Equal(t, "failed", loaded.TurnOutcome("new"))
 }

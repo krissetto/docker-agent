@@ -2991,9 +2991,6 @@ func (s *Session) TurnOutcome(id string) string {
 	return s.TurnOutcomes[id]
 }
 
-// MaxRetainedTurnOutcomes bounds terminal evidence; older admissions recover as uncertain.
-const MaxRetainedTurnOutcomes = 1024
-
 func (s *Session) TurnOutcomeOrderSnapshot() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3015,9 +3012,6 @@ func (s *Session) SetTurnOutcome(id, outcome string) {
 	if _, exists := s.TurnOutcomes[id]; !exists {
 		s.TurnOutcomeOrder = append(s.TurnOutcomeOrder, id)
 	}
+	// Retained admissions need their terminal evidence to avoid false recovery uncertainty.
 	s.TurnOutcomes[id] = outcome
-	for len(s.TurnOutcomeOrder) > MaxRetainedTurnOutcomes {
-		delete(s.TurnOutcomes, s.TurnOutcomeOrder[0])
-		s.TurnOutcomeOrder = s.TurnOutcomeOrder[1:]
-	}
 }

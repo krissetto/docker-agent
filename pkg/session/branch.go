@@ -58,6 +58,7 @@ func branchSessionWithTitle(parent *Session, branchAtPosition int, titleFn func(
 		branched.Messages = append(branched.Messages, cloned)
 	}
 
+	copyRetainedTurnOutcomes(branched, parent)
 	setParentIDs(branched)
 	recalculateSessionTotals(branched)
 	return branched, nil
@@ -246,8 +247,22 @@ func cloneSubSession(src *Session) (*Session, error) {
 		cloned.Messages = append(cloned.Messages, clonedItem)
 	}
 
+	copyRetainedTurnOutcomes(cloned, src)
 	recalculateSessionTotals(cloned)
 	return cloned, nil
+}
+
+func copyRetainedTurnOutcomes(dst, src *Session) {
+	outcomes := src.TurnOutcomesSnapshot()
+	for _, item := range dst.Messages {
+		msg := item.Message
+		if msg == nil || !msg.Accepted || msg.TurnID == "" {
+			continue
+		}
+		if outcome := outcomes[msg.TurnID]; outcome != "" {
+			dst.SetTurnOutcome(msg.TurnID, outcome)
+		}
+	}
 }
 
 func copySessionMetadata(dst, src *Session, title string) {
