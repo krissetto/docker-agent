@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +46,7 @@ type streamResult struct {
 	Calls             []tools.ToolCall
 	Content           string
 	ReasoningContent  string
+	Presentation      []chat.AssistantPart
 	ThinkingSignature string
 	ThoughtSignature  []byte
 	// Media accumulates every [chat.MediaDelta] streamed during the turn
@@ -115,6 +117,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var thinkingSignature string
 	var thoughtSignature []byte
 	var toolCalls []tools.ToolCall
+	var presentation []chat.AssistantPart
 	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
 	var providerFinishReason chat.FinishReason
@@ -146,10 +149,12 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		if !xmlToolCallGate {
 			tagIdx := strings.Index(content, "<tool_call>")
 			if tagIdx < 0 {
+				presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content})
 				events.Emit(AgentChoice(a.Name(), sess.ID, content))
 			} else {
 				xmlToolCallGate = true
 				if tagIdx > 0 {
+					presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartContent, Text: content[:tagIdx]})
 					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
 				}
 			}
@@ -186,6 +191,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		fullContent.WriteString(textBefore)
 		for _, tc := range toolCalls {
 			toolDef := toolDefMap[tc.Function.Name]
+			presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartToolCall, ToolCallID: tc.ID})
 			events.Emit(PartialToolCall(tc, toolDef, a.Name()))
 		}
 	}
@@ -218,7 +224,8 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		return streamResult{
 			Content: fullContent.String(), ReasoningContent: fullReasoningContent.String(),
 			ThinkingSignature: thinkingSignature, ThoughtSignature: thoughtSignature,
-			Media: media, Usage: messageUsage, Stopped: true, Steered: true,
+			Presentation: slices.DeleteFunc(presentation, func(part chat.AssistantPart) bool { return part.Type == chat.AssistantPartToolCall }),
+			Media:        media, Usage: messageUsage, Stopped: true, Steered: true,
 		}, nil
 	}
 	steering := steeringSignal(ctx)
@@ -324,17 +331,27 @@ mainLoop:
 							if !emittedPartial[delta.ID] {
 								toolDef = toolDefMap[tc.Function.Name]
 							}
+							presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartToolCall, ToolCallID: tc.ID})
 							events.Emit(PartialToolCall(partial, toolDef, a.Name()))
 							emittedPartial[delta.ID] = true
 						}
 					}
 				}
-				// Short-circuit only when the chunk carried nothing but tool call
-				// deltas. If it also carries a terminal finish reason, fall through
-				// so the early return below sees the freshly accumulated call.
-				if choice.FinishReason == "" {
-					continue
-				}
+			}
+
+			if choice.Delta.ReasoningContent != "" {
+				presentation = chat.AppendAssistantPart(presentation, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: choice.Delta.ReasoningContent})
+				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
+				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
+			}
+
+			// Capture thinking signature for Anthropic extended thinking
+			if choice.Delta.ThinkingSignature != "" {
+				thinkingSignature = choice.Delta.ThinkingSignature
+			}
+
+			if choice.Delta.Content != "" {
+				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 			if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength || choice.FinishReason == chat.FinishReasonRefusal {
@@ -350,6 +367,7 @@ mainLoop:
 						slog.WarnContext(ctx, "Dropping tool calls from refused turn",
 							"agent", a.Name(), "tool_calls", len(toolCalls))
 						toolCalls = nil
+						presentation = slices.DeleteFunc(presentation, func(part chat.AssistantPart) bool { return part.Type == chat.AssistantPartToolCall })
 					}
 				} else {
 					applyXMLFallback()
@@ -361,6 +379,7 @@ mainLoop:
 					Calls:             toolCalls,
 					Content:           fullContent.String(),
 					ReasoningContent:  fullReasoningContent.String(),
+					Presentation:      presentation,
 					ThinkingSignature: thinkingSignature,
 					ThoughtSignature:  thoughtSignature,
 					Media:             media,
@@ -375,20 +394,6 @@ mainLoop:
 			// already handled by the early return above.
 			if choice.FinishReason != "" {
 				providerFinishReason = choice.FinishReason
-			}
-
-			if choice.Delta.ReasoningContent != "" {
-				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
-				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
-			}
-
-			// Capture thinking signature for Anthropic extended thinking
-			if choice.Delta.ThinkingSignature != "" {
-				thinkingSignature = choice.Delta.ThinkingSignature
-			}
-
-			if choice.Delta.Content != "" {
-				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 		case <-steering:
@@ -461,6 +466,7 @@ mainLoop:
 		Calls:             toolCalls,
 		Content:           fullContent.String(),
 		ReasoningContent:  fullReasoningContent.String(),
+		Presentation:      presentation,
 		ThinkingSignature: thinkingSignature,
 		ThoughtSignature:  thoughtSignature,
 		Media:             media,

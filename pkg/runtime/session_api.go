@@ -680,6 +680,8 @@ func (envelope SessionEvent) IsLiveSeed() bool {
 		return event.ToolCall.ID != ""
 	case *ToolCallOutputEvent:
 		return event.ToolCallID != "" && event.Output != ""
+	case *ToolCallResponseEvent:
+		return event.ToolCallID != ""
 	default:
 		return false
 	}

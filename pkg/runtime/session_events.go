@@ -84,9 +84,10 @@ type sequencedSessionEventSubscriber struct {
 }
 
 type inflightAssistant struct {
-	agentName string
-	content   strings.Builder
-	reasoning strings.Builder
+	agentName     string
+	parts         []chat.AssistantPart
+	resolvedBytes int
+	seedTooLarge  bool
 }
 
 func newSessionEventHubWithLimits(capacity, maxBytes int) *sessionEventHub {
@@ -310,7 +311,13 @@ func (h *sessionEventHub) replayFitsLocked(sessionID string, since uint64) bool 
 func (h *sessionEventHub) liveSeedFitsLocked(sessionID string) bool {
 	total := 0
 	if st := h.inflight[sessionID]; st != nil {
-		total = st.content.Len() + st.reasoning.Len()
+		if st.seedTooLarge {
+			return false
+		}
+		total = st.resolvedBytes
+		for _, part := range st.parts {
+			total += len(part.Text)
+		}
 	}
 	for _, tool := range h.activeTools[sessionID] {
 		total += tool.arguments.Len() + tool.output.Len()
@@ -340,36 +347,74 @@ func (h *sessionEventHub) liveSeedWithCloneLocked(sessionID string, clone bool) 
 	if h.liveRuns[sessionID] > 0 {
 		seed = append(seed, StreamStarted(sessionID, h.liveAgent[sessionID]))
 	}
-	if st := h.inflight[sessionID]; st != nil {
-		if st.reasoning.Len() > 0 {
-			seed = append(seed, AgentChoiceReasoning(st.agentName, sessionID, st.reasoning.String()))
-		}
-		if st.content.Len() > 0 {
-			seed = append(seed, AgentChoice(st.agentName, sessionID, st.content.String()))
+	parts := h.livePartsLocked(sessionID)
+	for _, part := range parts {
+		switch part.Type {
+		case chat.AssistantPartReasoning:
+			seed = append(seed, AgentChoiceReasoning(h.inflight[sessionID].agentName, sessionID, part.Text))
+		case chat.AssistantPartContent:
+			seed = append(seed, AgentChoice(h.inflight[sessionID].agentName, sessionID, part.Text))
+		case chat.AssistantPartToolCall:
+			if part.Tool != nil {
+				definition := part.Tool.Definition
+				if clone {
+					definition = cloneLiveToolDefinition(definition)
+				}
+				agent := h.inflight[sessionID].agentName
+				seed = append(seed, ToolCall(part.Tool.Call, definition, agent))
+				if clone {
+					definition = cloneLiveToolDefinition(part.Tool.Definition)
+				}
+				seed = append(seed, ToolCallResponse(part.ToolCallID, definition, &tools.ToolCallResult{Output: *part.Tool.Result, IsError: part.Tool.IsError}, *part.Tool.Result, agent))
+				continue
+			}
+			for _, tool := range h.activeTools[sessionID] {
+				if tool.call.ID == part.ToolCallID {
+					seed = append(seed, liveToolSeed(tool, clone)...)
+					break
+				}
+			}
 		}
 	}
+	return seed
+}
+
+func (h *sessionEventHub) livePartsLocked(sessionID string) []chat.AssistantPart {
+	if st := h.inflight[sessionID]; st != nil {
+		return st.parts
+	}
+	var parts []chat.AssistantPart
 	for _, tool := range h.activeTools[sessionID] {
-		call := tool.call
-		call.Function.Arguments = tool.arguments.String()
-		definition := tool.definition
+		parts = append(parts, chat.AssistantPart{Type: chat.AssistantPartToolCall, ToolCallID: tool.call.ID})
+	}
+	return parts
+}
+
+func liveToolSeed(tool *inflightTool, clone bool) []Event {
+	if tool.committed && !tool.running {
+		return nil
+	}
+	call := tool.call
+	call.Function.Arguments = tool.arguments.String()
+	definition := tool.definition
+	if clone {
+		definition = cloneLiveToolDefinition(definition)
+	}
+	var seed []Event
+	if tool.running {
+		seed = append(seed, ToolCall(call, definition, tool.agentName))
+	} else {
+		seed = append(seed, PartialToolCall(call, definition, tool.agentName))
+	}
+	output := tool.output.String()
+	if tool.truncated {
+		output += "\n[Earlier tool output truncated at the session replay byte limit]\n"
+	}
+	if output != "" {
 		if clone {
-			definition = cloneLiveToolDefinition(definition)
+			definition = cloneLiveToolDefinition(tool.definition)
 		}
-		if tool.running {
-			seed = append(seed, ToolCall(call, definition, tool.agentName))
-		} else {
-			seed = append(seed, PartialToolCall(call, definition, tool.agentName))
-		}
-		output := tool.output.String()
-		if tool.truncated {
-			output += "\n[Earlier tool output truncated at the session replay byte limit]\n"
-		}
-		if output != "" {
-			if clone {
-				definition = cloneLiveToolDefinition(tool.definition)
-			}
-			seed = append(seed, ToolCallOutput(call.ID, definition, output, tool.agentName))
-		}
+		seed = append(seed, ToolCallOutput(call.ID, definition, output, tool.agentName))
 	}
 	return seed
 }
@@ -576,18 +621,22 @@ func (h *sessionEventHub) trackInflightLocked(sessionID string, event Event) {
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
-			st.content.WriteString(e.Content)
+			st.parts = chat.AppendAssistantPart(st.parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
 		}
 	case *AgentChoiceReasoningEvent:
 		if e.Content != "" {
 			st := h.inflightLocked(sessionID)
 			st.agentName = e.AgentName
-			st.reasoning.WriteString(e.Content)
+			st.parts = chat.AppendAssistantPart(st.parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
 		}
-	case *UserMessageEvent, *MessageAddedEvent, *ErrorEvent:
-		delete(h.inflight, sessionID)
+	case *MessageAddedEvent:
+		if role := e.CommittedRole(); role == "" || role == chat.MessageRoleAssistant || role == chat.MessageRoleUser {
+			h.clearInflightLocked(sessionID)
+		}
+	case *UserMessageEvent, *ErrorEvent:
+		h.clearInflightLocked(sessionID)
 	case *StreamStoppedEvent:
-		delete(h.inflight, sessionID)
+		h.clearInflightLocked(sessionID)
 		if h.liveRuns[sessionID] > 1 {
 			h.liveRuns[sessionID]--
 		} else {
@@ -597,10 +646,18 @@ func (h *sessionEventHub) trackInflightLocked(sessionID string, event Event) {
 	}
 }
 
+func (h *sessionEventHub) clearInflightLocked(sessionID string) {
+	delete(h.inflight, sessionID)
+	for _, tool := range h.activeTools[sessionID] {
+		tool.committed = true
+	}
+}
+
 func (h *sessionEventHub) inflightLocked(sessionID string) *inflightAssistant {
 	st := h.inflight[sessionID]
 	if st == nil {
-		st = &inflightAssistant{}
+		// Active calls from committed messages precede the next assistant response.
+		st = &inflightAssistant{parts: h.livePartsLocked(sessionID)}
 		h.inflight[sessionID] = st
 	}
 	return st
@@ -609,6 +666,7 @@ func (h *sessionEventHub) inflightLocked(sessionID string) *inflightAssistant {
 // Tool arguments are authoritative state, not evictable journal deltas. Output
 // gets a separate per-session ReplayBytes budget shared by all active calls.
 type inflightTool struct {
+	committed  bool
 	agentName  string
 	call       tools.ToolCall
 	definition tools.Tool
@@ -625,6 +683,8 @@ func (h *sessionEventHub) activeToolLocked(sessionID, id string) *inflightTool {
 		}
 	}
 	tool := &inflightTool{call: tools.ToolCall{ID: id}}
+	st := h.inflightLocked(sessionID)
+	st.parts = chat.AppendAssistantPart(st.parts, chat.AssistantPart{Type: chat.AssistantPartToolCall, ToolCallID: id})
 	h.activeTools[sessionID] = append(h.activeTools[sessionID], tool)
 	return tool
 }
@@ -634,6 +694,9 @@ func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
 	case *PartialToolCallEvent:
 		tool := h.activeToolLocked(sessionID, e.ToolCall.ID)
 		tool.agentName = e.AgentName
+		if !tool.committed {
+			h.inflightLocked(sessionID).agentName = e.AgentName
+		}
 		if e.ToolCall.Type != "" {
 			tool.call.Type = e.ToolCall.Type
 		}
@@ -647,6 +710,9 @@ func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
 	case *ToolCallEvent:
 		tool := h.activeToolLocked(sessionID, e.ToolCall.ID)
 		tool.agentName, tool.call, tool.running = e.AgentName, e.ToolCall, true
+		if !tool.committed {
+			h.inflightLocked(sessionID).agentName = e.AgentName
+		}
 		tool.call.Function.Arguments = ""
 		tool.arguments.Reset()
 		tool.arguments.WriteString(e.ToolCall.Function.Arguments)
@@ -666,12 +732,22 @@ func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
 			return
 		}
 	case *MessageAddedEvent:
-		if e.Message == nil || e.Message.Message.Role != chat.MessageRoleAssistant {
+		if e.CommittedRole() != chat.MessageRoleAssistant {
 			return
 		}
-		// Committed calls already supply their complete arguments in the snapshot.
+		// Keep snapshot-owned IDs until execution, without replaying their argument deltas.
+		committedIDs := e.CommittedToolCallIDs()
+		agentName := e.AgentName
+		if e.Message != nil {
+			agentName = e.Message.AgentName
+		}
 		h.activeTools[sessionID] = slices.DeleteFunc(h.activeTools[sessionID], func(tool *inflightTool) bool {
-			if tool.running || tool.agentName != e.Message.AgentName {
+			if tool.running || tool.agentName != agentName {
+				return false
+			}
+			if slices.Contains(committedIDs, tool.call.ID) {
+				tool.committed = true
+				tool.arguments.Reset()
 				return false
 			}
 			h.outputBytes[sessionID] -= tool.output.Len()
@@ -682,6 +758,7 @@ func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
 			delete(h.outputBytes, sessionID)
 		}
 	case *ToolCallResponseEvent:
+		h.retainResolvedToolLocked(sessionID, e)
 		h.activeTools[sessionID] = slices.DeleteFunc(h.activeTools[sessionID], func(tool *inflightTool) bool {
 			if tool.call.ID != e.ToolCallID {
 				return false
@@ -697,6 +774,38 @@ func (h *sessionEventHub) trackToolsLocked(sessionID string, event Event) {
 		if h.liveRuns[sessionID] <= 1 {
 			delete(h.activeTools, sessionID)
 			delete(h.outputBytes, sessionID)
+		}
+	}
+}
+
+func (h *sessionEventHub) retainResolvedToolLocked(sessionID string, event *ToolCallResponseEvent) {
+	st := h.inflight[sessionID]
+	if st == nil || st.seedTooLarge {
+		return
+	}
+	for _, tool := range h.activeTools[sessionID] {
+		if tool.call.ID != event.ToolCallID || tool.committed {
+			continue
+		}
+		call := tool.call
+		call.Function.Arguments = tool.arguments.String()
+		response := event.Response
+		if len(call.Function.Arguments)+len(response) > maxSessionEventSubscriberBytes-st.resolvedBytes {
+			st.seedTooLarge = true
+			return
+		}
+		resolved := &chat.AssistantTool{Call: call, Definition: tool.definition, Result: &response, IsError: event.Result != nil && event.Result.IsError}
+		data, err := json.Marshal(resolved)
+		if err != nil || len(data) > maxSessionEventSubscriberBytes-st.resolvedBytes {
+			st.seedTooLarge = true
+			return
+		}
+		for i := range st.parts {
+			if st.parts[i].ToolCallID == event.ToolCallID {
+				st.parts[i].Tool = resolved
+				st.resolvedBytes += len(data)
+				return
+			}
 		}
 	}
 }

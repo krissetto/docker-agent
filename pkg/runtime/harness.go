@@ -34,6 +34,13 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		return turnEndReasonError
 	}
 
+	var presentation []chat.AssistantPart
+	liveEvents := events
+	events = EventSinkFunc(func(event Event) {
+		presentation = captureAssistantPresentation(presentation, event)
+		liveEvents.Emit(event)
+	})
+
 	modelID := agentModelLabel(ctx, a)
 	events.Emit(AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage()))
 
@@ -233,7 +240,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		hookCost = &c
 	}
 	r.executeAfterLLMCallHooks(ctx, sess, a, modelID, content, usage, hookCost)
-	r.recordHarnessAssistantMessage(sess, a, content, modelID, usage, cost, events)
+	r.recordHarnessAssistantMessage(sess, a, content, modelID, usage, cost, presentation, events)
 	r.executeStopHooks(ctx, sess, a, content, events)
 
 	span.SetAttributes(attribute.Int("content.length", len(content)))
@@ -372,21 +379,29 @@ func harnessUsage(u *harness.Usage) *chat.Usage {
 	}
 }
 
-func (r *LocalRuntime) recordHarnessAssistantMessage(sess *session.Session, a *agent.Agent, content, modelID string, usage *chat.Usage, cost float64, events EventSink) {
-	if strings.TrimSpace(content) == "" && usage == nil {
+func (r *LocalRuntime) recordHarnessAssistantMessage(sess *session.Session, a *agent.Agent, content, modelID string, usage *chat.Usage, cost float64, presentation []chat.AssistantPart, events EventSink) {
+	if strings.TrimSpace(content) == "" && usage == nil && len(presentation) == 0 {
 		return
 	}
 
 	msg := chat.Message{
 		Role:         chat.MessageRoleAssistant,
 		Content:      content,
+		Presentation: presentation,
 		CreatedAt:    r.now().Format(time.RFC3339),
 		Usage:        usage,
 		Model:        modelID,
 		Cost:         cost,
 		FinishReason: chat.FinishReasonStop,
 	}
-	addAgentMessage(sess, a, &msg, events)
+	if strings.TrimSpace(content) == "" && usage == nil && len(presentation) > 0 {
+		message := session.NewAgentMessage(a.Name(), &msg)
+		message.DisplayOnly = true
+		pos := sess.AddMessageAt(message)
+		events.Emit(MessageAddedAt(sess.ID, message, a.Name(), pos))
+	} else {
+		addAgentMessage(sess, a, &msg, events)
+	}
 
 	if usage == nil {
 		return

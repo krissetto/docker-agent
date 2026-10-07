@@ -1268,7 +1268,16 @@ func (r *LocalRuntime) recordAssistantMessage(
 	cost *float64,
 	events EventSink,
 ) *MessageUsage {
-	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered {
+	displayOnly := strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && slices.ContainsFunc(res.Presentation, func(part chat.AssistantPart) bool {
+		return part.Type == chat.AssistantPartReasoning && part.Text != ""
+	})
+	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly {
+		if res.FinishReason == chat.FinishReasonRefusal {
+			message := chat.Message{Role: chat.MessageRoleAssistant, Content: res.Content, ReasoningContent: res.ReasoningContent, Presentation: res.Presentation, FinishReason: res.FinishReason}
+			boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &message), a.Name(), -1).(*MessageAddedEvent)
+			boundary.boundaryOnly = true
+			events.Emit(boundary)
+		}
 		slog.DebugContext(ctx, "Skipping empty assistant message (no content, no tool calls, and no generated media)", "agent", a.Name())
 		return nil
 	}
@@ -1331,6 +1340,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 		Role:              chat.MessageRoleAssistant,
 		Content:           res.Content,
 		ReasoningContent:  res.ReasoningContent,
+		Presentation:      res.Presentation,
 		ThinkingSignature: res.ThinkingSignature,
 		ThoughtSignature:  res.ThoughtSignature,
 		ToolCalls:         calls,
@@ -1364,7 +1374,14 @@ func (r *LocalRuntime) recordAssistantMessage(
 		events.Emit(boundary)
 		return nil
 	}
-	addAgentMessage(sess, a, &assistantMessage, events)
+	if displayOnly {
+		message := session.NewAgentMessage(a.Name(), &assistantMessage)
+		message.DisplayOnly = true
+		pos := sess.AddMessageAt(message)
+		events.Emit(MessageAddedAt(sess.ID, message, a.Name(), pos))
+	} else {
+		addAgentMessage(sess, a, &assistantMessage, events)
+	}
 	slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", len(sess.GetAllMessages()))
 
 	// Build per-message usage for the event.

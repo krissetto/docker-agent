@@ -60,6 +60,9 @@ type Message struct {
 	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
+	// Presentation preserves assistant display order; nil is legacy unordered history.
+	Presentation []AssistantPart `json:"presentation,omitempty"`
+
 	// ThinkingSignature is used for Anthropic's extended thinking feature
 	ThinkingSignature string `json:"thinking_signature,omitempty"`
 

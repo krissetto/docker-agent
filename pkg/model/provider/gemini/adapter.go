@@ -29,6 +29,7 @@ type StreamAdapter struct {
 	closeOnce  sync.Once
 	model      string
 	trackUsage bool
+	pending    []chat.MessageStreamResponse
 }
 
 type result struct {
@@ -180,6 +181,10 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	default:
 	}
 
+	if len(g.pending) > 0 {
+		return g.popPending(), nil
+	}
+
 	g.start()
 
 	var res result
@@ -232,79 +237,72 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			resp.Choices[0].FinishReason = chat.FinishReasonStop
 		}
 	} else if res.resp != nil {
-		// Handle text and thoughts separately so TUI can render them distinctly
-		var reasoningTextSb strings.Builder
-		var textContentSb strings.Builder
 		var thoughtSignature []byte
-		var media []chat.MediaDelta
-		for _, candidate := range res.resp.Candidates {
-			if candidate.Content != nil {
-				for _, part := range candidate.Content.Parts {
-					if len(part.ThoughtSignature) > 0 {
-						thoughtSignature = part.ThoughtSignature
-					}
-
-					if part.Text != "" {
-						if part.Thought {
-							reasoningTextSb.WriteString(part.Text)
-						} else {
-							textContentSb.WriteString(part.Text)
-						}
-					}
-
-					// Inline generated media (e.g. an image from an
-					// image-output model). Gemini can return more than one
-					// inline blob per chunk — multiple parts in one candidate,
-					// or multiple candidates — so every blob is appended
-					// rather than overwriting a single field, which used to
-					// silently drop all but the last one.
-					if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-						media = append(media, chat.MediaDelta{
-							Data:     part.InlineData.Data,
-							MimeType: part.InlineData.MIMEType,
-							Name:     part.InlineData.DisplayName,
-							Size:     int64(len(part.InlineData.Data)),
-						})
-					}
-				}
+		for candidateIndex, candidate := range res.resp.Candidates {
+			if candidate.Content == nil {
+				continue
 			}
-		}
-		reasoningText := reasoningTextSb.String()
-		textContent := textContentSb.String()
-		if reasoningText != "" {
-			resp.Choices[0].Delta.ReasoningContent = reasoningText
-		}
-		if textContent != "" {
-			resp.Choices[0].Delta.Content = textContent
-		}
-		if len(thoughtSignature) > 0 {
-			resp.Choices[0].Delta.ThoughtSignature = thoughtSignature
-		}
-		if len(media) > 0 {
-			resp.Choices[0].Delta.Media = media
-		}
+			for _, part := range candidate.Content.Parts {
+				if len(part.ThoughtSignature) > 0 {
+					thoughtSignature = part.ThoughtSignature
+				}
 
-		// Handle function calls
-		if funcs := res.resp.FunctionCalls(); len(funcs) > 0 {
-			toolCalls := make([]tools.ToolCall, 0, len(funcs))
-			for _, fc := range funcs {
-				argsJSON, _ := json.Marshal(fc.Args)
-				id := "call_" + uuid.New().String()
-				slog.Debug("Gemini: Function call", "name", fc.Name, "args", string(argsJSON), "id", id)
-				toolCalls = append(toolCalls, tools.ToolCall{
-					ID:   id,
-					Type: "function",
-					Function: tools.FunctionCall{
-						Name:      fc.Name,
-						Arguments: string(argsJSON),
-					},
+				delta := chat.MessageDelta{}
+				if part.Thought {
+					delta.ReasoningContent = part.Text
+				} else {
+					delta.Content = part.Text
+				}
+				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+					delta.Media = []chat.MediaDelta{{
+						Data:     part.InlineData.Data,
+						MimeType: part.InlineData.MIMEType,
+						Name:     part.InlineData.DisplayName,
+						Size:     int64(len(part.InlineData.Data)),
+					}}
+				}
+				// Match the SDK's FunctionCalls selection of the first candidate.
+				if fc := part.FunctionCall; candidateIndex == 0 && fc != nil {
+					argsJSON, _ := json.Marshal(fc.Args)
+					id := "call_" + uuid.New().String()
+					slog.Debug("Gemini: Function call", "name", fc.Name, "args", string(argsJSON), "id", id)
+					delta.ToolCalls = []tools.ToolCall{{
+						ID:   id,
+						Type: "function",
+						Function: tools.FunctionCall{
+							Name:      fc.Name,
+							Arguments: string(argsJSON),
+						},
+					}}
+				}
+				if delta.Content == "" && delta.ReasoningContent == "" && len(delta.Media) == 0 && len(delta.ToolCalls) == 0 {
+					continue
+				}
+				g.pending = append(g.pending, chat.MessageStreamResponse{
+					ID:      resp.ID,
+					Model:   resp.Model,
+					Choices: []chat.MessageStreamChoice{{Delta: delta}},
 				})
 			}
-			resp.Choices[0].Delta.ToolCalls = toolCalls
 		}
+		if len(g.pending) > 0 {
+			// Keep the chunk's last signature available before any tool call,
+			// as it was when all parts were emitted together.
+			g.pending[0].Choices[0].Delta.ThoughtSignature = thoughtSignature
+			g.pending[len(g.pending)-1].Usage = resp.Usage
+			return g.popPending(), nil
+		}
+		resp.Choices[0].Delta.ThoughtSignature = thoughtSignature
 	}
 
 	return resp, nil
+}
+
+func (g *StreamAdapter) popPending() chat.MessageStreamResponse {
+	resp := g.pending[0]
+	g.pending[0] = chat.MessageStreamResponse{}
+	g.pending = g.pending[1:]
+	return resp
 }
 
 // Close closes the stream

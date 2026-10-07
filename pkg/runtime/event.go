@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"cmp"
+	"slices"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -1372,9 +1373,7 @@ func MessageAddedAt(sessionID string, msg *session.Message, agentName string, po
 	if msg != nil {
 		event.GeneratedMedia = generatedMediaParts(msg)
 		event.MessageRole = msg.Message.Role
-		for _, call := range msg.Message.ToolCalls {
-			event.ToolCallIDs = append(event.ToolCallIDs, call.ID)
-		}
+		event.ToolCallIDs = event.CommittedToolCallIDs()
 	}
 	return event
 }
@@ -1392,7 +1391,14 @@ func (e *MessageAddedEvent) CommittedToolCallIDs() []string {
 	}
 	ids := make([]string, 0, len(e.Message.Message.ToolCalls))
 	for _, call := range e.Message.Message.ToolCalls {
-		ids = append(ids, call.ID)
+		if call.ID != "" && !slices.Contains(ids, call.ID) {
+			ids = append(ids, call.ID)
+		}
+	}
+	for _, part := range e.Message.Message.Presentation {
+		if part.Type == chat.AssistantPartToolCall && part.ToolCallID != "" && !slices.Contains(ids, part.ToolCallID) {
+			ids = append(ids, part.ToolCallID)
+		}
 	}
 	return ids
 }

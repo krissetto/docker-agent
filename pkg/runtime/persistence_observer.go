@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // PersistenceObserver writes only the emitting session's row. Failed effects
@@ -49,6 +51,7 @@ type persistenceEffect struct {
 type streamingState struct {
 	content          strings.Builder
 	reasoningContent strings.Builder
+	presentation     []chat.AssistantPart
 	agentName        string
 	messageID        int64
 	writeID          string
@@ -228,6 +231,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			j.streaming = st
 		}
 		st.content.WriteString(e.Content)
+		st.presentation = captureAssistantPresentation(st.presentation, e)
 		st.agentName = e.AgentName
 		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *AgentChoiceReasoningEvent:
@@ -237,8 +241,35 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			j.streaming = st
 		}
 		st.reasoningContent.WriteString(e.Content)
+		st.presentation = captureAssistantPresentation(st.presentation, e)
 		st.agentName = e.AgentName
 		p.persistStreamingContentLocked(ctx, id, j, st)
+	case *PartialToolCallEvent:
+		st := j.streaming
+		if st == nil {
+			st = &streamingState{}
+			j.streaming = st
+		}
+		st.agentName = e.AgentName
+		st.presentation = captureAssistantPresentation(st.presentation, e)
+		p.persistStreamingContentLocked(ctx, id, j, st)
+	case *ToolCallEvent:
+		st := j.streaming
+		if st == nil {
+			if e.ToolDefinition.Category != "harness" {
+				break
+			}
+			st = &streamingState{}
+			j.streaming = st
+		}
+		st.agentName = e.AgentName
+		st.presentation = captureAssistantPresentation(st.presentation, e)
+		p.persistStreamingContentLocked(ctx, id, j, st)
+	case *ToolCallResponseEvent:
+		if st := j.streaming; st != nil {
+			st.presentation = captureAssistantPresentation(st.presentation, e)
+			p.persistStreamingContentLocked(ctx, id, j, st)
+		}
 	case *UserMessageEvent:
 		j.streaming = nil
 		msg := QueuedMessage{Content: e.Message, MultiContent: e.MultiContent, InputOrigin: e.InputOrigin, SenderID: e.SenderID, SenderName: e.SenderName, ReportOutcome: e.ReportOutcome, InputMode: e.InputMode}
@@ -246,14 +277,25 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		message.TurnID = e.TurnID
 		appendItem(session.NewMessageItem(message), e.ownerMessage)
 	case *MessageAddedEvent:
+		if e.CommittedRole() == chat.MessageRoleUser {
+			j.streaming = nil
+		}
+		if e.CommittedRole() != chat.MessageRoleAssistant {
+			if e.Message != nil && !e.boundaryOnly {
+				message := *e.Message
+				appendItem(session.NewMessageItem(&message), e.ownerMessage)
+			}
+			break
+		}
 		st := j.streaming
 		j.streaming = nil
-		if e.boundaryOnly {
+		if e.boundaryOnly && (e.Message.Message.FinishReason != chat.FinishReasonRefusal || st == nil || st.writeID == "") {
 			break
 		}
 		message := *e.Message
 		if st != nil && st.writeID != "" {
-			p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+			data, _ := json.Marshal(message)
+			p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
 				if err := p.store.UpdateMessage(ctx, id, st.messageID, &message); err != nil {
 					return err
 				}
@@ -302,14 +344,18 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 }
 
 func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context, id string, j *sessionPersistenceJournal, st *streamingState) {
-	message := &session.Message{AgentName: st.agentName, Message: chat.Message{Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String()}}
+	message := &session.Message{AgentName: st.agentName, Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String(),
+		Presentation: cloneAssistantPresentation(st.presentation),
+	}}
+	data, _ := json.Marshal(message)
 	if st.writeID == "" {
 		writeID, err := newSessionRequestID()
 		if err != nil {
 			return
 		}
 		st.writeID = writeID
-		p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+		p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
 			rowID, err := p.appendItem(ctx, id, writeID, session.NewMessageItem(message))
 			if err == nil {
 				st.messageID = rowID
@@ -317,7 +363,7 @@ func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context,
 			return err
 		})
 	} else {
-		p.enqueueLocked(ctx, j, len(message.Message.Content)+len(message.Message.ReasoningContent)+128, func(ctx context.Context) error {
+		p.enqueueLocked(ctx, j, len(data), func(ctx context.Context) error {
 			return p.store.UpdateMessage(ctx, id, st.messageID, message)
 		})
 	}
@@ -372,4 +418,84 @@ func (p *PersistenceObserver) publishMessageID(ctx context.Context, id string, r
 		d.sess.PublishMessageID(receipt, rowID)
 		return nil
 	})
+}
+
+func captureAssistantPresentation(parts []chat.AssistantPart, event Event) []chat.AssistantPart {
+	var call tools.ToolCall
+	var definition *tools.Tool
+	var result *string
+	var isError, delta bool
+	switch e := event.(type) {
+	case *AgentChoiceEvent:
+		return chat.AppendAssistantPart(parts, chat.AssistantPart{Type: chat.AssistantPartContent, Text: e.Content})
+	case *AgentChoiceReasoningEvent:
+		return chat.AppendAssistantPart(parts, chat.AssistantPart{Type: chat.AssistantPartReasoning, Text: e.Content})
+	case *PartialToolCallEvent:
+		call, definition, delta = e.ToolCall, e.ToolDefinition, true
+	case *ToolCallEvent:
+		call, definition = e.ToolCall, &e.ToolDefinition
+	case *ToolCallResponseEvent:
+		call.ID, definition, result = e.ToolCallID, &e.ToolDefinition, &e.Response
+		if e.Result != nil {
+			isError = e.Result.IsError
+		}
+	default:
+		return parts
+	}
+	idx := slices.IndexFunc(parts, func(part chat.AssistantPart) bool {
+		return part.Type == chat.AssistantPartToolCall && part.ToolCallID == call.ID
+	})
+	if idx < 0 {
+		if call.ID == "" || result != nil {
+			return parts
+		}
+		parts = chat.AppendAssistantPart(parts, chat.AssistantPart{Type: chat.AssistantPartToolCall, ToolCallID: call.ID, Tool: &chat.AssistantTool{}})
+		idx = len(parts) - 1
+	}
+	tool := parts[idx].Tool
+	if tool == nil {
+		tool = &chat.AssistantTool{}
+		parts[idx].Tool = tool
+	}
+	if result != nil {
+		output := *result
+		tool.Result, tool.IsError = &output, isError
+		return parts
+	}
+	if delta {
+		tool.Call.ID = call.ID
+		if call.Type != "" {
+			tool.Call.Type = call.Type
+		}
+		if call.Function.Name != "" {
+			tool.Call.Function.Name = call.Function.Name
+		}
+		tool.Call.Function.Arguments += call.Function.Arguments
+	} else {
+		arguments := tool.Call.Function.Arguments
+		tool.Call = call
+		if call.Function.Arguments == "" {
+			tool.Call.Function.Arguments = arguments
+		}
+	}
+	if definition != nil {
+		tool.Definition = cloneLiveToolDefinition(*definition)
+	}
+	return parts
+}
+
+func cloneAssistantPresentation(parts []chat.AssistantPart) []chat.AssistantPart {
+	cloned := slices.Clone(parts)
+	for i := range cloned {
+		if tool := cloned[i].Tool; tool != nil {
+			copyTool := *tool
+			copyTool.Definition = cloneLiveToolDefinition(tool.Definition)
+			if tool.Result != nil {
+				result := *tool.Result
+				copyTool.Result = &result
+			}
+			cloned[i].Tool = &copyTool
+		}
+	}
+	return cloned
 }

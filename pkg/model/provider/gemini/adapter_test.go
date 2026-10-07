@@ -255,6 +255,10 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 		resp, err := adapter.Recv()
 		require.NoError(t, err)
 		assert.Equal(t, "here you go", resp.Choices[0].Delta.Content, "text handling must remain intact alongside media")
+		require.Empty(t, resp.Choices[0].Delta.Media)
+		resp, err = adapter.Recv()
+		require.NoError(t, err)
+		require.Empty(t, resp.Choices[0].Delta.Content)
 		require.Len(t, resp.Choices[0].Delta.Media, 1)
 		assert.Equal(t, imgBytes, resp.Choices[0].Delta.Media[0].Data)
 		assert.Equal(t, "image/jpeg", resp.Choices[0].Delta.Media[0].MimeType)
@@ -320,11 +324,161 @@ func TestStreamAdapter_GeneratedImage(t *testing.T) {
 		}
 		adapter := NewStreamAdapter(iter, "test-model", true)
 
+		for _, name := range []string{"first.png", "second.jpg", "third.webp"} {
+			resp, err := adapter.Recv()
+			require.NoError(t, err)
+			require.Len(t, resp.Choices[0].Delta.Media, 1)
+			assert.Equal(t, name, resp.Choices[0].Delta.Media[0].Name)
+		}
+		done, err := adapter.Recv()
+		require.NoError(t, err)
+		assert.Equal(t, chat.FinishReasonStop, done.Choices[0].FinishReason)
+	})
+}
+
+func TestStreamAdapter_OrderedParts(t *testing.T) {
+	t.Parallel()
+
+	chunk := &genai.GenerateContentResponse{
+		ResponseID: "ordered-response",
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{
+				{Text: "before"},
+				{Text: "thinking", Thought: true, ThoughtSignature: []byte("first")},
+				{FunctionCall: &genai.FunctionCall{Name: "first_tool", Args: map[string]any{"n": 1}}},
+				{Text: "between"},
+				{FunctionCall: &genai.FunctionCall{Name: "second_tool", Args: map[string]any{}}, ThoughtSignature: []byte("last")},
+				{Text: "more thinking", Thought: true},
+				{Text: "after"},
+			}},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount: 12, CachedContentTokenCount: 2,
+			CandidatesTokenCount: 3, ThoughtsTokenCount: 4,
+		},
+	}
+	adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+		yield(chunk, nil)
+	}, "test-model", true)
+	t.Cleanup(adapter.Close)
+
+	var toolIDs []string
+	for i, want := range []struct {
+		text, reasoning, tool string
+	}{
+		{text: "before"},
+		{reasoning: "thinking"},
+		{tool: "first_tool"},
+		{text: "between"},
+		{tool: "second_tool"},
+		{reasoning: "more thinking"},
+		{text: "after"},
+	} {
 		resp, err := adapter.Recv()
 		require.NoError(t, err)
-		require.Len(t, resp.Choices[0].Delta.Media, 3, "every blob in the chunk must be retained")
-		assert.Equal(t, "first.png", resp.Choices[0].Delta.Media[0].Name)
-		assert.Equal(t, "second.jpg", resp.Choices[0].Delta.Media[1].Name)
-		assert.Equal(t, "third.webp", resp.Choices[0].Delta.Media[2].Name)
-	})
+		require.Len(t, resp.Choices, 1)
+		assert.Equal(t, "ordered-response", resp.ID)
+		assert.Equal(t, "test-model", resp.Model)
+		assert.Empty(t, resp.Choices[0].FinishReason)
+		delta := resp.Choices[0].Delta
+		assert.Equal(t, want.text, delta.Content)
+		assert.Equal(t, want.reasoning, delta.ReasoningContent)
+		if want.tool == "" {
+			assert.Empty(t, delta.ToolCalls)
+		} else {
+			require.Len(t, delta.ToolCalls, 1)
+			call := delta.ToolCalls[0]
+			assert.Equal(t, want.tool, call.Function.Name)
+			assert.Equal(t, "function", string(call.Type))
+			assert.NotEmpty(t, call.ID)
+			toolIDs = append(toolIDs, call.ID)
+			if want.tool == "first_tool" {
+				assert.JSONEq(t, `{"n":1}`, call.Function.Arguments)
+			}
+		}
+		if i == 0 {
+			assert.Equal(t, []byte("last"), delta.ThoughtSignature)
+		} else {
+			assert.Empty(t, delta.ThoughtSignature)
+		}
+		if i == 6 {
+			require.NotNil(t, resp.Usage)
+			assert.Equal(t, int64(10), resp.Usage.InputTokens)
+			assert.Equal(t, int64(7), resp.Usage.OutputTokens)
+			assert.Equal(t, int64(2), resp.Usage.CachedInputTokens)
+			assert.Equal(t, int64(4), resp.Usage.ReasoningTokens)
+		} else {
+			assert.Nil(t, resp.Usage)
+		}
+	}
+	assert.NotEqual(t, toolIDs[0], toolIDs[1])
+	final, err := adapter.Recv()
+	require.NoError(t, err)
+	assert.Equal(t, chat.FinishReasonToolCalls, final.Choices[0].FinishReason)
+	assert.Equal(t, string(chat.MessageRoleAssistant), final.Choices[0].Delta.Role)
+	assert.Empty(t, final.Choices[0].Delta.ToolCalls)
+	assert.Empty(t, final.Choices[0].Delta.Content)
+	require.NotNil(t, final.Usage)
+	assert.Equal(t, int64(7), final.Usage.OutputTokens)
+	_, err = adapter.Recv()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestStreamAdapter_CloseWithPendingParts(t *testing.T) {
+	t.Parallel()
+	adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+		yield(&genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: "first"}, {Text: "second"}}},
+		}}}, nil)
+	}, "test-model", true)
+	resp, err := adapter.Recv()
+	require.NoError(t, err)
+	assert.Equal(t, "first", resp.Choices[0].Delta.Content)
+	adapter.Close()
+	_, err = adapter.Recv()
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestStreamAdapter_OrderedChunks(t *testing.T) {
+	t.Parallel()
+	adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+		for _, parts := range [][]*genai.Part{
+			{{Text: "first"}, {Text: "second", Thought: true}, {ThoughtSignature: []byte("signature")}},
+			{{Text: "third"}},
+		} {
+			if !yield(&genai.GenerateContentResponse{
+				Candidates:    []*genai.Candidate{{Content: &genai.Content{Parts: parts}}},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5},
+			}, nil) {
+				return
+			}
+		}
+	}, "test-model", false)
+	t.Cleanup(adapter.Close)
+
+	for i, want := range []string{"first", "second", "third"} {
+		resp, err := adapter.Recv()
+		require.NoError(t, err)
+		delta := resp.Choices[0].Delta
+		if i == 1 {
+			assert.Equal(t, want, delta.ReasoningContent)
+			assert.Empty(t, delta.Content)
+		} else {
+			assert.Equal(t, want, delta.Content)
+			assert.Empty(t, delta.ReasoningContent)
+		}
+		if i == 0 {
+			assert.Equal(t, []byte("signature"), delta.ThoughtSignature)
+		} else {
+			assert.Empty(t, delta.ThoughtSignature)
+		}
+		assert.Empty(t, resp.Choices[0].FinishReason)
+		assert.Nil(t, resp.Usage)
+	}
+	final, err := adapter.Recv()
+	require.NoError(t, err)
+	assert.Equal(t, chat.FinishReasonStop, final.Choices[0].FinishReason)
+	assert.Nil(t, final.Usage)
+	_, err = adapter.Recv()
+	require.ErrorIs(t, err, io.EOF)
 }

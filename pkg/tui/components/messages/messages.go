@@ -2152,6 +2152,84 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 			msg.SessionPosition = &msgPos
 			appendSessionMessage(msg, m.createMessageView(msg))
 		case chat.MessageRoleAssistant:
+			if smsg.Message.Presentation != nil {
+				var block *reasoningblock.Model
+				contentIdx := -1
+				for _, part := range smsg.Message.Presentation {
+					switch part.Type {
+					case chat.AssistantPartReasoning:
+						if part.Text == "" {
+							continue
+						}
+						if block == nil {
+							block = newReasoningBlock(smsg.AgentName)
+						}
+						block.AppendReasoningSegment(part.Text)
+						m.messages[len(m.messages)-1].Content += part.Text
+					case chat.AssistantPartContent:
+						if part.Text == "" {
+							continue
+						}
+						block = nil
+						msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, part.Text)
+						appendSessionMessage(msg, m.createMessageView(msg))
+						contentIdx = len(m.messages) - 1
+					case chat.AssistantPartToolCall:
+						var tc tools.ToolCall
+						var toolDef tools.Tool
+						if part.Tool != nil {
+							tc, toolDef = part.Tool.Call, part.Tool.Definition
+						} else {
+							for i, call := range smsg.Message.ToolCalls {
+								if call.ID == part.ToolCallID {
+									tc = call
+									if i < len(smsg.Message.ToolDefinitions) {
+										toolDef = smsg.Message.ToolDefinitions[i]
+									}
+									break
+								}
+							}
+						}
+						if tc.ID == "" {
+							continue
+						}
+						status := types.ToolStatusCompleted
+						result, hasResult := toolResults[tc.ID]
+						if part.Tool != nil {
+							if part.Tool.Result != nil {
+								result, hasResult = *part.Tool.Result, true
+							}
+							if part.Tool.IsError {
+								status = types.ToolStatusError
+							}
+						}
+						toolMsg := types.ToolCallMessage(smsg.AgentName, tc, toolDef, status)
+						if block != nil {
+							block.AddToolCall(toolMsg)
+							if hasResult {
+								block.UpdateToolResult(tc.ID, result, status, nil)
+							}
+						} else {
+							if hasResult {
+								toolMsg.Content = strings.ReplaceAll(result, "\t", "    ")
+							}
+							appendSessionMessage(toolMsg, m.createToolCallView(toolMsg))
+						}
+					}
+				}
+				if media := generatedMedia[pos]; len(media) > 0 {
+					if contentIdx >= 0 {
+						m.messages[contentIdx].AssistantMedia = media
+						m.views[contentIdx].(message.Model).SetMessage(m.messages[contentIdx])
+					} else {
+						msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, "")
+						msg.AssistantMedia = media
+						appendSessionMessage(msg, m.createMessageView(msg))
+					}
+				}
+				return
+			}
+			// Legacy aggregates cannot recover the original interleaving.
 			hasReasoning := smsg.Message.ReasoningContent != ""
 			hasContent := smsg.Message.Content != ""
 			hasToolCalls := len(smsg.Message.ToolCalls) > 0
@@ -2443,8 +2521,8 @@ func (m *model) CompleteAssistant(event *runtime.MessageAddedEvent) tea.Cmd {
 	start := m.committedMessageCount
 	cmd := m.CommitAssistant(event.GetAgentName(), event.CommittedToolCallIDs())
 	m.committedMessageCount = min(start, len(m.messages))
-	// Tool bubbles may split the streamed text; they already own their content.
-	if event.Message != nil && len(event.Message.Message.ToolCalls) == 0 {
+	// Ordered streams and tool bubbles already own their text; aggregates lose interleaving.
+	if event.Message != nil && event.Message.Message.Presentation == nil && len(event.Message.Message.ToolCalls) == 0 {
 		cmd = tea.Batch(cmd, m.FinalizeStreamedAssistant(event.GetAgentName(), event.Message.Message.Content, event.Message.Message.ReasoningContent, false))
 	}
 	m.committedMessageCount = len(m.messages)
@@ -2685,7 +2763,7 @@ func (m *model) getActiveReasoningBlock(agentName string) (*reasoningblock.Model
 	lastIdx := len(m.messages) - 1
 	lastMsg := m.messages[lastIdx]
 
-	if lastMsg.Type == types.MessageTypeAssistantReasoningBlock && lastMsg.Sender == agentName {
+	if lastIdx >= max(m.loadedMessageCount, m.committedMessageCount) && lastMsg.Type == types.MessageTypeAssistantReasoningBlock && lastMsg.Sender == agentName {
 		if block, ok := m.views[lastIdx].(*reasoningblock.Model); ok {
 			return block, lastIdx
 		}

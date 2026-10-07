@@ -555,6 +555,8 @@ type Message struct {
 	// like when an agent transfers a task to another agent - new session is created with a default user message, but this shouldn't be shown to the user.
 	// Such messages should be marked as true
 	Implicit bool `json:"implicit,omitempty"`
+	// DisplayOnly preserves response boundaries without adding provider input.
+	DisplayOnly bool `json:"display_only,omitempty"`
 	// Pending keeps an accepted user message visible and durable while excluding
 	// it from model input until its session turn is promoted.
 	Pending       bool          `json:"pending,omitempty"`
@@ -802,6 +804,21 @@ func (s *Session) snapshotItems() []Item {
 // cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
 func cloneChatMessage(m chat.Message) chat.Message {
+	if m.Presentation != nil {
+		m.Presentation = slices.Clone(m.Presentation)
+		for i := range m.Presentation {
+			if original := m.Presentation[i].Tool; original != nil {
+				tool := *original
+				tool.Definition = cloneToolDefinitions([]tools.Tool{original.Definition})[0]
+				tool.Definition.Metadata = maps.Clone(original.Definition.Metadata)
+				if original.Result != nil {
+					result := *original.Result
+					tool.Result = &result
+				}
+				m.Presentation[i].Tool = &tool
+			}
+		}
+	}
 	if m.MultiContent != nil {
 		orig := m.MultiContent
 		m.MultiContent = make([]chat.MessagePart, len(orig))
@@ -2372,7 +2389,7 @@ func (s *Session) CompactionInput() ([]chat.Message, []int, int) {
 	}
 
 	for i := startIndex; i < len(items); i++ {
-		if !items[i].IsMessage() || (items[i].Message.Pending || items[i].Message.InputMode == "legacy_run") {
+		if !items[i].IsMessage() || (items[i].Message.Pending || items[i].Message.DisplayOnly || items[i].Message.InputMode == "legacy_run") {
 			continue
 		}
 		msg := items[i].Message.Message
@@ -2513,7 +2530,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, pr
 			})
 			updateIndex++
 		}
-		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending && items[i].Message.InputMode != "legacy_run" {
+		if i < len(items) && items[i].IsMessage() && !items[i].Message.Pending && !items[i].Message.DisplayOnly && items[i].Message.InputMode != "legacy_run" {
 			if project != nil {
 				project(items[i].Message)
 			}

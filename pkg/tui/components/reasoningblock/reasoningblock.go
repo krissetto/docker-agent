@@ -202,6 +202,17 @@ func (m *Model) AppendReasoning(content string) {
 	}
 }
 
+// AppendReasoningSegment preserves a recorded boundary even when a removed tool
+// leaves two reasoning segments adjacent.
+func (m *Model) AppendReasoningSegment(content string) {
+	if content == "" {
+		return
+	}
+	m.contentItems = append(m.contentItems, contentItem{kind: contentItemReasoning, reasoning: content})
+	m.reasoningVersion++
+	m.cache = nil
+}
+
 // Reasoning returns the full reasoning content (concatenated from all reasoning items).
 func (m *Model) Reasoning() string {
 	var parts []string
