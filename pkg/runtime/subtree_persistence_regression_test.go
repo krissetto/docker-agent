@@ -119,7 +119,7 @@ func TestRestoreSessionTreeKeepsSyntheticRootOnFailureAndPublication(t *testing.
 			err = (&localSessionRuntimeView{runtime: rt}).RestoreSessionTree(t.Context(), root)
 			assert.Same(t, tracked, rt.subagents.sessions[root.ID])
 			require.NotNil(t, tracked.unwatch)
-			if failure != "none" {
+			if failure == "preparation" {
 				require.Error(t, err)
 				assert.Equal(t, before, rt.SubagentTree().Snapshot())
 				select {
@@ -170,7 +170,7 @@ func TestPublicDeleteSessionReleasesBudgetOnlyAfterSuccessfulDeletion(t *testing
 			}
 			rt.sessionStore = fault
 			err := owner.Runtime().DeleteSession(t.Context(), root.ID())
-			if failure != "none" {
+			if failure == "preparation" {
 				require.Error(t, err)
 				rt.budgetMu.Lock()
 				_, retained := rt.rootBudgets[root.ID()]

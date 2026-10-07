@@ -206,24 +206,8 @@ func advanceSessionCatalog(query url.Values, seen map[string]bool, cursor string
 }
 
 func (r *SessionTransport) LoadSession(ctx context.Context, id string) (SessionHandle, *session.Session, error) {
-	handle, err := r.SessionByID(id)
-	if err != nil {
-		return nil, nil, err
-	}
-	if hydrator, ok := handle.(Hydrator); ok {
-		if err := hydrator.Hydrate(ctx); err != nil {
-			var sessionErr *SessionError
-			if !errors.As(err, &sessionErr) || sessionErr.Kind != SessionErrorUnsupported {
-				return nil, nil, err
-			}
-		}
-	}
-	observation, err := handle.Observe(ctx, ObserveOptions{})
-	if err != nil {
-		return nil, nil, err
-	}
-	defer observation.Cancel()
-	return handle, observation.Primary().Session, nil
+	committed, err := RestoreSessionView(ctx, r, id)
+	return committed.SessionHandle, committed.Info.Session, err
 }
 
 type remoteSession struct {

@@ -53,24 +53,15 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	var sess *session.Session
 	if id != "" {
 		var err error
-		handle, err = transport.SessionByID(id)
+		reader := runtime.SessionViewInfoReader(transport)
+		info, readErr := reader.ConfirmedSessionViewInfo(ctx, id)
+		err = readErr
 		if err == nil {
-			err = handle.(runtime.Hydrator).Hydrate(ctx)
-		}
-		if err == nil {
-			sess, err = handle.Snapshot(ctx)
-		}
-		if err != nil {
-			var sessionErr *runtime.SessionError
-			if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound || session.IsRelativeSessionRef(req.ResumeSessionID) {
-				return nil, nil, err
-			}
-			handle = nil
-		} else {
+			sess = info.Session
 			if sess == nil || sess.ID != id {
 				return nil, nil, errors.New("remote snapshot has invalid session identity")
 			}
-			if source := sess.AttributesSnapshot()[sessionActorSourceAttribute]; source != b.agentFileName {
+			if sess.AttributesSnapshot()[sessionActorSourceAttribute] != b.agentFileName {
 				return nil, nil, errors.New("remote session belongs to a different source")
 			}
 			if req.WorkingDir != "" && sess.WorkingDir != req.WorkingDir {
@@ -79,6 +70,17 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 			if sess.ParentID != "" {
 				return nil, nil, errors.New("child sessions require confirmed session view attachment")
 			}
+			committed, commitErr := runtime.RestoreSessionView(ctx, transport, id)
+			err = commitErr
+			handle, sess = committed.SessionHandle, committed.Info.Session
+		}
+
+		if err != nil {
+			var sessionErr *runtime.SessionError
+			if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound || session.IsRelativeSessionRef(req.ResumeSessionID) {
+				return nil, nil, err
+			}
+			handle = nil
 		}
 	}
 	agentName := req.AgentName

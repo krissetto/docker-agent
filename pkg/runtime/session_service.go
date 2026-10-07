@@ -212,31 +212,8 @@ func (s *SessionService) runtimeForSession(ctx context.Context, id string) (*Loc
 }
 
 func (s *SessionService) LoadSession(ctx context.Context, id string) (SessionHandle, *session.Session, error) {
-	if handle, err := s.SessionByID(id); err == nil {
-		snapshot, err := handle.Snapshot(ctx)
-		return handle, snapshot, err
-	}
-	r, err := s.runtimeForSession(ctx, id)
-	if err != nil {
-		return nil, nil, err
-	}
-	stored, err := r.sessionStore.GetSession(ctx, id)
-	if err != nil {
-		return nil, nil, err
-	}
-	if stored.ParentID != "" {
-		prepared, err := (&localSessionRuntimeView{runtime: r}).PrepareSessionView(ctx, id)
-		if err != nil {
-			return nil, nil, err
-		}
-		defer prepared.Abort()
-		committed, err := prepared.Commit(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		return committed.SessionHandle, committed.Info.Session, nil
-	}
-	return (&localSessionRuntimeView{runtime: r}).LoadSession(ctx, id)
+	committed, err := RestoreSessionView(ctx, &serviceSessionRuntime{service: s}, id)
+	return committed.SessionHandle, committed.Info.Session, err
 }
 
 func (s *SessionService) Shutdown(ctx context.Context) error {

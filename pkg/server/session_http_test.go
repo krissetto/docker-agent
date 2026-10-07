@@ -215,6 +215,7 @@ func newSessionHTTPServer(t *testing.T, registry *httpSessionRegistry) (*Server,
 	t.Helper()
 	store := session.NewInMemorySessionStore()
 	registry.store = store
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	return NewWithManager(sm, ""), store
 }
@@ -783,9 +784,9 @@ func TestSessionHTTPPersistedSessionRestoresUsingServerOwnedSource(t *testing.T)
 	ambiguous := session.New(session.WithID("ambiguous"), session.WithAgentName("worker"))
 	require.NoError(t, store.AddSession(t.Context(), ambiguous))
 	failed := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/ambiguous/status", "", "")
-	assert.Equal(t, http.StatusNotImplemented, failed.Code, failed.Body.String())
-	assert.Contains(t, failed.Body.String(), `"error":"unsupported"`)
-	assert.Contains(t, failed.Body.String(), `"operation":"attach"`)
+	assert.Equal(t, http.StatusBadRequest, failed.Code, failed.Body.String())
+	assert.Contains(t, failed.Body.String(), `"error":"invalid"`)
+	assert.Contains(t, failed.Body.String(), `"operation":"source"`)
 	assert.Equal(t, "persisted", second.created.ID, "caller ID must not route an ambiguous source")
 }
 
@@ -876,6 +877,7 @@ func TestSessionHTTPCatalogDoesNotCreateObserversAndKeepsUnknownStatus(t *testin
 	store := session.NewInMemorySessionStore()
 	sess := session.New(session.WithID("session"), session.WithAgentName("root"))
 	require.NoError(t, store.AddSession(t.Context(), sess))
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{handle: a, registry: registry})
 	srv := NewWithManager(sm, "")
@@ -902,6 +904,7 @@ func TestSessionHTTPConcurrentColdRootRestorePublishesOnce(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	root := session.New(session.WithID("cold-root"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}))
 	require.NoError(t, store.AddSession(t.Context(), root))
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "")
 
@@ -967,6 +970,7 @@ func TestSessionCatalogDefersDurableMembershipUntilSelection(t *testing.T) {
 	rootNode := subagent.SessionRootID(root.ID)
 	snapshot := &subagent.Snapshot{Root: rootNode, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootNode, Agent: "root"}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-node", Agent: "worker", Parent: rootNode, SessionID: child.ID}, Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "nested-node", Agent: "worker", Parent: "child-node", SessionID: nested.ID}}}}}}}}
 	registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, snapshots: map[string]*subagent.Snapshot{root.ID: snapshot}}
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "")
 	rec := sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
@@ -1018,6 +1022,7 @@ func TestSessionCatalogRejectsTreeBindingMismatches(t *testing.T) {
 			_ = parentSession
 			snapshot := &subagent.Snapshot{Root: rootNode, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootNode, Agent: "root"}, Children: children}}}
 			registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, snapshots: map[string]*subagent.Snapshot{root.ID: snapshot}}
+			registry.store = store
 			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 			rec := sessionRequest(t, NewWithManager(sm, ""), http.MethodGet, "/api/v2/sessions?include_children=true", "", "")
 			var catalog sessionCatalogDTO
@@ -1062,6 +1067,7 @@ func TestSessionTreeRootIdentityAndBindingRejectCatalogAndColdRecovery(t *testin
 				}},
 			}
 			registry := &httpTreeRegistry{httpSessionRegistry: &httpSessionRegistry{sessions: map[string]*httpSession{}}, snapshots: map[string]*subagent.Snapshot{root.ID: snapshot}}
+			registry.store = store
 			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 			srv := NewWithManager(sm, "")
 
@@ -1116,6 +1122,7 @@ func TestSessionRestoreLocksCleanupSuccessAndFailure(t *testing.T) {
 	bad := session.New(session.WithID("bad"))
 	require.NoError(t, store.AddSession(t.Context(), good))
 	require.NoError(t, store.AddSession(t.Context(), bad))
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "")
 	assert.Equal(t, http.StatusOK, sessionRequest(t, srv, http.MethodGet, "/api/v2/sessions/good/status", "", "").Code)
@@ -1190,6 +1197,7 @@ func TestSessionHTTPBodyLimitsAndAttachUnaffected(t *testing.T) {
 	a := &httpSession{id: "session", agent: "root", attach: runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: session.New(session.WithID("session")), Status: runtime.SessionStatus{SessionID: "session", State: runtime.SessionStateSettled}}}, Events: live, Cancel: func() {}}}
 	registry := &httpSessionRegistry{sessions: map[string]*httpSession{"session": a}}
 	store := session.NewInMemorySessionStore()
+	registry.store = store
 	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(registry))
 	srv := NewWithManager(sm, "", WithMaxRequestBytes(128))
 	oversized := strings.Repeat("x", 256)
@@ -1401,3 +1409,67 @@ func TestSessionHTTPEpochMismatchCarriesFreshBaseline(t *testing.T) {
 }
 
 func (a *httpSession) StopSubtree(context.Context) error { a.stops++; return nil }
+
+func (r *httpSessionRegistry) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	return prepareHTTPFixture(ctx, r, nil, id)
+}
+func (r *httpTreeRegistry) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	return prepareHTTPFixture(ctx, r.httpSessionRegistry, r, id)
+}
+func prepareHTTPFixture(ctx context.Context, r *httpSessionRegistry, tree *httpTreeRegistry, id string) (runtime.PreparedSessionView, error) {
+	if r.store == nil {
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	selected, err := r.store.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	bound := selected.AttributesSnapshot()[sessionAgentAttribute]
+	if bound == "" {
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	root := selected
+	for root.ParentID != "" {
+		root, err = r.store.GetSession(ctx, root.ParentID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if selected.ParentID != "" {
+		if tree == nil {
+			return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+		}
+		index := newSessionCatalogIndex([]*session.Session{root, selected})
+		if err := index.validateChild(ctx, tree, selected, root); err != nil {
+			return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
+		}
+	}
+	return &httpPreparedFixture{registry: r, selected: selected, root: root, binding: runtime.SessionBinding{AgentName: bound}}, nil
+}
+
+type httpPreparedFixture struct {
+	registry       *httpSessionRegistry
+	selected, root *session.Session
+	binding        runtime.SessionBinding
+}
+
+func (p *httpPreparedFixture) Info() runtime.PreparedSessionViewInfo {
+	return runtime.PreparedSessionViewInfo{SessionID: p.selected.ID, RootSessionID: p.root.ID, Session: p.selected, WorkingDir: p.selected.WorkingDir, ActiveAgentName: p.binding.AgentName, Binding: p.binding}
+}
+func (p *httpPreparedFixture) Abort() {}
+func (p *httpPreparedFixture) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
+	r := p.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	handle := r.sessions[p.selected.ID]
+	if handle == nil {
+		selected := p.selected.Clone()
+		selected.AgentName = p.binding.AgentName
+		handle = &httpSession{id: selected.ID, agent: p.binding.AgentName, snapshot: selected}
+		r.sessions[selected.ID] = handle
+		r.created = selected
+		r.binding = p.binding
+		r.createCount++
+	}
+	return runtime.CommittedSessionView{SessionHandle: handle, Info: p.Info()}, nil
+}

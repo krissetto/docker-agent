@@ -42,16 +42,40 @@ func (b *remoteBackend) Restorer(services app.Services, sessions runtime.Session
 		if id == "" {
 			return tui.SpawnedSession{}, errors.New("cannot restore an empty remote session ID")
 		}
-		handle, err := sessions.SessionByID(id)
+		reader, ok := sessions.(runtime.SessionViewInfoReader)
+		if !ok {
+			return tui.SpawnedSession{}, runtime.UnsupportedSessionOperation(id, "prepare_view")
+		}
+		info, err := reader.ConfirmedSessionViewInfo(ctx, id)
 		if err != nil {
 			return tui.SpawnedSession{}, err
 		}
-		if hydrator, ok := handle.(runtime.Hydrator); ok {
-			if err := hydrator.Hydrate(ctx); err != nil {
+		if info.Session == nil || info.Session.AttributesSnapshot()[sessionActorSourceAttribute] != b.agentFileName {
+			return tui.SpawnedSession{}, errors.New("remote session belongs to a different source")
+		}
+		if b.flags.sessionViewHost != nil {
+			application, err := b.flags.restoreHostedSession(ctx, id)
+			if err != nil {
 				return tui.SpawnedSession{}, err
 			}
+			return tui.SpawnedSession{App: application, Session: application.Session(), Ownership: tui.RuntimeBorrowed}, nil
 		}
-		return b.remoteAttachedApp(ctx, services, sessions, handle)
+		committed, err := runtime.RestoreSessionView(ctx, sessions, id)
+		if err != nil {
+			return tui.SpawnedSession{}, err
+		}
+		opts := []app.Opt{app.WithRuntimeServices(services)}
+		if b.flags.sessionReadOnly {
+			opts = append(opts, app.WithReadOnly())
+		}
+		if committed.Info.Attach != nil {
+			opts = append(opts, app.WithSubagentAttach(*committed.Info.Attach))
+		}
+		application, err := app.NewResolved(ctx, sessions, committed, opts...)
+		if err != nil {
+			return tui.SpawnedSession{}, err
+		}
+		return tui.SpawnedSession{App: application, Session: application.Session(), Ownership: tui.RuntimeBorrowed}, nil
 	}
 }
 

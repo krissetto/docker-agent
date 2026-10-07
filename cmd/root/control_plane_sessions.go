@@ -257,26 +257,11 @@ func (c *controlPlaneSessions) RestoreSessionTree(ctx context.Context, root *ses
 	if root == nil {
 		return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, Operation: "restore_tree"}
 	}
-	if c.host != nil && c.host.sessionViewHost != nil {
-		return c.host.sessionViewHost.WithSessionOwner(ctx, root.ID, func(ctx context.Context, resources viewhost.ViewOwnerResources) error {
-			restorer, ok := resources.Sessions.(runtime.TreeRestorer)
-			if !ok {
-				return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: root.ID, Operation: "restore_child_tree"}
-			}
-			return restorer.RestoreSessionTree(ctx, root)
-		})
+	committed, err := runtime.RestoreSessionView(ctx, c, root.ID)
+	if err == nil {
+		root.SetSubagentTree(committed.Info.Session.GetSubagentTree())
 	}
-	owner, release := c.owner(root.ID)
-	defer release()
-	restorer, ok := owner.rt.(runtime.TreeRestorer)
-	if !ok {
-		return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: root.ID, Operation: "restore_child_tree"}
-	}
-	if err := restorer.RestoreSessionTree(ctx, root); err != nil {
-		return err
-	}
-	c.cache(root.ID, owner)
-	return nil
+	return err
 }
 
 func (c *controlPlaneSessions) SwitchAgent(ctx context.Context, sessionID, targetAgent string) (runtime.SessionHandle, *session.Session, error) {

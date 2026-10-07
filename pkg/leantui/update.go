@@ -601,26 +601,29 @@ func (m *model) resumeSession(ctx context.Context, sessionID string) {
 		m.addNotice("✗ ", "Session is not from the current directory", ui.StError())
 		return
 	}
-	loader, ok := m.app.SessionRuntime().(runtime.SessionLoader)
-	if !ok {
-		m.addNotice("✗ ", "Session loading is not supported", ui.StError())
-		return
-	}
-	_, sess, err := loader.LoadSession(ctx, sessionID)
+	committed, err := runtime.RestoreSessionView(ctx, m.app.SessionRuntime(), sessionID)
 	if err != nil {
-		m.addNotice("✗ ", "Failed to load session: "+err.Error(), ui.StError())
+		m.reportCapability("Failed to load session", err)
 		return
 	}
+	sess := committed.Info.Session
 	if cleanDirectory(sess.WorkingDir) != cleanDirectory(m.app.Session().WorkingDir) {
 		m.addNotice("✗ ", "Session is not from the current directory", ui.StError())
 		return
 	}
-	previousID := m.app.Session().ID
-	m.app.ReplaceSession(ctx, sess)
-	if current := m.app.Session(); current == nil || current.ID != sess.ID || m.app.SessionHandle() == nil {
-		m.reportCapability("Session loading failed to bind the requested canonical handle.", nil)
+	application, err := app.NewResolvedFromTemplate(ctx, m.app.SessionRuntime(), committed, m.app)
+	if err != nil {
+		m.reportCapability("Failed to attach session", err)
 		return
 	}
+	previousID := m.app.Session().ID
+	m.app.Close()
+	m.app = application
+	if m.viewers != nil {
+		m.subscribeViewer(m.viewers.ctx(), application)
+	}
+	application.Start(ctx)
+
 	if m.viewers != nil && m.viewers.store != nil {
 		if err := m.viewers.store.ReplaceTab(ctx, previousID, sess.ID, sess.WorkingDir); err != nil {
 			m.reportCapability(nil, err)

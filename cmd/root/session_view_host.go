@@ -1,6 +1,7 @@
 package root
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,16 @@ const sessionActorSourceAttribute = "docker-agent.actor.source"
 // configuration and authorization lifetime. Both UIs and --listen receive this
 // same Supervisor; this adapter owns no session or runtime registry.
 func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, services app.Services, sessions runtime.SessionRuntime, initial *session.Session, spawner tui.SessionSpawner, cleanup func()) error {
+	eventHooks, err := parseOnEventFlags(f.onEventSpecs)
+	if err != nil {
+		return err
+	}
+	decorate := func(opts []app.Opt) []app.Opt {
+		if hook := withEventHooks(eventHooks); hook != nil {
+			opts = append(opts, hook)
+		}
+		return opts
+	}
 	f.sessionViewScope = viewhost.NewViewOwnerScope()
 	f.sessionViewStore = services.SessionStore()
 	f.sessionViewWorkingDir = initial.WorkingDir
@@ -65,6 +76,7 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 				resources.cleanup()
 				return viewhost.ViewOwnerResources{}, err
 			}
+			resources.opts = decorate(resources.opts)
 			return resources.viewResources(), nil
 		}
 	} else {
@@ -77,7 +89,7 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 			if f.sessionReadOnly {
 				opts = append(opts, app.WithReadOnly())
 			}
-			return viewhost.ViewOwnerResources{Services: services, Sessions: sessions, NewApp: resolvedViewBuilder(sessions, opts)}, nil
+			return viewhost.ViewOwnerResources{Services: services, Sessions: sessions, NewApp: resolvedViewBuilder(sessions, decorate(opts))}, nil
 		}
 	}
 	if err := f.sessionViewHost.ConfigureSessionViews(ctx, viewhost.HostViewConfig{
@@ -96,58 +108,21 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 	if f.sessionReadOnly {
 		opts = append(opts, app.WithReadOnly())
 	}
-	resources.NewApp = resolvedViewBuilder(sessions, opts)
+	resources.NewApp = resolvedViewBuilder(sessions, decorate(opts))
 	return f.sessionViewHost.RegisterSessionOwner(identity, resources, true)
 }
 
 func (f *runExecFlags) restoreHostedSession(ctx context.Context, sessionID string) (*app.App, error) {
-	var application *app.App
-	err := f.sessionViewHost.WithSessionOwner(ctx, sessionID, func(ctx context.Context, resources viewhost.ViewOwnerResources) error {
-		handle, err := resources.Sessions.SessionByID(sessionID)
-		if err != nil {
-			var sessionErr *runtime.SessionError
-			if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound {
-				return err
-			}
-			sess, err := resources.Services.SessionStore().GetSession(ctx, sessionID)
-			if err != nil {
-				return err
-			}
-			if sess == nil || sess.ID != sessionID {
-				return viewOwnerError(sessionID, "restore_identity", "store returned a different session")
-			}
-			if sess.ParentID != "" {
-				return viewOwnerError(sessionID, "restore_binding", "child sessions require confirmed view acquisition")
-			}
-			if sess.AgentName == "" {
-				sess.AgentName = sess.AttributesSnapshot()[runtime.SessionAgentAttribute]
-			}
-			handle, err = resources.Sessions.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName, Model: sess.AgentModelOverrides[sess.AgentName]})
-			if err != nil {
-				return err
-			}
-			// Ordinary root restore historically rehydrated and woke its
-			// subtree in App.Start. NewResolved skips that work deliberately
-			// for dormant views, so preserve it here only for a cold root.
-			if restorer, ok := resources.Sessions.(runtime.TreeRestorer); ok {
-				if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
-					return err
-				}
-			}
-		}
-		sess, err := handle.Snapshot(ctx)
-		if err != nil {
-			return err
-		}
-		metadata := handle.Metadata()
-		committed := runtime.CommittedSessionView{SessionHandle: handle, Info: runtime.PreparedSessionViewInfo{
-			SessionID: sessionID, RootSessionID: sessionID, Session: sess, WorkingDir: sess.WorkingDir,
-			Binding: runtime.SessionBinding{AgentName: handle.AgentName(), Model: metadata.Model},
-		}}
-		application, err = resources.NewApp(ctx, committed)
-		return err
-	})
-	return application, err
+	prepared, err := f.sessionViewHost.AcquireSessionView(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer prepared.Abort()
+	committed, err := prepared.Commit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return prepared.NewApp(ctx, committed)
 }
 
 func resolvedViewBuilder(sessions runtime.SessionRuntime, opts []app.Opt) func(context.Context, runtime.CommittedSessionView) (*app.App, error) {
@@ -176,7 +151,7 @@ func (f *runExecFlags) freshViewOwnerIdentity(sess *session.Session) viewhost.Vi
 		Source:         f.sessionViewSource,
 		RootSessionID:  sess.ID,
 		RootWorkingDir: sess.WorkingDir,
-		RootBinding:    runtime.SessionBinding{AgentName: sess.AgentName},
+		RootBinding:    runtime.SessionBinding{AgentName: cmp.Or(sess.AttributesSnapshot()[runtime.SessionAgentAttribute], sess.AgentName)},
 	}
 }
 

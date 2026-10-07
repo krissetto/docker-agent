@@ -37,15 +37,19 @@ func TestManagedRemoteHostedChildView(t *testing.T) {
 				selected = rootInfo
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": api.SessionAPIVersion, "view": "prepare-info", "info": selected})
-		case r.Method == http.MethodPatch && r.URL.Path == api.SessionAPIPath+"/child":
+		case r.Method == http.MethodPatch:
 			var edit runtime.SessionEdit
 			if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&edit)) {
 				return
 			}
 			assert.Equal(t, runtime.SessionEditOpenView, edit.Kind)
-			_ = json.NewEncoder(w).Encode(child)
+			if r.URL.Path == api.SessionAPIPath+"/root" {
+				_ = json.NewEncoder(w).Encode(root)
+			} else {
+				_ = json.NewEncoder(w).Encode(child)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/root/status":
-			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": api.SessionMetadata{SessionID: root.ID, AgentName: "director"}, "status": runtime.SessionStatus{SessionID: root.ID, AgentName: "director", State: runtime.SessionStateSettled}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": api.SessionMetadata{SessionID: root.ID, AgentName: "active-director"}, "status": runtime.SessionStatus{SessionID: root.ID, AgentName: "active-director", State: runtime.SessionStateSettled}})
 		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/root/snapshot":
 			_ = json.NewEncoder(w).Encode(map[string]any{"session": root, "status": runtime.SessionStatus{SessionID: root.ID, AgentName: "director", State: runtime.SessionStateSettled}})
 		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/child/status":

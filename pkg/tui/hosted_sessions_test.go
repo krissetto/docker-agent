@@ -30,6 +30,7 @@ func (h *hostedRootHandle) Metadata() runtime.SessionMetadata {
 type hostedRootRuntime struct {
 	runtime.SessionRuntime
 
+	store             session.Store
 	handles           map[string]*hostedRootHandle
 	creates, restores int
 }
@@ -48,9 +49,23 @@ func (r *hostedRootRuntime) CreateSession(_ context.Context, sess *session.Sessi
 	return handle, nil
 }
 
-func (r *hostedRootRuntime) RestoreSessionTree(context.Context, *session.Session) error {
+func (r *hostedRootRuntime) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
 	r.restores++
-	return nil
+	sess, err := r.store.GetSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if sess.ParentID != "" {
+		return nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
+	}
+	handle := r.handles[id]
+	if handle == nil {
+		handle = &hostedRootHandle{lifecycleHandle: &lifecycleHandle{id: id}, snapshot: sess.Clone()}
+		r.handles[id] = handle
+	} else {
+		sess = handle.snapshot.Clone()
+	}
+	return &preparedViewFixture{handle: handle, info: runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id, Session: sess, ActiveAgentName: sess.AgentName, WorkingDir: sess.WorkingDir, Binding: runtime.SessionBinding{AgentName: sess.AttributesSnapshot()[runtime.SessionAgentAttribute], Model: handle.Metadata().Model}}}, nil
 }
 
 func hostedRootFixture(t *testing.T) (*supervisor.Supervisor, *hostedRootRuntime, session.Store) {
@@ -59,6 +74,7 @@ func hostedRootFixture(t *testing.T) (*supervisor.Supervisor, *hostedRootRuntime
 	t.Cleanup(owner.Shutdown)
 	rt := &hostedRootRuntime{handles: make(map[string]*hostedRootHandle)}
 	store := session.NewInMemorySessionStore()
+	rt.store = store
 	services := storeRuntime{store: store}
 	scope := supervisor.NewViewOwnerScope()
 	identity := supervisor.ViewOwnerIdentity{Scope: scope, Source: "test", RootSessionID: "persisted-root", RootBinding: runtime.SessionBinding{AgentName: "root"}}
@@ -74,25 +90,28 @@ func hostedRootFixture(t *testing.T) (*supervisor.Supervisor, *hostedRootRuntime
 func TestHostedOrdinaryColdRootRestoresOnceAndWarmReusesWinningModel(t *testing.T) {
 	owner, rt, store := hostedRootFixture(t)
 	sess := session.New(session.WithID("persisted-root"), session.WithAgentName("root"))
+	sess.SetAttribute(runtime.SessionAgentAttribute, "root")
 	sess.AgentModelOverrides = map[string]string{"root": "provider/original"}
 	require.NoError(t, store.AddSession(t.Context(), sess))
-	firstData, err := loadHostedRoot(t.Context(), owner, sess.ID)
+	firstData, err := loadHostedSession(t.Context(), owner, sess.ID)
 	require.NoError(t, err)
+	defer firstData.prepared.Abort()
 	first, err := firstData.newApp(t.Context(), firstData.committed)
 	require.NoError(t, err)
 	defer first.Close()
-	require.Equal(t, 1, rt.creates)
+	require.Zero(t, rt.creates)
 	require.Equal(t, 1, rt.restores)
 	rt.handles[sess.ID].snapshot.AgentModelOverrides["root"] = "provider/winner"
-	secondData, err := loadHostedRoot(t.Context(), owner, sess.ID)
+	secondData, err := loadHostedSession(t.Context(), owner, sess.ID)
 	require.NoError(t, err)
+	defer secondData.prepared.Abort()
 	second, err := secondData.newApp(t.Context(), secondData.committed)
 	require.NoError(t, err)
 	defer second.Close()
 	require.Same(t, first.SessionHandle(), second.SessionHandle())
 	require.Equal(t, "provider/winner", second.Binding().Model)
-	require.Equal(t, 1, rt.creates)
-	require.Equal(t, 1, rt.restores, "warm canonical winner never replays the tree")
+	require.Zero(t, rt.creates)
+	require.Equal(t, 2, rt.restores, "warm canonical winner still uses confirmed preparation")
 }
 
 func TestHostedOrdinaryChildNeverCreatesTopLevelOwner(t *testing.T) {
@@ -100,7 +119,7 @@ func TestHostedOrdinaryChildNeverCreatesTopLevelOwner(t *testing.T) {
 	child := session.New(session.WithID("child"), session.WithAgentName("root"))
 	child.ParentID = "persisted-root"
 	require.NoError(t, store.AddSession(t.Context(), child))
-	_, err := loadHostedRoot(t.Context(), owner, child.ID)
+	_, err := loadHostedSession(t.Context(), owner, child.ID)
 	require.Error(t, err, "fixture lacks prepared child capability; never unsafe root fallback")
 	require.Zero(t, rt.creates)
 }
@@ -110,9 +129,10 @@ func TestPublicNewOrdinaryForeignRestoreUsesDistinctDirectoryOwner(t *testing.T)
 	initialDir, foreignDir := t.TempDir(), t.TempDir()
 	initialSession := session.New(session.WithID("initial"), session.WithAgentName("root"), session.WithWorkingDir(initialDir))
 	persisted := session.New(session.WithID("foreign"), session.WithAgentName("root"), session.WithWorkingDir(foreignDir))
+	persisted.SetAttribute(runtime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), persisted))
-	initialRuntime := &hostedRootRuntime{handles: make(map[string]*hostedRootHandle)}
-	foreignRuntime := &hostedRootRuntime{handles: make(map[string]*hostedRootHandle)}
+	initialRuntime := &hostedRootRuntime{store: store, handles: make(map[string]*hostedRootHandle)}
+	foreignRuntime := &hostedRootRuntime{store: store, handles: make(map[string]*hostedRootHandle)}
 	services := storeRuntime{store: store}
 	initial := app.New(t.Context(), initialRuntime, initialSession, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(services))
 	var spawns, cleanups atomic.Int32
@@ -140,8 +160,9 @@ func TestPublicNewOrdinaryForeignRestoreUsesDistinctDirectoryOwner(t *testing.T)
 	// Simulate another ordinary browser request originating from the initial
 	// runtime after the foreign owner is retained. It must not spawn a loser.
 	require.NoError(t, registerCompatibilityRoot(t.Context(), root.supervisor, root.compatResolve, initial, nil, initialDir, persisted.ID))
-	reopened, err := loadHostedRoot(t.Context(), root.supervisor, persisted.ID)
+	reopened, err := loadHostedSession(t.Context(), root.supervisor, persisted.ID)
 	require.NoError(t, err)
+	defer reopened.prepared.Abort()
 	require.Same(t, foreignRuntime.handles[persisted.ID], reopened.committed.SessionHandle)
 	require.EqualValues(t, 1, spawns.Load(), "retained foreign root wins before any repeated legacy spawn")
 	root.cleanupManagedResources()
@@ -153,6 +174,7 @@ func TestPublicNewArchivedForeignPaneDoesNotInvokeLegacySpawner(t *testing.T) {
 	initialDir, foreignDir := t.TempDir(), t.TempDir()
 	initialSession := session.New(session.WithID("initial"), session.WithAgentName("root"), session.WithWorkingDir(initialDir))
 	persisted := session.New(session.WithID("foreign"), session.WithAgentName("root"), session.WithWorkingDir(foreignDir))
+	persisted.SetAttribute(runtime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), persisted))
 	rt := &hostedRootRuntime{handles: make(map[string]*hostedRootHandle)}
 	application := app.New(t.Context(), rt, initialSession, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(storeRuntime{store: store}))

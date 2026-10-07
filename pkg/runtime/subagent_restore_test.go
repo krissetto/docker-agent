@@ -37,7 +37,7 @@ func newRestoreFixture(t *testing.T) (*LocalRuntime, session.Store, *session.Ses
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
-	sess := session.New(session.WithID(t.Name() + "/parent-sess"))
+	sess := session.New(session.WithID(t.Name()+"/parent-sess"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	return rt, store, sess
 }
@@ -81,7 +81,7 @@ func TestNormalCreateRejectsReservedRestoreChildWithoutSideEffects(t *testing.T)
 		},
 	}}}
 	done := make(chan error, 1)
-	go func() { _, restoreErr := rt.subagents.Restore(t.Context(), sess, snapshot); done <- restoreErr }()
+	go func() { _, restoreErr := restorePersistedFixture(t, rt, sess, snapshot); done <- restoreErr }()
 	<-entered
 
 	_, err = rt.CreateSession(t.Context(), first.Clone(), SessionBinding{AgentName: "planner"})
@@ -146,7 +146,7 @@ func TestRestorePreparedDriversRemainInvisibleAndPreserveDurablePending(t *testi
 		},
 	}}}
 	done := make(chan error, 1)
-	go func() { _, err := rt.subagents.Restore(t.Context(), sess, snapshot); done <- err }()
+	go func() { _, err := restorePersistedFixture(t, rt, sess, snapshot); done <- err }()
 	<-entered
 
 	_, lookup := rt.sessionDrivers.Lookup(first.ID)
@@ -192,7 +192,7 @@ func TestRestoreInitializationFailureLeavesPendingChildDormantAndNoTopology(t *t
 		},
 	}}}
 
-	_, err = rt.subagents.Restore(t.Context(), sess, snapshot)
+	_, err = restorePersistedFixture(t, rt, sess, snapshot)
 	require.Error(t, err)
 	assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
 	assert.Empty(t, rt.subagents.children)
@@ -218,7 +218,7 @@ func TestRestoreCollisionLeavesExistingRootAndObserverUntouched(t *testing.T) {
 		Node:     subagent.Node{ID: firstRootID, Agent: "root"},
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "shared-node", Parent: firstRootID, Agent: "planner", SessionID: firstChild.ID, State: subagent.NodeIdle}}},
 	}}}
-	_, err := rt.subagents.Restore(t.Context(), firstRoot, firstSnapshot)
+	_, err := restorePersistedFixture(t, rt, firstRoot, firstSnapshot)
 	require.NoError(t, err)
 	before := rt.subagents.tree.Snapshot()
 	updates, cancel := rt.subagents.tree.Subscribe(4)
@@ -236,7 +236,7 @@ func TestRestoreCollisionLeavesExistingRootAndObserverUntouched(t *testing.T) {
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "shared-node", Parent: secondRootID, Agent: "planner", SessionID: secondChild.ID, State: subagent.NodeIdle}}},
 	}}}
 
-	_, err = rt.subagents.Restore(t.Context(), secondRoot, secondSnapshot)
+	_, err = restorePersistedFixture(t, rt, secondRoot, secondSnapshot)
 	require.Error(t, err)
 	assert.Equal(t, before, rt.subagents.tree.Snapshot())
 	select {
@@ -289,7 +289,7 @@ func TestRestorePreflightRejectsMalformedSnapshotsWithoutPublishing(t *testing.T
 	for name, makeSnapshot := range tests {
 		t.Run(name, func(t *testing.T) {
 			rt, _, sess := newRestoreFixture(t)
-			_, err := rt.subagents.Restore(t.Context(), sess, makeSnapshot(subagent.SessionRootID(sess.ID)))
+			_, err := restorePersistedFixture(t, rt, sess, makeSnapshot(subagent.SessionRootID(sess.ID)))
 			require.Error(t, err)
 			assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
 			assert.Empty(t, rt.subagents.sessions)
@@ -312,7 +312,7 @@ func TestRestoreWithRemovedChildAgentDegradesToStopped(t *testing.T) {
 		}}},
 	}}}
 
-	got, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+	got, err := restorePersistedFixture(t, rt, sess, snapshot)
 	require.NoError(t, err)
 	require.Len(t, got.Nodes[0].Children, 1)
 	assert.Equal(t, subagent.NodeStopped, got.Nodes[0].Children[0].Node.State)
@@ -354,7 +354,7 @@ func TestRestoreConfigDriftStopsChildAndDescendants(t *testing.T) {
 				}},
 			}}}
 
-			got, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+			got, err := restorePersistedFixture(t, rt, sess, snapshot)
 			require.NoError(t, err)
 			require.Len(t, got.Nodes[0].Children[0].Children, 1)
 			assert.Equal(t, subagent.NodeStopped, got.Nodes[0].Children[0].Node.State)
@@ -387,7 +387,7 @@ func TestRestorePreflightAllowsDuplicateRenamedAliasesForSameAgent(t *testing.T)
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", Name: "historical-alias", Parent: rootID, Agent: "planner", SessionID: child.ID, State: subagent.NodeIdle}}},
 	}}}
 
-	_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+	_, err := restorePersistedFixture(t, rt, sess, snapshot)
 	require.NoError(t, err)
 }
 
@@ -405,7 +405,7 @@ func TestRestorePreflightAcceptsUnambiguousAliasRenameAndSessionlessFailure(t *t
 		},
 	}}}
 
-	got, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+	got, err := restorePersistedFixture(t, rt, sess, snapshot)
 	require.NoError(t, err)
 	require.Len(t, got.Nodes[0].Children, 2)
 	failed, ok := rt.subagents.tree.Node("failed")
@@ -455,7 +455,7 @@ func TestRestorePreflightRejectsConfigDriftBindingMismatch(t *testing.T) {
 				require.NoError(t, store.AddSession(t.Context(), child))
 			}
 
-			_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+			_, err := restorePersistedFixture(t, rt, sess, snapshot)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "session binding")
 			assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
@@ -476,7 +476,7 @@ func TestRestorePreflightRejectsWrongPersistedChildBinding(t *testing.T) {
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", Parent: rootID, Agent: "planner", SessionID: child.ID}}},
 	}}}
 
-	_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+	_, err := restorePersistedFixture(t, rt, sess, snapshot)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session binding")
 	assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
@@ -495,7 +495,7 @@ func TestRestorePreflightRejectsUnrelatedStoredSession(t *testing.T) {
 		Children: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child", Parent: rootID, Agent: "planner", SessionID: unrelated.ID}}},
 	}}}
 
-	_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+	_, err := restorePersistedFixture(t, rt, sess, snapshot)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not match enclosing session")
 	assert.Empty(t, rt.subagents.tree.Snapshot().Nodes)
@@ -506,7 +506,7 @@ func TestRestorePreflightRejectsUnrelatedStoredSession(t *testing.T) {
 func TestRestoreRejectsInvalidSnapshotWithoutRuntimeState(t *testing.T) {
 	rt, _, sess := newRestoreFixture(t)
 
-	got, err := rt.subagents.Restore(t.Context(), sess, subagent.Snapshot{
+	got, err := restorePersistedFixture(t, rt, sess, subagent.Snapshot{
 		Version: subagent.SnapshotVersion + 1,
 	})
 
@@ -529,8 +529,8 @@ func TestRestoreAfterCloseCreatesNoRuntimeState(t *testing.T) {
 		}}},
 	}}}
 
-	got, err := rt.subagents.Restore(t.Context(), sess, snapshot)
-	require.NoError(t, err)
+	got, err := restorePersistedFixture(t, rt, sess, snapshot)
+	require.Error(t, err)
 	assert.Empty(t, got.Nodes)
 	assert.Empty(t, rt.subagents.sessions)
 	assert.Empty(t, rt.subagents.children)
@@ -554,16 +554,18 @@ func TestRestoreRacingCloseCannotPublishAfterCloseReturns(t *testing.T) {
 	go func() {
 		defer close(done)
 		<-start
-		_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
-		assert.NoError(t, err)
+		_, err := restorePersistedFixture(t, rt, sess, snapshot)
+		if err != nil {
+			assert.ErrorIs(t, err, ErrSessionClosed)
+		}
 	}()
 	close(start)
 	require.NoError(t, rt.Close())
 	<-done
 
 	before := rt.subagents.tree.Snapshot()
-	_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
-	require.NoError(t, err)
+	_, err := restorePersistedFixture(t, rt, sess, snapshot)
+	require.Error(t, err)
 	assert.Equal(t, before, rt.subagents.tree.Snapshot(), "restore cannot mutate state after Close returns")
 }
 
@@ -586,7 +588,7 @@ func TestConcurrentRestorePublishesOneRecordAndHookSet(t *testing.T) {
 	for range callers {
 		go func() {
 			defer wg.Done()
-			_, err := rt.subagents.Restore(t.Context(), sess, snapshot)
+			_, err := restorePersistedFixture(t, rt, sess, snapshot)
 			assert.NoError(t, err)
 		}()
 	}
@@ -937,4 +939,27 @@ func TestEmitStartupInfoHonoursPinnedSessionAgent(t *testing.T) {
 	}
 	assert.Equal(t, "planner", agentName)
 	assert.Equal(t, "planner", teamCurrent, "the selected agent is the session's pinned agent, not the runtime's global current agent")
+}
+
+func restorePersistedFixture(t *testing.T, rt *LocalRuntime, root *session.Session, snapshot subagent.Snapshot) (subagent.Snapshot, error) {
+	t.Helper()
+	if err := rt.subagentStore.SaveTree(t.Context(), root.ID, snapshot); err != nil {
+		return subagent.Snapshot{}, err
+	}
+	root.SetAttribute(SessionAgentAttribute, "root")
+	if err := rt.sessionStore.UpdateSession(t.Context(), root); err != nil {
+		return subagent.Snapshot{}, err
+	}
+	var stamp func([]subagent.NodeSnapshot)
+	stamp = func(nodes []subagent.NodeSnapshot) {
+		for _, node := range nodes {
+			if child, err := rt.sessionStore.GetSession(t.Context(), node.Node.SessionID); err == nil && child.AttributesSnapshot()[SessionAgentAttribute] == "" {
+				child.SetAttribute(SessionAgentAttribute, node.Node.Agent)
+				require.NoError(t, rt.sessionStore.UpdateSession(t.Context(), child))
+			}
+			stamp(node.Children)
+		}
+	}
+	stamp(snapshot.Nodes)
+	return rt.subagents.Restore(t.Context(), root, snapshot)
 }

@@ -39,11 +39,12 @@ func (r *legacyTreeRestoreServices) RestoreSubagentTree(context.Context, *sessio
 	return nil, nil
 }
 
-func TestReplaceSessionRestoresTreeThroughSessionRuntime(t *testing.T) {
+func TestReplacePersistedSessionRejectsTreeOnlyCompatibilityRuntime(t *testing.T) {
 	t.Parallel()
 
 	initial := session.New(session.WithID("initial"), session.WithAgentName("root"))
 	loaded := session.New(session.WithID("loaded"), session.WithAgentName("root"))
+	loaded.SetAttribute(runtime.SessionAgentAttribute, "root")
 	snapshot := &subagent.Snapshot{Root: subagent.SessionRootID(loaded.ID)}
 	sessions := &sessionTreeRestoreRuntime{
 		projectionSessions: &projectionSessions{session: &projectionSession{id: initial.ID}},
@@ -54,7 +55,7 @@ func TestReplaceSessionRestoresTreeThroughSessionRuntime(t *testing.T) {
 
 	a.ReplaceSession(t.Context(), loaded)
 
-	require.Equal(t, snapshot, a.Session().GetSubagentTree(), "session restoration must populate the loaded session tree")
-	assert.Equal(t, 1, sessions.restores)
+	require.Equal(t, initial.ID, a.Session().ID, "unsupported preparation keeps the current view")
+	assert.Zero(t, sessions.restores)
 	assert.Zero(t, legacy.restores, "legacy services must not restore when session capability is available")
 }

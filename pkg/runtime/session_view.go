@@ -173,11 +173,11 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 		return nil, err
 	}
 	p.records = records
+	p.snapshot, err = normalizeRestoredSnapshot(canonical, r.sessionDurability(), records...)
+	if err != nil {
+		return nil, err
+	}
 	if len(canonical.Nodes) != 0 {
-		p.snapshot, err = normalizeRestoredSnapshot(canonical, r.sessionDurability(), records...)
-		if err != nil {
-			return nil, err
-		}
 		p.nodes, err = r.subagents.preflightRestore(ctx, root, p.snapshot)
 		if err != nil {
 			return nil, err
@@ -339,38 +339,6 @@ func (p *preparedSessionView) validateRegistryLocked() error {
 	return nil
 }
 
-func (p *preparedSessionView) canonicalResult() (CommittedSessionView, error) {
-	handle, err := p.r.SessionByID(p.info.SessionID)
-	if err != nil {
-		return CommittedSessionView{}, err
-	}
-	driver := handle.(*sessionHandle).driver
-	projection := driver.registrySnapshot()
-	if projection.stopped && !projection.stoppedView {
-		return CommittedSessionView{}, ErrSessionStopped
-	}
-	info := p.info
-	info.Session = driver.session()
-	if info.Session == nil {
-		return CommittedSessionView{}, ErrSessionClosed
-	}
-	_, modelRef, _ := driver.ModelBindingSnapshot()
-	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
-		info.Session.SetSubagentTree(&tree)
-	}
-	info.ActiveAgentName = info.Session.AgentName
-	info.Binding.Model = modelRef
-	info.WorkingDir = info.Session.WorkingDir
-	if info.Attach != nil {
-		// Copy attach metadata without cloning the stale session it replaces.
-		attach := *info.Attach
-		info.Attach = &attach
-		info.Attach.Session = info.Session.Clone()
-		info.Attach.Agent = info.ActiveAgentName
-	}
-	return CommittedSessionView{SessionHandle: handle, Info: info}, nil
-}
-
 func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -409,14 +377,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	if err != nil {
 		return CommittedSessionView{}, err
 	}
-	if len(p.reservations) == 0 {
-		result, err := p.canonicalResult()
-		if err != nil {
-			return CommittedSessionView{}, err
-		}
-		p.committed = &result
-		return CommittedSessionView{SessionHandle: result.SessionHandle, Info: cloneSessionViewInfo(result.Info)}, nil
-	}
+
 	known := make(map[subagent.NodeID]session.ChildRecord, len(p.records))
 	for _, record := range p.records {
 		known[record.Node.ID] = record
@@ -607,4 +568,19 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	result := CommittedSessionView{SessionHandle: &sessionHandle{runtime: p.r, driver: driver, sessionID: info.SessionID, agentName: info.Binding.AgentName}, Info: info}
 	p.committed = &result
 	return CommittedSessionView{SessionHandle: result.SessionHandle, Info: cloneSessionViewInfo(result.Info)}, nil
+}
+
+// RestoreSessionView is the compatibility entry point for confirmed dormant
+// restoration. Abort releases only the preparation, never a committed owner.
+func RestoreSessionView(ctx context.Context, sessions SessionRuntime, id string) (CommittedSessionView, error) {
+	preparer, ok := sessions.(SessionViewPreparer)
+	if !ok {
+		return CommittedSessionView{}, UnsupportedSessionOperation(id, "prepare_view")
+	}
+	prepared, err := preparer.PrepareSessionView(ctx, id)
+	if err != nil {
+		return CommittedSessionView{}, err
+	}
+	defer prepared.Abort()
+	return prepared.Commit(ctx)
 }

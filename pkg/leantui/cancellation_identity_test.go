@@ -103,3 +103,24 @@ func TestLeanCapturedInterruptCannotCancelReplacement(t *testing.T) {
 		})
 	}
 }
+
+func (r *leanCancellationRuntime) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
+	prepared, err := r.SessionRuntime.(runtime.SessionViewPreparer).PrepareSessionView(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &leanCancellationPreparation{PreparedSessionView: prepared, handle: r.handle}, nil
+}
+
+type leanCancellationPreparation struct {
+	runtime.PreparedSessionView
+	handle runtime.SessionHandle
+}
+
+func (p *leanCancellationPreparation) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
+	committed, err := p.PreparedSessionView.Commit(ctx)
+	if err == nil {
+		committed.SessionHandle = p.handle
+	}
+	return committed, err
+}

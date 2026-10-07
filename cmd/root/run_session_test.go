@@ -113,7 +113,7 @@ func TestCreateLocalRuntimeAndSession_ExplicitUnknownIDCreatesWithThatID(t *test
 	f := &runExecFlags{}
 	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "board-card-42"}
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, "board-card-42", sess.ID)
 
@@ -127,14 +127,14 @@ func TestCreateLocalRuntimeAndSession_ExplicitExistingIDResumes(t *testing.T) {
 	t.Parallel()
 
 	store := session.NewInMemorySessionStore()
-	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID("existing"))))
+	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))))
 
 	f := &runExecFlags{}
-	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}
+	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name()}
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
-	assert.Equal(t, "existing", sess.ID)
+	assert.Equal(t, t.Name(), sess.ID)
 }
 
 // A fresh session resolves its safety mode from the user-owned request
@@ -217,7 +217,7 @@ func TestCreateLocalRuntimeAndSession_FreshSessionSafetyResolution(t *testing.T)
 				req.AgentName = "root"
 			}
 
-			_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSafetyTestLoadResult(tt.rootSafety, tt.runtimeSafety), req, store)
+			_, sess, err := createTestRuntimeAndSession(t, f, newSafetyTestLoadResult(tt.rootSafety, tt.runtimeSafety), req, store)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantStored, sess.SafetyPolicy)
 			assert.Equal(t, tt.wantEffective, sess.GetSafetyPolicy())
@@ -231,13 +231,13 @@ func TestCreateLocalRuntimeAndSession_ResumeWithYoloBackfillsSafetyPolicy(t *tes
 	t.Parallel()
 
 	store := session.NewInMemorySessionStore()
-	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID("existing"))))
+	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))))
 
-	f := &runExecFlags{autoApprove: true, yoloChanged: true, sessionID: "existing"}
+	f := &runExecFlags{autoApprove: true, yoloChanged: true, sessionID: t.Name()}
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.True(t, sess.ToolsApproved)
 	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
@@ -250,14 +250,14 @@ func TestCreateLocalRuntimeAndSession_ResumeKeepsExplicitSafetyPolicy(t *testing
 
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), session.New(
-		session.WithID("existing"),
+		session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}),
 		session.WithSafetyPolicy(session.SafetyPolicyBalanced),
 	)))
 
 	f := &runExecFlags{}
-	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}
+	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name()}
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy)
 }
@@ -271,14 +271,14 @@ func TestCreateLocalRuntimeAndSession_PlainResumeKeepsAutonomousInSync(t *testin
 
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), session.New(
-		session.WithID("existing"),
+		session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}),
 		session.WithSafetyPolicy(session.SafetyPolicyAutonomous),
 	)))
 
 	f := &runExecFlags{}
-	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}
+	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name()}
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
 	assert.True(t, sess.ToolsApproved, "plain resume must not reset the legacy flag out from under an autonomous policy")
@@ -293,7 +293,7 @@ func TestCreateLocalRuntimeAndSession_PlainResumeKeepsLegacyToolsApprovedShape(t
 
 	// WithToolsApproved(true) backfills SafetyPolicy=autonomous, so build
 	// the legacy deserialized shape via raw field writes instead.
-	legacy := session.New(session.WithID("existing"))
+	legacy := session.New(session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
 	legacy.ToolsApproved = true
 	legacy.SafetyPolicy = ""
 
@@ -301,9 +301,9 @@ func TestCreateLocalRuntimeAndSession_PlainResumeKeepsLegacyToolsApprovedShape(t
 	require.NoError(t, store.AddSession(t.Context(), legacy))
 
 	f := &runExecFlags{}
-	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}
+	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name()}
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.True(t, sess.ToolsApproved, "plain resume must keep the legacy blanket approval")
 	assert.Equal(t, session.SafetyPolicy(""), sess.SafetyPolicy, "plain resume must not invent an explicit policy on a legacy session")
@@ -318,15 +318,15 @@ func TestCreateLocalRuntimeAndSession_ResumeWithYoloEscalatesStoredPolicy(t *tes
 
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), session.New(
-		session.WithID("existing"),
+		session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}),
 		session.WithSafetyPolicy(session.SafetyPolicyBalanced),
 	)))
 
-	f := &runExecFlags{autoApprove: true, yoloChanged: true, sessionID: "existing"}
+	f := &runExecFlags{autoApprove: true, yoloChanged: true, sessionID: t.Name()}
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
 	assert.True(t, sess.ToolsApproved)
@@ -338,19 +338,19 @@ func TestCreateLocalRuntimeAndSession_ResumeSafetyFlagWinsOverYolo(t *testing.T)
 	t.Parallel()
 
 	store := session.NewInMemorySessionStore()
-	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID("existing"))))
+	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))))
 
 	f := &runExecFlags{
 		autoApprove:   true,
 		yoloChanged:   true,
 		safety:        string(session.SafetyPolicyStrict),
 		safetyChanged: true,
-		sessionID:     "existing",
+		sessionID:     t.Name(),
 	}
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyStrict, sess.SafetyPolicy)
 	assert.False(t, sess.ToolsApproved, "explicit strict must revoke the blanket approval")
@@ -365,17 +365,17 @@ func TestCreateLocalRuntimeAndSession_ResumeUserDefaultDoesNotOverride(t *testin
 
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), session.New(
-		session.WithID("existing"),
+		session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}),
 		session.WithSafetyPolicy(session.SafetyPolicyBalanced),
 	)))
 
 	// The settings.YOLO shape after applyUserSettings: autoApprove and the
 	// resolved default are set, but no CLI flag was passed.
-	f := &runExecFlags{autoApprove: true, defaultSafety: session.SafetyPolicyAutonomous, sessionID: "existing"}
+	f := &runExecFlags{autoApprove: true, defaultSafety: session.SafetyPolicyAutonomous, sessionID: t.Name()}
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
 
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy, "settings/alias defaults must not escalate a resumed session")
 	assert.False(t, sess.ToolsApproved)
@@ -387,22 +387,23 @@ func TestCreateLocalRuntimeAndSession_ResumeUserDefaultDoesNotOverride(t *testin
 func TestCreateLocalRuntimeAndSession_ResumeAuthorDefaultDoesNotOverride(t *testing.T) {
 	t.Parallel()
 
-	stored := session.New(session.WithID("existing"), session.WithSafetyPolicy(session.SafetyPolicyStrict))
-	empty := session.New(session.WithID("empty"))
+	stored := session.New(session.WithID(t.Name()), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}), session.WithSafetyPolicy(session.SafetyPolicyStrict))
+	empty := session.New(session.WithID(t.Name()+"-empty"), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
 
 	store := session.NewInMemorySessionStore()
+	stored.SetAttribute(runtime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), stored))
 	require.NoError(t, store.AddSession(t.Context(), empty))
 
 	loadResult := newSafetyTestLoadResult(latest.SafetyModeAutonomous, latest.SafetyModeAutonomous)
 
 	f := &runExecFlags{}
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), loadResult, runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}, store)
+	_, sess, err := createTestRuntimeAndSession(t, f, loadResult, runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name()}, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyStrict, sess.SafetyPolicy)
 	assert.False(t, sess.ToolsApproved)
 
-	_, sess, err = f.createLocalRuntimeAndSession(t.Context(), loadResult, runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "empty"}, store)
+	_, sess, err = createTestRuntimeAndSession(t, f, loadResult, runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: t.Name() + "-empty"}, store)
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicy(""), sess.SafetyPolicy, "author defaults must not be written onto a resumed session")
 }
@@ -416,7 +417,7 @@ func TestCreateLocalRuntimeAndSession_RelativeRefDoesNotCreate(t *testing.T) {
 	f := &runExecFlags{}
 	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "-1"}
 
-	_, _, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	_, _, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, store)
 	require.Error(t, err)
 }
 
@@ -433,7 +434,7 @@ func TestExecCLIConfig_TypedSafetyWinsOverLegacyYolo(t *testing.T) {
 
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, session.NewInMemorySessionStore())
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, session.NewInMemorySessionStore())
 	require.NoError(t, err)
 	require.Equal(t, session.SafetyPolicyBalanced, sess.GetSafetyPolicy())
 
@@ -448,8 +449,19 @@ func TestExecCLIConfig_AutonomousSessionAutoApproves(t *testing.T) {
 	f := &runExecFlags{autoApprove: true, yoloChanged: true}
 	req := f.createSessionRequest("")
 	req.AgentName = "root"
-	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, session.NewInMemorySessionStore())
+	_, sess, err := createTestRuntimeAndSession(t, f, newSessionTestLoadResult(), req, session.NewInMemorySessionStore())
 	require.NoError(t, err)
 
 	assert.True(t, f.execCLIConfig(sess).AutoApprove)
+}
+
+func createTestRuntimeAndSession(t *testing.T, f *runExecFlags, loaded *teamloader.LoadResult, req runtime.CreateSessionRequest, store session.Store) (*runtime.LocalRuntime, *session.Session, error) {
+	t.Helper()
+	rt, sess, err := f.createLocalRuntimeAndSession(t.Context(), loaded, req, store)
+	if rt != nil {
+		t.Cleanup(func() {
+			require.NoError(t, runtime.NewSessionRuntimeSupervisor(rt).Shutdown(context.WithoutCancel(t.Context())))
+		})
+	}
+	return rt, sess, err
 }

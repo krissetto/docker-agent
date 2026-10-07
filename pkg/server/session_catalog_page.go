@@ -157,10 +157,10 @@ func (sm *SessionManager) summaryEntry(row session.Summary) runtime.SessionSumma
 		entry.RouteError = "session is not attachable"
 	} else if registry, _, err := sm.sessionRegistryForCreate(entry.Source); err != nil {
 		entry.RouteError = "persisted session source is unavailable or ambiguous"
+	} else if _, ok := registry.(runtime.SessionViewPreparer); !ok {
+		entry.RouteError = "runtime cannot prepare persisted session views"
 	} else if row.ParentID == "" {
 		entry.Loadable = true
-	} else if _, ok := registry.(runtime.TreeRestorer); !ok {
-		entry.RouteError = "runtime cannot load durable child session tree"
 	} else {
 		entry.RequiresConfirmation = true
 	}

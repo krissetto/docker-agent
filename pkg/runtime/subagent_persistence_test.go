@@ -55,7 +55,7 @@ func TestSubagentTranscriptSurvivesReload(t *testing.T) {
 	// Process A: spawn, run a turn, then a follow-up turn (second persist of
 	// the same sub-session).
 	rtA, storeA := newRuntime()
-	sess := session.New(session.WithID("parent-sess"))
+	sess := session.New(session.WithID(t.Name()+"/parent-sess"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
 	require.NoError(t, storeA.AddSession(t.Context(), sess))
 
 	id, err := rtA.subagents.Spawn(sess, "root", subagent.AllowedSubagent{Agent: "planner"}, "do the thing")
@@ -72,7 +72,7 @@ func TestSubagentTranscriptSurvivesReload(t *testing.T) {
 
 	// Process B: restore and attach.
 	rtB, storeB := newRuntime()
-	loaded, err := storeB.GetSession(t.Context(), "parent-sess")
+	loaded, err := storeB.GetSession(t.Context(), t.Name()+"/parent-sess")
 	require.NoError(t, err)
 	_, err = rtB.RestoreSubagentTree(t.Context(), loaded)
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestStoppedSubagentAttachSurvivesReload(t *testing.T) {
 	}
 
 	rtA, storeA := newRuntime(true)
-	sess := session.New(session.WithID("parent-sess"))
+	sess := session.New(session.WithID(t.Name()+"/parent-sess"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
 	require.NoError(t, storeA.AddSession(t.Context(), sess))
 
 	id, err := rtA.subagents.Spawn(sess, "root", subagent.AllowedSubagent{Agent: "planner"}, "do the thing")
@@ -162,7 +162,7 @@ func TestStoppedSubagentAttachSurvivesReload(t *testing.T) {
 	_ = storeA.(*session.SQLiteSessionStore).Close()
 
 	rtB, storeB := newRuntime(false)
-	loaded, err := storeB.GetSession(t.Context(), "parent-sess")
+	loaded, err := storeB.GetSession(t.Context(), t.Name()+"/parent-sess")
 	require.NoError(t, err)
 	_, err = rtB.RestoreSubagentTree(t.Context(), loaded)
 	require.NoError(t, err)

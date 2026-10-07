@@ -1034,6 +1034,12 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		return nil, nil, fmt.Errorf("creating runtime: %w", err)
 	}
 	f.snapshotController = ctrl
+	complete := false
+	defer func() {
+		if !complete {
+			_ = runtime.NewSessionRuntimeSupervisor(localRt).Shutdown(context.WithoutCancel(ctx))
+		}
+	}()
 
 	var sess *session.Session
 	if req.ResumeSessionID != "" {
@@ -1047,25 +1053,22 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		sess, err = sessStore.GetSession(ctx, resolvedID)
 		switch {
 		case err == nil:
-			// Only an explicit CLI flag (--safety / --yolo, both resolved
-			// into req.SafetyPolicy with --safety winning) may override the
-			// mode a resumed session carries: alias options, user settings
-			// and author-declared YAML defaults are defaults for NEW
-			// sessions and must never replace persisted state. The override
-			// goes through the option (not a raw field write) so the legacy
-			// ToolsApproved flag and the mode stay in sync. Without an
-			// explicit flag the stored state is left untouched — a plain
-			// resume must not reset ToolsApproved out from under a stored
-			// autonomous policy.
+			committed, restoreErr := runtime.RestoreSessionView(ctx, runtime.NewSessionRuntimeSupervisor(localRt).Runtime(), resolvedID)
+			if restoreErr != nil {
+				return nil, nil, restoreErr
+			}
+			sess = committed.Info.Session
 			if req.SafetyExplicit && req.SafetyPolicy != "" {
-				session.WithSafetyPolicy(req.SafetyPolicy)(sess)
+				if _, err := committed.SessionHandle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditPolicy, SafetyPolicy: &req.SafetyPolicy}); err != nil {
+					return nil, nil, err
+				}
+				sess, err = committed.SessionHandle.Snapshot(ctx)
+				if err != nil {
+					return nil, nil, err
+				}
 			}
 			sess.HideToolResults = req.HideToolResults
-			// Stored model overrides are applied per session when its session
-			// is bound (see sessionSessionBinding), so other tabs sharing this
-			// runtime keep their own models.
 
-			slog.DebugContext(ctx, "Loaded existing session", "session_id", resolvedID, "session_ref", req.ResumeSessionID, "agent", agentName)
 		case errors.Is(err, session.ErrNotFound) && !session.IsRelativeSessionRef(req.ResumeSessionID):
 			// An explicit, caller-chosen ID that doesn't exist yet: create the
 			// session with that ID rather than failing. This lets a supervisor
@@ -1085,6 +1088,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		slog.DebugContext(ctx, "Using local runtime", "agent", agentName)
 	}
 
+	complete = true
 	return localRt, sess, nil
 }
 
@@ -1366,17 +1370,36 @@ func leanSessionRestorer(spawner tui.SessionSpawner, store session.Store, initia
 		if !info.IsDir() {
 			return nil, nil, errors.New("restored session working directory is not a directory")
 		}
-		// GetSession returns the store snapshot, not a running session owner.
-		// Pin legacy tab provenance before creating its immutable handle.
-		sess.WorkingDir = workingDir
-		if sess.AgentName == "" {
-			sess.AgentName = sess.AttributesSnapshot()[runtime.SessionAgentAttribute]
-		}
 		spawned, err := spawner(ctx, workingDir)
-		if sess.AgentName == "" && spawned.App != nil {
-			sess.AgentName = spawned.App.Binding().AgentName
+		var cleanup func()
+		if spawned.Ownership == tui.RuntimeOwned && spawned.Cleanup != nil {
+			cleanup = sync.OnceFunc(spawned.Cleanup)
 		}
-		return leanBindSpawnedSession(ctx, spawned, err, sess)
+		fail := func(err error) (*app.App, func(), error) {
+			if spawned.App != nil {
+				spawned.App.Close()
+			}
+			if cleanup != nil {
+				cleanup()
+			}
+			return nil, nil, err
+		}
+		if err != nil {
+			return fail(err)
+		}
+		if spawned.App == nil || spawned.App.SessionRuntime() == nil {
+			return fail(runtime.ErrUnsupported)
+		}
+		committed, err := runtime.RestoreSessionView(ctx, spawned.App.SessionRuntime(), sessionID)
+		if err != nil {
+			return fail(err)
+		}
+		application, err := app.NewResolvedFromTemplate(ctx, spawned.App.SessionRuntime(), committed, spawned.App)
+		if err != nil {
+			return fail(err)
+		}
+		spawned.App.Close()
+		return application, cleanup, nil
 	}
 }
 

@@ -459,6 +459,8 @@ func TestRunDockerAgent_RejectsNonA2ASessionCollision(t *testing.T) {
 				session.WithTitle("Private Session"),
 				session.WithUserMessage("private history"),
 			)
+			existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
+			existing.NonInteractive = true
 			require.NoError(t, store.AddSession(t.Context(), existing))
 
 			ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-collision", "A2A request")
@@ -514,6 +516,7 @@ func TestRunDockerAgent_ResumedSessionDoesNotExceedServerSafety(t *testing.T) {
 		session.WithOrigin("a2a"),
 		session.WithSafetyPolicy(session.SafetyPolicyAutonomous),
 	)
+	existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ceiling", "follow-up question")
@@ -540,6 +543,7 @@ func TestRunDockerAgent_ResumedSaferSessionIsPreserved(t *testing.T) {
 		session.WithOrigin("a2a"),
 		session.WithSafetyPolicy(session.SafetyPolicyStrict),
 	)
+	existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-preserve", "follow-up question")
@@ -566,6 +570,7 @@ func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
 		session.WithOrigin("a2a"),
 		session.WithTitle("Existing Title"),
 	)
+	existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-resume", "follow-up question")
@@ -604,6 +609,7 @@ func TestRunDockerAgent_ResumeFailsClosedWhenPersistedChildBindingConflicts(t *t
 	t.Cleanup(func() { require.NoError(t, store.(*session.SQLiteSessionStore).Close()) })
 
 	existing := session.New(session.WithID("a2a-ctx-invalid-binding"), session.WithOrigin("a2a"))
+	existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), existing))
 	child := session.New(session.WithID("a2a-invalid-bound-child"))
 	child.ParentID = existing.ID
@@ -626,7 +632,7 @@ func TestRunDockerAgent_ResumeFailsClosedWhenPersistedChildBindingConflicts(t *t
 	require.Len(t, events, 1)
 	assert.Nil(t, events[0].event)
 	require.Error(t, events[0].err)
-	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
+	assert.Contains(t, events[0].err.Error(), "restore A2A session")
 	assert.Contains(t, events[0].err.Error(), "session binding")
 	stored, err := store.GetSession(t.Context(), existing.ID)
 	require.NoError(t, err)
@@ -645,6 +651,7 @@ func TestRunDockerAgent_ResumeFailsClosedWhenSubagentTreeIsInvalid(t *testing.T)
 		session.WithID("a2a-ctx-invalid-tree"),
 		session.WithOrigin("a2a"),
 	)
+	existing.SetAttribute(dagentruntime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), existing))
 	require.NoError(t, store.(*session.SQLiteSessionStore).SaveTree(t.Context(), existing.ID, subagent.Snapshot{
 		Version: subagent.SnapshotVersion + 1,
@@ -656,7 +663,7 @@ func TestRunDockerAgent_ResumeFailsClosedWhenSubagentTreeIsInvalid(t *testing.T)
 	require.Len(t, events, 1)
 	assert.Nil(t, events[0].event)
 	require.Error(t, events[0].err)
-	assert.Contains(t, events[0].err.Error(), "restore subagent tree for A2A session")
+	assert.Contains(t, events[0].err.Error(), "restore A2A session")
 	assert.Contains(t, events[0].err.Error(), "unsupported topology version")
 	stored, err := store.GetSession(t.Context(), existing.ID)
 	require.NoError(t, err)
@@ -701,4 +708,94 @@ func TestBorrowedA2ARuntimeSurvivesInvocation(t *testing.T) {
 	require.NoError(t, err)
 	_, err = owner.Runtime().CreateSession(t.Context(), session.New(), dagentruntime.SessionBinding{AgentName: ag.Name()})
 	require.NoError(t, err)
+}
+
+// Gate the policy edit after any adapter-side reads; the intervening owner
+// edit must not be weakened by stale policy derived before this boundary.
+type a2aCeilingGate struct {
+	dagentruntime.SessionRuntime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *a2aCeilingGate) PrepareSessionView(ctx context.Context, id string) (dagentruntime.PreparedSessionView, error) {
+	prepared, err := r.SessionRuntime.(dagentruntime.SessionViewPreparer).PrepareSessionView(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &a2aCeilingPreparation{PreparedSessionView: prepared, gate: r}, nil
+}
+
+type a2aCeilingPreparation struct {
+	dagentruntime.PreparedSessionView
+	gate *a2aCeilingGate
+}
+
+func (p *a2aCeilingPreparation) Commit(ctx context.Context) (dagentruntime.CommittedSessionView, error) {
+	committed, err := p.PreparedSessionView.Commit(ctx)
+	if err != nil {
+		return committed, err
+	}
+	committed.SessionHandle = &a2aCeilingHandle{SessionHandle: committed.SessionHandle, gate: p.gate}
+	return committed, nil
+}
+
+type a2aCeilingHandle struct {
+	dagentruntime.SessionHandle
+	gate *a2aCeilingGate
+}
+
+func (h *a2aCeilingHandle) Edit(ctx context.Context, edit dagentruntime.SessionEdit) (*session.Session, error) {
+	if edit.Kind == dagentruntime.SessionEditPolicy {
+		close(h.gate.entered)
+		select {
+		case <-h.gate.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return h.SessionHandle.Edit(ctx, edit)
+}
+
+func TestA2AResumeCeilingPreservesInterveningStrictOwnerPolicy(t *testing.T) {
+	tm, ag := newMockTeam("reply")
+	store := session.NewInMemorySessionStore()
+	rt, err := dagentruntime.NewLocalRuntime(t.Context(), tm, dagentruntime.WithSessionStore(store))
+	require.NoError(t, err)
+	owner := dagentruntime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	original := session.New(session.WithID(t.Name()), session.WithOrigin("a2a"), session.WithAgentName(ag.Name()), session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+	handle, err := owner.Runtime().CreateSession(t.Context(), original, dagentruntime.SessionBinding{AgentName: ag.Name()})
+	require.NoError(t, err)
+	gate := &a2aCeilingGate{SessionRuntime: owner.Runtime(), entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		ctx := newFakeInvocationContext(t.Context(), original.ID, "resume")
+		for _, err := range runDockerAgent(ctx, tm, ag.Name(), ag, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot, gate) {
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("policy edit did not reach barrier")
+	}
+	strict := session.SafetyPolicyStrict
+	_, err = handle.Edit(t.Context(), dagentruntime.SessionEdit{Kind: dagentruntime.SessionEditPolicy, SafetyPolicy: &strict})
+	require.NoError(t, err)
+	close(gate.release)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("A2A resume did not complete")
+	}
+	canonical, err := handle.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, strict, canonical.GetSafetyPolicy())
+	require.True(t, canonical.NonInteractive, "canonical owner, not only a recording-store snapshot, is unattended")
 }

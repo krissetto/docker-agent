@@ -77,7 +77,7 @@ func TestCanonicalRestoreAllowsLegacyParentOfCanonicalChild(t *testing.T) {
 func TestRestoredRootLifecycleBindsOnceAndFencesReplacedDriver(t *testing.T) {
 	rt, _, root := newRestoreFixture(t)
 	rootID := subagent.SessionRootID(root.ID)
-	_, err := rt.subagents.Restore(t.Context(), root, subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootID, Agent: "root", State: subagent.NodeIdle}}}})
+	_, err := restorePersistedFixture(t, rt, root, subagent.Snapshot{Root: rootID, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: rootID, Agent: "root", State: subagent.NodeIdle}}}})
 	require.NoError(t, err)
 	first, err := rt.sessionDrivers.GetInitialized(t.Context(), root)
 	require.NoError(t, err)

@@ -550,25 +550,11 @@ func (w *workspaceSessionRuntimes) RestoreSessionTree(ctx context.Context, root 
 	if root == nil {
 		return &runtime.SessionError{Kind: runtime.SessionErrorInvalid, Operation: "restore_tree"}
 	}
-	rt, key, ok := w.owner(root.ID)
-	var release func()
-	if !ok {
-		var err error
-		rt, key, release, err = w.acquireRuntime(ctx, root.WorkingDir)
-		if err != nil {
-			return err
-		}
-		defer release()
+	committed, err := runtime.RestoreSessionView(ctx, w, root.ID)
+	if err == nil {
+		root.SetSubagentTree(committed.Info.Session.GetSubagentTree())
 	}
-	restorer, ok := rt.(runtime.TreeRestorer)
-	if !ok {
-		return &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: root.ID, Operation: "restore_child_tree"}
-	}
-	if err := restorer.RestoreSessionTree(ctx, root); err != nil {
-		return err
-	}
-	w.remember(root.ID, key)
-	return nil
+	return err
 }
 
 func (w *workspaceSessionRuntimes) SwitchAgent(ctx context.Context, sessionID, targetAgent string) (runtime.SessionHandle, *session.Session, error) {

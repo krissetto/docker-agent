@@ -162,6 +162,11 @@ type managerPreparedView struct {
 func (p *managerPreparedView) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
 	result, err := p.PreparedSessionView.Commit(ctx)
 	if err == nil {
+		if result.Info.RootSessionID != result.Info.SessionID {
+			if root, lookupErr := p.registry.SessionByID(result.Info.RootSessionID); lookupErr == nil {
+				p.manager.runtimeSessions.Store(result.Info.RootSessionID, &activeRuntimes{handle: root, registry: p.registry})
+			}
+		}
 		p.manager.runtimeSessions.Store(result.Info.SessionID, &activeRuntimes{handle: result.SessionHandle, registry: p.registry})
 	}
 	return result, err

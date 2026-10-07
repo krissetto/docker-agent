@@ -18,11 +18,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
-var errHostedChild = errors.New("child session requires prepared view acquisition")
-
-// loadHostedRoot retains ordinary root restoration semantics inside the same
-// host admission fence as prepared views. A live winner is never reconciled or
-// tree-restored again. Child sessions use the prepared view path instead.
 type hostedSessionData struct {
 	application *app.App
 	committed   runtime.CommittedSessionView
@@ -30,60 +25,17 @@ type hostedSessionData struct {
 	prepared    supervisor.PreparedHostedView
 }
 
-func loadHostedRoot(ctx context.Context, owner *supervisor.Supervisor, id string) (*hostedSessionData, error) {
-	var data *hostedSessionData
-	err := owner.WithSessionOwner(ctx, id, func(ctx context.Context, resources supervisor.ViewOwnerResources) error {
-		handle, err := resources.Sessions.SessionByID(id)
-		if err != nil {
-			var sessionErr *runtime.SessionError
-			if !errors.As(err, &sessionErr) || sessionErr.Kind != runtime.SessionErrorNotFound {
-				return err
-			}
-			if resources.Services == nil || resources.Services.SessionStore() == nil {
-				return runtime.ErrUnsupported
-			}
-			sess, err := resources.Services.SessionStore().GetSession(ctx, id)
-			if err != nil {
-				return err
-			}
-			if sess == nil || sess.ID != id {
-				return errors.New("stored session identity changed")
-			}
-			if sess.ParentID != "" {
-				return errHostedChild
-			}
-			if sess.AgentName == "" {
-				sess.AgentName = sess.AttributesSnapshot()[runtime.SessionAgentAttribute]
-			}
-			handle, err = resources.Sessions.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: sess.AgentName, Model: sess.AgentModelOverrides[sess.AgentName]})
-			if err != nil {
-				return err
-			}
-			if restorer, ok := resources.Sessions.(runtime.TreeRestorer); ok {
-				if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
-					return err
-				}
-			}
-		}
-		sess, err := handle.Snapshot(ctx)
-		if errors.Is(err, runtime.ErrUnsupported) && resources.Services != nil && resources.Services.SessionStore() != nil {
-			sess, err = resources.Services.SessionStore().GetSession(ctx, id)
-		}
-		if err != nil {
-			return err
-		}
-		if sess == nil || sess.ID != id || handle.ID() != id {
-			return errors.New("canonical snapshot identity changed")
-		}
-		if sess.ParentID != "" {
-			return errHostedChild
-		}
-		metadata := handle.Metadata()
-		committed := runtime.CommittedSessionView{SessionHandle: handle, Info: runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id, Session: sess, WorkingDir: sess.WorkingDir, Binding: runtime.SessionBinding{AgentName: handle.AgentName(), Model: metadata.Model}}}
-		data = &hostedSessionData{committed: committed, newApp: resources.NewApp}
-		return nil
-	})
-	return data, err
+func loadHostedSession(ctx context.Context, owner *supervisor.Supervisor, id string) (*hostedSessionData, error) {
+	prepared, err := owner.AcquireSessionView(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	committed, err := prepared.Commit(ctx)
+	if err != nil {
+		prepared.Abort()
+		return nil, err
+	}
+	return &hostedSessionData{committed: committed, newApp: prepared.NewApp, prepared: prepared}, nil
 }
 
 type hostedLoadRequest struct {
@@ -149,28 +101,16 @@ func (m *appModel) beginHostedLoad(id, target string, send *messages.SendMsg) te
 			data.application, err = data.newApp(lifetime, data.committed)
 			return hostedLoadResult{request: request, data: data, err: err}
 		}
-		child, err := hostedSelectionIsChild(ctx, services, sessions, id)
-		var data *hostedSessionData
-		if err == nil && child {
-			prepared, prepareErr := owner.AcquireSessionView(ctx, id)
-			err = prepareErr
-			if err == nil {
-				committed, commitErr := prepared.Commit(ctx)
-				err = commitErr
-				if err == nil {
-					data = &hostedSessionData{committed: committed, newApp: prepared.NewApp, prepared: prepared}
-				} else {
-					prepared.Abort()
-				}
-			}
-		} else if err == nil {
-			if resolve != nil {
-				err = registerCompatibilityRoot(ctx, owner, resolve, origin, placeholder, originDir, id)
-			}
-			if err == nil {
-				data, err = loadHostedRoot(ctx, owner, id)
-			}
+
+		var err error
+		if resolve != nil {
+			err = registerCompatibilityRoot(ctx, owner, resolve, origin, placeholder, originDir, id)
 		}
+		var data *hostedSessionData
+		if err == nil {
+			data, err = loadHostedSession(ctx, owner, id)
+		}
+
 		if err == nil && data != nil {
 			data.application, err = data.newApp(lifetime, data.committed)
 		}
@@ -272,43 +212,6 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 
 // Classification is read-only and precedes ordinary owner admission, so a child
 // cannot turn an optional retained view into uncapped ordinary safety ownership.
-func hostedSelectionIsChild(ctx context.Context, services app.Services, sessions runtime.SessionRuntime, id string) (bool, error) {
-	if inspector, ok := sessions.(interface {
-		ConfirmedSessionViewInfo(ctx context.Context, id string) (runtime.PreparedSessionViewInfo, error)
-	}); ok {
-		info, err := inspector.ConfirmedSessionViewInfo(ctx, id)
-		if err != nil {
-			return false, err
-		}
-		if info.Session == nil || info.SessionID != id {
-			return false, errors.New("selected session identity unavailable")
-		}
-		return info.Session.ParentID != "", nil
-	}
-	if services != nil && services.SessionStore() != nil {
-		sess, err := services.SessionStore().GetSession(ctx, id)
-		if err != nil {
-			return false, err
-		}
-		if sess == nil || sess.ID != id {
-			return false, errors.New("selected session identity unavailable")
-		}
-		return sess.ParentID != "", nil
-	}
-	if catalog, ok := sessions.(runtime.SessionSummaryCatalog); ok {
-		rows, err := catalog.ListSessionSummaries(ctx, runtime.SessionSummaryOptions{IncludeChildren: true})
-		if err != nil {
-			return false, err
-		}
-		for _, row := range rows {
-			if row.SessionID == id {
-				return row.ParentID != "", nil
-			}
-		}
-	}
-	return false, errors.New("runtime cannot classify the selected session without admission")
-}
-
 // configureCompatibilityHost preserves legacy canonical A/B operations on the
 // same supervisor. It deliberately installs no private foreign-view factory.
 func (m *appModel) configureCompatibilityHost(ctx context.Context, initial *app.App, cwd string) error {
@@ -363,9 +266,9 @@ func (m *appModel) configureCompatibilityHost(ctx context.Context, initial *app.
 		if snapshot == nil || snapshot.ID == "" {
 			return supervisor.ViewOwnerIdentity{}, errors.New("session root identity unavailable")
 		}
-		binding := runtime.SessionBinding{AgentName: snapshot.AgentName}
+		binding := runtime.SessionBinding{AgentName: snapshot.AttributesSnapshot()[runtime.SessionAgentAttribute]}
 		if binding.AgentName == "" {
-			binding.AgentName = snapshot.AttributesSnapshot()[runtime.SessionAgentAttribute]
+			return supervisor.ViewOwnerIdentity{}, runtime.UnsupportedSessionOperation(id, "restore_binding")
 		}
 		return supervisor.ViewOwnerIdentity{Scope: scope, Source: "embedded", RootSessionID: snapshot.ID, RootWorkingDir: snapshot.WorkingDir, RootBinding: binding}, nil
 	}

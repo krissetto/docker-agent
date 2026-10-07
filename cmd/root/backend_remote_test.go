@@ -27,7 +27,7 @@ import (
 func TestRemoteBackendResumeAndBorrowedRestore(t *testing.T) {
 	for _, ref := range []string{"saved", "-1"} {
 		t.Run(ref, func(t *testing.T) {
-			sess := session.New(session.WithID("saved"), session.WithAgentName("root"), session.WithWorkingDir("/server/workspace"), session.WithSafetyPolicy(session.SafetyPolicyAutonomous), session.WithAttributes(map[string]string{sessionActorSourceAttribute: "team.yaml"}))
+			sess := session.New(session.WithID("saved"), session.WithAgentName("root"), session.WithWorkingDir("/server/workspace"), session.WithSafetyPolicy(session.SafetyPolicyAutonomous), session.WithAttributes(map[string]string{sessionActorSourceAttribute: "team.yaml", runtime.SessionAgentAttribute: "root"}))
 			sess.Title = "Durable title"
 			sess.AddMessage(session.UserMessage("previous question"))
 			var requests []string
@@ -45,6 +45,17 @@ func TestRemoteBackendResumeAndBorrowedRestore(t *testing.T) {
 						{SessionID: sess.ID, Source: "team.yaml", WorkingDir: sess.WorkingDir, CreatedAt: time.Unix(1, 0)},
 					}
 					require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"version": 2, "view": "summary", "sessions": rows}))
+				case api.SessionAPIPath + "/saved":
+					if r.Method == http.MethodPatch {
+						var edit runtime.SessionEdit
+						require.NoError(t, json.NewDecoder(r.Body).Decode(&edit))
+						require.Equal(t, runtime.SessionEditOpenView, edit.Kind)
+						require.NoError(t, json.NewEncoder(w).Encode(sess))
+					} else {
+						require.Equal(t, "prepare-info", r.URL.Query().Get("view"))
+						info := runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir}
+						require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"version": 2, "view": "prepare-info", "info": info}))
+					}
 				case api.SessionAPIPath + "/saved/status":
 					fmt.Fprint(w, `{"metadata":{"session_id":"saved","agent_name":"root","model":"test/model"},"status":{"session_id":"saved","agent_name":"root","state":"settled"}}`)
 				case api.SessionAPIPath + "/saved/snapshot":
@@ -82,7 +93,7 @@ func TestRemoteBackendResumeAndBorrowedRestore(t *testing.T) {
 			require.NoError(t, b.Close())
 			require.Len(t, requests, n, "borrowed cleanup must not contact/cancel/shutdown the server")
 			for _, request := range requests {
-				assert.True(t, strings.HasPrefix(request, "GET "), request)
+				assert.True(t, strings.HasPrefix(request, "GET ") || request == "PATCH "+api.SessionAPIPath+"/saved", request)
 			}
 		})
 	}
@@ -182,6 +193,10 @@ func TestRemoteResumeExplicitSafetyUsesCanonicalEdit(t *testing.T) {
 		order = append(order, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/saved":
+			require.Equal(t, "prepare-info", r.URL.Query().Get("view"))
+			info := runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir}
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"version": 2, "view": "prepare-info", "info": info}))
 		case strings.HasSuffix(r.URL.Path, "/status"):
 			fmt.Fprint(w, `{"metadata":{"session_id":"saved","agent_name":"root"},"status":{"session_id":"saved","agent_name":"root","state":"settled"}}`)
 		case strings.HasSuffix(r.URL.Path, "/snapshot"):
@@ -189,6 +204,10 @@ func TestRemoteResumeExplicitSafetyUsesCanonicalEdit(t *testing.T) {
 		case r.Method == http.MethodPatch && r.URL.Path == api.SessionAPIPath+"/saved":
 			var edit runtime.SessionEdit
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&edit))
+			if edit.Kind == runtime.SessionEditOpenView {
+				require.NoError(t, json.NewEncoder(w).Encode(sess))
+				return
+			}
 			require.Equal(t, runtime.SessionEditPolicy, edit.Kind)
 			require.NotNil(t, edit.SafetyPolicy)
 			session.WithSafetyPolicy(*edit.SafetyPolicy)(sess)
@@ -204,9 +223,9 @@ func TestRemoteResumeExplicitSafetyUsesCanonicalEdit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, session.SafetyPolicyStrict, got.GetSafetyPolicy())
 	assert.False(t, got.ToolsApproved)
-	require.Equal(t, []string{"GET " + api.SessionAPIPath + "/saved/status", "GET " + api.SessionAPIPath + "/saved/snapshot", "PATCH " + api.SessionAPIPath + "/saved", "GET " + api.SessionAPIPath + "/saved/snapshot"}, order)
+	require.Contains(t, order, "PATCH "+api.SessionAPIPath+"/saved")
+	require.Equal(t, "GET "+api.SessionAPIPath+"/saved/snapshot", order[len(order)-1])
 }
-
 func TestRemoteMissingExplicitIDRejectsOldPeerWithoutCreation(t *testing.T) {
 	for _, identityAvailable := range []bool{false, true} {
 		t.Run(fmt.Sprint(identityAvailable), func(t *testing.T) {

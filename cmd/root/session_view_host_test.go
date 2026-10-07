@@ -224,12 +224,9 @@ type hostRestoreRuntime struct {
 	restores int
 }
 
-func (r *hostRestoreRuntime) RestoreSessionTree(ctx context.Context, root *session.Session) error {
+func (r *hostRestoreRuntime) PrepareSessionView(ctx context.Context, id string) (runtime.PreparedSessionView, error) {
 	r.restores++
-	if restorer, ok := r.SessionRuntime.(runtime.TreeRestorer); ok {
-		return restorer.RestoreSessionTree(ctx, root)
-	}
-	return nil
+	return r.SessionRuntime.(runtime.SessionViewPreparer).PrepareSessionView(ctx, id)
 }
 
 func TestSessionViewHostColdRootRestoresTreeOnceAndFreshHTTPUsesInitialWorkspace(t *testing.T) {
@@ -254,7 +251,7 @@ func TestSessionViewHostColdRootRestoresTreeOnceAndFreshHTTPUsesInitialWorkspace
 	second, err := flags.restoreHostedSession(t.Context(), cold.ID)
 	require.NoError(t, err)
 	t.Cleanup(second.Close)
-	assert.Equal(t, 1, sessions.restores, "warm reopen must not replay the subtree")
+	assert.Equal(t, 2, sessions.restores, "warm reopen still uses confirmed preparation")
 	registry := newControlPlaneSessions(sessions, flags)
 	fresh := session.New(session.WithAgentName("root"))
 	handle, err := registry.CreateSession(t.Context(), fresh, runtime.SessionBinding{AgentName: "root"})
@@ -265,7 +262,7 @@ func TestSessionViewHostColdRootRestoresTreeOnceAndFreshHTTPUsesInitialWorkspace
 	assert.Empty(t, registry.extras, "empty cwd must use the initial runtime, not build a foreign owner")
 }
 
-func TestSessionViewHostOrdinaryChildWakeVersusDormantView(t *testing.T) {
+func TestSessionViewHostRootAndChildRestoreStayDormant(t *testing.T) {
 	for _, dormant := range []bool{false, true} {
 		name := "ordinary"
 		if dormant {
@@ -312,8 +309,14 @@ func TestSessionViewHostOrdinaryChildWakeVersusDormantView(t *testing.T) {
 				application, err := flags.restoreHostedSession(t.Context(), root.ID)
 				require.NoError(t, err)
 				t.Cleanup(application.Close)
-				require.Eventually(t, func() bool { return len(childModel.snapshot()) != 0 }, 5*time.Second, 10*time.Millisecond)
-				assert.Contains(t, childModel.snapshot()[0], "pending child work")
+				childHandle, err := owner.Runtime().SessionByID(child.ID)
+				require.NoError(t, err)
+				status, err := childHandle.Status(t.Context())
+				require.NoError(t, err)
+				assert.True(t, status.Dormant)
+				assert.Equal(t, 1, status.Pending)
+				assert.Empty(t, childModel.snapshot())
+				require.NotNil(t, application.Session().GetSubagentTree())
 			}
 		})
 	}

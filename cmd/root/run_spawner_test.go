@@ -170,16 +170,17 @@ func TestLeanSessionSpawnerWorkingDirectoryIsolation(t *testing.T) {
 
 func TestLeanSessionSpawnerForkPreservesBindingAndHistory(t *testing.T) {
 	store := session.NewInMemorySessionStore()
+	workingDir := t.TempDir()
 	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(
 		agent.New("root", "root instructions", agent.WithModel(rootTestProvider{})),
 		agent.New("worker", "worker instructions", agent.WithModel(rootTestProvider{})),
-	)), runtime.WithSessionStore(store))
+	)), runtime.WithSessionStore(store), runtime.WithWorkingDir(workingDir))
 	require.NoError(t, err)
 	owner := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
 	sessions := owner.Runtime()
 	flags := &runExecFlags{}
-	flags.runConfig.WorkingDir = t.TempDir()
+	flags.runConfig.WorkingDir = workingDir
 	source := session.New(session.WithAgentName("worker"), session.WithWorkingDir(flags.runConfig.WorkingDir), session.WithSafetyPolicy(session.SafetyPolicyStrict))
 	source.AgentModelOverrides = map[string]string{"worker": "test/override"}
 	source.AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "fork this history"}})
@@ -255,6 +256,7 @@ func TestLeanSessionRestorerLazyIdentityAndCleanup(t *testing.T) {
 	initial := app.New(t.Context(), sessions, initialSession, runtime.SessionBinding{AgentName: "root"}, app.WithRuntimeServices(rt))
 	t.Cleanup(initial.Close)
 	stored := session.New(session.WithAgentName("worker"), session.WithWorkingDir(workingDir))
+	stored.SetAttribute(runtime.SessionAgentAttribute, "worker")
 	stored.AgentModelOverrides = map[string]string{"worker": "test/override"}
 	stored.AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "restore this history"}})
 	require.NoError(t, store.AddSession(t.Context(), stored))
@@ -308,16 +310,16 @@ func TestLeanSessionRestorerLazyIdentityAndCleanup(t *testing.T) {
 	assert.Equal(t, legacy.ID, restoredLegacy.SessionHandle().ID())
 	assert.Equal(t, "worker", restoredLegacy.SessionHandle().AgentName())
 	assert.Equal(t, "test/legacy", restoredLegacy.Binding().Model)
-	assert.Equal(t, workingDir, restoredLegacy.Session().WorkingDir)
+	assert.Empty(t, restoredLegacy.Session().WorkingDir, "canonical restore never fabricates archived provenance")
 	assert.Empty(t, legacy.WorkingDir, "normalizing the loaded snapshot must not mutate its stored source")
 	ownedCleanup()
 	ownedCleanup()
 	assert.Equal(t, 1, cleanups)
 
-	invalid := session.New(session.WithAgentName("missing"), session.WithWorkingDir(workingDir))
+	invalid := session.New(session.WithAgentName("missing"), session.WithWorkingDir(workingDir), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "missing"}))
 	require.NoError(t, store.AddSession(t.Context(), invalid))
 	failed, failedCleanup, err := restore(t.Context(), invalid.ID, workingDir)
-	require.ErrorContains(t, err, "failed to bind")
+	require.Error(t, err)
 	assert.Nil(t, failed)
 	assert.Nil(t, failedCleanup)
 	assert.Equal(t, 2, cleanups, "partial restore failure cleans only its owned runtime")

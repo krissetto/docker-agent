@@ -52,12 +52,15 @@ func TestReplaceSessionHydratesSubagentTree(t *testing.T) {
 	// Persisted state from a previous process: session, child sub-session,
 	// and the subagent tree pointing at it.
 	sess := session.New(session.WithID("019d500e-aaaa-bbbb-cccc-000000000000"))
+	sess.SetAttribute(runtime.SessionAgentAttribute, "root")
 	require.NoError(t, store.AddSession(t.Context(), sess))
 	childSess := session.New(session.WithID("child-sess-1"))
 	childSess.ParentID = sess.ID
+	childSess.SetAttribute(runtime.SessionAgentAttribute, "planner")
 	require.NoError(t, store.AddSession(t.Context(), childSess))
 	stoppedSess := session.New(session.WithID("child-sess-stopped"))
 	stoppedSess.ParentID = sess.ID
+	stoppedSess.SetAttribute(runtime.SessionAgentAttribute, "planner")
 	require.NoError(t, store.AddSession(t.Context(), stoppedSess))
 
 	rootID := subagent.SessionRootID(sess.ID)

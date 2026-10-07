@@ -80,9 +80,6 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		switch {
 		case err == nil:
 			sess = existing
-			sess.AgentName = agentName
-			sess.SetSafetyPolicy(servesafety.ResumeCeiling(sess.GetSafetyPolicy(), safety.Policy))
-			sess.NonInteractive = true
 		case !errors.Is(err, session.ErrNotFound):
 			yield(nil, fmt.Errorf("look up A2A session: %w", err))
 			return
@@ -127,16 +124,15 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			sessionRuntime = supervisor.Runtime()
 		}
 
-		// Re-adopt any persisted subagent swarm so a resumed conversation's
-		// send_message / read_subagent keep working.
-		if restorer, ok := sessionRuntime.(runtime.TreeRestorer); ok {
-			if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
-				yield(nil, fmt.Errorf("restore subagent tree for A2A session %s: %w", sess.ID, err))
+		handle, err := sessionRuntime.SessionByID(sess.ID)
+		if existing != nil {
+			committed, restoreErr := runtime.RestoreSessionView(ctx, sessionRuntime, sess.ID)
+			handle, err = committed.SessionHandle, restoreErr
+			if err != nil {
+				yield(nil, fmt.Errorf("restore A2A session: %w", err))
 				return
 			}
 		}
-
-		handle, err := sessionRuntime.SessionByID(sess.ID)
 		switch {
 		case err != nil:
 			var sessionErr *runtime.SessionError
@@ -148,8 +144,8 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		case handle.AgentName() != agentName:
 			err = &runtime.SessionError{Kind: runtime.SessionErrorWrongSession, SessionID: sess.ID, Operation: runtime.SessionOperationBindAgent}
 		default:
-			policy := sess.GetSafetyPolicy()
-			_, err = handle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditPolicy, SafetyPolicy: &policy})
+			nonInteractive := true
+			_, err = handle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditPolicy, SafetyCeiling: &safety.Policy, NonInteractive: &nonInteractive})
 		}
 		if err != nil {
 			yield(nil, fmt.Errorf("bind A2A session: %w", err))

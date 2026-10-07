@@ -388,10 +388,7 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 	if handle := sm.loadedSession(id); handle != nil {
 		return handle, nil
 	}
-	sess, err := sm.sessionStore.GetSession(ctx, id)
-	if err != nil {
-		// Single-registry embeddings may own sessions that are intentionally not
-		// represented in this server's store.
+	if _, err := sm.sessionStore.GetSession(ctx, id); err != nil {
 		if len(sm.sessionRegistries) == 0 && sm.sessionRegistry != nil {
 			if handle, lookupErr := sm.sessionRegistry.SessionByID(id); lookupErr == nil {
 				return handle, nil
@@ -399,76 +396,17 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 		}
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "lookup"}
 	}
-	if sess.ParentID == "" && sess.AttributesSnapshot()[sessionAgentAttribute] == "" {
-		return nil, nonAttachableSessionError(id)
-	}
-	root, err := sm.sessionRestoreRoot(ctx, sess)
+	prepared, err := sm.PrepareSessionView(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	unlock := sm.sessionRestoreLocks.lock(root.ID)
-	defer unlock()
-
-	if handle := sm.loadedSession(id); handle != nil {
-		return handle, nil
-	}
-	registry, _, routeErr := sm.sessionRegistryForCreate(root.AttributesSnapshot()[sessionSourceAttribute])
-	if routeErr != nil {
-		return nil, routeErr
-	}
-	if sess.ParentID != "" {
-		index := newSessionCatalogIndex([]*session.Session{root, sess})
-		// Cold lookup has only one row and its ancestors, so build that bounded
-		// index explicitly; catalog builds the same index once for every row.
-		current := sess
-		for current.ParentID != "" && current.ParentID != root.ID {
-			parent, parentErr := sm.sessionStore.GetSession(ctx, current.ParentID)
-			if parentErr != nil {
-				return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "restore_parent"}
-			}
-			index.byID[parent.ID] = parent
-			current = parent
-		}
-		if treeErr := index.validateChild(ctx, registry, sess, root); treeErr != nil {
-			return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
-		}
-	}
-	if handle, lookupErr := registry.SessionByID(id); lookupErr == nil {
-		sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry})
-		sm.markReady()
-		return handle, nil
-	}
-	if root.AgentName == "" {
-		root.AgentName = root.AttributesSnapshot()[sessionAgentAttribute]
-	}
-	if root.AgentName == "" {
-		return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: root.ID, Operation: "restore_binding"}
-	}
-	rootSession, lookupErr := registry.SessionByID(root.ID)
-	if lookupErr != nil {
-		rootSession, err = sm.createHTTPSession(ctx, registry, root, runtime.SessionBinding{AgentName: root.AgentName})
-		if err != nil {
-			return nil, err
-		}
-	} else if _, ok := sm.runtimeSessions.Load(root.ID); !ok {
-		sm.runtimeSessions.Store(root.ID, &activeRuntimes{handle: rootSession, registry: registry})
-	}
-	if id == root.ID {
-		return rootSession, nil
-	}
-	restorer, ok := registry.(runtime.TreeRestorer)
-	if !ok {
-		return nil, &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: id, Operation: "restore_child_tree"}
-	}
-	if err := restorer.RestoreSessionTree(ctx, root); err != nil {
+	defer prepared.Abort()
+	committed, err := prepared.Commit(ctx)
+	if err != nil {
 		return nil, err
 	}
-	handle, err := registry.SessionByID(id)
-	if err != nil {
-		return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: id, Operation: "restore_child_tree"}
-	}
-	sm.runtimeSessions.Store(id, &activeRuntimes{handle: handle, registry: registry})
-	return handle, nil
+	sm.markReady()
+	return committed.SessionHandle, nil
 }
 
 func (sm *SessionManager) loadedSession(id string) runtime.SessionHandle {

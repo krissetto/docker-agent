@@ -432,3 +432,49 @@ func TestSessionViewAbortAfterAdmissionPublishesDormantOwners(t *testing.T) {
 		assert.Empty(t, rt.sessionDrivers.reservations)
 	}()
 }
+
+func TestSessionViewCompatibilityLoadersAndRestorersStayDormant(t *testing.T) {
+	for _, entry := range []string{"local-loader", "service-loader", "tree-restorer", "runtime-restorer", "manager-restorer"} {
+		t.Run(entry, func(t *testing.T) {
+			rt, owner, _, root := viewRootFixture(t)
+			sessions := owner.Runtime()
+			switch entry {
+			case "local-loader":
+				handle, snapshot, err := sessions.(SessionLoader).LoadSession(t.Context(), root.ID)
+				require.NoError(t, err)
+				require.Equal(t, root.ID, snapshot.ID)
+				require.NotNil(t, handle)
+			case "service-loader":
+				_, snapshot, err := rt.sessionService.LoadSession(t.Context(), root.ID)
+				require.NoError(t, err)
+				require.Equal(t, root.ID, snapshot.ID)
+			case "tree-restorer":
+				require.NoError(t, sessions.(TreeRestorer).RestoreSessionTree(t.Context(), root))
+			case "runtime-restorer":
+				_, err := rt.RestoreSubagentTree(t.Context(), root)
+				require.NoError(t, err)
+			case "manager-restorer":
+				_, err := rt.subagents.Restore(t.Context(), root, subagent.Snapshot{Version: -1})
+				require.NoError(t, err, "unconfirmed caller snapshots cannot replace persisted coordination")
+			}
+			handle, err := sessions.SessionByID(root.ID)
+			require.NoError(t, err)
+			status, err := handle.Status(t.Context())
+			require.NoError(t, err)
+			require.True(t, status.Dormant)
+			require.Equal(t, 1, status.Pending)
+			require.Empty(t, status.TurnID)
+			require.Empty(t, canonicalSettlements(canonicalReplay(handle.(*sessionHandle).driver)))
+		})
+	}
+}
+
+func TestSessionViewRejectsUnsupportedEmptyTopology(t *testing.T) {
+	rt, owner, _, root := viewRootFixture(t)
+	require.NoError(t, rt.subagentStore.SaveTree(t.Context(), root.ID, subagent.Snapshot{Version: subagent.SnapshotVersion + 1}))
+	_, err := RestoreSessionView(t.Context(), owner.Runtime(), root.ID)
+	require.ErrorContains(t, err, "unsupported topology version")
+	_, err = owner.Runtime().SessionByID(root.ID)
+	require.Error(t, err)
+	require.Empty(t, rt.sessionDrivers.reservations)
+}

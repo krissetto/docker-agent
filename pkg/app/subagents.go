@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 	"sync"
 
@@ -31,26 +30,6 @@ func WithSubagentAttach(info runtime.SubagentAttachInfo) Opt {
 // an async subagent's sub-session, or nil for a regular App.
 func (a *App) AttachedSubagent() *runtime.SubagentAttachInfo {
 	return a.attachedSubagent
-}
-
-// reloadSubagentTree rebuilds the loaded session's subagent swarm from the
-// subagent store (session stores don't carry the snapshot — it lives in its
-// own table/backend) and populates the session's view of it before the TUI
-// reads it. Restored resumable subagents stay conversational; stopped subagents
-// remain stopped. No-op when the session already holds a tree or the session
-// runtime cannot restore trees.
-func (a *App) reloadSubagentTree(ctx context.Context) {
-	sess := a.Session()
-	if sess == nil || sess.GetSubagentTree() != nil {
-		return
-	}
-	restorer, ok := a.sessions.(runtime.TreeRestorer)
-	if !ok {
-		return
-	}
-	if err := restorer.RestoreSessionTree(ctx, sess); err != nil {
-		slog.WarnContext(ctx, "Failed to restore subagent tree for session", "session_id", sess.ID, "error", err)
-	}
 }
 
 // SessionEventMsg carries bridge-origin metadata for consumers that opt into

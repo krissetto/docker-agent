@@ -78,7 +78,6 @@ type App struct {
 	cancel                 context.CancelFunc
 	currentAgentModel      string      // Tracks the current agent's model ID from AgentInfoEvent
 	exitAfterFirstResponse bool        // Exit TUI after first assistant response completes
-	resolvedView           bool        // canonical view acquisition already completed; Start must not restore again
 	readOnly               bool        // When true, no new messages can be sent to the LLM
 	titleGenerating        atomic.Bool // True when title generation is in progress
 	titleEnabled           bool
@@ -258,7 +257,6 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		runtime:          nil,
 		sessions:         sessions,
 		currentState:     initial,
-		resolvedView:     resolved,
 		events:           make(chan any, 128),
 		throttleDuration: 50 * time.Millisecond,
 	}
@@ -271,8 +269,19 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 	case resolved:
 		state = initial
 	case sessions != nil && sess != nil:
-		state.binding = app.resolvedSessionBinding(sess, state.binding)
-		state.handle, state.binding, state.err = resolveSessionHandle(ctx, sessions, sess, state.binding)
+		if app.isPersistedSession(ctx, sess) {
+			committed, err := runtime.RestoreSessionView(ctx, sessions, sess.ID)
+			state.err = err
+			if err == nil {
+				state.session, state.handle, state.binding = committed.Info.Session, committed.SessionHandle, committed.Info.Binding
+				if committed.Info.Attach != nil {
+					app.attachedSubagent = committed.Info.Attach
+				}
+			}
+		} else {
+			state.binding = app.resolvedSessionBinding(sess, state.binding)
+			state.handle, state.binding, state.err = resolveSessionHandle(ctx, sessions, sess, state.binding)
+		}
 	case sess != nil:
 		state.err = &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
@@ -369,16 +378,14 @@ func (a *App) replaceSessionState(state sessionState) {
 	a.currentState = state
 }
 
-// Start begins App-owned background event producers. Construction stays cheap
-// and side-effect free; embedders call Start when the App enters a managed
+// Start begins App-owned background event producers. Persisted construction
+// already confirms its canonical owner.
+// Embedders call Start when the App enters a managed
 // lifecycle.
 func (a *App) Start(ctx context.Context) {
 	a.startOnce.Do(func() {
 		a.initBus(ctx)
 		context.AfterFunc(ctx, a.stopBus)
-		if a.attachedSubagent == nil && !a.resolvedView {
-			a.reloadSubagentTree(ctx)
-		}
 		// One event source for local runtimes: the session's canonical stream
 		// feeds the bus, whoever drives a run — this App, the subagent
 		// manager, or the runtime's session handle waking the session.
@@ -1833,10 +1840,6 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 	if a.attachedSubagent != nil {
 		return // an attached viewer cannot swap out the subagent's session
 	}
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
-	}
 	current := a.state()
 	binding := runtime.SessionBinding{
 		AgentName:  sess.AgentName,
@@ -1846,15 +1849,26 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 	var handle runtime.SessionHandle
 	var sessionErr error
 	if a.sessions != nil {
-		handle, binding, sessionErr = resolveSessionHandle(ctx, a.sessions, sess, binding)
+		if a.isPersistedSession(ctx, sess) {
+			committed, err := runtime.RestoreSessionView(ctx, a.sessions, sess.ID)
+			if err != nil {
+				a.sendEvent(ctx, runtime.Error(err.Error()))
+				return
+			}
+			sess, handle, binding = committed.Info.Session, committed.SessionHandle, committed.Info.Binding
+			a.attachedSubagent = committed.Info.Attach
+		} else {
+			handle, binding, sessionErr = resolveSessionHandle(ctx, a.sessions, sess, binding)
+		}
+	}
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
 	}
 	a.replaceSessionState(sessionState{session: sess, handle: handle, binding: binding, err: sessionErr})
 	// Clear first message so it won't be re-sent on re-init
 	a.firstMessage = nil
 	a.firstMessageAttach = ""
-	// Hydrate the loaded session's subagent view from the subagent store
-	// before the TUI components read it.
-	a.reloadSubagentTree(ctx)
 	a.hubBridged = a.startSessionEventBridge(ctx)
 
 	// Reset and re-emit startup info so the sidebar shows agent/tools info
@@ -1862,7 +1876,7 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 
 	// If this runtime is still driving subagents for the loaded session (an
 	// in-process switch back), push the live swarm snapshot: the sidebar just
-	// restored the persisted tree with active nodes marked stopped.
+	// reflects the canonical tree without re-adopting stored execution.
 	a.emitLiveSubagentTree(ctx)
 }
 
@@ -2289,4 +2303,12 @@ func (a *App) CancelPendingMessage(ctx context.Context, turnID string) (bool, er
 		return false, nil
 	}
 	return canceler.CancelPendingMessage(ctx, turnID)
+}
+
+func (a *App) isPersistedSession(ctx context.Context, sess *session.Session) bool {
+	if a.runtime != nil && a.runtime.SessionStore() != nil {
+		_, err := a.runtime.SessionStore().GetSession(ctx, sess.ID)
+		return !errors.Is(err, session.ErrNotFound)
+	}
+	return sess.AttributesSnapshot()[runtime.SessionAgentAttribute] != ""
 }

@@ -133,8 +133,8 @@ func BenchmarkSessionViewCanonicalResult(b *testing.B) {
 			for _, impl := range []struct {
 				name string
 				run  func(*preparedSessionView) (CommittedSessionView, error)
-			}{{"legacy", legacySessionViewCanonicalResult}, {"optimized", (*preparedSessionView).canonicalResult}, {"optimized_defensive_return", func(p *preparedSessionView) (CommittedSessionView, error) {
-				result, err := p.canonicalResult()
+			}{{"legacy", legacySessionViewCanonicalResult}, {"optimized", benchmarkCanonicalResult}, {"optimized_defensive_return", func(p *preparedSessionView) (CommittedSessionView, error) {
+				result, err := benchmarkCanonicalResult(p)
 				if err == nil {
 					result.Info = cloneSessionViewInfo(result.Info)
 				}
@@ -152,4 +152,36 @@ func BenchmarkSessionViewCanonicalResult(b *testing.B) {
 			}
 		})
 	}
+}
+
+func benchmarkCanonicalResult(p *preparedSessionView) (CommittedSessionView, error) {
+	handle, err := p.r.SessionByID(p.info.SessionID)
+	if err != nil {
+		return CommittedSessionView{}, err
+	}
+	driver := handle.(*sessionHandle).driver
+	projection := driver.registrySnapshot()
+	if projection.stopped && !projection.stoppedView {
+		return CommittedSessionView{}, ErrSessionStopped
+	}
+	info := p.info
+	info.Session = driver.session()
+	if info.Session == nil {
+		return CommittedSessionView{}, ErrSessionClosed
+	}
+	_, modelRef, _ := driver.ModelBindingSnapshot()
+	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
+		info.Session.SetSubagentTree(&tree)
+	}
+	info.ActiveAgentName = info.Session.AgentName
+	info.Binding.Model = modelRef
+	info.WorkingDir = info.Session.WorkingDir
+	if info.Attach != nil {
+		// Copy attach metadata without cloning the stale session it replaces.
+		attach := *info.Attach
+		info.Attach = &attach
+		info.Attach.Session = info.Session.Clone()
+		info.Attach.Agent = info.ActiveAgentName
+	}
+	return CommittedSessionView{SessionHandle: handle, Info: info}, nil
 }

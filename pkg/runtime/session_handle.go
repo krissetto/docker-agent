@@ -168,38 +168,9 @@ func (v *localSessionRuntimeView) ListSessionSummaries(ctx context.Context, opti
 	return out, nil
 }
 
-func (v *localSessionRuntimeView) LoadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
-	release, err := v.runtime.sessionDrivers.reserveCreation(ctx, sessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer release()
-	return v.loadSession(ctx, sessionID)
-}
-
-func (v *localSessionRuntimeView) loadSession(ctx context.Context, sessionID string) (SessionHandle, *session.Session, error) {
-	if found, err := v.SessionByID(sessionID); err == nil {
-		if handle, ok := found.(*sessionHandle); ok {
-			return found, handle.driver.session().Clone(), nil
-		}
-	}
-	if v.runtime.sessionStore == nil {
-		return nil, nil, ErrUnsupported
-	}
-	sess, err := v.runtime.sessionStore.GetSession(ctx, sessionID)
-	if err != nil {
-		return nil, nil, err
-	}
-	boundAgent := sess.AttributesSnapshot()[SessionAgentAttribute]
-	if boundAgent == "" {
-		return nil, nil, &SessionError{Kind: SessionErrorUnsupported, SessionID: sessionID, Operation: "attach"}
-	}
-	if sess.AgentName == "" {
-		sess.AgentName = boundAgent
-	}
-	binding := SessionBinding{AgentName: boundAgent, Model: sess.AgentModelOverrides[boundAgent]}
-	handle, err := v.runtime.createSession(ctx, sess, binding)
-	return handle, sess, err
+func (v *localSessionRuntimeView) LoadSession(ctx context.Context, id string) (SessionHandle, *session.Session, error) {
+	committed, err := RestoreSessionView(ctx, v, id)
+	return committed.SessionHandle, committed.Info.Session, err
 }
 
 func (v *localSessionRuntimeView) SwitchAgent(ctx context.Context, sessionID, targetAgent string) (SessionHandle, *session.Session, error) {
@@ -247,14 +218,14 @@ func (v *localSessionRuntimeView) InspectSessionTree(ctx context.Context, rootSe
 }
 
 func (v *localSessionRuntimeView) RestoreSessionTree(ctx context.Context, root *session.Session) error {
-	snapshot, err := v.runtime.RestoreSubagentTree(ctx, root)
-	if err != nil {
-		return err
+	if root == nil {
+		return &SessionError{Kind: SessionErrorInvalid, Operation: "restore_tree"}
 	}
-	if snapshot != nil {
-		root.SetSubagentTree(snapshot)
+	committed, err := RestoreSessionView(ctx, v, root.ID)
+	if err == nil {
+		root.SetSubagentTree(committed.Info.Session.GetSubagentTree())
 	}
-	return nil
+	return err
 }
 
 // sessionHandle is the stable-ID session-native API. A handle never permits the
@@ -880,7 +851,13 @@ func (h *sessionHandle) Snapshot(ctx context.Context) (*session.Session, error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return h.driver.ownerSnapshot(ctx)
+	snapshot, err := h.driver.ownerSnapshot(ctx)
+	if err == nil && snapshot != nil && snapshot.ParentID == "" {
+		if tree, ok := snapshotForRoot(h.runtime.subagents.tree.Snapshot(), subagent.SessionRootID(snapshot.ID)); ok {
+			snapshot.SetSubagentTree(&tree)
+		}
+	}
+	return snapshot, err
 }
 
 // Compact requests manual compaction through the session driver's serialized
@@ -1141,6 +1118,11 @@ func (h *sessionHandle) Observe(ctx context.Context, options ObserveOptions) (Ob
 	replay := make([]SessionEvent, len(observed.seed))
 	for i, item := range observed.seed {
 		replay[i] = sessionEnvelope(h.sessionID, item)
+	}
+	if observed.session != nil && observed.session.ParentID == "" {
+		if tree, ok := snapshotForRoot(h.runtime.subagents.tree.Snapshot(), subagent.SessionRootID(h.sessionID)); ok {
+			observed.session.SetSubagentTree(&tree)
+		}
 	}
 	presentation := h.observationPresentation(ctx, observed)
 	return Observation{

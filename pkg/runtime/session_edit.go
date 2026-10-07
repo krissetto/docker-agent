@@ -31,10 +31,12 @@ type PendingMessageEdit struct {
 }
 
 type SessionEdit struct {
+	NonInteractive      *bool                      `json:"non_interactive,omitempty"`
 	PendingMessage      *PendingMessageEdit        `json:"pending_message,omitempty"`
 	AttachmentPath      string                     `json:"attachment_path,omitempty"`
 	Kind                SessionEditKind            `json:"kind"`
 	SafetyPolicy        *session.SafetyPolicy      `json:"safety_policy,omitempty"`
+	SafetyCeiling       *session.SafetyPolicy      `json:"safety_ceiling,omitempty"`
 	ToolsApproved       *bool                      `json:"tools_approved,omitempty"`
 	ToggleToolsApproved bool                       `json:"toggle_tools_approved,omitempty"`
 	Permissions         *session.PermissionsConfig `json:"permissions,omitempty"`
@@ -110,6 +112,21 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 				write = func(ctx context.Context) error { return store.UpdateSession(ctx, next) }
 			}
 		case SessionEditPolicy:
+			if edit.SafetyCeiling != nil {
+				if !edit.SafetyCeiling.IsValid() || edit.SafetyPolicy != nil || edit.ToolsApproved != nil || edit.ToggleToolsApproved {
+					return invalid()
+				}
+				policy := next.GetSafetyPolicy()
+				if policy == "" {
+					policy = *edit.SafetyCeiling
+				} else {
+					policy = session.MinSafetyPolicy(policy, *edit.SafetyCeiling)
+				}
+				next.SetSafetyPolicy(policy)
+			}
+			if edit.NonInteractive != nil {
+				next.NonInteractive = *edit.NonInteractive
+			}
 			if edit.SafetyPolicy != nil {
 				if !edit.SafetyPolicy.IsValid() {
 					return invalid()
@@ -204,6 +221,7 @@ func (h *sessionHandle) Edit(ctx context.Context, edit SessionEdit) (*session.Se
 			case SessionEditAttachment:
 				d.sess.AddAttachedFile(edit.AttachmentPath)
 			case SessionEditPolicy:
+				d.sess.NonInteractive = next.NonInteractive
 				d.sess.SetSafetyPolicy(next.GetSafetyPolicy())
 				d.sess.SetToolsApproved(next.ToolsApproved)
 			case SessionEditPermissions:
