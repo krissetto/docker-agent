@@ -31,7 +31,7 @@ func TestTeam(t *testing.T) {
 		readFile  bool
 	}{
 		{"root", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", []string{"director", "engineer", "designer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
-		{"director", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"filesystem"}, true},
+		{"director", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"shell"}, false},
 		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
 		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
@@ -108,7 +108,7 @@ func TestTeamGuidance(t *testing.T) {
 		guidance []string
 	}{
 		{"root", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the maker explicitly asks"}},
-		{"director", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks"}},
+		{"director", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
 		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
 		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "not for every ui edit"}},
 		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change"}},
