@@ -230,3 +230,95 @@ func TestRunTurnCallerCancellationOnlyDetaches(t *testing.T) {
 	assert.Zero(t, handle.cancels.Load())
 	assert.Equal(t, []string{"observe", "submit", "cancel"}, handle.calls)
 }
+
+func TestObservationConsumersRejectEnvelopeDiscontinuityBeforeFiltering(t *testing.T) {
+	for _, event := range []runtime.SessionEvent{
+		{Version: 2, Epoch: "other", Sequence: 5, TurnID: "unrelated"},
+		{Version: 2, Sequence: 6, TurnID: "accepted"},
+		{Sequence: 6, TurnID: "accepted"},
+		{Epoch: "other", TurnID: "accepted", Event: runtime.StreamStopped("s", "root", "normal")},
+	} {
+		for _, replay := range []bool{true, false} {
+			t.Run(fmt.Sprintf("epoch=%q/sequence=%d/replay=%t", event.Epoch, event.Sequence, replay), func(t *testing.T) {
+				makeObservation := func() runtime.Observation {
+					events := make(chan runtime.SessionEvent, 1)
+					observation := obs(5, nil, events)
+					observation.Initial[0].Epoch = "owner"
+					if replay {
+						observation.Replay = []runtime.SessionEvent{event}
+					} else {
+						events <- event
+					}
+					close(events)
+					errs := make(chan error)
+					close(errs)
+					observation.Errors = errs
+					return observation
+				}
+				sink := &recordingSink{}
+				projection := projectObservation(t.Context(), sink, makeObservation(), nil)
+				require.True(t, projection.gap)
+				assert.Equal(t, uint64(5), projection.cursor)
+				assert.Empty(t, sink.applied)
+
+				observation := makeObservation()
+				detaches := 0
+				observation.Cancel = func() { detaches++ }
+				observer := observerFunc(func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+					t.Fatal("discontinuity must not reconnect an accepted turn")
+					return runtime.Observation{}, nil
+				})
+				termination := consumeAcceptedTurn(t.Context(), observer, observation, "accepted", func(context.Context, runtime.SessionEvent) (TurnDecision, error) {
+					t.Fatal("discontinuous envelope must not reach handler")
+					return TurnContinue, nil
+				}, observationRetryPolicy{now: time.Now, wait: func(context.Context, int) bool {
+					t.Fatal("discontinuity must not back off")
+					return false
+				}})
+				var discontinuity *ObservationDiscontinuityError
+				require.ErrorAs(t, termination.Err, &discontinuity)
+				assert.Equal(t, "owner", discontinuity.PreviousEpoch)
+				assert.Equal(t, event.Epoch, discontinuity.CurrentEpoch)
+				assert.Equal(t, uint64(5), discontinuity.Cursor)
+				assert.Equal(t, 1, detaches)
+			})
+		}
+	}
+}
+
+func TestObservationConsumersShareReplayCursorAndLegacyEpochPolicy(t *testing.T) {
+	for _, version := range []int{0, 2} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			epoch := "owner"
+			if version == 0 {
+				epoch = "" // Legacy observations and envelopes both omit authority.
+			}
+			events := make(chan runtime.SessionEvent)
+			close(events)
+			observation := obs(5, []runtime.SessionEvent{
+				{Version: version, Epoch: epoch, Sequence: 5, TurnID: "accepted"},
+				{Version: version, Epoch: epoch, Sequence: 6, TurnID: "unrelated"},
+				{Version: version, Epoch: epoch, Sequence: 6, TurnID: "accepted"},
+				{Version: version, Epoch: epoch, TurnID: "accepted"},
+				{Version: version, Epoch: epoch, Sequence: 7, TurnID: "accepted", Event: runtime.StreamStopped("s", "root", "normal")},
+			}, events)
+			observation.Initial[0].Epoch = epoch
+			sink := &recordingSink{}
+			projection := projectObservation(t.Context(), sink, observation, nil)
+			assert.False(t, projection.gap)
+			assert.Equal(t, []uint64{6, 0, 7}, sink.applied)
+			assert.Equal(t, uint64(7), projection.cursor)
+
+			var delivered []uint64
+			cursor := uint64(5)
+			termination := consumeTurn(t.Context(), observation, "accepted", func(_ context.Context, event runtime.SessionEvent) (TurnDecision, error) {
+				delivered = append(delivered, event.Sequence)
+				return TurnContinue, nil
+			}, &cursor, nil)
+			require.NoError(t, termination.Err)
+			assert.True(t, termination.Stopped)
+			assert.Equal(t, []uint64{0, 7}, delivered)
+			assert.Equal(t, projection.cursor, cursor)
+		})
+	}
+}

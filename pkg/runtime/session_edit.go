@@ -31,6 +31,7 @@ type PendingMessageEdit struct {
 }
 
 type SessionEdit struct {
+	ViewConfirmation    *SessionViewConfirmation   `json:"view_confirmation,omitempty"`
 	NonInteractive      *bool                      `json:"non_interactive,omitempty"`
 	PendingMessage      *PendingMessageEdit        `json:"pending_message,omitempty"`
 	AttachmentPath      string                     `json:"attachment_path,omitempty"`

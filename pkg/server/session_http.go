@@ -608,14 +608,29 @@ func (s *Server) editCanonicalSession(c echo.Context) error {
 		return sessionRequestError("invalid request body")
 	}
 	if edit.Kind == runtime.SessionEditOpenView {
+		view := c.QueryParam("view")
+		if view != "" && view != "open-view" {
+			return sessionRequestError("unsupported session opening view")
+		}
+		if view == "open-view" && edit.ViewConfirmation == nil {
+			return sessionRequestError("session opening requires confirmed binding")
+		}
 		prepared, err := s.sm.PrepareSessionView(c.Request().Context(), c.Param("id"))
 		if err != nil {
 			return sessionHTTPError(err)
 		}
 		defer prepared.Abort()
+		if edit.ViewConfirmation != nil {
+			if err := edit.ViewConfirmation.Validate(prepared.Info()); err != nil {
+				return sessionHTTPError(err)
+			}
+		}
 		committed, err := prepared.Commit(c.Request().Context())
 		if err != nil {
 			return sessionHTTPError(err)
+		}
+		if view == "open-view" {
+			return c.JSON(http.StatusOK, api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: committed.Info, Metadata: sessionMetadata(committed.Metadata), Status: sessionStatus(committed.Status)})
 		}
 		return c.JSON(http.StatusOK, committed.Info.Session)
 	}

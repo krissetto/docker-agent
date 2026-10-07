@@ -81,7 +81,12 @@ func TestRemotePreparedViewRevalidatesCommit(t *testing.T) {
 					case "source":
 						snapshot.SetAttribute("docker-agent.actor.source", "other.yaml")
 					}
-					_ = json.NewEncoder(w).Encode(snapshot)
+					info.Session = snapshot
+					metadata := api.SessionMetadata{SessionID: "child", AgentName: "worker"}
+					if change == "agent" {
+						metadata.AgentName = "other"
+					}
+					_ = json.NewEncoder(w).Encode(api.SessionOpened[PreparedSessionViewInfo, SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: info, Metadata: metadata, Status: api.SessionStatus[SessionState]{SessionID: "child", AgentName: "worker", State: SessionStateSettled}})
 				case r.URL.Path == api.SessionAPIPath+"/child/status":
 					_ = json.NewEncoder(w).Encode(map[string]any{"metadata": SessionMetadata{SessionID: "child", AgentName: "other"}, "status": SessionStatus{SessionID: "child"}})
 				default:
@@ -168,4 +173,34 @@ func TestRemoteConfirmedViewLegacyIdentity(t *testing.T) {
 			assert.Equal(t, "worker", got.Binding.AgentName)
 		})
 	}
+}
+
+func TestRemotePreparedViewReadyCommitUsesSingleRequest(t *testing.T) {
+	info := confirmedChildInfo()
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Query().Get("view"))
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": api.SessionAPIVersion, "view": "prepare-info", "info": info})
+			return
+		}
+		require.Equal(t, "open-view", r.URL.Query().Get("view"))
+		var edit SessionEdit
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&edit))
+		require.NotNil(t, edit.ViewConfirmation)
+		assert.Equal(t, info.Confirmation(), *edit.ViewConfirmation)
+		_ = json.NewEncoder(w).Encode(api.SessionOpened[PreparedSessionViewInfo, SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: info, Metadata: api.SessionMetadata{SessionID: "child", AgentName: "worker", Capabilities: api.SessionCapabilities{Pause: true}}, Status: api.SessionStatus[SessionState]{SessionID: "child", AgentName: "worker", State: SessionStateSettled, Dormant: true}})
+	}))
+	defer srv.Close()
+	client, err := NewClient(srv.URL, WithHTTPClient(srv.Client()))
+	require.NoError(t, err)
+	transport, err := NewSessionTransport(client)
+	require.NoError(t, err)
+	committed, err := OpenSessionView(t.Context(), transport, "child")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"GET prepare-info", "PATCH open-view"}, requests)
+	assert.Equal(t, "worker", committed.SessionHandle.AgentName())
+	assert.True(t, committed.SessionHandle.Metadata().Capabilities.Pause)
+	assert.True(t, committed.Status.Dormant)
+	assert.Equal(t, "root", committed.Info.Session.ParentID)
 }

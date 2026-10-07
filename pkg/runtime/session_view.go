@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/session"
@@ -343,7 +344,7 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.committed != nil {
-		return CommittedSessionView{SessionHandle: p.committed.SessionHandle, Info: cloneSessionViewInfo(p.committed.Info)}, nil
+		return cloneCommittedSessionView(*p.committed), nil
 	}
 	if p.terminal {
 		return CommittedSessionView{}, context.Canceled
@@ -359,10 +360,19 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	m, g := p.r.subagents, p.r.sessionDrivers
 	restore := m.transition("restore:" + p.root.ID)
 	restore.Lock()
-	defer restore.Unlock()
+	publicationLocked := true
+	defer func() {
+		if publicationLocked {
+			restore.Unlock()
+		}
+	}()
 	transition := m.transition(p.root.ID)
 	transition.Lock()
-	defer transition.Unlock()
+	defer func() {
+		if publicationLocked {
+			transition.Unlock()
+		}
+	}()
 	m.mu.Lock()
 	for _, record := range p.records {
 		if current := m.children[record.Node.ID]; current != nil && current.durable.Revision != record.Revision {
@@ -476,9 +486,17 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	// A successful legacy batch is durable linearization. Caller cancellation
 	// after it cannot revoke admission; shutdown/delete still prevent resurrection.
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		if publicationLocked {
+			m.mu.Unlock()
+		}
+	}()
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	defer func() {
+		if publicationLocked {
+			g.mu.Unlock()
+		}
+	}()
 	if m.closed {
 		return CommittedSessionView{}, ErrSessionClosed
 	}
@@ -550,7 +568,9 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		g.mu.Lock()
 		return CommittedSessionView{}, ErrSessionClosed
 	}
+	handle := &sessionHandle{runtime: p.r, driver: driver, sessionID: info.SessionID, agentName: info.Binding.AgentName}
 	_, modelRef, _ := driver.ModelBindingSnapshot()
+	status := driver.Status()
 	g.mu.Lock()
 	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
 		info.Session.SetSubagentTree(&tree)
@@ -565,14 +585,21 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 		info.Attach.Session = info.Session.Clone()
 		info.Attach.Agent = info.ActiveAgentName
 	}
-	result := CommittedSessionView{SessionHandle: &sessionHandle{runtime: p.r, driver: driver, sessionID: info.SessionID, agentName: info.Binding.AgentName}, Info: info}
+	// Catalog discovery may perform I/O; publication is complete before metadata hydration.
+	g.mu.Unlock()
+	m.mu.Unlock()
+	transition.Unlock()
+	restore.Unlock()
+	publicationLocked = false
+	metadata := handle.Metadata()
+	result := CommittedSessionView{SessionHandle: handle, Info: info, Metadata: metadata, Status: status}
 	p.committed = &result
-	return CommittedSessionView{SessionHandle: result.SessionHandle, Info: cloneSessionViewInfo(result.Info)}, nil
+	return cloneCommittedSessionView(result), nil
 }
 
-// RestoreSessionView is the compatibility entry point for confirmed dormant
-// restoration. Abort releases only the preparation, never a committed owner.
-func RestoreSessionView(ctx context.Context, sessions SessionRuntime, id string) (CommittedSessionView, error) {
+// OpenSessionView acquires a confirmed, ready view without starting execution.
+// Abort releases only the preparation, never a committed owner.
+func OpenSessionView(ctx context.Context, sessions SessionRuntime, id string) (CommittedSessionView, error) {
 	preparer, ok := sessions.(SessionViewPreparer)
 	if !ok {
 		return CommittedSessionView{}, UnsupportedSessionOperation(id, "prepare_view")
@@ -583,4 +610,16 @@ func RestoreSessionView(ctx context.Context, sessions SessionRuntime, id string)
 	}
 	defer prepared.Abort()
 	return prepared.Commit(ctx)
+}
+
+// RestoreSessionView delegates to canonical ready acquisition.
+func RestoreSessionView(ctx context.Context, sessions SessionRuntime, id string) (CommittedSessionView, error) {
+	return OpenSessionView(ctx, sessions, id)
+}
+
+func cloneCommittedSessionView(view CommittedSessionView) CommittedSessionView {
+	view.Info = cloneSessionViewInfo(view.Info)
+	view.Metadata.ThinkingLevels = slices.Clone(view.Metadata.ThinkingLevels)
+	view.Metadata.Capabilities.AvailableModels = slices.Clone(view.Metadata.Capabilities.AvailableModels)
+	return view
 }

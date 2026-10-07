@@ -44,9 +44,9 @@ func TestManagedRemoteHostedChildView(t *testing.T) {
 			}
 			assert.Equal(t, runtime.SessionEditOpenView, edit.Kind)
 			if r.URL.Path == api.SessionAPIPath+"/root" {
-				_ = json.NewEncoder(w).Encode(root)
+				writeReadyOpening(t, w, rootInfo)
 			} else {
-				_ = json.NewEncoder(w).Encode(child)
+				writeReadyOpening(t, w, info)
 			}
 		case r.Method == http.MethodGet && r.URL.Path == api.SessionAPIPath+"/root/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": api.SessionMetadata{SessionID: root.ID, AgentName: "active-director"}, "status": runtime.SessionStatus{SessionID: root.ID, AgentName: "active-director", State: runtime.SessionStateSettled}})

@@ -67,8 +67,8 @@ func (e *ObservationGapError) Error() string {
 	return fmt.Sprintf("observation gap: first available sequence %d", e.FirstAvailable)
 }
 
-// ObservationDiscontinuityError means a reconnect cannot recover the accepted
-// turn's contiguous output from its previous observation baseline.
+// ObservationDiscontinuityError means an observation cannot preserve the
+// accepted turn's contiguous output from its previous authority baseline.
 type ObservationDiscontinuityError struct {
 	PreviousEpoch string
 	CurrentEpoch  string
@@ -216,17 +216,15 @@ func consumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 	}
 
 	consume := func(envelope runtime.SessionEvent) (bool, TurnTermination) {
-		if envelope.Gap {
-			return false, TurnTermination{ObservationError: true, Err: &ObservationGapError{FirstAvailable: envelope.FirstAvailable}}
+		apply, err := advanceObservation(envelope, observation.Primary().Epoch, cursor)
+		if err != nil {
+			return false, TurnTermination{ObservationError: true, Err: err}
 		}
-		if cursor != nil && envelope.Sequence != 0 {
-			if envelope.Sequence <= *cursor {
-				return true, TurnTermination{}
-			}
-			*cursor = envelope.Sequence
-			if progress != nil {
-				progress()
-			}
+		if !apply {
+			return true, TurnTermination{}
+		}
+		if cursor != nil && envelope.Sequence != 0 && progress != nil {
+			progress()
 		}
 		if envelope.TurnID != turnID {
 			return true, TurnTermination{}

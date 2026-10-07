@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -49,6 +50,8 @@ func TestSessionViewRemoteConfirmedPrepareCommitAndResume(t *testing.T) {
 	assert.NotEqual(t, "mutated", prepared.Info().Session.TitleSnapshot())
 	committed, err := prepared.Commit(t.Context())
 	require.NoError(t, err)
+	assert.Equal(t, archived.ID, committed.Metadata.SessionID)
+	assert.True(t, committed.Status.Dormant)
 	status, err := committed.SessionHandle.Status(t.Context())
 	require.NoError(t, err)
 	assert.True(t, status.Dormant)
@@ -99,4 +102,45 @@ func TestSessionViewRemoteLegacyPrepareDoesNotCommitFallback(t *testing.T) {
 	_, err = transport.PrepareSessionView(t.Context(), "old")
 	require.Error(t, err)
 	assert.Equal(t, 1, calls)
+}
+
+func TestSessionViewHTTPRejectsChangedConfirmationBeforePublication(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("confirmed"), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root"}))
+	require.NoError(t, store.AddSession(t.Context(), root))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(sessionHTTPProvider{})))), runtime.WithSessionStore(store))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sm := NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(owner.Runtime()))
+	srv := NewWithManager(sm, "secret")
+	info, err := sm.ConfirmedSessionViewInfo(t.Context(), root.ID)
+	require.NoError(t, err)
+	confirmation := info.Confirmation()
+	confirmation.WorkingDir = "/foreign"
+	body, err := json.Marshal(runtime.SessionEdit{Kind: runtime.SessionEditOpenView, ViewConfirmation: &confirmation})
+	require.NoError(t, err)
+	response := sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/confirmed?view=open-view", string(body), "secret")
+	assert.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	_, err = owner.Runtime().SessionByID(root.ID)
+	require.Error(t, err)
+	assert.Zero(t, sm.runtimeSessions.Length())
+	response = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/confirmed?view=open-view", `{"kind":"open_view"}`, "secret")
+	assert.Equal(t, http.StatusBadRequest, response.Code)
+	confirmation = info.Confirmation()
+	body, err = json.Marshal(runtime.SessionEdit{Kind: runtime.SessionEditOpenView, ViewConfirmation: &confirmation})
+	require.NoError(t, err)
+	response = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/confirmed?view=open-view", string(body), "secret")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var ready api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &ready))
+	assert.Equal(t, "open-view", ready.View)
+	assert.Equal(t, root.ID, ready.Info.SessionID)
+	assert.Equal(t, root.ID, ready.Metadata.SessionID)
+	assert.True(t, ready.Status.Dormant)
+	response = sessionRequest(t, srv, http.MethodPatch, "/api/v2/sessions/confirmed", `{"kind":"open_view"}`, "secret")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var legacy session.Session
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &legacy))
+	assert.Equal(t, root.ID, legacy.ID)
 }

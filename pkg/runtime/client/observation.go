@@ -199,6 +199,28 @@ func rejectTreeObservation(observation runtime.Observation) error {
 	return nil
 }
 
+// advanceObservation checks authority and gaps before deduplication or host filtering.
+// A nil cursor retains the legacy ConsumeTurn contract without sequence filtering.
+func advanceObservation(envelope runtime.SessionEvent, epoch string, cursor *uint64) (bool, error) {
+	if envelope.Gap {
+		return false, &ObservationGapError{FirstAvailable: envelope.FirstAvailable}
+	}
+	if envelope.Epoch != epoch {
+		var sequence uint64
+		if cursor != nil {
+			sequence = *cursor
+		}
+		return false, &ObservationDiscontinuityError{PreviousEpoch: epoch, CurrentEpoch: envelope.Epoch, Cursor: sequence}
+	}
+	if cursor != nil && envelope.Sequence != 0 {
+		if envelope.Sequence <= *cursor {
+			return false, nil
+		}
+		*cursor = envelope.Sequence
+	}
+	return true, nil
+}
+
 func waitRetry(ctx context.Context, attempt int) bool {
 	delay := min(time.Duration(1<<min(max(attempt, 0), 8))*25*time.Millisecond, 5*time.Second)
 	timer := time.NewTimer(delay)
@@ -246,14 +268,12 @@ func projectObservationWithEpoch(ctx context.Context, sink Sink, observation run
 		cursor = *since
 	}
 	apply := func(envelope runtime.SessionEvent) bool {
-		if envelope.Gap || envelope.Epoch != primary.Epoch {
+		apply, err := advanceObservation(envelope, primary.Epoch, &cursor)
+		if err != nil {
 			return false
 		}
-		if envelope.Sequence != 0 && envelope.Sequence <= cursor {
+		if !apply {
 			return true
-		}
-		if envelope.Sequence != 0 {
-			cursor = envelope.Sequence
 		}
 		sink.Apply(envelope)
 		progress = true

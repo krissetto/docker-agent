@@ -50,7 +50,7 @@ func TestRemoteBackendResumeAndBorrowedRestore(t *testing.T) {
 						var edit runtime.SessionEdit
 						require.NoError(t, json.NewDecoder(r.Body).Decode(&edit))
 						require.Equal(t, runtime.SessionEditOpenView, edit.Kind)
-						require.NoError(t, json.NewEncoder(w).Encode(sess))
+						writeReadyOpening(t, w, runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir})
 					} else {
 						require.Equal(t, "prepare-info", r.URL.Query().Get("view"))
 						info := runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir}
@@ -79,7 +79,8 @@ func TestRemoteBackendResumeAndBorrowedRestore(t *testing.T) {
 			require.Len(t, got.GetAllMessages(), 1)
 			assert.Equal(t, chat.MessageRoleUser, got.GetAllMessages()[0].Message.Role)
 			assert.Equal(t, "root", got.AgentName)
-			assert.Contains(t, requests, "GET "+api.SessionAPIPath+"/saved/status")
+			assert.NotContains(t, requests, "GET "+api.SessionAPIPath+"/saved/status")
+			assert.NotContains(t, requests, "GET "+api.SessionAPIPath+"/saved/snapshot")
 			n := len(requests)
 			_, err = b.Restorer(services, sessions)(t.Context(), "", "")
 			require.Error(t, err)
@@ -205,7 +206,7 @@ func TestRemoteResumeExplicitSafetyUsesCanonicalEdit(t *testing.T) {
 			var edit runtime.SessionEdit
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&edit))
 			if edit.Kind == runtime.SessionEditOpenView {
-				require.NoError(t, json.NewEncoder(w).Encode(sess))
+				writeReadyOpening(t, w, runtime.PreparedSessionViewInfo{SessionID: sess.ID, RootSessionID: sess.ID, Session: sess, ActiveAgentName: "root", Binding: runtime.SessionBinding{AgentName: "root"}, WorkingDir: sess.WorkingDir})
 				return
 			}
 			require.Equal(t, runtime.SessionEditPolicy, edit.Kind)
@@ -354,4 +355,9 @@ func TestRemoteExecUsesCanonicalSession(t *testing.T) {
 			require.Len(t, sess.GetAllMessages(), 1, "history remains server-owned")
 		})
 	}
+}
+
+func writeReadyOpening(t *testing.T, w http.ResponseWriter, info runtime.PreparedSessionViewInfo) {
+	t.Helper()
+	require.NoError(t, json.NewEncoder(w).Encode(api.SessionOpened[runtime.PreparedSessionViewInfo, runtime.SessionState]{Version: api.SessionAPIVersion, View: "open-view", Info: info, Metadata: api.SessionMetadata{SessionID: info.SessionID, AgentName: info.ActiveAgentName, Model: info.Binding.Model}, Status: api.SessionStatus[runtime.SessionState]{SessionID: info.SessionID, AgentName: info.ActiveAgentName, State: runtime.SessionStateSettled}}))
 }

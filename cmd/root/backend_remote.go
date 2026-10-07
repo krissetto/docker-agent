@@ -53,10 +53,11 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	var sess *session.Session
 	if id != "" {
 		var err error
-		reader := runtime.SessionViewInfoReader(transport)
-		info, readErr := reader.ConfirmedSessionViewInfo(ctx, id)
-		err = readErr
+		prepared, prepareErr := transport.PrepareSessionView(ctx, id)
+		err = prepareErr
 		if err == nil {
+			defer prepared.Abort()
+			info := prepared.Info()
 			sess = info.Session
 			if sess == nil || sess.ID != id {
 				return nil, nil, errors.New("remote snapshot has invalid session identity")
@@ -70,7 +71,7 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 			if sess.ParentID != "" {
 				return nil, nil, errors.New("child sessions require confirmed session view attachment")
 			}
-			committed, commitErr := runtime.RestoreSessionView(ctx, transport, id)
+			committed, commitErr := prepared.Commit(ctx)
 			err = commitErr
 			handle, sess = committed.SessionHandle, committed.Info.Session
 		}
@@ -101,6 +102,7 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	if err != nil {
 		return nil, nil, err
 	}
+	refreshSnapshot := handle == nil
 	if handle == nil {
 		template := session.New(session.WithAgentName(agentName), session.WithWorkingDir(req.WorkingDir), session.WithToolsApproved(req.ToolsApproved), session.WithSafetyPolicy(req.SafetyPolicy))
 		if id != "" {
@@ -131,19 +133,23 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 			if !handle.Metadata().Capabilities.ModelSwitching {
 				return nil, nil, errors.New("remote server does not support per-session --model overrides")
 			}
+			refreshSnapshot = true
 			if err := handle.SetModel(ctx, model); err != nil {
 				return nil, nil, err
 			}
 		}
 		if req.SafetyExplicit && req.SafetyPolicy != "" {
+			refreshSnapshot = true
 			if _, err := handle.Edit(ctx, runtime.SessionEdit{Kind: runtime.SessionEditPolicy, SafetyPolicy: &req.SafetyPolicy}); err != nil {
 				return nil, nil, err
 			}
 		}
 	}
-	sess, err = handle.Snapshot(ctx)
-	if err != nil {
-		return nil, nil, err
+	if refreshSnapshot {
+		sess, err = handle.Snapshot(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	if sess == nil || sess.ID != handle.ID() {
 		return nil, nil, errors.New("remote snapshot has invalid session identity")

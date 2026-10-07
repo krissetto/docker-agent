@@ -231,3 +231,12 @@ type SessionSummaryCatalog[Row any] struct {
 	Sessions   []Row  `json:"sessions"`
 	NextCursor string `json:"next_cursor,omitempty"`
 }
+
+// SessionOpened explicitly negotiates a ready confirmed opening, not a legacy edit snapshot.
+type SessionOpened[Info any, State ~string] struct {
+	Version  int                  `json:"version"`
+	View     string               `json:"view"`
+	Info     Info                 `json:"info"`
+	Metadata SessionMetadata      `json:"metadata"`
+	Status   SessionStatus[State] `json:"status"`
+}

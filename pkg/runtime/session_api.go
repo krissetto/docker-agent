@@ -209,9 +209,43 @@ type PreparedSessionViewInfo struct {
 	Attach          *SubagentAttachInfo `json:"attach,omitempty"`
 }
 
+// CommittedSessionView is ready for use without lookup or metadata hydration.
+// Observation still establishes its own atomic initial-state/live-tail barrier.
 type CommittedSessionView struct {
 	SessionHandle SessionHandle
 	Info          PreparedSessionViewInfo
+	Metadata      SessionMetadata
+	Status        SessionStatus
+}
+
+// SessionViewConfirmation binds publication to the identity the caller approved.
+type SessionViewConfirmation struct {
+	SessionID       string          `json:"session_id"`
+	RootSessionID   string          `json:"root_session_id"`
+	Source          string          `json:"source"`
+	WorkingDir      string          `json:"working_dir"`
+	Binding         SessionBinding  `json:"binding"`
+	ActiveAgentName string          `json:"active_agent_name"`
+	NodeID          subagent.NodeID `json:"node_id,omitempty"`
+}
+
+func (i PreparedSessionViewInfo) Confirmation() SessionViewConfirmation {
+	c := SessionViewConfirmation{SessionID: i.SessionID, RootSessionID: i.RootSessionID, WorkingDir: i.WorkingDir, Binding: i.Binding, ActiveAgentName: i.ActiveAgentName}
+	if i.Session != nil {
+		c.Source = i.Session.AttributesSnapshot()["docker-agent.actor.source"]
+	}
+	if i.Attach != nil {
+		c.NodeID = i.Attach.NodeID
+	}
+	return c
+}
+
+// Validate checks that publication still targets the approved binding.
+func (c SessionViewConfirmation) Validate(info PreparedSessionViewInfo) error {
+	if c != info.Confirmation() {
+		return &SessionError{Kind: SessionErrorConflict, SessionID: info.SessionID, Operation: "open_view", Detail: "confirmed session binding changed"}
+	}
+	return nil
 }
 
 // AgentSwitcher clones a top-level conversation into a fresh immutable

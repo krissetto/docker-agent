@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +65,9 @@ func TestSessionViewCommitDormantResumeFIFOAndIdempotence(t *testing.T) {
 	again, err := prepared.Commit(t.Context())
 	require.NoError(t, err)
 	assert.Same(t, committed.SessionHandle, again.SessionHandle)
+	assert.Equal(t, committed.SessionHandle.Metadata(), committed.Metadata)
+	assert.Equal(t, root.ID, committed.Status.SessionID)
+	assert.True(t, committed.Status.Dormant)
 	handle := committed.SessionHandle
 	status, err := handle.Status(t.Context())
 	require.NoError(t, err)
@@ -426,6 +431,9 @@ func TestSessionViewAbortAfterAdmissionPublishesDormantOwners(t *testing.T) {
 	again, err := prepared.Commit(t.Context())
 	require.NoError(t, err)
 	assert.Same(t, committed.SessionHandle, again.SessionHandle)
+	assert.Equal(t, committed.SessionHandle.Metadata(), committed.Metadata)
+	assert.Equal(t, child.ID, committed.Status.SessionID)
+	assert.True(t, committed.Status.Dormant)
 	func() {
 		rt.sessionDrivers.mu.Lock()
 		defer rt.sessionDrivers.mu.Unlock()
@@ -477,4 +485,57 @@ func TestSessionViewRejectsUnsupportedEmptyTopology(t *testing.T) {
 	_, err = owner.Runtime().SessionByID(root.ID)
 	require.Error(t, err)
 	require.Empty(t, rt.sessionDrivers.reservations)
+}
+
+func TestSessionViewMetadataDiscoveryReleasesPublicationLocks(t *testing.T) {
+	rt, owner, _, root := viewRootFixture(t)
+	prepared, err := owner.Runtime().(SessionViewPreparer).PrepareSessionView(t.Context(), root.ID)
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte(`{"data":[{"id":"openai/test-model"}]}`))
+	}))
+	defer gateway.Close()
+	defer unblock()
+	rt.modelSwitcherCfg = gatewayRuntime(gateway.URL, nil).modelSwitcherCfg
+	rt.modelSwitcherCfg.Models = nil
+	rt.modelsStore = nil
+	done := make(chan error, 1)
+	var result CommittedSessionView
+	go func() { result, err = prepared.Commit(t.Context()); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("metadata discovery did not reach loopback gateway")
+	}
+	for name, lock := range map[string]*sync.Mutex{
+		"manager":  &rt.subagents.mu,
+		"registry": &rt.sessionDrivers.mu,
+	} {
+		if assert.True(t, lock.TryLock(), "%s lock held during metadata I/O", name) {
+			lock.Unlock()
+		}
+	}
+	for _, name := range []string{"restore:" + root.ID, root.ID} {
+		lock := rt.subagents.transition(name)
+		lockCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+		err := lock.LockContext(lockCtx)
+		cancel()
+		if assert.NoError(t, err, "%s transition held during metadata I/O", name) {
+			lock.Unlock()
+		}
+	}
+	prepared.Abort()
+	unblock()
+	require.NoError(t, <-done)
+	assert.Equal(t, root.ID, result.SessionHandle.ID())
+	assert.True(t, result.Status.Dormant)
+	again, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Same(t, result.SessionHandle, again.SessionHandle)
+	assert.Equal(t, result.Metadata, again.Metadata)
 }

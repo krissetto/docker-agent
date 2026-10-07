@@ -270,7 +270,7 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		state = initial
 	case sessions != nil && sess != nil:
 		if app.isPersistedSession(ctx, sess) {
-			committed, err := runtime.RestoreSessionView(ctx, sessions, sess.ID)
+			committed, err := runtime.OpenSessionView(ctx, sessions, sess.ID)
 			state.err = err
 			if err == nil {
 				state.session, state.handle, state.binding = committed.Info.Session, committed.SessionHandle, committed.Info.Binding
@@ -1850,7 +1850,7 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 	var sessionErr error
 	if a.sessions != nil {
 		if a.isPersistedSession(ctx, sess) {
-			committed, err := runtime.RestoreSessionView(ctx, a.sessions, sess.ID)
+			committed, err := runtime.OpenSessionView(ctx, a.sessions, sess.ID)
 			if err != nil {
 				a.sendEvent(ctx, runtime.Error(err.Error()))
 				return
