@@ -424,6 +424,7 @@ type SessionBinding struct {
 // SessionCapabilities are read-only facts; false capabilities must return a
 // typed unsupported error rather than silently mutating shared runtime state.
 type SessionCapabilities struct {
+	PendingMessageRemoval bool
 	Snapshots             bool
 	DelegationPolicy      bool
 	StopSubtree           bool

@@ -84,6 +84,7 @@ type SessionMetadata struct {
 }
 
 type SessionCapabilities struct {
+	PendingMessageRemoval bool     `json:"pending_message_removal,omitempty"`
 	Snapshots             bool     `json:"snapshots,omitempty"`
 	DelegationPolicy      bool     `json:"delegation_policy,omitempty"`
 	StopSubtree           bool     `json:"stop_subtree"`
@@ -129,7 +130,8 @@ type SessionSubmission[Disposition ~string] struct {
 }
 
 type SessionCancelRequest struct {
-	TurnID string `json:"turn_id,omitempty"`
+	PendingOnly bool   `json:"pending_only,omitempty"`
+	TurnID      string `json:"turn_id,omitempty"`
 }
 
 type SessionResponseRequest[Kind ~string] struct {

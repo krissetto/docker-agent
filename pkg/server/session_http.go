@@ -566,7 +566,21 @@ func (s *Server) cancelSession(c echo.Context) error {
 			return sessionRequestError("invalid request body")
 		}
 	}
-	result, err := handle.Cancel(c.Request().Context(), req.TurnID)
+	var result runtime.CancelResult
+	if req.PendingOnly {
+		canceler, ok := handle.(runtime.PendingMessageCanceler)
+		if !ok {
+			return sessionHTTPError(runtime.UnsupportedSessionOperation(handle.ID(), "cancel_pending_message"))
+		}
+		var removed bool
+		removed, err = canceler.CancelPendingMessage(c.Request().Context(), req.TurnID)
+		result = runtime.CancelResult{SessionID: handle.ID(), TurnID: req.TurnID, Outcome: runtime.CancelNotActive}
+		if removed {
+			result.Outcome = runtime.CancelAccepted
+		}
+	} else {
+		result, err = handle.Cancel(c.Request().Context(), req.TurnID)
+	}
 	if err != nil {
 		return sessionHTTPError(err)
 	}
@@ -784,8 +798,9 @@ func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamM
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 	capabilities := meta.Capabilities
 	return sessionMetadataDTO{SessionID: meta.SessionID, AgentName: meta.AgentName, Model: meta.Model, ThinkingLevels: meta.ThinkingLevels, ThinkingLevel: meta.ThinkingLevel, Capabilities: sessionCapabilitiesDTO{
-		Snapshots:      capabilities.Snapshots,
-		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
+		PendingMessageRemoval: capabilities.PendingMessageRemoval,
+		Snapshots:             capabilities.Snapshots,
+		ToolInspection:        capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: capabilities.AvailableModels, Durability: string(capabilities.Durability), Compaction: capabilities.Compaction,
 		TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching, ContextInspection: capabilities.ContextInspection,
 		DelegationPolicy: capabilities.DelegationPolicy, StopSubtree: capabilities.StopSubtree, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,

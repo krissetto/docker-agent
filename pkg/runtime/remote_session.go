@@ -338,6 +338,36 @@ func (s *remoteSession) Cancel(ctx context.Context, turnID string) (CancelResult
 	return out, err
 }
 
+var _ PendingMessageCanceler = (*remoteSession)(nil)
+
+func (s *remoteSession) CancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
+	if turnID == "" {
+		return false, nil
+	}
+	// Re-negotiate before mutation: older peers may ignore pending_only.
+	if _, err := s.Status(ctx); err != nil {
+		return false, err
+	}
+	if !s.Metadata().Capabilities.PendingMessageRemoval {
+		return false, sessionUnsupported(s.ID(), "cancel_pending_message")
+	}
+	var out CancelResult
+	if err := s.runtime.client.sessionJSON(ctx, http.MethodPost, s.endpoint("cancel"), api.SessionCancelRequest{TurnID: turnID, PendingOnly: true}, &out); err != nil {
+		return false, err
+	}
+	if out.SessionID != s.ID() || out.TurnID != turnID {
+		return false, protocolError(errors.New("invalid pending message cancellation identity"))
+	}
+	switch out.Outcome {
+	case CancelAccepted:
+		return true, nil
+	case CancelNotActive:
+		return false, nil
+	default:
+		return false, protocolError(fmt.Errorf("invalid pending message cancellation outcome %q", out.Outcome))
+	}
+}
+
 func (s *remoteSession) StopSubtree(ctx context.Context) error {
 	if !s.Metadata().Capabilities.StopSubtree {
 		return sessionUnsupported(s.ID(), "stop_subtree")
@@ -623,8 +653,9 @@ type remoteSessionMetadata api.SessionMetadata
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
 	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
-		Snapshots:      capabilities.Snapshots,
-		ToolInspection: capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
+		PendingMessageRemoval: capabilities.PendingMessageRemoval,
+		Snapshots:             capabilities.Snapshots,
+		ToolInspection:        capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
 		AvailableModels: slices.Clone(capabilities.AvailableModels), Durability: subagent.Durability(capabilities.Durability),
 		Compaction: capabilities.Compaction, TargetCompaction: capabilities.TargetCompaction, ModelSwitching: capabilities.ModelSwitching,
 		DelegationPolicy: capabilities.DelegationPolicy, StopSubtree: capabilities.StopSubtree, ContextInspection: capabilities.ContextInspection, LiveSessions: capabilities.LiveSessions, SessionEditing: capabilities.SessionEditing,
