@@ -214,12 +214,12 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 			return busy(SessionOperationSwitchAgent)
 		}
 	case SessionOperationCompact:
-		if d.compactReserved || d.starting() || d.skillOperationID != "" {
+		if d.compactReserved || d.starting() || d.settling() || d.reclaiming || d.switchReserved || d.skillOperationID != "" {
 			err := busy(SessionOperationCompactBusy)
 			err.Limit = d.pendingLimit()
 			return err
 		}
-		if len(d.pending) != 0 || len(d.steering) != 0 {
+		if (d.running() && len(d.pending) != 0) || len(d.steering) != 0 {
 			return &SessionError{Kind: SessionErrorCapacity, SessionID: sessionID, Operation: SessionOperationCompactPending, Reason: SessionErrorReasonPending, Limit: d.pendingLimit()}
 		}
 	case SessionOperationRunSkill:
@@ -1057,7 +1057,8 @@ func (d *sessionDriver) Status() SessionStatus {
 // sessions use the existing live-session boundary queue. A settled session is
 // claimed for the duration of the standalone compaction so submissions cannot
 // start against the same mutable session snapshot. Accepted session input is a
-// separate state and is never overtaken by compaction.
+// separate state: idle compaction summarizes only history, retaining the FIFO
+// unchanged behind the reservation until compaction releases it.
 func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, sink EventSink) error {
 	var operation uint64
 	var running bool

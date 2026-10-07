@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestCompactorSettledSessionEmitsCanonicalEvents(t *testing.T) {
@@ -345,20 +348,199 @@ func TestCompactorStoppedDuringCancellationCleanupRejectsInputAsStopped(t *testi
 	local.driver.Wait()
 }
 
-func TestCompactorRejectsPendingInputSeparately(t *testing.T) {
-	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 100_000})
-	sess := session.New(session.WithID("session-pending"), session.WithAgentName("worker"))
+func TestCompactorIdleHistoryRetainsDurablePendingFIFO(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			var store session.Store = session.NewInMemorySessionStore()
+			if backend == "sqlite" {
+				store = coordinationSQLite(t)
+			}
+			compactStarted, releaseCompact := make(chan struct{}), make(chan struct{})
+			prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
+				{stream: newStreamBuilder().AddContent("history summary").AddStopWithUsage(10, 5).Build(), started: compactStarted, release: releaseCompact},
+			}}
+			rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+			rt.sessionStore = store
+			sess := session.New(session.WithID("idle-history"), session.WithAgentName("worker"), session.WithUserMessage("old history"))
+			handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
+			require.NoError(t, err)
+			d := handle.(*sessionHandle).driver
+			d.SetPreStartGate(func() bool { return false }, nil)
+			inputs := []QueuedMessage{
+				{Content: "old queued user", RequestID: "first"},
+				{Content: "old child report", RequestID: "second", InputOrigin: session.InputOriginAgent, SenderID: "child", SenderName: "worker", ReportOutcome: session.ReportOutcomeFinished},
+			}
+			for _, input := range inputs {
+				_, err := d.admitInput(t.Context(), input, SessionOperationPost, true, false)
+				require.NoError(t, err)
+			}
+			require.NoError(t, handle.Compact(t.Context(), "", nil))
+			waitClosed(t, compactStarted, "idle history compaction")
+			d.SetPreStartErrorGate(nil, nil)
+			submit, err := handle.Submit(t.Context(), TurnInput{Content: "new queued user", RequestID: "third"})
+			require.NoError(t, err)
+			steer, err := handle.Steer(t.Context(), TurnInput{Content: "new queued steer", RequestID: "fourth"})
+			require.NoError(t, err)
+			require.NoError(t, d.ownerCall(t.Context(), func() error {
+				assert.Equal(t, []string{"first", "second", submit.TurnID, steer.TurnID}, pendingRequestIDs(d.pending))
+				assert.Empty(t, d.steering)
+				assert.True(t, d.compactReserved)
+				return nil
+			}))
+			stored, err := store.GetSession(t.Context(), handle.ID())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"first", "second", submit.TurnID, steer.TurnID}, pendingTurnIDs(stored))
+			prov.mu.Lock()
+			require.Len(t, prov.messages, 1, "pending work cannot start through reservation")
+			compactInput := slices.Clone(prov.messages[0])
+			prov.mu.Unlock()
+			for _, message := range compactInput {
+				for _, text := range []string{"old queued user", "old child report", "new queued user", "new queued steer"} {
+					assert.NotContains(t, message.Content, text)
+				}
+			}
+			close(releaseCompact)
+			d.Wait()
+			snapshot := sessionHandleSnapshot(t, handle)
+			assert.Equal(t, "history summary", snapshot.LastSummary())
+			assert.Empty(t, pendingTurnIDs(snapshot))
+			stored, err = store.GetSession(t.Context(), handle.ID())
+			require.NoError(t, err)
+			assert.Equal(t, "history summary", stored.LastSummary())
+			assert.Empty(t, pendingTurnIDs(stored))
+			var promoted []string
+			for _, event := range canonicalReplay(d) {
+				if input, ok := event.Event.(*PendingUserMessagePromotedEvent); ok {
+					promoted = append(promoted, input.TurnID)
+				}
+			}
+			assert.Equal(t, []string{"first", "second", submit.TurnID, steer.TurnID}, promoted)
+			prov.mu.Lock()
+			defer prov.mu.Unlock()
+			for _, text := range []string{"old queued user", "old child report", "new queued user", "new queued steer"} {
+				found := false
+				for _, call := range prov.messages[1:] {
+					for _, message := range call {
+						found = found || strings.Contains(message.Content, text)
+					}
+				}
+				assert.True(t, found, "promoted input %q must survive the summary boundary", text)
+			}
+		})
+	}
+}
+
+func TestCompactorDormantHistoryRetainsPendingWithoutWake(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{{
+		stream: newStreamBuilder().AddContent("dormant summary").AddStopWithUsage(10, 5).Build(), started: started, release: release,
+	}}}
+	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	sess := session.New(session.WithID("dormant-history"), session.WithAgentName("worker"), session.WithUserMessage("old history"))
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
 	require.NoError(t, err)
-	local := handle.(*sessionHandle)
-	local.driver.mu.Lock()
-	local.driver.pending = append(local.driver.pending, QueuedMessage{Content: "later", RequestID: "turn-2"})
-	local.driver.mu.Unlock()
+	d := handle.(*sessionHandle).driver
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.viewDormant = true; return nil }))
+	input := QueuedMessage{Content: "pending child delivery", RequestID: "delivery", InputOrigin: session.InputOriginAgent, SenderID: "child", SenderName: "worker", InputMode: "steer"}
+	require.True(t, d.postTrustedInput(t.Context(), input))
+	require.NoError(t, handle.Compact(t.Context(), "", nil))
+	waitClosed(t, started, "dormant history compaction")
+	close(release)
+	d.Wait()
+	require.NoError(t, d.ownerCall(t.Context(), func() error {
+		assert.True(t, d.viewDormant)
+		assert.Equal(t, []string{"delivery"}, pendingRequestIDs(d.pending))
+		assert.False(t, d.compactReserved)
+		assert.Equal(t, sessionIdle, d.phase)
+		return nil
+	}))
+	snapshot := sessionHandleSnapshot(t, handle)
+	assert.Equal(t, "dormant summary", snapshot.LastSummary())
+	assert.Equal(t, []string{"delivery"}, pendingTurnIDs(snapshot))
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	assert.Len(t, prov.messages, 1, "compaction must not authorize dormant work")
+}
 
-	err = local.Compact(t.Context(), "", nil)
-	var sessionErr *SessionError
-	require.ErrorAs(t, err, &sessionErr)
-	assert.Equal(t, SessionErrorCapacity, sessionErr.Kind)
-	assert.Equal(t, SessionOperationCompactPending, sessionErr.Operation)
-	assert.Empty(t, sessionHandleSnapshot(t, handle).LastSummary())
+func pendingRequestIDs(inputs []QueuedMessage) []string {
+	var ids []string
+	for _, input := range inputs {
+		ids = append(ids, input.RequestID)
+	}
+	return ids
+}
+
+func pendingTurnIDs(sess *session.Session) []string {
+	var ids []string
+	for _, item := range sess.MessagesSnapshot() {
+		if item.Message != nil && item.Message.Pending {
+			ids = append(ids, item.Message.TurnID)
+		}
+	}
+	return ids
+}
+
+func TestCompactorIdleRootRetainsReportFromRunningChild(t *testing.T) {
+	compactStarted, releaseCompact := make(chan struct{}), make(chan struct{})
+	childStarted, releaseChild := make(chan struct{}), make(chan struct{})
+	rootProv := &stepProvider{id: "test/coordination", steps: []providerStep{{
+		stream: newStreamBuilder().AddContent("root history summary").AddStopWithUsage(10, 5).Build(), started: compactStarted, release: releaseCompact,
+	}}}
+	childProv := &stepProvider{id: "test/coordination", steps: []providerStep{{
+		stream: newStreamBuilder().AddContent("arriving child report").AddStopWithUsage(1, 1).Build(), started: childStarted, release: releaseChild,
+	}}}
+	adapt := func(prov *stepProvider) *coordinationProvider {
+		return &coordinationProvider{mockProvider: &mockProvider{id: prov.id}, call: func(ctx context.Context, messages []chat.Message) (chat.MessageStream, error) {
+			return prov.CreateChatCompletionStream(ctx, messages, []tools.Tool{})
+		}}
+	}
+	store := coordinationSQLite(t)
+	_, owner := coordinationRuntime(t, store, adapt(rootProv), adapt(childProv), WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+	root := coordinationCreate(t, owner.Runtime(), "compact-running-child-root", "")
+	d := root.(*sessionHandle).driver
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.sess.AddMessage(session.UserMessage("settled root history")); return nil }))
+	d.SetPreStartGate(func() bool { return false }, nil)
+	child := coordinationCreate(t, owner.Runtime(), "compact-running-child", root.ID())
+	submitted, err := child.Submit(t.Context(), TurnInput{Content: "child task"})
+	require.NoError(t, err)
+	waitClosed(t, childStarted, "running descendant")
+	require.True(t, d.postTrustedInput(t.Context(), QueuedMessage{Content: "older child guidance", RequestID: "older", InputOrigin: session.InputOriginAgent, SenderID: child.ID(), SenderName: "worker", InputMode: "steer"}))
+	require.NoError(t, root.Compact(t.Context(), "", nil))
+	waitClosed(t, compactStarted, "root history compaction")
+	childStatus, err := child.Status(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, SessionStateRunning, childStatus.State)
+	close(releaseChild)
+	coordinationAwait(t, child, submitted.TurnID)
+	require.Eventually(t, func() bool {
+		status, err := root.Status(t.Context())
+		return err == nil && status.Pending >= 2
+	}, time.Second, time.Millisecond, "child report delivery")
+	var pending []QueuedMessage
+	require.NoError(t, d.ownerCall(t.Context(), func() error {
+		pending = slices.Clone(d.pending)
+		assert.True(t, d.compactReserved)
+		assert.False(t, d.viewDormant)
+		return nil
+	}))
+	require.GreaterOrEqual(t, len(pending), 2, "child completion must arrive through the reserved root mailbox")
+	assert.Equal(t, "older", pending[0].RequestID)
+	var report bool
+	for _, input := range pending[1:] {
+		report = report || strings.Contains(input.Content, "arriving child report")
+	}
+	assert.True(t, report)
+	close(releaseCompact)
+	d.Wait()
+	stored, err := store.GetSession(t.Context(), root.ID())
+	require.NoError(t, err)
+	assert.Equal(t, "root history summary", stored.LastSummary())
+	assert.Equal(t, pendingRequestIDs(pending), pendingTurnIDs(stored))
+	rootProv.mu.Lock()
+	defer rootProv.mu.Unlock()
+	require.Len(t, rootProv.messages, 1)
+	for _, message := range rootProv.messages[0] {
+		assert.NotContains(t, message.Content, "older child guidance")
+		assert.NotContains(t, message.Content, "arriving child report")
+	}
 }
