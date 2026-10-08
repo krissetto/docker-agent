@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/subagentview"
 )
 
 type treeControl struct {
@@ -259,4 +260,50 @@ func (m *model) participantLine(name string, width int) string {
 		line = padRight(line, width-lipgloss.Width(reading)) + contextGaugeStyle(m.agentContextGaugeLevel(name), styles.MutedStyle).Render(reading)
 	}
 	return ansi.Truncate(line, width, "")
+}
+
+type identityColumns struct {
+	nameStart, nameEnd int
+	idStart, idEnd     int
+}
+
+func (c identityColumns) shift(indent int) identityColumns {
+	return identityColumns{c.nameStart + indent, c.nameEnd + indent, c.idStart + indent, c.idEnd + indent}
+}
+
+func (c identityColumns) contains(x int) bool {
+	return (x >= c.nameStart && x < c.nameEnd) || (x >= c.idStart && x < c.idEnd)
+}
+
+// SubagentIdentityAt excludes status, counts, whitespace and disclosure controls.
+func (m *model) SubagentIdentityAt(x, y int) (subagent.Node, bool) {
+	kind, id := m.HandleClickType(x, y)
+	if kind != ClickSubagent {
+		return subagent.Node{}, false
+	}
+	identity := m.preparedTrees[m.contentWidth(m.cachedNeedsScrollbar)].rows[y+m.scrollview.ScrollOffset()-m.treeSectionStart].identity
+	if m.placement != nil {
+		row, ok := m.placementRowAt(x, y)
+		if !ok {
+			return subagent.Node{}, false
+		}
+		identity = row.identity
+	}
+	if !identity.contains(x - m.layoutCfg.PaddingLeft) {
+		return subagent.Node{}, false
+	}
+	node, found := subagentview.Find(m.subagentNodes, subagent.NodeID(id))
+	return node.Node, found
+}
+
+func (m *model) subagentDisclosureAt(x, y int) (treeControl, bool) {
+	kind, id := m.HandleClickType(x, y)
+	if kind != ClickSubagent {
+		return treeControl{}, false
+	}
+	node, found := subagentview.Find(m.subagentNodes, subagent.NodeID(id))
+	if !found || len(node.Children) == 0 {
+		return treeControl{}, false
+	}
+	return treeControl{id: node.Node.ID}, true
 }

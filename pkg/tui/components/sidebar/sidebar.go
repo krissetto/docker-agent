@@ -1587,8 +1587,12 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			if cmd, handled := m.todoClick(msg.X-m.xPos, msg.Y-m.yPos); handled {
 				return m, cmd
 			}
-			if control, ok := m.treeControlAt(msg.X-m.xPos, msg.Y-m.yPos); ok {
-				if !control.whole {
+			control, explicit := m.treeControlAt(msg.X-m.xPos, msg.Y-m.yPos)
+			if !explicit {
+				control, _ = m.subagentDisclosureAt(msg.X-m.xPos, msg.Y-m.yPos)
+			}
+			if explicit || control.id != "" {
+				if explicit && !control.whole {
 					m.branchCapture = branchCapture{id: control.id, x: msg.X - m.xPos, y: msg.Y - m.yPos}
 					if node, found := subagentview.Find(m.subagentNodes, control.id); found {
 						m.branchCapture.parent = node.Node.Parent
@@ -2758,6 +2762,11 @@ func (m *model) subagentLine(n subagent.Node, guides string, contentWidth int) s
 }
 
 func (m *model) subagentRow(n subagent.Node, guides string, contentWidth, row int, branch bool) string {
+	text, _ := m.subagentRowIdentity(n, guides, contentWidth, row, branch)
+	return text
+}
+
+func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth, row int, branch bool) (string, identityColumns) {
 	hovered := m.hoveredSubagent == n.ID
 
 	nameStyle := styles.AgentIdentityStyle(n.Agent, false)
@@ -2813,6 +2822,7 @@ func (m *model) subagentRow(n subagent.Node, guides string, contentWidth, row in
 	name, _, guideWidth, showGlyph := subagentLineParts(baseName, "", leftBudget-controlReserve-badgeReserve, glyphWidth)
 
 	guides = subagentGuideTail(guides, guideWidth)
+	identity := identityColumns{nameStart: lipgloss.Width(guides), nameEnd: lipgloss.Width(guides) + lipgloss.Width(name)}
 	left := styles.MutedStyle.Render(guides) + m.hoverText(nameStyle.Render(name), "node:"+string(n.ID))
 
 	if badgeReserve > 0 {
@@ -2824,6 +2834,7 @@ func (m *model) subagentRow(n subagent.Node, guides string, contentWidth, row in
 	idProgress := m.branchSpans[n.ID].idValue
 	idWidth := spanWidth(suffix, idProgress)
 	if suffix != "" && lipgloss.Width(left)+idWidth+controlReserve <= leftBudget {
+		identity.idStart, identity.idEnd = lipgloss.Width(left)+1, lipgloss.Width(left)+idWidth
 		left += neutralSpan(suffix, idProgress, idWidth)
 	}
 	if controlReserve > 0 {
@@ -2843,10 +2854,10 @@ func (m *model) subagentRow(n subagent.Node, guides string, contentWidth, row in
 	}
 
 	if right == "" {
-		return left
+		return left, identity
 	}
 	gap := max(1, contentWidth-lipgloss.Width(left)-rightWidth)
-	return left + strings.Repeat(" ", gap) + right
+	return left + strings.Repeat(" ", gap) + right, identity
 }
 
 func subagentLineParts(name, suffix string, leftBudget, glyphWidth int) (string, string, int, bool) {

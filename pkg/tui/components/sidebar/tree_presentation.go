@@ -19,6 +19,7 @@ type counterPresentation struct {
 }
 
 type preparedTreeRow struct {
+	identity identityColumns
 	node     subagent.Node
 	guides   string
 	branch   bool
@@ -231,7 +232,9 @@ func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) pre
 	}
 	indent := min(2, max(0, width-1))
 	delete(m.treeControls, row)
-	item.text = strings.Repeat(" ", indent) + m.subagentRow(item.node, item.guides, max(1, width-indent), row, item.branch)
+	text, identity := m.subagentRowIdentity(item.node, item.guides, max(1, width-indent), row, item.branch)
+	item.text = strings.Repeat(" ", indent) + text
+	item.identity = identity.shift(indent)
 	for i := range m.treeControls[row] {
 		m.treeControls[row][i].x += indent
 	}

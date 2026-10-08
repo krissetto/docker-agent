@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -39,9 +40,11 @@ type HitTest struct {
 	// SubagentID is the subagent node id when At() returns
 	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
 	// when it returns TargetSidebarParent.
-	QueueTurnID     string
-	SubagentID      string
-	ParentSessionID string
+	QueueTurnID        string
+	SubagentID         string
+	ParentSessionID    string
+	SubagentIdentity   subagent.Node
+	OnSubagentIdentity bool
 }
 
 // NewHitTest creates a hit tester for the given chat page.
@@ -171,6 +174,15 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 		return TargetSidebarUsage
 	case sidebar.ClickSubagent:
 		h.SubagentID = agentName
+		if identities, ok := h.page.sidebar.(interface {
+			SubagentIdentityAt(x, y int) (subagent.Node, bool)
+		}); ok {
+			localX, localY := x-styles.AppPadding-h.page.computeSidebarLayout().sidebarStartX, y
+			if g := h.page.splitPresentation; g != nil {
+				localX, localY = x-g.Shell.Sidebar.X, y-g.Shell.Sidebar.Y
+			}
+			h.SubagentIdentity, h.OnSubagentIdentity = identities.SubagentIdentityAt(localX, localY)
+		}
 		return TargetSidebarSubagent
 	case sidebar.ClickSubagentParent:
 		h.ParentSessionID = agentName

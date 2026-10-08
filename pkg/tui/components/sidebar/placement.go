@@ -15,6 +15,7 @@ import (
 )
 
 type placedRow struct {
+	identity                                         identityColumns
 	id, text                                         string
 	y, fromY, targetY, alpha, fromAlpha, targetAlpha float64
 	action                                           ClickResult
@@ -109,6 +110,7 @@ func (m *model) targetRows() []placedRow {
 			row.id = "node:" + string(id)
 			row.action = ClickSubagent
 			row.payload = string(id)
+			row.identity = m.preparedTrees[width].rows[y-m.treeSectionStart].identity
 		}
 		if name, ok := m.agentClickZones[y]; ok {
 			row.id = "agent:" + name
@@ -518,6 +520,7 @@ func (m *model) refreshPlacementPresentation() {
 			row.text = lines[y]
 			if strings.HasPrefix(row.id, "node:") {
 				row.controls = slices.Clone(m.treeControls[y-m.treeSectionStart])
+				row.identity = m.preparedTrees[width].rows[y-m.treeSectionStart].identity
 			}
 		}
 	}
@@ -545,7 +548,7 @@ func (m *model) refreshPlacementHover() {
 			if item, found := prepared.rows[index]; found {
 				item = m.refreshPreparedTreeRow(item, index, width)
 				prepared.rows[index] = item
-				row.text, row.controls = item.text, item.controls
+				row.text, row.controls, row.identity = item.text, item.controls, item.identity
 			}
 		case row.action == ClickWorkingDir:
 			row.text = m.directoryRow(width)

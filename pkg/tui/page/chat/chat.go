@@ -190,10 +190,12 @@ func (p *chatPage) SidebarVisualGeneration() uint64 {
 }
 
 type sidebarClick struct {
-	sessionID string
-	target    MouseTarget
-	turnID    string
-	at        time.Time
+	sessionID                       string
+	target                          MouseTarget
+	turnID                          string
+	nodeID, nodeSessionID, parentID string
+	x, y, width, height             int
+	at                              time.Time
 }
 
 type queuedMessage struct {
@@ -216,6 +218,7 @@ type chatPage struct {
 	sessionState *service.SessionState
 
 	lastSidebarClick         sidebarClick
+	sidebarClickNow          func() time.Time
 	lastMessageIdentityClick messageIdentityClick
 	messageClickNow          func() time.Time
 
@@ -665,6 +668,9 @@ func Cleanup(page Page) {
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseWheelMsg, msgtypes.WheelCoalescedMsg:
+		if p.lastSidebarClick.nodeID != "" {
+			p.lastSidebarClick = sidebarClick{}
+		}
 		p.lastMessageIdentityClick = messageIdentityClick{}
 		p.sidebar.ResetTodoClick()
 	}
