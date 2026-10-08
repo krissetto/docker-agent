@@ -19,6 +19,7 @@ import (
 type streamAdapter struct {
 	retryableStream[anthropic.MessageStreamEventUnion]
 
+	usage      anthropic.Usage
 	trackUsage bool
 	toolCall   bool
 	stopReason anthropic.StopReason
@@ -140,10 +141,15 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		default:
 			return response, fmt.Errorf("unknown delta type: %T", deltaVariant)
 		}
+	case anthropic.MessageStartEvent:
+		if a.trackUsage {
+			a.usage = eventVariant.Message.Usage
+		}
 	case anthropic.MessageDeltaEvent:
 		a.stopReason = eventVariant.Delta.StopReason
 		if a.trackUsage {
-			response.Usage = usageFromDelta(eventVariant.Usage)
+			a.accumulateUsage(eventVariant.Usage)
+			response.Usage = usageFromMessage(a.usage)
 		}
 	case anthropic.MessageStopEvent:
 		response.Choices[0].FinishReason = finishReason(a.stopReason, a.toolCall)
@@ -152,12 +158,8 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	return response, nil
 }
 
-// usageFromDelta maps the standard Messages API streaming usage onto chat.Usage.
-// ReasoningTokens comes from OutputTokensDetails.ThinkingTokens, which Anthropic
-// reports as a read-only decomposition of OutputTokens (thinking is already
-// billed inside output), so surfacing it never changes the cost computed in the
-// runtime — it only makes the otherwise-invisible thinking spend observable.
-func usageFromDelta(u anthropic.MessageDeltaUsage) *chat.Usage {
+// usageFromMessage maps cumulative usage; reasoning is already included in output.
+func usageFromMessage(u anthropic.Usage) *chat.Usage {
 	return &chat.Usage{
 		InputTokens:       u.InputTokens,
 		OutputTokens:      u.OutputTokens,
@@ -188,4 +190,23 @@ func finishReason(stopReason anthropic.StopReason, sawToolUse bool) chat.FinishR
 // Close closes the stream
 func (a *streamAdapter) Close() {
 	a.close()
+}
+
+// Counts are cumulative: omitted/null fields preserve previous values, including zero.
+func (a *streamAdapter) accumulateUsage(u anthropic.MessageDeltaUsage) {
+	if u.JSON.InputTokens.Valid() {
+		a.usage.InputTokens = u.InputTokens
+	}
+	if u.JSON.OutputTokens.Valid() {
+		a.usage.OutputTokens = u.OutputTokens
+	}
+	if u.JSON.CacheReadInputTokens.Valid() {
+		a.usage.CacheReadInputTokens = u.CacheReadInputTokens
+	}
+	if u.JSON.CacheCreationInputTokens.Valid() {
+		a.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
+	}
+	if u.JSON.OutputTokensDetails.Valid() && u.OutputTokensDetails.JSON.ThinkingTokens.Valid() {
+		a.usage.OutputTokensDetails.ThinkingTokens = u.OutputTokensDetails.ThinkingTokens
+	}
 }
