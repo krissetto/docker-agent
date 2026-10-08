@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -260,7 +261,7 @@ func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	msgs []chat.Message,
 ) []chat.Message {
 	if len(r.transforms) == 0 {
-		return msgs
+		return builtins.BoundToolMessages(msgs)
 	}
 	in := &hooks.Input{
 		SessionID:         sess.ID,
@@ -287,5 +288,5 @@ func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 		}
 		msgs = out
 	}
-	return msgs
+	return builtins.BoundToolMessages(msgs)
 }
