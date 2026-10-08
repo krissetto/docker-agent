@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,4 +58,73 @@ func TestSubagentRowDisclosureScrolledNarrowAndLeaf(t *testing.T) {
 	m.scrollview.SetScrollOffset(leafRow)
 	m.Update(tea.MouseClickMsg{X: m.xPos + m.layoutCfg.PaddingLeft + 2, Y: m.yPos + leafRow - m.scrollview.ScrollOffset(), Button: tea.MouseLeft})
 	require.NotContains(t, m.collapsedBranches, subagent.NodeID("leaf-full-identity"), "leaf rows have no branch state")
+}
+
+func TestSubagentNameHoverOnlyWithinRenderedName(t *testing.T) {
+	for _, width := range []int{12, 20, 60} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			m := newCollapseSidebar(t)
+			snapshot := collapseFixture()
+			snapshot.Nodes[0].Children[0].Node.Name = "作業planner"
+			m.SetSubagentTree(snapshot)
+			m.SetSize(width, 4)
+			m.CancelPresentation()
+			m.ReconcileLayout()
+			var contentY int
+			for y, id := range m.subagentHoverZone {
+				if id == "branch-full-identity" {
+					contentY = y
+				}
+			}
+			m.scrollview.SetScrollOffset(contentY)
+			m.View()
+			y := contentY - m.scrollview.ScrollOffset()
+			motion := func(x int) {
+				t.Helper()
+				_, cmd := m.Update(tea.MouseMotionMsg{X: m.xPos + x, Y: m.yPos + y})
+				settleSidebarHover(t, m, cmd)
+				m.ReconcileLayout()
+			}
+			motion(m.layoutCfg.PaddingLeft)
+			row, ok := m.placementRowAt(m.layoutCfg.PaddingLeft, y)
+			require.True(t, ok)
+			require.Greater(t, row.identity.nameEnd, row.identity.nameStart)
+			nameKey := "node-name:branch-full-identity"
+			require.Zero(t, m.hoverValues[nameKey].value, "indent leaves the name unhighlighted")
+			require.Equal(t, 1.0, m.branchSpans["branch-full-identity"].idValue, "indent still reveals the ID")
+			motion(m.layoutCfg.PaddingLeft + row.identity.nameStart)
+			require.Equal(t, 1.0, m.hoverValues[nameKey].value)
+			for _, col := range []int{row.identity.nameStart - 1, row.identity.nameEnd, m.contentWidth(m.cachedNeedsScrollbar) - 1} {
+				motion(m.layoutCfg.PaddingLeft + col)
+				require.Zero(t, m.hoverValues[nameKey].value, "non-name column %d", col)
+				require.Equal(t, "node:branch-full-identity", m.hoverTarget)
+				require.Equal(t, 1.0, m.branchSpans["branch-full-identity"].idValue)
+			}
+			row, ok = m.placementRowAt(m.layoutCfg.PaddingLeft, y)
+			require.True(t, ok)
+			if width == 60 {
+				require.Greater(t, row.identity.idEnd, row.identity.idStart)
+				motion(m.layoutCfg.PaddingLeft + row.identity.idStart)
+				require.Zero(t, m.hoverValues[nameKey].value, "visible ID leaves the name unhighlighted")
+				_, cmd := m.Update(tea.MouseClickMsg{X: m.xPos + m.layoutCfg.PaddingLeft, Y: m.yPos + y, Button: tea.MouseLeft})
+				settleTreePresentation(t, m, cmd)
+				y = contentY - m.scrollview.ScrollOffset()
+				motion(m.layoutCfg.PaddingLeft)
+				row, ok = m.placementRowAt(m.layoutCfg.PaddingLeft, y)
+				require.True(t, ok)
+				motion(m.layoutCfg.PaddingLeft + row.identity.nameEnd + 1)
+				require.Zero(t, m.hoverValues[nameKey].value, "count leaves the name unhighlighted")
+				require.True(t, m.collapsedBranches["branch-full-identity"])
+			}
+			for _, control := range row.controls {
+				motion(m.layoutCfg.PaddingLeft + control.x)
+				require.Zero(t, m.hoverValues[nameKey].value, "chevron leaves the name unhighlighted")
+				require.Equal(t, "node:branch-full-identity", m.hoverTarget)
+			}
+			motion(m.layoutCfg.PaddingLeft + row.identity.nameStart)
+			require.Equal(t, 1.0, m.hoverValues[nameKey].value, "name reentry restores its highlight")
+			settleSidebarHover(t, m, m.ClearSubagentHover())
+			require.Empty(t, m.hoverValues)
+		})
+	}
 }

@@ -19,13 +19,17 @@ func (m *model) hoverText(text, key string) string {
 }
 
 func (m *model) setHoverTarget(key string) tea.Cmd {
+	return m.setHoverTargets(key, "")
+}
+
+func (m *model) setHoverTargets(key, nameKey string) tea.Cmd {
 	if !m.presentationActive {
 		return nil
 	}
-	if key == m.hoverTarget {
+	if key == m.hoverTarget && nameKey == m.hoverNameTarget {
 		return nil
 	}
-	m.hoverTarget = key
+	m.hoverTarget, m.hoverNameTarget = key, nameKey
 	m.invalidateHover()
 	m.syncBranchHover()
 	if m.hoverValues == nil {
@@ -45,6 +49,9 @@ func (m *model) setHoverTarget(key string) tea.Cmd {
 			base := key[:strings.LastIndex(key, ":")]
 			active[base+":row"] = true
 		}
+	}
+	if nameKey != "" {
+		active[nameKey] = true
 	}
 	for name := range active {
 		if _, ok := m.hoverValues[name]; !ok {
@@ -99,7 +106,7 @@ func (m *model) cancelHover() {
 	m.ResetTodoClick()
 	m.hoverAnimation.Stop()
 	m.hoverValues = nil
-	m.hoverTarget = ""
+	m.hoverTarget, m.hoverNameTarget = "", ""
 	m.hoveredRegion = ClickNone
 	m.hoveredSubagent = ""
 	m.hoveredParent = false

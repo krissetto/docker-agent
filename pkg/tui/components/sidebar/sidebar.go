@@ -483,6 +483,7 @@ type model struct {
 	hoveredRegion        ClickResult
 	hoverValues          map[string]hoverValue
 	hoverTarget          string
+	hoverNameTarget      string
 	hoverAnimation       animation.Subscription
 	workingDirRow        int
 	workingDirBodyRow    int
@@ -2823,7 +2824,7 @@ func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth
 
 	guides = subagentGuideTail(guides, guideWidth)
 	identity := identityColumns{nameStart: lipgloss.Width(guides), nameEnd: lipgloss.Width(guides) + lipgloss.Width(name)}
-	left := styles.MutedStyle.Render(guides) + m.hoverText(nameStyle.Render(name), "node:"+string(n.ID))
+	left := styles.MutedStyle.Render(guides) + m.hoverText(nameStyle.Render(name), "node-name:"+string(n.ID))
 
 	if badgeReserve > 0 {
 		left += neutralSpan(badge, badgeProgress, badgeReserve)

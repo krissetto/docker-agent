@@ -275,25 +275,27 @@ func (c identityColumns) contains(x int) bool {
 	return (x >= c.nameStart && x < c.nameEnd) || (x >= c.idStart && x < c.idEnd)
 }
 
-// SubagentIdentityAt excludes status, counts, whitespace and disclosure controls.
+// SubagentIdentityAt returns the row node and whether its name or visible ID is hit.
 func (m *model) SubagentIdentityAt(x, y int) (subagent.Node, bool) {
 	kind, id := m.HandleClickType(x, y)
 	if kind != ClickSubagent {
 		return subagent.Node{}, false
 	}
-	identity := m.preparedTrees[m.contentWidth(m.cachedNeedsScrollbar)].rows[y+m.scrollview.ScrollOffset()-m.treeSectionStart].identity
-	if m.placement != nil {
-		row, ok := m.placementRowAt(x, y)
-		if !ok {
-			return subagent.Node{}, false
-		}
-		identity = row.identity
-	}
-	if !identity.contains(x - m.layoutCfg.PaddingLeft) {
+	identity, ok := m.subagentIdentityColumnsAt(x, y)
+	if !ok {
 		return subagent.Node{}, false
 	}
 	node, found := subagentview.Find(m.subagentNodes, subagent.NodeID(id))
-	return node.Node, found
+	return node.Node, found && identity.contains(x-m.layoutCfg.PaddingLeft)
+}
+
+func (m *model) subagentIdentityColumnsAt(x, y int) (identityColumns, bool) {
+	if m.placement != nil {
+		row, ok := m.placementRowAt(x, y)
+		return row.identity, ok && row.action == ClickSubagent
+	}
+	row, ok := m.preparedTrees[m.contentWidth(m.cachedNeedsScrollbar)].rows[y+m.scrollview.ScrollOffset()-m.treeSectionStart]
+	return row.identity, ok
 }
 
 func (m *model) subagentDisclosureAt(x, y int) (treeControl, bool) {

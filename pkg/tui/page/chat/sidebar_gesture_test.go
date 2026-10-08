@@ -78,85 +78,105 @@ func requireNoSidebarNavigation(t *testing.T, events []tea.Msg) {
 	}
 }
 
-func TestSidebarAgentRowSingleToggleAndIdentityDoubleAttach(t *testing.T) {
+func TestSidebarAgentIdentitySingleAttachWithoutDisclosure(t *testing.T) {
 	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarLeft, msgtypes.SidebarRight} {
 		for _, expanded := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/expanded=%t", position, expanded), func(t *testing.T) {
-				p, now := newSidebarGesturePage(t, position)
-				x, y, _ := sidebarGesturePoint(t, p, "作業planner")
-				if !expanded {
-					_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x + 16, Y: y, Button: tea.MouseLeft})
-					requireNoSidebarNavigation(t, runTimerCmd(t, cmd))
+			for _, width := range []int{22, 70} {
+				t.Run(fmt.Sprintf("%s/expanded=%t/width=%d", position, expanded, width), func(t *testing.T) {
+					p, _ := newSidebarGesturePage(t, position)
+					p.sidebar.SetPreferredWidth(width)
+					p.SetSize(160, 40)
 					settleSidebarGesture(t, p)
-				}
-				p.handleMouseMotion(tea.MouseMotionMsg{X: x, Y: y})
-				settleSidebarGesture(t, p)
-				click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
-				_, cmd := p.handleMouseClick(click)
-				events := runTimerCmd(t, cmd)
-				requireNoSidebarNavigation(t, events)
-				require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
-				settleSidebarGesture(t, p)
-				xAfter, yAfter, _ := sidebarGesturePoint(t, p, "作業planner")
-				require.Equal(t, x, xAfter, "first click keeps the name in the same column")
-				require.Equal(t, y, yAfter)
-				require.Equal(t, !expanded, strings.Contains(ansi.Strip(p.sidebar.View()), "reviewer"))
-				beforeAttach := ansi.Strip(p.sidebar.View())
-				*now = now.Add(100 * time.Millisecond)
-				_, cmd = p.handleMouseClick(click)
-				events = runTimerCmd(t, cmd)
-				require.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
-				require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing"})
-				require.Equal(t, beforeAttach, ansi.Strip(p.sidebar.View()), "second click does not toggle")
-			})
+					x, y, _ := sidebarGesturePoint(t, p, "作")
+					if !expanded {
+						_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: styles.AppPadding + p.computeSidebarLayout().sidebarStartX + sidebar.DefaultLayoutConfig().PaddingLeft, Y: y, Button: tea.MouseLeft})
+						requireNoSidebarNavigation(t, runTimerCmd(t, cmd))
+						settleSidebarGesture(t, p)
+					}
+					before := ansi.Strip(p.sidebar.View())
+					_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+					events := runTimerCmd(t, cmd)
+					require.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
+					require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing"})
+					require.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
+					require.Empty(t, p.lastSidebarClick.nodeID, "immediate attach clears the pending row pair")
+					settleSidebarGesture(t, p)
+					require.Equal(t, before, ansi.Strip(p.sidebar.View()), "name attaches without hover or a disclosure change")
+				})
+			}
 		}
 	}
 }
 
-func TestSidebarAgentRowNonIdentityClicksToggleWithoutAttachment(t *testing.T) {
-	for _, part := range []string{"indent", "count", "whitespace", "status", "chevron"} {
-		t.Run(part, func(t *testing.T) {
-			p, now := newSidebarGesturePage(t, msgtypes.SidebarRight)
-			x, y, _ := sidebarGesturePoint(t, p, "作業planner")
-			p.handleMouseMotion(tea.MouseMotionMsg{X: x, Y: y})
-			settleSidebarGesture(t, p)
-			// Collapse once so the count is a visible row-wide disclosure hit.
-			p.handleMouseClick(tea.MouseClickMsg{X: x + 25, Y: y, Button: tea.MouseLeft})
-			settleSidebarGesture(t, p)
-			base := styles.AppPadding + p.computeSidebarLayout().sidebarStartX
-			_, _, line := sidebarGesturePoint(t, p, "作業planner")
-			switch part {
-			case "indent":
-				x = base + sidebar.DefaultLayoutConfig().PaddingLeft
-			case "count":
-				x += ansi.StringWidth("作業planner ")
-			case "whitespace":
-				x += 25
-			case "status":
-				x = base + ansi.StringWidth(strings.TrimRight(line, " ")) - ansi.StringWidth("just now")
-			case "chevron":
-				before, _, found := strings.Cut(line, "›")
-				require.True(t, found)
-				x = base + ansi.StringWidth(before)
+func TestSidebarAgentRowSingleToggleDoubleAttach(t *testing.T) {
+	for _, position := range []msgtypes.SidebarPosition{msgtypes.SidebarLeft, msgtypes.SidebarRight} {
+		for _, expanded := range []bool{false, true} {
+			for _, part := range []string{"indent", "count", "whitespace", "status"} {
+				t.Run(fmt.Sprintf("%s/expanded=%t/%s", position, expanded, part), func(t *testing.T) {
+					p, now := newSidebarGesturePage(t, position)
+					x, y, _ := sidebarGesturePoint(t, p, "作業planner")
+					if !expanded {
+						p.handleMouseClick(tea.MouseClickMsg{X: x + 25, Y: y, Button: tea.MouseLeft})
+						settleSidebarGesture(t, p)
+					}
+					p.lastSidebarClick = sidebarClick{}
+					base := styles.AppPadding + p.computeSidebarLayout().sidebarStartX
+					_, _, line := sidebarGesturePoint(t, p, "作業planner")
+					switch part {
+					case "indent":
+						x = base + sidebar.DefaultLayoutConfig().PaddingLeft
+					case "count":
+						x += ansi.StringWidth("作業planner ")
+					case "whitespace":
+						x += 25
+					case "status":
+						x = base + ansi.StringWidth(strings.TrimRight(line, " ")) - ansi.StringWidth("idle")
+					}
+					click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+					_, cmd := p.handleMouseClick(click)
+					events := runTimerCmd(t, cmd)
+					requireNoSidebarNavigation(t, events)
+					require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
+					settleSidebarGesture(t, p)
+					require.Equal(t, !expanded, strings.Contains(ansi.Strip(p.sidebar.View()), "reviewer"))
+					beforeAttach := ansi.Strip(p.sidebar.View())
+					*now = now.Add(100 * time.Millisecond)
+					_, cmd = p.handleMouseClick(click)
+					events = runTimerCmd(t, cmd)
+					require.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
+					require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing"})
+					settleSidebarGesture(t, p)
+					require.Equal(t, beforeAttach, ansi.Strip(p.sidebar.View()), "qualifying second row click does not toggle")
+				})
 			}
-			for i := range 2 {
-				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-				events := runTimerCmd(t, cmd)
-				requireNoSidebarNavigation(t, events)
-				require.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
-				settleSidebarGesture(t, p)
-				require.Equal(t, i == 0, strings.Contains(ansi.Strip(p.sidebar.View()), "reviewer"))
-				*now = now.Add(100 * time.Millisecond)
-			}
-		})
+		}
 	}
 }
 
-func TestSidebarAgentIdentityPairRequiresSameUninterruptedTarget(t *testing.T) {
-	for _, interruption := range []string{"timeout", "backward clock", "key", "wheel", "outside", "modal", "motion", "other identity", "row whitespace", "session", "resize", "tree replacement", "release elsewhere", "same-position release"} {
+func TestSidebarAgentChevronRepeatedClicksOnlyToggle(t *testing.T) {
+	p, now := newSidebarGesturePage(t, msgtypes.SidebarRight)
+	x, y, _ := sidebarGesturePoint(t, p, "作業planner")
+	p.handleMouseMotion(tea.MouseMotionMsg{X: x, Y: y})
+	settleSidebarGesture(t, p)
+	x, y, _ = sidebarGesturePoint(t, p, "⌄")
+	for i := range 2 {
+		_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+		events := runTimerCmd(t, cmd)
+		requireNoSidebarNavigation(t, events)
+		require.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
+		settleSidebarGesture(t, p)
+		require.Equal(t, i == 1, strings.Contains(ansi.Strip(p.sidebar.View()), "reviewer"))
+		*now = now.Add(100 * time.Millisecond)
+	}
+}
+
+func TestSidebarAgentRowPairRequiresSameUninterruptedTarget(t *testing.T) {
+	for _, interruption := range []string{"timeout", "backward clock", "key", "wheel", "outside", "modal", "motion", "other row", "other column", "name attach", "session", "resize", "tree replacement", "node session", "node parent", "release elsewhere", "same-position release"} {
 		t.Run(interruption, func(t *testing.T) {
 			p, now := newSidebarGesturePage(t, msgtypes.SidebarRight)
 			x, y, _ := sidebarGesturePoint(t, p, "作業planner")
+			nameX := x
+			x += 25
 			click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 			p.handleMouseClick(click)
 			switch interruption {
@@ -174,12 +194,15 @@ func TestSidebarAgentIdentityPairRequiresSameUninterruptedTarget(t *testing.T) {
 				ClearSidebarHover(p)
 			case "motion":
 				p.handleMouseMotion(tea.MouseMotionMsg{X: x + 1, Y: y})
-			case "other identity":
+			case "other row":
 				settleSidebarGesture(t, p)
 				otherX, otherY, _ := sidebarGesturePoint(t, p, "leaf")
-				p.handleMouseClick(tea.MouseClickMsg{X: otherX, Y: otherY, Button: tea.MouseLeft})
-			case "row whitespace":
-				p.handleMouseClick(tea.MouseClickMsg{X: x + 25, Y: y, Button: tea.MouseLeft})
+				p.handleMouseClick(tea.MouseClickMsg{X: otherX + 25, Y: otherY, Button: tea.MouseLeft})
+			case "other column":
+				p.handleMouseClick(tea.MouseClickMsg{X: x + 1, Y: y, Button: tea.MouseLeft})
+			case "name attach":
+				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: nameX, Y: y, Button: tea.MouseLeft})
+				require.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
 			case "session":
 				p.app.Session().ID = "different-session"
 			case "resize":
@@ -188,9 +211,17 @@ func TestSidebarAgentIdentityPairRequiresSameUninterruptedTarget(t *testing.T) {
 				p.handleMouseRelease(tea.MouseReleaseMsg{X: x + 1, Y: y, Button: tea.MouseLeft})
 			case "same-position release":
 				p.handleMouseRelease(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
-			case "tree replacement":
+			case "tree replacement", "node session", "node parent":
 				tree := p.app.Session().GetSubagentTree()
-				tree.Nodes[0].Children[0].Node.ID = "abcde-replacement-full"
+				node := &tree.Nodes[0].Children[0].Node
+				switch interruption {
+				case "tree replacement":
+					node.ID = "abcde-replacement-full"
+				case "node session":
+					node.SessionID = "replacement-session"
+				case "node parent":
+					node.Parent = "replacement-parent"
+				}
 				p.handleRuntimeEvent(&runtime.SubagentTreeEvent{Snapshot: *tree})
 			}
 			_, cmd := p.handleMouseClick(click)
@@ -204,23 +235,33 @@ func TestSidebarAgentIdentityPairRequiresSameUninterruptedTarget(t *testing.T) {
 	}
 }
 
-func TestSidebarAgentLeafHintAndDoubleAttachNeverExpand(t *testing.T) {
-	p, now := newSidebarGesturePage(t, msgtypes.SidebarRight)
-	x, y, before := sidebarGesturePoint(t, p, "leaf")
-	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
-	_, cmd := p.handleMouseClick(click)
-	events := runTimerCmd(t, cmd)
-	requireNoSidebarNavigation(t, events)
-	require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
-	_, _, after := sidebarGesturePoint(t, p, "leaf")
-	require.Equal(t, before, after, "leaf does not invent expansion or a disclosure glyph")
-	*now = now.Add(100 * time.Millisecond)
-	_, cmd = p.handleMouseClick(click)
-	require.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "abcde-leaf-full"})
+func TestSidebarAgentLeafNameAndRowAttachNeverExpand(t *testing.T) {
+	for _, part := range []string{"name", "row"} {
+		t.Run(part, func(t *testing.T) {
+			p, now := newSidebarGesturePage(t, msgtypes.SidebarRight)
+			x, y, before := sidebarGesturePoint(t, p, "leaf")
+			if part == "row" {
+				x += 25
+			}
+			click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+			_, cmd := p.handleMouseClick(click)
+			events := runTimerCmd(t, cmd)
+			if part == "row" {
+				requireNoSidebarNavigation(t, events)
+				require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing", Text: "Double-click to attach"})
+				*now = now.Add(100 * time.Millisecond)
+				_, cmd = p.handleMouseClick(click)
+				events = runTimerCmd(t, cmd)
+			}
+			require.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: "abcde-leaf-full"})
+			_, _, after := sidebarGesturePoint(t, p, "leaf")
+			require.Equal(t, before, after, "leaf does not invent expansion or a disclosure glyph")
+		})
+	}
 }
 
 func TestSidebarAgentIdentitySplitScreenAndVisibleIDSuffix(t *testing.T) {
-	p, now := newSidebarGesturePage(t, msgtypes.SidebarLeft)
+	p, _ := newSidebarGesturePage(t, msgtypes.SidebarLeft)
 	p.sidebar.SetPreferredWidth(70)
 	p.SetSize(160, 40)
 	g := SplitPresentationGeometry{
@@ -236,19 +277,20 @@ func TestSidebarAgentIdentitySplitScreenAndVisibleIDSuffix(t *testing.T) {
 	require.True(t, found)
 	x := g.Shell.Sidebar.X + ansi.StringWidth(before)
 	y += g.Shell.Sidebar.Y
+	_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	require.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
 	p.handleMouseMotion(tea.MouseMotionMsg{X: x, Y: y})
 	settleSidebarGesture(t, p)
 	line = strings.Split(ansi.Strip(p.sidebar.View()), "\n")[y-g.Shell.Sidebar.Y]
 	before, _, found = strings.Cut(line, "(abcde-branch-full)")
 	require.True(t, found)
 	x = g.Shell.Sidebar.X + ansi.StringWidth(before)
-	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 	hit := NewHitTest(p)
 	require.Equal(t, TargetSidebarSubagent, hit.At(x, y))
 	require.True(t, hit.OnSubagentIdentity)
-	_, cmd := p.handleMouseClick(click)
-	requireNoSidebarNavigation(t, runTimerCmd(t, cmd))
-	*now = now.Add(100 * time.Millisecond)
-	_, cmd = p.handleMouseClick(click)
-	require.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
+	_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	events := runTimerCmd(t, cmd)
+	require.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: "abcde-branch-full"})
+	require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "sidebar-tab-routing"})
+	require.Contains(t, ansi.Strip(p.sidebar.View()), "reviewer", "visible ID attaches without toggling")
 }

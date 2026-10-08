@@ -467,7 +467,7 @@ func (m *model) placementClick(x, y int) (ClickResult, string) {
 		}
 	}
 	for _, control := range row.controls {
-		if control.whole || col == control.x {
+		if control.whole || (col == control.x && row.chevronAt(col)) {
 			return ClickNone, ""
 		}
 	}
@@ -494,11 +494,16 @@ func (m *model) placementControlAt(x, y int) (treeControl, bool) {
 		return treeControl{}, false
 	}
 	for _, control := range row.controls {
-		if control.whole || x-m.layoutCfg.PaddingLeft == control.x {
+		if control.whole || (x-m.layoutCfg.PaddingLeft == control.x && row.chevronAt(control.x)) {
 			return control, true
 		}
 	}
 	return treeControl{}, false
+}
+
+func (r placedRow) chevronAt(x int) bool {
+	glyph := ansi.Strip(ansi.Cut(r.text, x, x+1))
+	return glyph == "⌄" || glyph == "›"
 }
 
 func modelPlacementRow(id string) int {

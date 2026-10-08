@@ -252,12 +252,12 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			if hintSession == "" {
 				hintSession = sessionID
 			}
-			if hit.OnSubagentIdentity {
-				node := hit.SubagentIdentity
+			if node := hit.SubagentNode; node.ID != "" {
 				current := sidebarClick{sessionID: sessionID, target: target, nodeID: hit.SubagentID, nodeSessionID: node.SessionID, parentID: string(node.Parent), x: msg.X, y: msg.Y, width: p.width, height: p.height}
 				elapsed := now.Sub(previousSidebarClick.at)
 				previousSidebarClick.at = time.Time{}
-				if sessionID != "" && current == previousSidebarClick && elapsed >= 0 && elapsed < styles.DoubleClickThreshold {
+				paired := sessionID != "" && current == previousSidebarClick && elapsed >= 0 && elapsed < styles.DoubleClickThreshold
+				if hit.OnSubagentIdentity || paired {
 					return p, tea.Batch(p.sidebar.ClearSubagentHover(), core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession}), core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID}))
 				}
 				current.at = now

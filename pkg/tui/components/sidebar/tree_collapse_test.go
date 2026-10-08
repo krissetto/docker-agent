@@ -415,7 +415,7 @@ func TestRepeatedTrailingChevronClicksKeepIdentityHoverAndNeverAttach(t *testing
 			x := m.layoutCfg.PaddingLeft + control.x
 			_, cmd := m.Update(tea.MouseMotionMsg{X: x, Y: y})
 			settleSidebarHover(t, m, cmd)
-			require.InDelta(t, 1, m.hoverValues["node:branch-full-identity"].value, 0, "chevron hover highlights its agent name")
+			require.Zero(t, m.hoverValues["node-name:branch-full-identity"].value, "chevron hover does not highlight its agent name")
 			for _, controls := range m.treeControls {
 				for _, current := range controls {
 					if current.id == control.id {

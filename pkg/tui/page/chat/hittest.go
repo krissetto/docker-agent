@@ -43,7 +43,7 @@ type HitTest struct {
 	QueueTurnID        string
 	SubagentID         string
 	ParentSessionID    string
-	SubagentIdentity   subagent.Node
+	SubagentNode       subagent.Node
 	OnSubagentIdentity bool
 }
 
@@ -181,7 +181,7 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 			if g := h.page.splitPresentation; g != nil {
 				localX, localY = x-g.Shell.Sidebar.X, y-g.Shell.Sidebar.Y
 			}
-			h.SubagentIdentity, h.OnSubagentIdentity = identities.SubagentIdentityAt(localX, localY)
+			h.SubagentNode, h.OnSubagentIdentity = identities.SubagentIdentityAt(localX, localY)
 		}
 		return TargetSidebarSubagent
 	case sidebar.ClickSubagentParent:

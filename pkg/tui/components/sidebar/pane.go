@@ -68,7 +68,14 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = m.todoHoverKey(row, x-m.layoutCfg.PaddingLeft)
 	}
 	m.hoveredRegion = region
-	return m.setHoverTarget(key)
+	nameKey := ""
+	if identity, ok := m.subagentIdentityColumnsAt(x, y); ok {
+		col := x - m.layoutCfg.PaddingLeft
+		if col >= identity.nameStart && col < identity.nameEnd && strings.HasPrefix(key, "node:") {
+			nameKey = "node-name:" + strings.TrimPrefix(key, "node:")
+		}
+	}
+	return m.setHoverTargets(key, nameKey)
 }
 
 func (m *model) decoratePane(lines []string, width int) {

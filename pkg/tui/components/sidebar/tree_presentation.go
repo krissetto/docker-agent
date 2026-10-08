@@ -19,16 +19,17 @@ type counterPresentation struct {
 }
 
 type preparedTreeRow struct {
-	identity identityColumns
-	node     subagent.Node
-	guides   string
-	branch   bool
-	text     string
-	controls []treeControl
-	hover    hoverValue
-	span     branchSpans
-	hovered  bool
-	frame    string
+	identity  identityColumns
+	node      subagent.Node
+	guides    string
+	branch    bool
+	text      string
+	controls  []treeControl
+	hover     hoverValue
+	nameHover hoverValue
+	span      branchSpans
+	hovered   bool
+	frame     string
 }
 
 type preparedTree struct {
@@ -222,12 +223,13 @@ func (m *model) SetPresentationActive(active bool) tea.Cmd {
 // controls are replaced together with the text so pointer geometry stays exact.
 func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) preparedTreeRow {
 	hover, span := m.hoverValues["node:"+string(item.node.ID)], m.branchSpans[item.node.ID]
+	nameHover := m.hoverValues["node-name:"+string(item.node.ID)]
 	hovered := m.hoveredSubagent == item.node.ID
 	frame := ""
 	if isActiveSubagentState(item.node.State) {
 		frame = m.subagentSpinner.RawFrame() + m.spinner.RawFrame()
 	}
-	if item.text != "" && item.hover == hover && item.span == span && item.hovered == hovered && item.frame == frame {
+	if item.text != "" && item.hover == hover && item.nameHover == nameHover && item.span == span && item.hovered == hovered && item.frame == frame {
 		return item
 	}
 	indent := min(2, max(0, width-1))
@@ -239,6 +241,6 @@ func (m *model) refreshPreparedTreeRow(item preparedTreeRow, row, width int) pre
 		m.treeControls[row][i].x += indent
 	}
 	item.controls = m.treeControls[row]
-	item.hover, item.span, item.hovered, item.frame = hover, span, hovered, frame
+	item.hover, item.nameHover, item.span, item.hovered, item.frame = hover, nameHover, span, hovered, frame
 	return item
 }

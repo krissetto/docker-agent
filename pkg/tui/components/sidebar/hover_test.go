@@ -86,18 +86,18 @@ func TestHoverEntryExitElapsedAndNeutralIdentityParts(t *testing.T) {
 	}
 	_, cmd := m.Update(tea.MouseMotionMsg{X: m.layoutCfg.PaddingLeft + 4, Y: row})
 	initial := m.View()
-	require.Zero(t, m.hoverValues["node:child-full-id"].value)
+	require.Zero(t, m.hoverValues["node-name:child-full-id"].value)
 	cmd = hoverTickCommand(t, sidebarOwnerCommand(m, cmd))
 	require.NotNil(t, cmd)
 	tick, ok := m.ar.Accept(cmd().(animation.TickMsg))
 	require.True(t, ok)
 	m.Update(tick)
-	progress := m.hoverValues["node:child-full-id"].value
+	progress := m.hoverValues["node-name:child-full-id"].value
 	assert.Greater(t, progress, 0.0)
 	assert.Less(t, progress, 1.0)
 	assert.NotEqual(t, initial, m.View())
 	settleSidebarHover(t, m, m.ar.Continue())
-	require.InDelta(t, 1, m.hoverValues["node:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
+	require.InDelta(t, 1, m.hoverValues["node-name:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
 	assert.Zero(t, m.ar.ActiveCount())
 	hovered := strings.Split(m.View(), "\n")[row]
 	assert.Contains(t, hovered, styles.MutedStyle.Render(" (child-full-id)"), "IDs remain neutral")
@@ -111,7 +111,7 @@ func TestHoverEntryExitElapsedAndNeutralIdentityParts(t *testing.T) {
 	assert.Zero(t, m.ar.ActiveCount())
 	exit := sidebarOwnerCommand(m, m.ClearSubagentHover())
 	require.NotNil(t, exit, "settled idle hover must start its exit via the owner command")
-	require.InDelta(t, 1, m.hoverValues["node:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
+	require.InDelta(t, 1, m.hoverValues["node-name:child-full-id"].value, 0, "settled hover endpoint is clamped to exactly one")
 	settleSidebarHover(t, m, exit)
 	assert.Empty(t, m.hoverValues)
 	assert.Zero(t, m.ar.ActiveCount())
@@ -146,9 +146,9 @@ func TestEveryActionableIdentityUsesSharedHoverText(t *testing.T) {
 	m.parentAgent = "parent"
 	m.parentSessionID = "parent-session"
 	m.hoverValues = map[string]hoverValue{
-		"parent:parent-session": {value: .5, target: 1},
-		"agent:legacy-worker":   {value: .5, target: 1},
-		"node:child-full-id":    {value: .5, target: 1},
+		"parent:parent-session":   {value: .5, target: 1},
+		"agent:legacy-worker":     {value: .5, target: 1},
+		"node-name:child-full-id": {value: .5, target: 1},
 	}
 	expected := func(name string) string {
 		return styles.HoverText(styles.AgentIdentityStyle(name, false).Render(name), .5, styles.TextPrimary)
@@ -157,9 +157,9 @@ func TestEveryActionableIdentityUsesSharedHoverText(t *testing.T) {
 	assert.Contains(t, m.participantLine("legacy-worker", 60), expected("legacy-worker"))
 	assert.Contains(t, m.subagentLine(subagent.Node{ID: "child-full-id", Agent: "worker", State: subagent.NodeIdle}, "", 60), expected("worker"))
 	assert.Contains(t, m.subagentLine(subagent.Node{ID: "child-full-id", Agent: "worker", State: subagent.NodeIdle}, "", 60), styles.MutedStyle.Render("idle"))
-	before := m.hoverValues["node:child-full-id"]
+	before := m.hoverValues["node-name:child-full-id"]
 	for range 100 {
 		m.View()
 	}
-	assert.Equal(t, before, m.hoverValues["node:child-full-id"], "rendering never advances transition values")
+	assert.Equal(t, before, m.hoverValues["node-name:child-full-id"], "rendering never advances transition values")
 }
