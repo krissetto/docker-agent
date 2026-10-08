@@ -96,7 +96,9 @@ Symlinks are resolved before the containment check, so a symlink inside an
 allowed root cannot be used to escape it. When an `allow_list` is set,
 each entry is opened as a Go [`*os.Root`](https://pkg.go.dev/os#Root) so
 that the kernel's rooted-lookup semantics also reject `..` and symlink
-escapes at I/O time, not just at resolve time.
+escapes at I/O time, not just at resolve time. With either list configured,
+dangling symlinks are rejected, including in parent directories, rather than
+treated as missing paths that a write could create.
 
 ```yaml
 toolsets:

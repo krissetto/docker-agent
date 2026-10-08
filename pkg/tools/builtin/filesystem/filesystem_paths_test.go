@@ -546,3 +546,58 @@ func TestPathRootSet_OpensOSRootForSandboxing(t *testing.T) {
 
 	set.close()
 }
+
+func TestFilesystemTool_RejectsDanglingSymlinks(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []string{"deny-only", "allow-and-deny", "missing-allow-root"} {
+		for _, ancestor := range []bool{false, true} {
+			name := "file"
+			if ancestor {
+				name = "ancestor"
+			}
+			t.Run(policy+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				wd := t.TempDir()
+				allowed := filepath.Join(wd, "public")
+				denied := filepath.Join(wd, "private")
+				require.NoError(t, os.Mkdir(denied, 0o700))
+
+				opts := []Opt{WithDenyList([]string{"private"})}
+				switch policy {
+				case "allow-and-deny":
+					opts = append(opts, WithAllowList([]string{"."}))
+				case "missing-allow-root":
+					opts = []Opt{WithAllowList([]string{"public"})}
+				}
+				tool := newTestToolSet(t, wd, opts...)
+				require.NoError(t, os.Mkdir(allowed, 0o700))
+				link := filepath.Join(allowed, "alias")
+				target := filepath.Join(denied, "new")
+				require.NoError(t, os.Symlink(filepath.Join("..", "private", "new"), link))
+				writePath := link
+				if ancestor {
+					writePath = filepath.Join(link, "file.txt")
+				}
+
+				result, err := tool.handleWriteFile(t.Context(), WriteFileArgs{Path: writePath, Content: "blocked"})
+				require.NoError(t, err)
+				require.True(t, result.IsError, result.Output)
+				assert.Contains(t, result.Output, "cannot resolve symlink")
+				_, err = os.Lstat(target)
+				require.ErrorIs(t, err, os.ErrNotExist)
+
+				result, err = tool.handleCreateDirectory(t.Context(), CreateDirectoryArgs{Paths: []string{filepath.Join(link, "dir")}})
+				require.NoError(t, err)
+				assert.True(t, result.IsError, result.Output)
+				assert.NoDirExists(t, target)
+
+				result, err = tool.handleWriteFile(t.Context(), WriteFileArgs{
+					Path: filepath.Join(allowed, "nested", "new.txt"), Content: "allowed",
+				})
+				require.NoError(t, err)
+				assert.False(t, result.IsError, result.Output)
+			})
+		}
+	}
+}
