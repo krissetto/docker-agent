@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
@@ -947,8 +948,8 @@ func (r *LocalRuntime) runTurn(
 			}
 			events.Emit(AgentInfo(a.Name(), modelID.String(), a.Description(), a.WelcomeMessage()))
 		}
-		// Fallbacks may share an ID but have different endpoint pricing overrides.
-		m = applyConfigCost(m, modelID, usedModel.BaseConfig().ModelConfig.Cost)
+		// Fallbacks may share an ID but have different endpoints or cost overrides.
+		m = applyModelCost(m, modelID, res.Usage, usedModel.BaseConfig())
 	}
 
 	// A successful model call resets the overflow compaction counter.
@@ -1191,6 +1192,25 @@ func (r *LocalRuntime) runTurn(
 	r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
 	endReason = turnEndReasonContinue
 	return turnContinue
+}
+
+func applyModelCost(m *modelsdev.Model, id modelsdev.ID, usage *chat.Usage, config base.Config) *modelsdev.Model {
+	cfg := config.ModelConfig
+	// Routers cannot identify the serving endpoint here; custom endpoints need their own rates.
+	isCustomEndpoint := func(endpoint string) bool {
+		return endpoint != "" && strings.TrimRight(endpoint, "/") != "https://api.openai.com/v1"
+	}
+	customEndpoint := isCustomEndpoint(cfg.BaseURL) || isCustomEndpoint(config.BaseURL)
+	if cfg.Cost != nil || customEndpoint || len(cfg.Routing) > 0 || m == nil || usage == nil {
+		return applyConfigCost(m, id, cfg.Cost)
+	}
+	cost := m.Cost.ForServiceTier(id, usage.ServiceTier)
+	if cost == m.Cost {
+		return m
+	}
+	out := *m
+	out.Cost = cost
+	return &out
 }
 
 // applyConfigCost overlays a config-declared price table (USD per 1M tokens)

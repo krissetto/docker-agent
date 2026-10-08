@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 
@@ -60,6 +61,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	}
 
 	globalOptions := options.Apply(opts...)
+	resolvedBaseURL := "https://api.openai.com/v1"
+	if globalOptions.Gateway() == "" {
+		resolvedBaseURL = cmp.Or(cfg.BaseURL, os.Getenv("OPENAI_BASE_URL"), resolvedBaseURL)
+	}
 
 	var clientFn func(context.Context) (*openai.Client, error)
 	if gateway := globalOptions.Gateway(); gateway == "" {
@@ -195,6 +200,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			ModelConfig:  *cfg,
 			ModelOptions: globalOptions,
 			Env:          env,
+			BaseURL:      resolvedBaseURL,
 		},
 		clientFn: clientFn,
 	}
@@ -206,8 +212,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	// gorilla/websocket dials raw TCP and never calls http.RoundTripper, so the
 	// wrapper cannot be applied. Fall back to SSE so the wrapper covers all calls.
 	if getTransport(cfg) == "websocket" && globalOptions.Gateway() == "" && globalOptions.TransportWrapper() == nil {
-		baseURL := cmp.Or(cfg.BaseURL, "https://api.openai.com/v1")
-		client.wsPool = newWSPool(httpToWSURL(baseURL), client.buildWSHeaderFn())
+		client.wsPool = newWSPool(httpToWSURL(resolvedBaseURL), client.buildWSHeaderFn())
 	}
 
 	return client, nil

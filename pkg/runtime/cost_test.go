@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -139,4 +141,141 @@ func TestConfigCostReplacesContextTiers(t *testing.T) {
 	got := computeMessageCost(usage, catalogued)
 	require.NotNil(t, got)
 	assert.InDelta(t, 4.0, *got, 1e-9, "overrides must not mutate shared catalog tiers")
+}
+
+func TestApplyModelCostServiceTier(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	for _, tc := range []struct {
+		name, provider, model, tier string
+		cfg                         latest.ModelConfig
+		short, long                 float64
+	}{
+		{name: "Luna fast", provider: "openai", model: "gpt-5.6-luna", tier: "fast", short: 0.0478, long: 0.4496},
+		{name: "Luna priority alias", provider: "openai", model: "gpt-5.6-luna", tier: "priority", short: 0.0478, long: 0.4496},
+		{name: "Astra fast", provider: "openai", model: "gpt-6-astra", tier: "fast", short: 2.29, long: 22.33},
+		{name: "Astra ultrafast", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", short: 6.87, long: 66.99},
+		{name: "actual default after fast request", provider: "openai", model: "gpt-6-astra", tier: "default", cfg: latest.ModelConfig{ProviderOpts: map[string]any{"service_tier": "fast"}}, short: 1.145, long: 11.165},
+		{name: "actual fast without requested tier", provider: "openai", model: "gpt-6-astra", tier: "fast", short: 2.29, long: 22.33},
+		{name: "missing actual tier", provider: "openai", model: "gpt-6-astra", cfg: latest.ModelConfig{ProviderOpts: map[string]any{"service_tier": "ultrafast"}}, short: 1.145, long: 11.165},
+		{name: "unknown tier", provider: "openai", model: "gpt-6-astra", tier: "future-tier", short: 1.145, long: 11.165},
+		{name: "unsupported Luna ultrafast", provider: "openai", model: "gpt-5.6-luna", tier: "ultrafast", short: 0.0239, long: 0.2248},
+		{name: "gateway fast already priced", provider: "vercel", model: "openai/gpt-6-astra-fast", tier: "fast", short: 2.29, long: 21.58},
+		{name: "Azure unchanged", provider: "azure", model: "gpt-6-astra", tier: "fast", short: 1.145, long: 11.165},
+		{name: "custom OpenAI endpoint unchanged", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{BaseURL: "https://example.com/v1"}, short: 1.145, long: 11.165},
+		{name: "override wins over ultrafast and context bands", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1.25}}, short: 0.0995, long: 0.5495},
+		{name: "zero override stays free", provider: "openai", model: "gpt-6-astra", tier: "fast", cfg: latest.ModelConfig{Cost: &latest.CostConfig{}}, short: 0, long: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			id := modelsdev.NewID(tc.provider, tc.model)
+			model, err := store.GetModel(t.Context(), id)
+			require.NoError(t, err)
+			original := *model.Cost
+			original.Tiers = slices.Clone(original.Tiers)
+			for _, band := range []struct {
+				input int64
+				want  float64
+			}{{50_000, tc.short}, {500_000, tc.long}} {
+				usage := &chat.Usage{InputTokens: band.input, CachedInputTokens: 20_000, CacheWriteTokens: 30_000, OutputTokens: 5_000, ReasoningTokens: 3_000, ServiceTier: tc.tier}
+				priced := applyModelCost(model, id, usage, base.Config{ModelConfig: tc.cfg})
+				got := computeMessageCost(usage, priced)
+				require.NotNil(t, got)
+				assert.InDelta(t, band.want, *got, 1e-9)
+				assert.Equal(t, original, *model.Cost, "shared catalogue must not be mutated")
+			}
+		})
+	}
+}
+
+func TestApplyModelCostServiceTierUnpriced(t *testing.T) {
+	t.Parallel()
+
+	id := modelsdev.NewID("openai", "gpt-6-astra")
+	usage := &chat.Usage{InputTokens: 1_000_000, ServiceTier: "ultrafast"}
+	assert.Nil(t, applyModelCost(nil, id, usage, base.Config{}))
+	model := &modelsdev.Model{}
+	assert.Same(t, model, applyModelCost(model, id, usage, base.Config{}))
+	assert.Same(t, model, applyModelCost(model, id, nil, base.Config{}))
+	priced := applyModelCost(nil, id, usage, base.Config{ModelConfig: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1.25}}})
+	cost := computeMessageCost(usage, priced)
+	require.NotNil(t, cost)
+	assert.InDelta(t, 1.25, *cost, 1e-9)
+}
+
+func TestApplyModelCostEndpointEligibility(t *testing.T) {
+	t.Parallel()
+
+	id := modelsdev.NewID("openai", "gpt-6-astra")
+	usage := &chat.Usage{InputTokens: 1_000_000, ServiceTier: "ultrafast"}
+	model := &modelsdev.Model{Cost: &modelsdev.Cost{Input: 10}}
+	for _, tc := range []struct {
+		name   string
+		config base.Config
+		want   float64
+	}{
+		{name: "official resolved endpoint", config: base.Config{BaseURL: "https://api.openai.com/v1/"}, want: 60},
+		{name: "official configured endpoint", config: base.Config{ModelConfig: latest.ModelConfig{BaseURL: "https://api.openai.com/v1"}}, want: 60},
+		{name: "official configured endpoint trailing slash", config: base.Config{ModelConfig: latest.ModelConfig{BaseURL: "https://api.openai.com/v1/"}, BaseURL: "https://api.openai.com/v1/"}, want: 60},
+		{name: "custom configured endpoint", config: base.Config{ModelConfig: latest.ModelConfig{BaseURL: "https://example.com/v1"}}, want: 10},
+		{name: "gateway with custom configured endpoint", config: base.Config{ModelConfig: latest.ModelConfig{BaseURL: "https://example.com/v1"}, BaseURL: "https://api.openai.com/v1"}, want: 10},
+		{name: "resolved custom endpoint wins", config: base.Config{ModelConfig: latest.ModelConfig{BaseURL: "https://api.openai.com/v1"}, BaseURL: "https://example.com/v1"}, want: 10},
+		{name: "environment redirected endpoint", config: base.Config{BaseURL: "https://example.com/v1"}, want: 10},
+		{name: "router endpoint unknown", config: base.Config{ModelConfig: latest.ModelConfig{Routing: []latest.RoutingRule{{Model: "custom"}}}}, want: 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cost := computeMessageCost(usage, applyModelCost(model, id, usage, tc.config))
+			require.NotNil(t, cost)
+			assert.InDelta(t, tc.want, *cost, 1e-9)
+		})
+	}
+}
+
+func TestLunaAstraPublishedCostBoundary(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	// https://developers.openai.com/api/docs/pricing: USD per million tokens.
+	for _, tc := range []struct {
+		name, provider, model, tier string
+		short, long                 modelsdev.Rates
+	}{
+		{"Luna standard", "openai", "gpt-5.6-luna", "default", modelsdev.Rates{Input: 0.2, CacheRead: 0.02, CacheWrite: 0.25, Output: 1.2}, modelsdev.Rates{Input: 0.4, CacheRead: 0.04, CacheWrite: 0.5, Output: 1.8}},
+		{"Luna fast", "openai", "gpt-5.6-luna", "fast", modelsdev.Rates{Input: 0.4, CacheRead: 0.04, CacheWrite: 0.5, Output: 2.4}, modelsdev.Rates{Input: 0.8, CacheRead: 0.08, CacheWrite: 1, Output: 3.6}},
+		{"Luna priority", "openai", "gpt-5.6-luna", "priority", modelsdev.Rates{Input: 0.4, CacheRead: 0.04, CacheWrite: 0.5, Output: 2.4}, modelsdev.Rates{Input: 0.8, CacheRead: 0.08, CacheWrite: 1, Output: 3.6}},
+		{"Astra standard", "openai", "gpt-6-astra", "default", modelsdev.Rates{Input: 10, CacheRead: 1, CacheWrite: 12.5, Output: 50}, modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 75}},
+		{"Astra fast", "openai", "gpt-6-astra", "fast", modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 100}, modelsdev.Rates{Input: 40, CacheRead: 4, CacheWrite: 50, Output: 150}},
+		{"Astra priority", "openai", "gpt-6-astra", "priority", modelsdev.Rates{Input: 20, CacheRead: 2, CacheWrite: 25, Output: 100}, modelsdev.Rates{Input: 40, CacheRead: 4, CacheWrite: 50, Output: 150}},
+		{"Astra ultrafast", "openai", "gpt-6-astra", "ultrafast", modelsdev.Rates{Input: 60, CacheRead: 6, CacheWrite: 75, Output: 300}, modelsdev.Rates{Input: 120, CacheRead: 12, CacheWrite: 150, Output: 450}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			id := modelsdev.NewID(tc.provider, tc.model)
+			model, err := store.GetModel(t.Context(), id)
+			require.NoError(t, err)
+			for _, prompt := range []int64{271_999, 272_000, 272_001, 272_002} {
+				for _, bucket := range []string{"fresh", "read", "write"} {
+					usage := &chat.Usage{InputTokens: 72_000, CachedInputTokens: 100_000, CacheWriteTokens: 100_000, OutputTokens: 10_000, ReasoningTokens: 9_000, ServiceTier: tc.tier}
+					switch bucket {
+					case "fresh":
+						usage.InputTokens += prompt - 272_000
+					case "read":
+						usage.CachedInputTokens += prompt - 272_000
+					case "write":
+						usage.CacheWriteTokens += prompt - 272_000
+					}
+					rates := tc.short
+					if prompt > 272_000 {
+						rates = tc.long
+					}
+					want := (float64(usage.InputTokens)*rates.Input + float64(usage.CachedInputTokens)*rates.CacheRead + float64(usage.CacheWriteTokens)*rates.CacheWrite + 10_000*rates.Output) / 1e6
+					got := computeMessageCost(usage, applyModelCost(model, id, usage, base.Config{}))
+					require.NotNil(t, got)
+					assert.InDelta(t, want, *got, 1e-9, "prompt=%d, varying %s tokens", prompt, bucket)
+				}
+			}
+		})
+	}
 }
