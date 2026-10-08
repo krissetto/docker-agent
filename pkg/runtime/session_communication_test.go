@@ -161,3 +161,68 @@ func TestCommunicationRejectedGuidanceRemainsRetriable(t *testing.T) {
 	assert.False(t, accepted.Idempotent)
 	require.Len(t, d.pending, 2)
 }
+
+func TestCommunicationExplicitMessagesAndCompletionHaveIndependentIdentity(t *testing.T) {
+	m := newTestSubagentManager(t)
+	parent := session.New(session.WithID("reply-parent"))
+	child := session.New(session.WithID("reply-child"))
+	m.registerChild(parent, "root", "36c92-full", "engineer", child)
+	m.children["36c92-full"].durable.Result = "same body"
+	m.reportTurn(t, "36c92-full", subagent.NodeIdle, "")
+	m.r.team = team.New(team.WithAgents(agent.New("root", "root"), agent.New("engineer", "engineer")))
+	m.r.agents = newAgentRouter(m.r.team, "root")
+	child.AgentName = "engineer"
+	d, ok := m.r.sessionDrivers.Lookup(parent.ID)
+	require.True(t, ok)
+	for _, id := range []string{"explicit-one", "explicit-two", "explicit-three"} {
+		call := tools.ToolCall{ID: id, Function: tools.FunctionCall{Arguments: `{"to":"parent","message":"same body","request_id":"` + id + `"}`}}
+		for retry := range 2 {
+			result, err := m.r.handleSendMessage(t.Context(), child, call, nil, tools.NopRuntime{})
+			require.NoError(t, err)
+			require.False(t, result.IsError, result.Output)
+			var receipt subagent.DeliveryReceipt
+			require.NoError(t, json.Unmarshal([]byte(result.Output), &receipt))
+			assert.True(t, receipt.Accepted)
+			assert.True(t, receipt.Durable)
+			assert.Equal(t, retry == 1, receipt.Idempotent)
+			assert.Equal(t, id, receipt.RequestID)
+		}
+	}
+	childDriver, ok := m.r.sessionDrivers.Lookup(child.ID)
+	require.True(t, ok)
+	require.NoError(t, m.completeSessionTurn(childDriver, m.children["36c92-full"].durable.LastTurnID, ""))
+	assert.False(t, m.r.sessionDrivers.deliverReports(d))
+	messages := d.session().MessagesSnapshot()
+	require.Len(t, messages, 4)
+	assert.Equal(t, session.InputOriginRuntime, messages[0].Message.InputOrigin)
+	assert.Equal(t, session.ReportOutcomeFinished, messages[0].Message.ReportOutcome)
+	assert.Equal(t, child.ID, messages[0].Message.SenderID)
+	ids := make(map[string]bool)
+	for i, item := range messages {
+		message := item.Message
+		require.NotNil(t, message)
+		require.NotEmpty(t, message.TurnID)
+		assert.False(t, ids[message.TurnID])
+		ids[message.TurnID] = true
+		if i > 0 {
+			assert.Equal(t, session.InputOriginAgent, message.InputOrigin)
+			assert.Empty(t, message.ReportOutcome)
+			assert.Equal(t, "36c92-full", message.SenderID)
+			assert.Equal(t, "same body", message.Message.Content)
+		}
+	}
+	require.Len(t, d.DrainRuntimeNotes(), 4)
+	assert.Empty(t, d.DrainRuntimeNotes())
+	stored, err := m.r.sessionStore.GetSession(t.Context(), parent.ID)
+	require.NoError(t, err)
+	storedIDs := make(map[string]bool)
+	for _, item := range stored.MessagesSnapshot() {
+		if item.Message == nil {
+			continue
+		}
+		assert.False(t, item.Message.Pending)
+		assert.False(t, storedIDs[item.Message.TurnID])
+		storedIDs[item.Message.TurnID] = true
+	}
+	assert.Equal(t, ids, storedIDs)
+}

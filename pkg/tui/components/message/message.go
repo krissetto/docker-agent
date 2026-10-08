@@ -461,10 +461,7 @@ func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 
 func (mv *messageModel) replyHeader(width int) string {
 	icon := styles.ToolCompletedIcon.Render("✓")
-	status := "has replied"
-	if !mv.message.IsSubagentReply() {
-		status = "sent a message"
-	}
+	status := "sent a message"
 	if mv.message.Type == types.MessageTypeRuntimeNotice {
 		var label string
 		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)

@@ -69,7 +69,8 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			err.RequestID = msg.RequestID
 			return sessionIOReservation{}, err
 		}
-		queued = !steer || d.compactReserved || (len(d.pending) != 0 && (!d.running() || d.activeRequestID == ""))
+		idleCommunication := op == SessionOperationPost && msg.InputOrigin == session.InputOriginAgent && d.phase == sessionIdle
+		queued = !steer || idleCommunication || d.compactReserved || (len(d.pending) != 0 && (!d.running() || d.activeRequestID == ""))
 		count := len(d.steering)
 		if queued {
 			count = len(d.pending)

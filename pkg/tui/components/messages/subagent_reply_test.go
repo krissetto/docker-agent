@@ -49,7 +49,15 @@ func TestSubagentReplyLiveReplayControlsAndRetention(t *testing.T) {
 					m.SetPosition(7, 3)
 					m.ensureAllItemsRendered()
 					m.View()
-					assert.NotContains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "Delivered")
+					out := ansi.Strip(strings.Join(m.renderedLines, "\n"))
+					assert.NotContains(t, out, "Delivered")
+					if width == 100 {
+						status := "sent a message >"
+						if origin == session.InputOriginRuntime {
+							status = "· report received >"
+						}
+						assert.Contains(t, out, status)
+					}
 					hits := 0
 					for y, line := range m.renderedLines {
 						for _, span := range extractOSC8Links(line) {
