@@ -177,6 +177,10 @@ toolsets:
     args: ["mcp"]
 ```
 
+### Extraction Safety
+
+GitHub release archives and raw binaries are written through a rooted filesystem handle. Destination paths cannot escape the package directory through `..` or symlinks, including symlinks replaced during extraction. Relative symlinks contained within the package directory are allowed; absolute symlinks are rejected.
+
 ### Checksum Verification
 
 Where the aqua registry includes a checksum manifest, downloaded binaries are verified against it before installation. Verification behaviour depends on the checksum type advertised:
