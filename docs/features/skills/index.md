@@ -178,6 +178,16 @@ prompt, so the commands are reported as skipped instead of running unannounced.
 > third-party agent config as you would any other untrusted code and read it
 > before running it.
 
+## Supporting Files
+
+Skills can bundle references, scripts, and other resources in their directory.
+The `read_skill_file` tool reads these on demand using paths relative to that
+skill's directory. Absolute paths and paths containing `..` are rejected.
+Relative symlinks to files or directories inside the skill directory are allowed;
+symlinks that escape it, and all absolute symlinks (even to internal targets),
+are rejected. This boundary applies to supporting-file reads, not arbitrary
+filesystem tools or commands.
+
 ## Running a Skill as a Sub-Agent
 
 By default, when an agent invokes a skill it reads the instructions inline into its own conversation. For complex, multi-step skills this can consume a large portion of the agent's context window and pollute the parent conversation with intermediate tool calls.
