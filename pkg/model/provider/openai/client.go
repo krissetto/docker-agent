@@ -685,6 +685,7 @@ func (c *Client) CreateResponseStream(
 		ServiceTier: responses.ResponseNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	params.Input.OfInputItemList = input
+	c.configureResponseState(&params)
 
 	if c.ModelConfig.Temperature != nil {
 		params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
@@ -809,7 +810,7 @@ func (c *Client) CreateResponseStream(
 
 	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
-		slog.DebugContext(ctx, "OpenAI responses request", "request", string(requestJSON))
+		slog.DebugContext(ctx, "OpenAI responses request", "request", redactEncryptedContent(requestJSON))
 	} else {
 		slog.ErrorContext(ctx, "Failed to marshal OpenAI responses request to JSON", "error", err)
 	}
@@ -820,7 +821,6 @@ func (c *Client) CreateResponseStream(
 	// dials raw TCP and never calls http.RoundTripper, so the wrapper cannot intercept those
 	// connections. Fall back to SSE so the wrapper applies to all requests.
 	transport := getTransport(&c.ModelConfig)
-	trackUsage := c.TrackUsageEnabled()
 
 	switch {
 	case transport == "websocket" && c.ModelOptions.Gateway() == "" && c.ModelOptions.TransportWrapper() == nil:
@@ -830,7 +830,7 @@ func (c *Client) CreateResponseStream(
 			// Fall through to SSE below.
 		} else {
 			slog.DebugContext(ctx, "OpenAI responses WebSocket stream created successfully", "model", c.ModelConfig.Model)
-			return newResponseStreamAdapter(stream, trackUsage), nil
+			return c.responseAdapter(ctx, stream), nil
 		}
 	case transport == "websocket" && c.ModelOptions.Gateway() != "":
 		slog.DebugContext(ctx, "WebSocket transport requested but Gateway is configured, using SSE",
@@ -849,7 +849,7 @@ func (c *Client) CreateResponseStream(
 	stream := client.Responses.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI responses stream created successfully", "model", c.ModelConfig.Model)
-	return newResponseStreamAdapter(stream, trackUsage), nil
+	return c.responseAdapter(ctx, stream), nil
 }
 
 // createWebSocketStream sends a request over the pre-initialized WebSocket
@@ -862,6 +862,10 @@ func (c *Client) createWebSocketStream(
 		return nil, errors.New("websocket pool not initialized")
 	}
 
+	// Full-history replay must not also append connection-local history.
+	if c.preservesResponseState() {
+		params.PreviousResponseID = param.Null[string]()
+	}
 	return c.wsPool.Stream(ctx, params)
 }
 
@@ -926,6 +930,10 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 	markBreakpoints := sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor())
 	var input []responses.ResponseInputItemUnionParam
 	for _, msg := range messages {
+		if replay := c.replayResponse(msg); len(replay) > 0 {
+			input = append(input, replay...)
+			continue
+		}
 		// Skip invalid messages
 		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
 			continue

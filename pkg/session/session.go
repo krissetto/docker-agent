@@ -804,6 +804,7 @@ func (s *Session) snapshotItems() []Item {
 // cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
 func cloneChatMessage(m chat.Message) chat.Message {
+	m.OpenAIResponse = m.OpenAIResponse.Clone()
 	if m.Presentation != nil {
 		m.Presentation = slices.Clone(m.Presentation)
 		for i := range m.Presentation {
@@ -2698,8 +2699,9 @@ func normalizeMessageContent(messages []chat.Message) []chat.Message {
 
 		// Single-part: drop messages with whitespace-only Content, but only when
 		// there are no tool calls or function calls attached. An assistant message
-		// with an empty text body but tool_use blocks is valid and must be kept.
-		if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && msg.FunctionCall == nil {
+		// with an empty text body but tool_use blocks or opaque Responses output
+		// is valid and must be kept; provider converters still gate opaque replay.
+		if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && msg.FunctionCall == nil && (msg.OpenAIResponse == nil || len(msg.OpenAIResponse.Output) == 0) {
 			continue
 		}
 		out = append(out, msg)

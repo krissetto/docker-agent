@@ -49,6 +49,7 @@ type streamResult struct {
 	Presentation      []chat.AssistantPart
 	ThinkingSignature string
 	ThoughtSignature  []byte
+	OpenAIResponse    *chat.OpenAIResponse
 	// Media accumulates every [chat.MediaDelta] streamed during the turn
 	// (e.g. generated images). Populated regardless of provider — see
 	// chat.MessageDelta.Media.
@@ -116,6 +117,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var fullReasoningContent strings.Builder
 	var thinkingSignature string
 	var thoughtSignature []byte
+	var openAIResponse *chat.OpenAIResponse
 	var toolCalls []tools.ToolCall
 	var presentation []chat.AssistantPart
 	var media []chat.MediaDelta
@@ -268,6 +270,9 @@ mainLoop:
 				continue
 			}
 			choice := response.Choices[0]
+			if choice.Delta.OpenAIResponse != nil {
+				openAIResponse = choice.Delta.OpenAIResponse.Clone()
+			}
 
 			if len(choice.Delta.ThoughtSignature) > 0 {
 				thoughtSignature = choice.Delta.ThoughtSignature
@@ -370,6 +375,7 @@ mainLoop:
 						slog.WarnContext(ctx, "Dropping tool calls from refused turn",
 							"agent", a.Name(), "tool_calls", len(toolCalls))
 						toolCalls = nil
+						openAIResponse = nil
 						presentation = slices.DeleteFunc(presentation, func(part chat.AssistantPart) bool { return part.Type == chat.AssistantPartToolCall })
 					}
 				} else {
@@ -385,6 +391,7 @@ mainLoop:
 					Presentation:      presentation,
 					ThinkingSignature: thinkingSignature,
 					ThoughtSignature:  thoughtSignature,
+					OpenAIResponse:    openAIResponse,
 					Media:             media,
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
@@ -472,6 +479,7 @@ mainLoop:
 		Presentation:      presentation,
 		ThinkingSignature: thinkingSignature,
 		ThoughtSignature:  thoughtSignature,
+		OpenAIResponse:    openAIResponse,
 		Media:             media,
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,

@@ -2,9 +2,11 @@ package openai
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 
 	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
@@ -20,12 +22,15 @@ var _ responseEventStream = (*ssestream.Stream[responses.ResponseStreamEventUnio
 // ResponseStreamAdapter adapts the OpenAI responses stream to our interface.
 // It works with any responseEventStream implementation (SSE or WebSocket).
 type ResponseStreamAdapter struct {
-	stream         responseEventStream
-	trackUsage     bool
-	serviceTier    string
-	done           bool
-	itemCallIDMap  map[string]string
-	itemHasContent map[string]bool
+	stream            responseEventStream
+	trackUsage        bool
+	serviceTier       string
+	done              bool
+	responseState     *chat.OpenAIResponse
+	responseItems     map[int64]json.RawMessage
+	responseReasoning strings.Builder
+	itemCallIDMap     map[string]string
+	itemHasContent    map[string]bool
 	// outputIndexHasContent mirrors itemHasContent keyed by output_index.
 	// The key identifies an output slot of the response, not a specific item:
 	// all events sharing an output_index belong to the same output whatever
@@ -406,7 +411,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			"output_items", len(event.Response.Output),
 			"output_tokens", event.Response.Usage.OutputTokens,
 			"reasoning_tokens", event.Response.Usage.OutputTokensDetails.ReasoningTokens,
-			"response_raw", event.Response.RawJSON(),
+			"response_raw", redactEncryptedContent([]byte(event.Response.RawJSON())),
 		)
 		u := event.Response.Usage
 		if u.TotalTokens > 0 {
@@ -435,9 +440,10 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 	default:
 		slog.Info("Unhandled stream event type", "type", event.Type)
-		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", event.RawJSON())
+		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", redactEncryptedContent([]byte(event.RawJSON())))
 	}
 
+	a.captureResponseState(event, &response)
 	return response, nil
 }
 

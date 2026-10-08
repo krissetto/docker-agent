@@ -209,9 +209,8 @@ func (e Estimator) EstimateMessageTokens(msg *chat.Message) int64 {
 //
 // OutputTokens is the provider's exact count of everything this message
 // contains (text, reasoning, tool-call arguments). Reasoning tokens are
-// subtracted only when no reasoning content was stored: reasoning that
-// providers never expose (e.g. OpenAI o-series) is not resent as input,
-// while stored reasoning (Anthropic thinking blocks) is — and keeping
+// subtracted only when neither visible reasoning nor opaque OpenAI output
+// was stored: retained reasoning can be resent as input, and keeping
 // it counted errs on the conservative side for providers that drop it.
 func reportedMessageTokens(msg *chat.Message) int64 {
 	u := msg.Usage
@@ -219,7 +218,7 @@ func reportedMessageTokens(msg *chat.Message) int64 {
 		return 0
 	}
 	reported := u.OutputTokens
-	if msg.ReasoningContent == "" {
+	if msg.ReasoningContent == "" && (msg.OpenAIResponse == nil || len(msg.OpenAIResponse.Output) == 0) {
 		reported -= u.ReasoningTokens
 	}
 	return reported

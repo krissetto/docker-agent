@@ -158,3 +158,33 @@ models:
 ### Example
 
 See [`examples/websocket_transport.yaml`](https://github.com/docker/docker-agent/blob/main/examples/websocket_transport.yaml) for a complete example.
+
+## Reasoning State Preservation
+
+Responses reasoning replay is separately opt-in. Existing configurations keep
+unchanged request and session-storage behavior:
+
+```yaml
+provider_opts:
+  preserve_reasoning: true
+```
+
+This saves opaque encrypted reasoning and ordered assistant output, including
+message phases, in the local session store. It does not reveal hidden reasoning
+as readable text. State is replayed only to the same provider and resolved model
+on the default or explicitly configured official OpenAI HTTPS endpoint
+(`https://api.openai.com/v1`), or the official `chatgpt` Codex endpoint. Gateways,
+custom compatible endpoints, and environment redirects to other endpoints are
+excluded.
+
+Edits to assistant text, visible reasoning, or tool calls invalidate replay;
+attachment-bearing assistant messages and unsupported output items also use
+normal conversation conversion instead. Presentation metadata remains display
+only. Tool-result attachments keep their normal conversion behavior.
+
+Retained reasoning may increase input usage and cause earlier compaction. The
+existing compaction strategy applies; summarized output is not replayed.
+WebSocket requests use full-history replay without also chaining
+`previous_response_id`. Nested encrypted state is redacted from Responses request
+and diagnostic payload logs, but remains stored in session data. No native tool
+search or cache-diagnostics feature is enabled by this option.

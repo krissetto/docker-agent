@@ -1288,10 +1288,11 @@ func (r *LocalRuntime) recordAssistantMessage(
 	cost *float64,
 	events EventSink,
 ) *MessageUsage {
-	displayOnly := strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && slices.ContainsFunc(res.Presentation, func(part chat.AssistantPart) bool {
+	hasResponseOutput := res.OpenAIResponse != nil && len(res.OpenAIResponse.Output) > 0
+	displayOnly := !hasResponseOutput && strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && slices.ContainsFunc(res.Presentation, func(part chat.AssistantPart) bool {
 		return part.Type == chat.AssistantPartReasoning && part.Text != ""
 	})
-	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly {
+	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 && !res.Steered && !displayOnly && !hasResponseOutput {
 		if res.FinishReason == chat.FinishReasonRefusal {
 			message := chat.Message{Role: chat.MessageRoleAssistant, Content: res.Content, ReasoningContent: res.ReasoningContent, Presentation: res.Presentation, FinishReason: res.FinishReason}
 			boundary := MessageAddedAt(sess.ID, session.NewAgentMessage(a.Name(), &message), a.Name(), -1).(*MessageAddedEvent)
@@ -1363,6 +1364,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 		Presentation:      res.Presentation,
 		ThinkingSignature: res.ThinkingSignature,
 		ThoughtSignature:  res.ThoughtSignature,
+		OpenAIResponse:    res.OpenAIResponse.Clone(),
 		ToolCalls:         calls,
 		ToolDefinitions:   toolDefs,
 		CreatedAt:         r.now().Format(time.RFC3339),
