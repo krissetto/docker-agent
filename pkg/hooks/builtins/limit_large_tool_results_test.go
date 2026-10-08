@@ -68,3 +68,44 @@ func TestLargeResultCleanupOnlyAllocatedOwnerDirectory(t *testing.T) {
 	require.NoDirExists(t, dirOther)
 	require.FileExists(t, sentinel)
 }
+
+func TestLimitLargeToolResultsSpillFailure(t *testing.T) {
+	parent := t.TempDir()
+	blocked := filepath.Join(parent, "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, nil, 0o600))
+	t.Setenv("TMPDIR", blocked)
+	for _, test := range []struct{ category, name, payload string }{
+		{"shell", "shell", "discarded head" + strings.Repeat("世", 100_000) + "diagnostic tail"},
+		{"filesystem", "read_file", "important beginning" + strings.Repeat("世", 100_000)},
+		{"shell", "shell", strings.Repeat("x\n", 2001)},
+	} {
+		l := newLargeToolResultLimiter()
+		out, err := l.dispatch(t.Context(), &hooks.Input{HookEventName: hooks.EventToolResponseTransform, ToolCategory: test.category, ToolName: test.name, ToolResponse: test.payload}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		got := *out.HookSpecificOutput.UpdatedToolResponse
+		require.LessOrEqual(t, len(got), maxToolCallResultBytes)
+		require.Equal(t, got, strings.ToValidUTF8(got, ""))
+		require.Contains(t, got, "could not be saved")
+		require.NotContains(t, got, "available in a file:")
+		require.NotEqual(t, test.payload, got)
+		require.Empty(t, l.dirs)
+		if test.name == "read_file" {
+			require.Contains(t, got, "important beginning")
+		} else if strings.Contains(test.payload, "diagnostic tail") {
+			require.Contains(t, got, "diagnostic tail")
+		}
+	}
+}
+
+func TestLimitLargeToolResultsAllocatedDirectoryFailure(t *testing.T) {
+	l := newLargeToolResultLimiter()
+	ctx := tools.WithResourceOwner(t.Context(), tools.NewResourceOwner())
+	key := largeResultKey(ctx, "shared")
+	l.dirs[key] = filepath.Join(t.TempDir(), "removed-directory")
+	out, err := l.dispatch(ctx, &hooks.Input{HookEventName: hooks.EventToolResponseTransform, ToolCategory: "shell", ToolResponse: strings.Repeat("x", 100_000)}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.LessOrEqual(t, len(*out.HookSpecificOutput.UpdatedToolResponse), maxToolCallResultBytes)
+	require.Contains(t, *out.HookSpecificOutput.UpdatedToolResponse, "could not be saved")
+}

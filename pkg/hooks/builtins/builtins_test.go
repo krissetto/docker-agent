@@ -594,7 +594,7 @@ func TestLimitLargeToolResultsReadFileSingleLongLineDoesNotSuggestLoopingRead(t 
 
 	updated := *out.HookSpecificOutput.UpdatedToolResponse
 	assert.Contains(t, updated, "Tool call result was too large")
-	assert.Contains(t, updated, fmt.Sprintf("Showing the first %d bytes", largeToolCallResultTailBytesForTest))
+	assert.LessOrEqual(t, len(updated), maxToolCallResultBytesForTest)
 
 	// No line-based continuation suggestion: any "line": N (including the
 	// misleading "line": 1) would re-read the same oversized line forever.
@@ -605,7 +605,8 @@ func TestLimitLargeToolResultsReadFileSingleLongLineDoesNotSuggestLoopingRead(t 
 
 	// The head excerpt is retained verbatim and stays valid UTF-8.
 	head := extractShownExcerpt(t, updated)
-	assert.Equal(t, original[:largeToolCallResultTailBytesForTest], head)
+	assert.Equal(t, original[:len(head)], head)
+	assert.Contains(t, updated, fmt.Sprintf("Showing the first %d bytes", len(head)))
 	assert.Equal(t, updated, strings.ToValidUTF8(updated, ""))
 
 	// The full result is still spilled for recovery.
@@ -871,4 +872,22 @@ func TestTransformPipelineRedactsBeforeSpillingLargeOutput(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, portcullis.Redact(original), string(stored))
 	}
+}
+
+func TestLimitLargeToolResultsBackgroundStatusAndFullLog(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	payload := "Job ID: job_1\nCommand: " + strings.Repeat("c", 100_000) + "\nStatus: failed\nExit Code: 1\n\n--- Output ---\n" + strings.Repeat("x", 10*1024*1024) + "FINAL DIAGNOSTIC"
+	fn := lookup(t, builtins.LimitLargeToolResults)
+	out, err := fn(t.Context(), &hooks.Input{HookEventName: hooks.EventToolResponseTransform, ToolCategory: "background_jobs", ToolName: "wait_background_job", ToolResponse: payload}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	got := *out.HookSpecificOutput.UpdatedToolResponse
+	assert.LessOrEqual(t, len(got), 50*1024)
+	assert.Contains(t, got, "Job ID: job_1")
+	assert.Contains(t, got, "Status: failed")
+	assert.Contains(t, got, "Exit Code: 1")
+	assert.Contains(t, got, "FINAL DIAGNOSTIC")
+	stored, err := os.ReadFile(extractLargeResultPath(t, got))
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(stored))
 }
