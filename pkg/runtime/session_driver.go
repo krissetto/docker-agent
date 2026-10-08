@@ -1488,6 +1488,7 @@ func (d *sessionDriver) finishRun(generation uint64, runErr string) (context.Con
 
 func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64, runErr string) (context.Context, uint64, bool) {
 	var turnID string
+	var hasConsumedInputs bool
 	var outcome TurnOutcome
 	var continuation context.Context
 	var previousCancel context.CancelFunc
@@ -1508,6 +1509,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 		}
 		d.phase = sessionSettling
 		turnID = d.activeRequestID
+		hasConsumedInputs = len(d.consumedSteering) != 0
 		outcome = TurnCompleted
 		if d.canceledOutcome || d.stopped || d.r.lifetime().Err() != nil {
 			outcome = TurnCanceled
@@ -1537,7 +1539,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 	if completionErr == nil && d.r.subagents != nil {
 		completionErr = d.r.subagents.completeSessionTurnContext(ctx, d, turnID, runErr)
 	}
-	if completionErr == nil && turnID != "" {
+	if completionErr == nil && (turnID != "" || hasConsumedInputs) {
 		completionErr = d.persistTurnOutcome(ctx, turnID, outcome)
 	}
 	var completedCancel context.CancelFunc
@@ -1724,14 +1726,16 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 	if _, withdrawn := d.withdrawnInputs[msg.RequestID]; withdrawn {
 		return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: msg.RequestID, Operation: "submit", Detail: "input identity was withdrawn"}
 	}
-	for _, queued := range d.pending {
-		if queued.RequestID != msg.RequestID {
-			continue
+	for lane, queue := range [][]QueuedMessage{d.pending, d.steering} {
+		for _, queued := range queue {
+			if queued.RequestID != msg.RequestID {
+				continue
+			}
+			if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || queued.ReportOutcome != msg.ReportOutcome || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
+				return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+			}
+			return true, lane == 0, nil
 		}
-		if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || queued.ReportOutcome != msg.ReportOutcome || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
-			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
-		}
-		return true, true, nil
 	}
 	if d.recentRetries[msg.RequestID] {
 		if !msg.Retry {

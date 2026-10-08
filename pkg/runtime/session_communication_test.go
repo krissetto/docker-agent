@@ -35,6 +35,7 @@ func TestCommunicationRetryIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, retry.Idempotent)
 	assert.True(t, retry.Durable)
+	assert.Equal(t, first.Queued, retry.Queued, "exact retry must preserve the STEERING lane receipt")
 	require.Empty(t, d.pending)
 	require.Len(t, d.steering, 1)
 	stored, err := store.GetSession(t.Context(), child.ID)

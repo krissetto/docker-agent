@@ -21,12 +21,14 @@ const SessionErrorInterrupted SessionErrorKind = "interrupted"
 // A promoted admission without this evidence is uncertain after a restart.
 func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outcome TurnOutcome) error {
 	return d.durableIO(ctx, func() (sessionIOReservation, error) {
-		if d.sess == nil {
+		if d.sess == nil || (id == "" && len(d.consumedSteering) == 0) {
 			return sessionIOReservation{}, nil
 		}
 		next := d.sess.OwnSnapshot()
 		consumed := slices.Clone(d.consumedSteering)
-		next.SetTurnOutcome(id, string(outcome))
+		if id != "" {
+			next.SetTurnOutcome(id, string(outcome))
+		}
 		for _, steeringID := range consumed {
 			next.SetTurnOutcome(steeringID, string(outcome))
 		}
@@ -38,7 +40,9 @@ func (d *sessionDriver) persistTurnOutcome(ctx context.Context, id string, outco
 			if err != nil {
 				return err
 			}
-			d.sess.SetTurnOutcome(id, string(outcome))
+			if id != "" {
+				d.sess.SetTurnOutcome(id, string(outcome))
+			}
 			for _, steeringID := range consumed {
 				d.sess.SetTurnOutcome(steeringID, string(outcome))
 			}

@@ -60,19 +60,18 @@ func InteractionIdentity(event any) InteractionKey {
 	return InteractionKey{}
 }
 
-// RecoveryUncertain reports promoted turns that ended without terminal
-// evidence: the session is settled but its last outcome is unknown.
+// RecoveryUncertain reports accepted inputs without durable terminal evidence.
 func (p *Projection) RecoveryUncertain() bool {
 	return p != nil && p.Status.InterruptedTurns > 0
 }
 
 // InterruptedTurnsNotice is the shared client wording for RecoveryUncertain.
 func InterruptedTurnsNotice(n int) string {
-	turns := "turn was"
+	inputs, records := "accepted input has", "record"
 	if n != 1 {
-		turns = "turns were"
+		inputs, records = "accepted inputs have", "records"
 	}
-	return fmt.Sprintf("Recovery uncertain: %d %s interrupted without a final result. Review the transcript before continuing.", n, turns)
+	return fmt.Sprintf("Recovery uncertain: %d %s no terminal outcome %s. Review the transcript before continuing.", n, inputs, records)
 }
 
 func (p *Projection) HasInteraction(key InteractionKey) bool {
