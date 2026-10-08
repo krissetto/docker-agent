@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"fmt"
 	"io"
 	"testing"
 
@@ -549,4 +550,105 @@ func TestStreamAdapter_ToolUsePromptTokens(t *testing.T) {
 			require.ErrorIs(t, err, io.EOF)
 		})
 	}
+}
+
+func TestStreamAdapter_SignatureOnlyChunk(t *testing.T) {
+	t.Parallel()
+
+	for _, toolCall := range []bool{false, true} {
+		t.Run(fmt.Sprintf("toolCall=%t", toolCall), func(t *testing.T) {
+			t.Parallel()
+			part := genai.NewPartFromText("hello")
+			if toolCall {
+				part = genai.NewPartFromFunctionCall("test_function", nil)
+			}
+			signature := []byte("signature")
+			adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+				for _, p := range []*genai.Part{part, {ThoughtSignature: signature}} {
+					if !yield(&genai.GenerateContentResponse{
+						Candidates: []*genai.Candidate{{Content: &genai.Content{Parts: []*genai.Part{p}}}},
+					}, nil) {
+						return
+					}
+				}
+			}, "gemini-3.8-flash", true)
+			t.Cleanup(adapter.Close)
+
+			_, err := adapter.Recv()
+			require.NoError(t, err)
+			response, err := adapter.Recv()
+			require.NoError(t, err)
+			assert.Equal(t, signature, response.Choices[0].Delta.ThoughtSignature)
+			assert.Empty(t, response.Choices[0].FinishReason)
+
+			done, err := adapter.Recv()
+			require.NoError(t, err)
+			wantReason := chat.FinishReasonStop
+			if toolCall {
+				wantReason = chat.FinishReasonToolCalls
+			}
+			assert.Equal(t, wantReason, done.Choices[0].FinishReason)
+			assert.Empty(t, done.Choices[0].Delta.ToolCalls)
+			assert.Empty(t, done.Choices[0].Delta.ThoughtSignature)
+			_, err = adapter.Recv()
+			require.ErrorIs(t, err, io.EOF)
+		})
+	}
+}
+
+func TestStreamAdapter_ToolCallsWithTrailingUsage(t *testing.T) {
+	t.Parallel()
+	parts := []*genai.Part{
+		{Text: "before"},
+		{Text: "thinking", Thought: true},
+		{InlineData: &genai.Blob{Data: []byte{1, 2}, MIMEType: "image/png"}},
+		{FunctionCall: &genai.FunctionCall{ID: "native-1", Name: "lookup"}},
+		{Text: "between"},
+		{FunctionCall: &genai.FunctionCall{ID: "native-2", Name: "lookup"}},
+	}
+	adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+		if !yield(&genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: &genai.Content{Parts: parts}}}}, nil) {
+			return
+		}
+		yield(&genai.GenerateContentResponse{UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, ToolUsePromptTokenCount: 2, CandidatesTokenCount: 3}}, nil)
+	}, "test-model", true)
+	t.Cleanup(adapter.Close)
+	var ids []string
+	for i, part := range parts {
+		response, err := adapter.Recv()
+		require.NoError(t, err)
+		delta := response.Choices[0].Delta
+		assert.Empty(t, response.Choices[0].FinishReason)
+		if part.Thought {
+			assert.Equal(t, part.Text, delta.ReasoningContent)
+		} else {
+			assert.Equal(t, part.Text, delta.Content)
+		}
+		if part.InlineData != nil {
+			require.Len(t, delta.Media, 1)
+			assert.Equal(t, part.InlineData.Data, delta.Media[0].Data)
+		} else {
+			assert.Empty(t, delta.Media)
+		}
+		if part.FunctionCall != nil {
+			require.Len(t, delta.ToolCalls, 1)
+			assert.Equal(t, part.FunctionCall.ID, delta.ToolCalls[0].ProviderID, "part %d", i)
+			assert.NotEqual(t, part.FunctionCall.ID, delta.ToolCalls[0].ID)
+			ids = append(ids, delta.ToolCalls[0].ID)
+		} else {
+			assert.Empty(t, delta.ToolCalls)
+		}
+	}
+	assert.NotEqual(t, ids[0], ids[1])
+	usage, err := adapter.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, usage.Usage)
+	assert.Equal(t, int64(3), usage.Usage.OutputTokens)
+	done, err := adapter.Recv()
+	require.NoError(t, err)
+	assert.Equal(t, chat.FinishReasonToolCalls, done.Choices[0].FinishReason)
+	assert.Equal(t, usage.Usage, done.Usage)
+	assert.Empty(t, done.Choices[0].Delta.ToolCalls)
+	_, err = adapter.Recv()
+	require.ErrorIs(t, err, io.EOF)
 }

@@ -57,9 +57,11 @@ func NewRuntimeHandler[T any](fn func(context.Context, T, Runtime) (*ToolCallRes
 type ToolHandler func(ctx context.Context, toolCall ToolCall, rt Runtime) (*ToolCallResult, error)
 
 type ToolCall struct {
-	ID       string       `json:"id,omitempty"`
-	Type     ToolType     `json:"type"`
-	Function FunctionCall `json:"function"`
+	ID string `json:"id,omitempty"`
+	// ProviderID preserves the native identity for provider history replay.
+	ProviderID string       `json:"provider_id,omitempty"`
+	Type       ToolType     `json:"type"`
+	Function   FunctionCall `json:"function"`
 }
 
 type FunctionCall struct {
