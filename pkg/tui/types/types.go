@@ -83,6 +83,8 @@ type AssistantMedia struct {
 
 // Message represents a single message in the chat
 type Message struct {
+	TurnID         string
+	Pending        bool
 	InputOrigin    session.InputOrigin
 	InputMode      string
 	SenderID       string
@@ -154,7 +156,7 @@ func User(content string) *Message {
 
 // Input preserves provenance and retains attributed replies for optional display.
 func Input(input *session.Message) *Message {
-	msg := &Message{Type: MessageTypeUser}
+	msg := &Message{Type: MessageTypeUser, TurnID: input.TurnID, Pending: input.Pending}
 	if input.InputOrigin != session.InputOriginRuntime {
 		msg.Content = strings.ReplaceAll(input.Message.Content, "\t", "    ")
 	}

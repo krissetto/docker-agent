@@ -148,6 +148,24 @@ func (r *InputReplay) Reset(sess *session.Session) {
 	}
 }
 
+// Contains reports consumed or withdrawn identity without changing replay state.
+func (r *InputReplay) Contains(turnID string, position int) bool {
+	if turnID != "" {
+		return r.turns[turnID]
+	}
+	return position >= 0 && r.positions[position]
+}
+
+func (r *InputReplay) Cancel(turnID string, position int) {
+	if r.turns == nil {
+		r.Reset(nil)
+	}
+	r.Withdraw(position)
+	if turnID != "" {
+		r.turns[turnID] = true
+	}
+}
+
 func (r *InputReplay) Consume(turnID string, position int) bool {
 	if r.turns == nil {
 		r.Reset(nil)

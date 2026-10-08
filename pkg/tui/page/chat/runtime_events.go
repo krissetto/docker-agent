@@ -147,9 +147,16 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Content Events =====
 	case *runtime.PendingUserMessageAcceptedEvent:
+		if p.inputReplay.Contains(msg.TurnID, msg.SessionPosition) {
+			return true, nil
+		}
 		p.applyLifecycle(msg)
 		if !lifecycle.IsUserInput(msg.InputOrigin) {
-			return true, nil
+			input := session.UserMessage(msg.Message, msg.MultiContent...)
+			input.TurnID, input.Pending = msg.TurnID, true
+			input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
+			input.ReportOutcome = msg.ReportOutcome
+			return true, p.messages.AddInputMessage(input, msg.SessionPosition)
 		}
 		for _, queued := range p.messageQueue {
 			if queued.turnID == msg.TurnID {
@@ -169,10 +176,14 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, nil
 
 	case *runtime.PendingUserMessageCanceledEvent:
+		if p.inputReplay.Contains(msg.TurnID, -1) {
+			return true, nil
+		}
 		if !p.sharedProjection {
 			p.lifecycle.Pending = slices.DeleteFunc(slices.Clone(p.lifecycle.Pending), func(id string) bool { return id == msg.TurnID })
 		}
-		p.inputReplay.Withdraw(msg.SessionPosition)
+		p.inputReplay.Cancel(msg.TurnID, msg.SessionPosition)
+		p.messages.RemovePendingInput(msg.TurnID)
 		p.messages.RemovePendingSessionPosition(msg.SessionPosition)
 		if msg.SessionPosition >= 0 && msg.SessionPosition < p.snapshotEnd {
 			p.snapshotEnd--
@@ -188,6 +199,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, queueCmd
 		}
 		input := session.UserMessage(msg.Message, msg.MultiContent...)
+		input.TurnID = msg.TurnID
 		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
 		input.ReportOutcome = msg.ReportOutcome
 		if lifecycle.VisibleTranscriptMessage(input) {
@@ -205,6 +217,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		input := session.UserMessage(msg.Message, msg.MultiContent...)
+		input.TurnID = msg.TurnID
 		input.InputOrigin, input.InputMode, input.SenderID, input.SenderName = msg.InputOrigin, msg.InputMode, msg.SenderID, msg.SenderName
 		input.ReportOutcome = msg.ReportOutcome
 		if lifecycle.VisibleTranscriptMessage(input) {
@@ -747,6 +760,16 @@ func (p *chatPage) applyProjection(snapshot runtime.SessionSnapshot, transcript 
 		if snapshot.Session.MessageCount() > 0 {
 			p.showStartupBanner = false
 		}
+	}
+	for _, input := range snapshot.PendingInputs {
+		if input.InputOrigin != session.InputOriginAgent {
+			continue
+		}
+		message := session.UserMessage(input.Content, input.MultiContent...)
+		message.TurnID, message.Pending = input.TurnID, true
+		message.InputOrigin, message.InputMode, message.SenderID, message.SenderName = input.InputOrigin, input.InputMode, input.SenderID, input.SenderName
+		message.ReportOutcome = input.ReportOutcome
+		cmds = append(cmds, p.messages.AddInputMessage(message, input.SessionPosition))
 	}
 	for _, event := range snapshot.Presentation {
 		if team, ok := event.(*runtime.TeamInfoEvent); ok {

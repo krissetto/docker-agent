@@ -559,8 +559,20 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	}
 	next := make(chan messageResult, 1)
 	go func() {
-		message, readErr := readMessageE()
-		next <- messageResult{message: message, err: readErr}
+		for {
+			message, readErr := readMessageE()
+			if readErr == nil {
+				envelope, _ := message["envelope"].(map[string]any)
+				event, _ := envelope["event"].(map[string]any)
+				// Root-tree status can follow settlement on the same observation;
+				// it is not another execution turn or a closed response.
+				if event["type"] == "subagent_tree" {
+					continue
+				}
+			}
+			next <- messageResult{message: message, err: readErr}
+			return
+		}
 	}()
 	select {
 	case result := <-next:
@@ -596,9 +608,12 @@ func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 		sequence := sequenceOf(envelope)
 		assert.Greater(t, sequence, lastSequence)
 		lastSequence = sequence
-		assert.Equal(t, secondSubmission.TurnID, envelope["turn_id"])
 		event, _ := envelope["event"].(map[string]any)
 		eventType, _ := event["type"].(string)
+		if eventType == "subagent_tree" {
+			continue
+		}
+		assert.Equal(t, secondSubmission.TurnID, envelope["turn_id"])
 		secondTypes = append(secondTypes, eventType)
 		if eventType == "stream_stopped" {
 			break

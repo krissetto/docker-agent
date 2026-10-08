@@ -155,11 +155,20 @@ func TestCancelRunTargetsActiveProjectedRequestInsteadOfQueuedSubmission(t *test
 
 	sess := session.New(session.WithID("cancel-active-projection"), session.WithAgentName("root"))
 	handle := &projectionSession{id: sess.ID, events: make(chan runtime.SessionEvent, 16), activeTurnID: "1"}
+	handle.observe = func(context.Context, runtime.ObserveOptions) (runtime.Observation, error) {
+		return runtime.Observation{Initial: []runtime.SessionSnapshot{{Session: sess, Status: runtime.SessionStatus{SessionID: sess.ID, State: runtime.SessionStateSettled}}}, Events: handle.events, Cancel: func() {}}, nil
+	}
 	a := New(t.Context(), &projectionSessions{session: handle}, sess, runtime.SessionBinding{AgentName: "root"}, WithRuntimeServices(&mockRuntime{}))
 	require.True(t, a.startSessionEventBridge(t.Context()))
+	initial, ok := (<-a.events).(SessionEventMsg)
+	require.True(t, ok)
+	require.IsType(t, &SessionResetEvent{}, initial.Event)
 
 	a.Run(t.Context(), func() {}, "active", nil)
-	emitProjection(handle.events, "1", runtime.UserMessage("active", sess.ID, nil), runtime.StreamStarted(sess.ID, "root"))
+	// Only an owner-correlated, sequenced start grants canonical cancellation
+	// authority; the legacy helper intentionally emits identity-free events.
+	handle.events <- runtime.SessionEvent{SessionID: sess.ID, TurnID: "1", Sequence: 1, TranscriptPosition: -1, Event: runtime.UserMessage("active", sess.ID, nil)}
+	handle.events <- runtime.SessionEvent{SessionID: sess.ID, TurnID: "1", Sequence: 2, TranscriptPosition: -1, Event: runtime.StreamStarted(sess.ID, "root")}
 	assertProjectedTypes(t, a.events, "user_message", "stream_started")
 
 	submission, err := a.FollowUpMessage(t.Context(), "queued", nil)

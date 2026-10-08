@@ -85,6 +85,7 @@ type Model interface {
 	AddLoadingMessage(description string) tea.Cmd
 	ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd
 	AddInputMessage(msg *session.Message, sessionPos int) tea.Cmd
+	RemovePendingInput(turnID string)
 	AddErrorMessage(content string) tea.Cmd
 	AddAssistantMessage(sender, label string) tea.Cmd
 	AddCancelledMessage() tea.Cmd
@@ -1943,13 +1944,141 @@ func (m *model) ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd {
 }
 
 func (m *model) AddInputMessage(msg *session.Message, sessionPos int) tea.Cmd {
-	if !lifecycle.VisibleTranscriptMessage(msg) {
+	if !visibleInputMessage(msg) {
 		return nil
 	}
 	if !lifecycle.IsUserInput(msg.InputOrigin) {
-		return m.addMessage(types.Input(msg))
+		next := types.Input(msg)
+		for i, current := range m.messages {
+			if msg.TurnID == "" || current.TurnID != msg.TurnID {
+				continue
+			}
+			if !current.Pending || msg.Pending {
+				return nil
+			}
+			// Preserve the card and disclosure while moving it to consumption
+			// order, matching the canonical session's pending-input promotion.
+			next.InputReference = m.resolveInputReference(next)
+			*current = *next
+			if view, ok := m.views[i].(message.Model); ok {
+				view.InvalidateRenderCache()
+			}
+			view := m.views[i]
+			m.messages = slices.Delete(m.messages, i, i+1)
+			m.views = slices.Delete(m.views, i, i+1)
+			target := len(m.messages)
+			if target > 0 && m.messages[target-1].Type == types.MessageTypeSpinner {
+				target--
+			}
+			if i < m.loadedMessageCount && target >= m.loadedMessageCount {
+				m.loadedMessageCount--
+			}
+			if i < m.committedMessageCount && target >= m.committedMessageCount {
+				m.committedMessageCount--
+			}
+			m.messages = slices.Insert(m.messages, target, current)
+			m.views = slices.Insert(m.views, target, view)
+			m.deferredTailIndex = movedInputIndex(m.deferredTailIndex, i, target)
+			m.selectedMessageIndex = movedInputIndex(m.selectedMessageIndex, i, target)
+			m.hoveredMessageIndex = movedInputIndex(m.hoveredMessageIndex, i, target)
+			m.CancelReferenceHover()
+			m.invalidateAllItems()
+			return nil
+		}
+		if next.Pending {
+			return m.addPendingInput(next)
+		}
+		return m.addMessage(next)
 	}
 	return m.ReplaceLoadingWithUser(msg.Message.Content, sessionPos)
+}
+
+// addPendingInput keeps the current streamed tail contiguous. Acceptance is
+// not a consumption boundary and must not split deltas or their later commit.
+func (m *model) addPendingInput(msg *types.Message) tea.Cmd {
+	position := len(m.messages)
+	for position > max(m.loadedMessageCount, m.committedMessageCount) {
+		tail := m.messages[position-1]
+		if tail.InputOrigin == session.InputOriginAgent {
+			break
+		}
+		switch tail.Type {
+		case types.MessageTypeAssistant, types.MessageTypeAssistantReasoningBlock, types.MessageTypeToolCall, types.MessageTypeSpinner:
+			position--
+		default:
+			goto insert
+		}
+	}
+insert:
+	if position == len(m.messages) {
+		return m.addMessage(msg)
+	}
+	view := m.createMessageView(msg)
+	m.messages = slices.Insert(m.messages, position, msg)
+	m.views = slices.Insert(m.views, position, view)
+	if m.deferredTailIndex >= position {
+		m.deferredTailIndex++
+	}
+	if m.selectedMessageIndex >= position {
+		m.selectedMessageIndex++
+	}
+	if m.hoveredMessageIndex >= position {
+		m.hoveredMessageIndex++
+	}
+	m.CancelReferenceHover()
+	m.invalidateAllItems()
+	if m.userHasScrolled {
+		return view.Init()
+	}
+	return tea.Batch(view.Init(), m.ScrollToBottom())
+}
+
+// Pending agent inputs are receipts, not yet consumed transcript messages.
+func visibleInputMessage(msg *session.Message) bool {
+	return lifecycle.VisibleTranscriptMessage(msg) || (msg != nil && msg.Pending && !msg.Implicit && msg.InputOrigin == session.InputOriginAgent)
+}
+
+func movedInputIndex(index, from, to int) int {
+	if index == from {
+		return to
+	}
+	if index > from && index <= to {
+		return index - 1
+	}
+	return index
+}
+
+func (m *model) RemovePendingInput(turnID string) {
+	for i, msg := range m.messages {
+		if turnID == "" || msg.TurnID != turnID || !msg.Pending {
+			continue
+		}
+		animation.StopView(m.views[i])
+		m.messages = slices.Delete(m.messages, i, i+1)
+		m.views = slices.Delete(m.views, i, i+1)
+		if m.deferredTailIndex > i {
+			m.deferredTailIndex--
+		}
+		if m.selectedMessageIndex == i {
+			m.selectedMessageIndex = -1
+		} else if m.selectedMessageIndex > i {
+			m.selectedMessageIndex--
+		}
+		if m.hoveredMessageIndex == i {
+			m.hoveredMessageIndex = -1
+		} else if m.hoveredMessageIndex > i {
+			m.hoveredMessageIndex--
+		}
+		if i < m.loadedMessageCount {
+			m.loadedMessageCount--
+		}
+		if i < m.committedMessageCount {
+			m.committedMessageCount--
+		}
+		m.CancelReferenceHover()
+		m.invalidateAllItems()
+		return
+	}
 }
 
 func (m *model) AddErrorMessage(content string) tea.Cmd {
@@ -2137,7 +2266,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 		}
 
 		smsg := item.Message
-		if !lifecycle.VisibleTranscriptMessage(smsg) {
+		if !visibleInputMessage(smsg) {
 			return
 		}
 

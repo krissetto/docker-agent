@@ -150,6 +150,7 @@ type renderCache struct {
 	sender         string
 	inputOrigin    session.InputOrigin
 	valid          bool
+	pending        bool
 	content        string
 	receivedBody   string
 	inputMode      string
@@ -462,7 +463,11 @@ func (mv *messageModel) NeedsTick() bool { return mv.disclosure.NeedsTick() }
 func (mv *messageModel) replyHeader(width int) string {
 	icon := styles.ToolCompletedIcon.Render("✓")
 	status := "sent a message"
-	if mv.message.Type == types.MessageTypeRuntimeNotice {
+	if mv.message.Pending {
+		icon = styles.ToolPendingIcon.Render("○")
+		status = "accepted · awaiting consumption"
+	}
+	if mv.message.Type == types.MessageTypeRuntimeNotice && !mv.message.Pending {
 		var label string
 		icon, label = subagenttool.CompletionPresentation(mv.message.ReportOutcome)
 		status = "· " + label
@@ -617,6 +622,7 @@ func (mv *messageModel) Render(width int) string {
 			c.content == msg.Content &&
 			c.receivedBody == msg.ReceivedBody &&
 			c.inputMode == msg.InputMode &&
+			c.pending == msg.Pending &&
 			c.sameAgent == mv.sameAgentAsPrevious(msg) &&
 			c.imageID == mv.markdownImageID &&
 			slices.Equal(c.media, msg.AssistantMedia) {
@@ -633,6 +639,7 @@ func (mv *messageModel) Render(width int) string {
 			content:        msg.Content,
 			receivedBody:   msg.ReceivedBody,
 			inputMode:      msg.InputMode,
+			pending:        msg.Pending,
 			msgType:        msg.Type,
 			inputOrigin:    msg.InputOrigin,
 			inputReference: msg.InputReference,

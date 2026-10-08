@@ -177,6 +177,9 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 	defer a.lifecycleMu.Unlock()
 
 	switch e.(type) {
+	case *runtime.PendingUserMessageAcceptedEvent, *runtime.PendingUserMessageEditedEvent, *runtime.PendingUserMessagePromotedEvent, *runtime.PendingUserMessageCanceledEvent:
+		// Mailbox transitions are canonical state, not the cancelled output tail.
+		return e
 	case *SessionResetEvent, *SessionViewEvent, *ConnectionStateEvent, *runtime.InteractionResolvedEvent, *runtime.TurnSettledEvent, *runtime.SubagentCreatedEvent, *runtime.SubagentTreeEvent, *runtime.DormancyChangedEvent:
 		return e
 	}
