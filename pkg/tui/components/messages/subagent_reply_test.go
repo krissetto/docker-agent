@@ -60,14 +60,14 @@ func TestSubagentReplyLiveReplayControlsAndRetention(t *testing.T) {
 								ref, ok := m.InputReferenceAt(7+x, 3+y)
 								require.True(t, ok, "width=%d x=%d y=%d", width, x, y)
 								assert.Equal(t, "abcde-node", ref.ID)
-								m.handleMouseClick(tea.MouseClickMsg{X: 7 + x, Y: 3 + y, Button: tea.MouseLeft})
+								require.True(t, m.views[0].(interface{ IsToggleAt(line, col int) bool }).IsToggleAt(y, x))
 								hits++
 							}
 						}
 					}
 					assert.Positive(t, hits)
 					m.ensureAllItemsRendered()
-					assert.NotContains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "Delivered", "identity never toggles")
+					assert.NotContains(t, ansi.Strip(strings.Join(m.renderedLines, "\n")), "Delivered", "coordinate lookup never toggles")
 					clickReplyChevron(t, m, ">")
 					m.ensureAllItemsRendered()
 					assert.Greater(t, len(m.renderedLines), 1)

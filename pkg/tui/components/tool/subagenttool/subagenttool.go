@@ -40,7 +40,10 @@ func NewSend(ar *animation.Runtime, msg *types.Message, sessionState service.Ses
 		header := m.header(msg, s, width)
 		m.headerLines = strings.Count(header, "\n") + 1
 		return header
-	}, lookup, references...), toolcommon.CollapsedRenderer(renderer(renderSend, lookup, references...)))
+	}, lookup, references...), toolcommon.CollapsedRenderer(renderer(func(msg *types.Message, s spinner.Spinner, _ service.SessionStateReader, width, _ int, _ NameLookup) string {
+		params, _ := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
+		return agentidentity.Wrap(statusIcon(msg, s)+" "+styles.MutedStyle.Render(verb(msg, "Messaging", "Messaged"))+" ", m.reference(msg, params.To), "", width)
+	}, lookup, references...)))
 	return m
 }
 

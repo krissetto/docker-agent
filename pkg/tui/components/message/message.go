@@ -429,12 +429,12 @@ func (mv *messageModel) Toggle() {
 	mv.invalidateOutput()
 }
 
-// IsToggleAt preserves existing line-wide controls, but replies toggle only at the chevron.
+// IsToggleAt preserves existing controls and toggles inter-agent messages across their header.
 func (mv *messageModel) IsToggleAt(lineIdx, col int) bool {
 	if !mv.isAgentMessage() {
 		return mv.IsToggleLine(lineIdx)
 	}
-	return agentmessage.ToggleAt(mv.replyHeader(mv.width), lineIdx, col)
+	return agentmessage.HeaderAt(mv.replyHeader(mv.width), lineIdx, col, mv.width)
 }
 
 // InputReferenceOnLine excludes body hyperlinks, including literal identity OSCs.
@@ -443,6 +443,14 @@ func (mv *messageModel) InputReferenceOnLine(lineIdx int) bool {
 		return lineIdx >= 0 && lineIdx <= strings.Count(mv.replyHeader(mv.width), "\n")
 	}
 	return mv.message.Type == types.MessageTypeRuntimeNotice || lineIdx == 0
+}
+
+func (mv *messageModel) InputReferenceForLine(line int) (lifecycle.InputReference, bool) {
+	if !mv.isAgentMessage() || !mv.InputReferenceOnLine(line) {
+		return lifecycle.InputReference{}, false
+	}
+	ref := mv.message.InputReference
+	return ref, ref.Kind != lifecycle.InputReferenceUnknown
 }
 
 func (mv *messageModel) isAgentMessage() bool {

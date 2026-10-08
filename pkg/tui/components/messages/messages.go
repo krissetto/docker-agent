@@ -2075,6 +2075,7 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	if m.subagents == nil {
 		m.subagents = subagentindex.New()
 	}
+	m.subagents.SetParent(sess.ParentID, "")
 	if snapshot := sess.GetSubagentTree(); snapshot != nil {
 		m.subagents.Reset(*snapshot)
 	}
@@ -2724,7 +2725,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 		Content: content,
 	}
 
-	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState)
+	block := reasoningblock.New(m.ar, nextBlockID(), agentName, m.sessionState, m.subagents)
 	block.SetShowAgentBadge(showReasoningAgentBadge(m.lastMessage(), agentName))
 	block.SetReasoning(content)
 	block.SetSize(m.contentWidth(), 0)

@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
@@ -116,4 +117,20 @@ func (m *inlineImagesModel) Toggle() {
 	if view, ok := m.model.(interface{ Toggle() }); ok {
 		view.Toggle()
 	}
+}
+
+func (m *inlineImagesModel) InputReferenceForLine(line int) (lifecycle.InputReference, bool) {
+	if view, ok := m.model.(interface {
+		InputReferenceForLine(line int) (lifecycle.InputReference, bool)
+	}); ok {
+		return view.InputReferenceForLine(line)
+	}
+	return lifecycle.InputReference{}, false
+}
+
+func (m *inlineImagesModel) InputReferenceOnLine(line int) bool {
+	if view, ok := m.model.(interface{ InputReferenceOnLine(line int) bool }); ok {
+		return view.InputReferenceOnLine(line)
+	}
+	return true
 }

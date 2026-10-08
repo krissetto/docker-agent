@@ -58,7 +58,7 @@ func (m *sendModel) IsToggleAt(line, col int) bool {
 	if m.msg.ToolStatus == types.ToolStatusError {
 		header = strings.Join(strings.Split(header, "\n")[:m.headerLines], "\n")
 	}
-	return agentmessage.ToggleAt(header, line, col)
+	return agentmessage.HeaderAt(header, line, col, m.width)
 }
 func (m *sendModel) Toggle()         { m.disclosure.Toggle() }
 func (m *sendModel) NeedsTick() bool { return m.disclosure.NeedsTick() }
@@ -85,10 +85,16 @@ func (m *sendModel) InputReferenceOnLine(line int) bool {
 }
 
 func (m *sendModel) reference(msg *types.Message, to string) lifecycle.InputReference {
+	if to == subagent.ParentAlias {
+		if len(m.references) > 0 && m.references[0] != nil {
+			return m.references[0](subagent.ParentAlias)
+		}
+		return lifecycle.InputReference{Name: "parent"}
+	}
 	name, id := attribution(msg, to, m.lookup)
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: id, Name: name, Agent: name, DisplayID: subagent.ShortID(id)}
-	if to == subagent.ParentAlias {
-		return lifecycle.InputReference{Kind: lifecycle.InputReferenceParent, Name: "parent"}
+	if id == "" {
+		ref.Kind = lifecycle.InputReferenceUnknown
 	}
 	if len(m.references) > 0 && m.references[0] != nil {
 		ref.Agent = m.references[0](subagent.NodeID(id)).Agent
@@ -100,4 +106,13 @@ func (m *sendModel) header(msg *types.Message, s spinner.Spinner, width int) str
 	params, _ := toolcommon.ParseArgs[subagent.SendArgs](msg.ToolCall.Function.Arguments)
 	prefix := statusIcon(msg, s) + " " + styles.MutedStyle.Render(verb(msg, "Messaging", "Messaged")) + " "
 	return m.disclosure.Header(prefix, m.reference(msg, params.To), "", width)
+}
+
+func (m *sendModel) InputReferenceForLine(line int) (lifecycle.InputReference, bool) {
+	if !m.InputReferenceOnLine(line) {
+		return lifecycle.InputReference{}, false
+	}
+	params, _ := toolcommon.ParseArgs[subagent.SendArgs](m.msg.ToolCall.Function.Arguments)
+	ref := m.reference(m.msg, params.To)
+	return ref, ref.Kind != lifecycle.InputReferenceUnknown
 }

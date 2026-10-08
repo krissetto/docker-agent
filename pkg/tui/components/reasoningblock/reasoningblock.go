@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
@@ -886,9 +887,9 @@ func (m *Model) IsToggleLine(lineIdx int) bool {
 	return m.IsHeaderLine(lineIdx) && (m.expanded || m.hasExtraContent())
 }
 
-func (m *Model) childToggleAt(line, col int) (interface{ Toggle() }, bool) {
+func (m *Model) childViewAt(line int) (layout.Model, int, bool) {
 	if !m.expanded {
-		return nil, false
+		return nil, 0, false
 	}
 	rendered := m.View()
 	cursor := 0
@@ -905,15 +906,34 @@ func (m *Model) childToggleAt(line, col int) (interface{ Toggle() }, bool) {
 		start := cursor + offset
 		local := line - strings.Count(rendered[:start], "\n")
 		cursor = start + len(content)
-		view, ok := entry.view.(interface {
-			IsToggleAt(line, col int) bool
-			Toggle()
-		})
-		if ok && view.IsToggleAt(local, col) {
-			return view, true
+		if local >= 0 && local <= strings.Count(content, "\n") {
+			return entry.view, local, true
 		}
 	}
+	return nil, 0, false
+}
+
+func (m *Model) childToggleAt(line, col int) (interface{ Toggle() }, bool) {
+	child, local, found := m.childViewAt(line)
+	view, ok := child.(interface {
+		IsToggleAt(line, col int) bool
+		Toggle()
+	})
+	if found && ok && view.IsToggleAt(local, col) {
+		return view, true
+	}
 	return nil, false
+}
+
+func (m *Model) InputReferenceForLine(line int) (lifecycle.InputReference, bool) {
+	child, local, found := m.childViewAt(line)
+	view, ok := child.(interface {
+		InputReferenceForLine(line int) (lifecycle.InputReference, bool)
+	})
+	if found && ok {
+		return view.InputReferenceForLine(local)
+	}
+	return lifecycle.InputReference{}, false
 }
 
 func (m *Model) IsToggleAt(line, col int) bool {

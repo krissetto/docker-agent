@@ -10,11 +10,12 @@ import (
 // Index maps canonical node and session identities for one chat-page/session view.
 // It owns scalar metadata only, never a caller's mutable snapshot.
 type Index struct {
-	mu         sync.RWMutex
-	root       subagent.NodeID
-	identities []identity
-	byID       map[subagent.NodeID]int
-	bySession  map[string]int
+	mu                           sync.RWMutex
+	parentSessionID, parentAgent string
+	root                         subagent.NodeID
+	identities                   []identity
+	byID                         map[subagent.NodeID]int
+	bySession                    map[string]int
 }
 
 type identity struct {
@@ -90,6 +91,7 @@ func (i *Index) Clear() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.root = ""
+	i.parentSessionID, i.parentAgent = "", ""
 	i.identities = nil
 	i.byID = nil
 	i.bySession = nil
@@ -124,4 +126,27 @@ func (i *Index) Resolve(parentID, senderID, senderName string) lifecycle.InputRe
 		ref.Kind, ref.ID = lifecycle.InputReferenceParent, parentID
 	}
 	return ref
+}
+
+// SetParent records exact attach context, including when the parent is outside the local subtree.
+func (i *Index) SetParent(sessionID, agent string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.parentSessionID, i.parentAgent = sessionID, agent
+}
+
+func (i *Index) Parent() lifecycle.InputReference {
+	if i == nil {
+		return lifecycle.InputReference{Name: "parent"}
+	}
+	i.mu.RLock()
+	sessionID, agent := i.parentSessionID, i.parentAgent
+	i.mu.RUnlock()
+	if sessionID == "" {
+		return lifecycle.InputReference{Name: "parent"}
+	}
+	if agent == "" {
+		agent = "parent"
+	}
+	return i.Resolve(sessionID, sessionID, agent)
 }

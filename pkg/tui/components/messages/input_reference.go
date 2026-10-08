@@ -39,6 +39,9 @@ func (m *model) referenceForMessage(index, localLine int) (lifecycle.InputRefere
 		return lifecycle.InputReference{}, false
 	}
 	msg := m.messages[index]
+	if ref, ok := m.agentMessageReferenceForLine(index, localLine); ok {
+		return ref, true
+	}
 	if msg.Type == types.MessageTypeAgentInput || msg.Type == types.MessageTypeRuntimeNotice {
 		if view, ok := m.views[index].(interface{ InputReferenceOnLine(line int) bool }); ok && !view.InputReferenceOnLine(localLine) {
 			return lifecycle.InputReference{}, false
@@ -114,4 +117,28 @@ func (m *model) resolveInputReference(msg *types.Message) lifecycle.InputReferen
 		return resolved
 	}
 	return ref
+}
+
+func (m *model) agentMessageReferenceForLine(index, line int) (lifecycle.InputReference, bool) {
+	if index >= 0 && index < len(m.views) {
+		if view, ok := m.views[index].(interface {
+			InputReferenceForLine(line int) (lifecycle.InputReference, bool)
+		}); ok {
+			return view.InputReferenceForLine(line)
+		}
+	}
+	return lifecycle.InputReference{}, false
+}
+
+func (m *model) AgentMessageIdentityAt(x, y int) (*types.Message, bool) {
+	if _, ok := m.InputReferenceAt(x, y); !ok {
+		return nil, false
+	}
+	line, _ := m.mouseToLineCol(x, y)
+	index, local, _ := m.globalLineToMessageLine(line)
+	_, ok := m.agentMessageReferenceForLine(index, local)
+	if !ok {
+		return nil, false
+	}
+	return m.messages[index], true
 }

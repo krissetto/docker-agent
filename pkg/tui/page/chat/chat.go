@@ -215,7 +215,9 @@ type chatPage struct {
 
 	sessionState *service.SessionState
 
-	lastSidebarClick sidebarClick
+	lastSidebarClick         sidebarClick
+	lastMessageIdentityClick messageIdentityClick
+	messageClickNow          func() time.Time
 
 	// State
 	working              bool
@@ -591,6 +593,10 @@ func (p *chatPage) hydrateSidebarSession(sess *session.Session) tea.Cmd {
 	}
 	p.sidebar.LoadFromSession(hydrated)
 	p.subagents.Clear()
+	p.subagents.SetParent(sess.ParentID, "")
+	if info := p.app.AttachedSubagent(); info != nil {
+		p.subagents.SetParent(info.ParentSessionID, info.ParentAgent)
+	}
 	if tree := hydrated.GetSubagentTree(); tree != nil {
 		p.subagents.Reset(*tree)
 		return p.forwardToSidebar(runtime.SubagentTree(*tree))
@@ -609,6 +615,7 @@ func WatchGitBranch(page Page) tea.Cmd {
 func ClearSidebarHover(page Page) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
 		p.lastSidebarClick = sidebarClick{}
+		p.lastMessageIdentityClick = messageIdentityClick{}
 		return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearReferenceHover())
 	}
 	return nil
@@ -621,6 +628,7 @@ func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 		active = active && p.sidebarInteractive()
 		if !active {
 			p.lastSidebarClick = sidebarClick{}
+			p.lastMessageIdentityClick = messageIdentityClick{}
 		}
 		if owner, ok := p.sidebar.(interface{ SetPresentationActive(active bool) tea.Cmd }); ok {
 			return owner.SetPresentationActive(active)
@@ -657,6 +665,7 @@ func Cleanup(page Page) {
 func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg.(type) {
 	case tea.KeyPressMsg, tea.PasteMsg, tea.MouseWheelMsg, msgtypes.WheelCoalescedMsg:
+		p.lastMessageIdentityClick = messageIdentityClick{}
 		p.sidebar.ResetTodoClick()
 	}
 

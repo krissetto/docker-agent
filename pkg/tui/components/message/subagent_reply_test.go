@@ -35,13 +35,13 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 					assert.LessOrEqual(t, ansi.StringWidth(line), width)
 					for x := range width {
 						if view.IsToggleAt(y, x) {
-							assert.Equal(t, ">", ansi.Strip(ansi.Cut(line, x, x+1)))
+							assert.True(t, view.InputReferenceOnLine(y))
 							hits++
 						}
 					}
 					assert.True(t, view.InputReferenceOnLine(y))
 				}
-				require.Equal(t, 1, hits)
+				require.Equal(t, width*len(lines), hits)
 				assert.False(t, view.InputReferenceOnLine(len(lines)))
 			}
 			collapsedHeader := ansi.Strip(view.replyHeader(80))

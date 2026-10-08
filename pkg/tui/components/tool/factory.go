@@ -126,7 +126,12 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 	var reference subagenttool.ReferenceLookup
 	if len(indexes) > 0 && indexes[0] != nil {
 		lookup = indexes[0].Name
-		reference = func(id subagentpkg.NodeID) lifecycle.InputReference { return indexes[0].Resolve("", string(id), "") }
+		reference = func(id subagentpkg.NodeID) lifecycle.InputReference {
+			if id == subagentpkg.ParentAlias {
+				return indexes[0].Parent()
+			}
+			return indexes[0].Resolve("", string(id), "")
+		}
 	}
 	name := msg.ToolCall.Function.Name
 	if b, ok := customBuilder(name); ok {

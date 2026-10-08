@@ -97,11 +97,11 @@ func TestSendRequestNestedChevronAndStatusReplacement(t *testing.T) {
 	}
 	require.True(t, found)
 	require.True(t, m.itemNeedsTick(0))
-	// Child identity remains navigation, not the disclosure target.
+	// Child identity belongs to the same disclosure row.
 	for y, line := range m.renderedLines {
 		plain := ansi.Strip(line)
 		if pos := strings.Index(plain, "parent >"); pos >= 0 {
-			require.False(t, block.IsToggleAt(y, pos))
+			require.True(t, block.IsToggleAt(y, pos))
 		}
 	}
 	// Collapsing the outer block releases the hidden child's transition.

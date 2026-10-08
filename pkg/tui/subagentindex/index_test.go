@@ -161,3 +161,17 @@ func BenchmarkIndexReferences(b *testing.B) {
 		})
 	}
 }
+
+func TestParentReferenceUsesExactAttachSessionAndCanonicalIdentity(t *testing.T) {
+	index := New()
+	assert.Equal(t, lifecycle.InputReference{Name: "parent"}, index.Parent())
+	index.SetParent("parent-session-full", "root")
+	fallback := lifecycle.InputReference{Kind: lifecycle.InputReferenceParent, ID: "parent-session-full", Name: "root", Agent: "root", DisplayID: subagent.ShortID("parent-session-full")}
+	assert.Equal(t, fallback, index.Parent(), "subtree-only snapshots retain exact parent session routing")
+	index.Reset(subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "abcde-full-node", SessionID: "parent-session-full", Name: "Visible root", Agent: "root"}}}})
+	assert.Equal(t, lifecycle.InputReference{Kind: lifecycle.InputReferenceParent, ID: "parent-session-full", Name: "Visible root", Agent: "root", DisplayID: "abcde"}, index.Parent())
+	index.Reset(subagent.Snapshot{})
+	assert.Equal(t, fallback, index.Parent(), "tree refresh cannot erase attach context")
+	index.Clear()
+	assert.Equal(t, lifecycle.InputReference{Name: "parent"}, index.Parent(), "clearing page identity cannot leak another session's parent")
+}

@@ -39,11 +39,11 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 						for x := range width {
 							if view.IsToggleAt(y, x) {
 								hits++
-								require.Equal(t, ">", ansi.Strip(ansi.Cut(line, x, x+1)))
+								require.True(t, view.InputReferenceOnLine(y))
 							}
 						}
 					}
-					require.Equal(t, 1, hits)
+					require.Equal(t, width*view.headerLines, hits)
 				}
 				view.SetExpanded(true)
 				body := ansi.Strip(view.View())
@@ -54,7 +54,7 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				}
 				require.Contains(t, body, "Literal **request**")
 				require.Equal(t, 1, strings.Count(body, "Literal"))
-				require.Contains(t, body, "━", "expanded body uses agent-input border")
+				require.Contains(t, body, "┃", "expanded body uses agent-input border")
 				if to != "parent" {
 					require.Equal(t, 1, strings.Count(body, "worker (abcde)"), "one recipient identity")
 					require.Contains(t, body, "worker (abcde) v")

@@ -76,10 +76,7 @@ func (d *Disclosure) Render(header, body string) string {
 const toggleLink = "docker-agent:disclosure"
 
 func (d *Disclosure) Header(prefix string, ref lifecycle.InputReference, status string, width int) string {
-	if !d.Visible() {
-		return CompactHeader(prefix, ref, status, d.Chevron(), width)
-	}
-	return Header(prefix, ref, status, d.Chevron(), width)
+	return CompactHeader(prefix, ref, status, d.Chevron(), width)
 }
 
 func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
@@ -88,20 +85,11 @@ func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron 
 }
 
 func Header(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
-	style := styles.UserMessageStyle.Bold(false)
-	surface := styles.NoStyle.Foreground(style.GetForeground()).Background(style.GetBackground())
-	rule := surface.Foreground(style.GetBorderLeftForeground())
-	border := style.GetBorderStyle()
-	header := ansi.Hardwrap(CompactHeader(rule.Render(border.TopLeft+border.Top+" ")+prefix, ref, status, chevron, width), max(1, width), true)
-	lines := strings.Split(header, "\n")
-	for i, line := range lines {
-		tail := max(0, width-ansi.StringWidth(line))
-		if tail > 0 {
-			line += rule.Render(" " + strings.Repeat(border.Top, tail-1))
-		}
-		lines[i] = styles.RenderComposite(surface, line)
-	}
-	return strings.Join(lines, "\n")
+	return CompactHeader(prefix, ref, status, chevron, width)
+}
+
+func HeaderAt(header string, line, col, width int) bool {
+	return line >= 0 && line <= strings.Count(header, "\n") && col >= 0 && col < width
 }
 
 func ToggleAt(header string, line, col int) bool {

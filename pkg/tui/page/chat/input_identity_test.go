@@ -3,6 +3,7 @@ package chat
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -52,7 +53,10 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 			if parentSender {
 				app.WithSubagentAttach(runtime.SubagentAttachInfo{NodeID: childNode, Session: sess, ParentSessionID: parentSession, ParentAgent: "director"})(a)
 			}
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			ar := animation.NewRuntimeWithScheduler(&referenceHoverScheduler{now: time.Unix(1, 0)})
+			p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			t.Cleanup(func() { Cleanup(p); ar.Stop() })
+			p.messageClickNow = func() time.Time { return time.Unix(10, 0) }
 			p.SetSize(160, 40)
 			p.resetProjection(runtime.SessionSnapshot{Session: sess})
 			input := session.UserMessage("literal body should not navigate")
@@ -85,6 +89,11 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				}
 				x := styles.AppPadding + sl.chatStartX + ansi.StringWidth(before)
 				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+				first := runTimerCmd(t, cmd)
+				assert.NotContains(t, first, msgtypes.SwitchTabMsg{SessionID: parentSession})
+				assert.NotContains(t, first, msgtypes.OpenSubagentMsg{NodeID: childNode})
+				assert.Contains(t, first, msgtypes.ShowInteractionHintMsg{SessionID: sess.ID, Text: "Double-click to attach"})
+				_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				require.NotNil(t, cmd)
 				if parentSender {
 					assert.Contains(t, runTimerCmd(t, cmd), msgtypes.SwitchTabMsg{SessionID: parentSession})

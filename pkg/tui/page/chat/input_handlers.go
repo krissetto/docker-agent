@@ -18,12 +18,14 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // handleKeyPress handles keyboard input events for the chat page.
 // Returns the updated model and command. All key presses are handled (forwarded to messages if no match).
 func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	p.lastMessageIdentityClick = messageIdentityClick{}
 	// When editing title, route keypresses to the sidebar
 	if p.sidebarInteractive() && p.sidebar.IsEditingTitle() {
 		switch msg.Key().Code {
@@ -114,8 +116,18 @@ func copyWorkingDirToClipboard(wd string) tea.Cmd {
 	)
 }
 
+type messageIdentityClick struct {
+	sessionID  string
+	ref        lifecycle.InputReference
+	occurrence *types.Message
+	x, y       int
+	at         time.Time
+}
+
 // handleMouseClick handles mouse click events.
 func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
+	previousMessageClick := p.lastMessageIdentityClick
+	p.lastMessageIdentityClick = messageIdentityClick{}
 	hit := NewHitTest(p)
 	target := hit.At(msg.X, msg.Y)
 	if target != TargetSidebarContent || msg.Button != tea.MouseLeft {
@@ -243,10 +255,37 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 
 	case TargetMessages:
 		if !p.messages.IsMouseOnScrollbar(msg.X, msg.Y) {
-			// A click on a subagent tool message ("Spawned x (id)" and
-			// friends) opens a tab attached to that subagent's session.
+			// Message cards disclose on the first click; their identity attaches on the second.
 			if msg.Button == tea.MouseLeft {
 				if ref, ok := p.messages.InputReferenceAt(msg.X, msg.Y); ok {
+					var occurrence *types.Message
+					if cards, ok := p.messages.(interface {
+						AgentMessageIdentityAt(x, y int) (*types.Message, bool)
+					}); ok {
+						occurrence, _ = cards.AgentMessageIdentityAt(msg.X, msg.Y)
+					}
+					if occurrence != nil {
+						clickNow := time.Now
+						if p.messageClickNow != nil {
+							clickNow = p.messageClickNow
+						}
+						at := clickNow()
+						elapsed := at.Sub(previousMessageClick.at)
+						paired := sessionID != "" && previousMessageClick.occurrence == occurrence && previousMessageClick.sessionID == sessionID && previousMessageClick.ref.Kind == ref.Kind && previousMessageClick.ref.ID == ref.ID && previousMessageClick.x == msg.X && previousMessageClick.y == msg.Y && elapsed >= 0 && elapsed < styles.DoubleClickThreshold
+						hintSession := p.routingID
+						if hintSession == "" {
+							hintSession = sessionID
+						}
+						if !paired {
+							p.lastMessageIdentityClick = messageIdentityClick{sessionID: sessionID, ref: ref, occurrence: occurrence, x: msg.X, y: msg.Y, at: at}
+							return p, tea.Batch(p.routeMouseEvent(msg, msg.Y), core.CmdHandler(msgtypes.RequestFocusMsg{Target: msgtypes.PanelMessages, ClickX: msg.X, ClickY: msg.Y}), core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession, Text: "Double-click to attach"}))
+						}
+						hint := core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession})
+						if ref.Kind == lifecycle.InputReferenceParent {
+							return p, tea.Batch(hint, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: ref.ID}))
+						}
+						return p, tea.Batch(hint, core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: ref.ID}))
+					}
 					if ref.Kind == lifecycle.InputReferenceParent {
 						return p, core.CmdHandler(msgtypes.SwitchTabMsg{SessionID: ref.ID})
 					}

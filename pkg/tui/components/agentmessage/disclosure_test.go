@@ -65,12 +65,12 @@ func TestDisclosureShortReversibleTransitionAndCleanup(t *testing.T) {
 	require.Zero(t, ar.ActiveCount())
 }
 
-func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing.T) {
+func TestStableHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing.T) {
 	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "abcde-full-node", Name: "director 界", Agent: "director", DisplayID: "abcde"}
 	ar := animation.NewRuntimeWithScheduler(&clock{now: time.Unix(1, 0)})
 	d := New(ar)
 	for _, width := range []int{80, 28, 8, 4, 80} {
-		header := Header("✓ ", ref, " turn finished", d.Chevron(), width)
+		header := d.Header("✓ ", ref, " turn finished", width)
 		hits := 0
 		for y, line := range strings.Split(header, "\n") {
 			require.LessOrEqual(t, ansi.StringWidth(line), width)
@@ -88,7 +88,7 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 	}
 	body := Body("unchanged <system_info>literal report</system_info>", 80, false, "")
 	d.Toggle()
-	expandedHeader := Header("✓ ", ref, " turn finished", d.Chevron(), 80)
+	expandedHeader := d.Header("✓ ", ref, " turn finished", 80)
 	for d.NeedsTick() {
 		advance(t, ar, &d)
 		output := ansi.Strip(d.Render(expandedHeader, body))
@@ -97,7 +97,7 @@ func TestSingleBorderHeaderKeepsIdentityAndControlAcrossMotionAndWrap(t *testing
 	}
 	require.Contains(t, ansi.Strip(d.Render(expandedHeader, body)), "unchanged <system_info>literal report</system_info>")
 	d.Toggle()
-	collapsedHeader := Header("✓ ", ref, " turn finished", d.Chevron(), 80)
+	collapsedHeader := d.Header("✓ ", ref, " turn finished", 80)
 	for d.NeedsTick() {
 		advance(t, ar, &d)
 		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(collapsedHeader, body)), ref.Label()))
@@ -134,15 +134,16 @@ func TestQuietCompactHeaderBeforeExpansionAndAfterCollapse(t *testing.T) {
 		require.NotContains(t, ansi.Strip(render(80)), "━", "no card before first visible body frame")
 		advance(t, ar, &d)
 		expanded := ansi.Strip(render(80))
-		require.Contains(t, expanded, "━")
+		require.Equal(t, strings.TrimSuffix(compact, ">")+"v", expanded)
 		require.Contains(t, expanded, strings.TrimSuffix(compact, ">")+"v", "expansion preserves the icon, wording and order")
 		require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(render(80), body)), ref.Label()))
 		d.Toggle()
-		require.Contains(t, ansi.Strip(render(80)), "━", "collapse retains card while rows remain visible")
+		require.Equal(t, compact, ansi.Strip(render(80)), "collapse retains the same header while rows remain visible")
 		d.Toggle()
 		for d.NeedsTick() {
 			advance(t, ar, &d)
 			require.Equal(t, 1, strings.Count(ansi.Strip(d.Render(render(80), body)), ref.Label()))
+			require.Equal(t, strings.TrimSuffix(compact, ">")+"v", ansi.Strip(render(80)), "every reveal frame stays aligned")
 		}
 		d.Toggle()
 		for d.NeedsTick() {
