@@ -59,6 +59,12 @@ func (m *appModel) cancelPaneGesture() {
 		m.hostedLoad.cancel()
 		m.hostedLoad = nil
 	}
+	m.cancelPaneGeometry()
+}
+
+// cancelPaneGeometry retires interactions whose targets depend on the layout.
+// Hosted session restoration has no geometry dependency and survives resizing.
+func (m *appModel) cancelPaneGeometry() {
 	m.panePicker = nil
 	m.cancelPaneSource()
 	m.cancelPaneCatalog()

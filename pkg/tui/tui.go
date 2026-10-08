@@ -2987,7 +2987,7 @@ func (m *appModel) handleWindowResize(width, height int) tea.Cmd {
 	if m.width != width || m.height != height {
 		m.viewCacheValid = false
 	}
-	m.cancelPaneGesture()
+	m.cancelPaneGeometry()
 	m.wWidth, m.wHeight = width, height
 
 	tabCmd := m.tabBar.SetWidth(tabFrameWidth(width))
