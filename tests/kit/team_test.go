@@ -178,15 +178,15 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:3.0.0-m.8@sha256:e6a397771e865625047cf84256a914c7974b3e749d858259b5bc9c653ddb6f0d\n"))
+	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09\n"))
 	byType := make(map[string][]int)
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
 	}
-	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "long-running"} {
+	for _, kind := range []string{"network-policy", "sbx", "agent-sessions", "agent-interactive-sessions", "lifecycle", "agent-context", "agent-skills", "git-identity", "ssh-agent", "long-running"} {
 		require.Len(t, byType["com.docker.sandbox/"+kind+"@1"], 1)
 	}
-	require.Len(t, kit.Capabilities, 13)
+	require.Len(t, kit.Capabilities, 14)
 	assert.NotContains(t, byType, "com.docker.sandbox/volume@1")
 	for _, capability := range kit.Capabilities {
 		switch capability.Type {
@@ -210,10 +210,20 @@ func TestNativeKit(t *testing.T) {
 	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
 	assert.Equal(t, map[string]any{
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
-		"resume":   []any{"--session", "{{.SessionID}}"},
-		"continue": []any{"--session=-1"},
+		"resume":   []any{"--exec", "--session", "{{.SessionID}}"},
+		"continue": []any{"--exec", "--session=-1"},
 		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"},
 	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
+	interactive := kit.Capabilities[byType["com.docker.sandbox/agent-interactive-sessions@1"][0]]
+	assert.Equal(t, map[string]any{
+		"prompt":     []any{"--", "{{.Prompt}}"},
+		"resume":     []any{"--session", "{{.SessionID}}"},
+		"continue":   []any{"--session=-1"},
+		"newSession": []any{},
+		"list":       []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"},
+	}, interactive.Config)
+	assert.Equal(t, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config["list"], interactive.Config["list"])
+	assert.NotContains(t, interactive.Config, "sessionPicker", "the CLI has no dedicated startup picker")
 	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
 	assert.True(t, lifecycle.Optional)
 	require.Len(t, lifecycle.Config, 2)

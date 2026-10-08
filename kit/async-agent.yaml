@@ -1,4 +1,4 @@
-# syntax=docker/sandbox-kit:3.0.0-m.8@sha256:e6a397771e865625047cf84256a914c7974b3e749d858259b5bc9c653ddb6f0d
+# syntax=docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09
 schemaVersion: "3"
 kind: workload
 displayName: Custom Docker Agent async subagents
@@ -84,8 +84,16 @@ capabilities:
     optional: true
     config:
       prompt: ["--exec", "--", "{{.Prompt}}"]
+      resume: ["--exec", "--session", "{{.SessionID}}"]
+      continue: ["--exec", "--session=-1"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"]
+  - type: com.docker.sandbox/agent-interactive-sessions@1
+    optional: true
+    config:
+      prompt: ["--", "{{.Prompt}}"]
       resume: ["--session", "{{.SessionID}}"]
       continue: ["--session=-1"]
+      newSession: []
       list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"]
   - type: com.docker.sandbox/agent-context@1
     optional: true

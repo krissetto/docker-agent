@@ -52,15 +52,30 @@ metadata: do not publish that image with `docker push` as a Kit. Use a repositor
 ending in **`kagent`**, not `docker-agent`: v3 registration uses the final repository
 component and otherwise collides with built-in `docker-agent`.
 
-The descriptor pins the frontend published with
-[`v3.0.0-m.8`](https://github.com/docker/sandbox-kit-spec/releases/tag/v3.0.0-m.8):
-`docker/sandbox-kit:3.0.0-m.8@sha256:e6a397771e865625047cf84256a914c7974b3e749d858259b5bc9c653ddb6f0d`.
+The descriptor pins the published development frontend for specification commit
+[`4be7f4dff4d647f10c51dcdb392ce3fa18dc3e96`](https://github.com/docker/sandbox-kit-spec/commit/4be7f4dff4d647f10c51dcdb392ce3fa18dc3e96):
+`docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09`.
+Checked on 2026-10-08, this is the current upstream specification, newer than the
+latest tagged milestone [`v3.0.0-m.8`](https://github.com/docker/sandbox-kit-spec/releases/tag/v3.0.0-m.8)
+(commit `129be2ff45e8f9463450eb3cf04ddcb52c2b76e5`). Main commits publish short-SHA
+frontend tags rather than moving floating `:3`. Anonymous registry metadata
+confirmed the immutable amd64/arm64 OCI index digest; its published BuildKit
+provenance names the full specification commit and frontend version `4be7f4d`.
+
 This frontend emits the expanded descriptor, schema-version and capabilities
 annotations on both platform manifests and the top-level index. `task kit`
 builds and publishes that index directly, preserving Buildx's provenance defaults;
 it does not rewrite the index or run the Kit. Use a compatible Kit v3 consumer.
-Do not strip derived package metadata for an older consumer or silently widen
-optional permissions.
+The optional `agent-interactive-sessions@1` declaration requires a consumer that
+implements the new terminal session surface; older consumers may omit it. The
+separate `agent-sessions@1` surface is headless, including resume and continue.
+No lifecycle interactive tail is necessary: the default launch already opens
+the TUI. Both session surfaces list the same managed history.
+
+The descriptor retains `network-policy@1` and the context's omitted `directory`,
+which preserves workspace-sibling discovery. It does not request host sharing or
+alternate context placement. Do not strip derived package metadata for an older
+consumer or silently widen optional permissions.
 
 ## Run
 
@@ -241,8 +256,11 @@ provide filesystem isolation.
 - **Detached lifetime:** the API server survives TUI exit; optional host support
   permits background sandbox lifetime, not process supervision or uninterrupted
   execution across server/sandbox restarts.
-- **Sessions:** prompt `--exec -- PROMPT`, resume `--session ID`, continue
-  `--session=-1`. `/opt/async-agent/docker-agent sessions list --managed-api --quiet`
+- **Sessions:** headless prompt `--exec -- PROMPT`, resume `--exec --session ID`,
+  continue `--exec --session=-1`; interactive prompt `-- PROMPT`, resume
+  `--session ID`, continue `--session=-1`, and a fresh session with no extra argv.
+  Interactive invocations require a terminal. No dedicated startup picker is
+  declared. `/opt/async-agent/docker-agent sessions list --managed-api --quiet`
   lists root IDs newest first from the same server-owned history used by resume,
   without creating sessions or opening a second local database.
 - **Diagnostics:** off by default; `--kit-arg diagnostics=on` permits local markers
