@@ -70,6 +70,7 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			return sessionIOReservation{}, err
 		}
 		idleCommunication := op == SessionOperationPost && msg.InputOrigin == session.InputOriginAgent && d.phase == sessionIdle
+		msg.activeSteering = steer && (d.running() || (d.starting() && d.activeRequestID != "" && !d.compactReserved))
 		queued = !steer || idleCommunication || d.compactReserved || (len(d.pending) != 0 && (!d.running() || d.activeRequestID == ""))
 		count := len(d.steering)
 		if queued {
@@ -215,7 +216,7 @@ func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []Qu
 		batch = slices.Clone(d.steering)
 		if !steeringOnly {
 			for _, msg := range d.pending {
-				if msg.RequestID == "" || msg.trustedSteering() {
+				if boundarySteering(msg) {
 					batch = append(batch, msg)
 				}
 			}

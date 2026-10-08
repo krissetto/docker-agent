@@ -55,6 +55,7 @@ type streamingState struct {
 	agentName        string
 	messageID        int64
 	writeID          string
+	toolCommitted    bool
 }
 
 func newPersistenceObserver(store session.Store) *PersistenceObserver {
@@ -263,10 +264,12 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 			j.streaming = st
 		}
 		st.agentName = e.AgentName
+		st.toolCommitted = true
 		st.presentation = captureAssistantPresentation(st.presentation, e)
 		p.persistStreamingContentLocked(ctx, id, j, st)
 	case *ToolCallResponseEvent:
 		if st := j.streaming; st != nil {
+			st.toolCommitted = true
 			st.presentation = captureAssistantPresentation(st.presentation, e)
 			p.persistStreamingContentLocked(ctx, id, j, st)
 		}
@@ -289,7 +292,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		}
 		st := j.streaming
 		j.streaming = nil
-		if e.boundaryOnly && (e.Message.Message.FinishReason != chat.FinishReasonRefusal || st == nil || st.writeID == "") {
+		if e.boundaryOnly && (e.Message.Message.FinishReason != chat.FinishReasonRefusal || st == nil) {
 			break
 		}
 		message := *e.Message
@@ -344,6 +347,11 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 }
 
 func (p *PersistenceObserver) persistStreamingContentLocked(ctx context.Context, id string, j *sessionPersistenceJournal, st *streamingState) {
+	// Uncommitted tool deltas can disappear at a STEERING boundary. Keep their
+	// presentation in memory until there is durable assistant output to retain.
+	if st.content.Len() == 0 && st.reasoningContent.Len() == 0 && !st.toolCommitted {
+		return
+	}
 	message := &session.Message{AgentName: st.agentName, Message: chat.Message{
 		Role: chat.MessageRoleAssistant, Content: st.content.String(), ReasoningContent: st.reasoningContent.String(),
 		Presentation: cloneAssistantPresentation(st.presentation),

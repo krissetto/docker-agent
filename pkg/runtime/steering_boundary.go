@@ -57,14 +57,19 @@ func (d *sessionDriver) hasSteeringLocked() bool {
 	if len(d.steering) != 0 {
 		return true
 	}
-	return slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool {
-		return msg.RequestID == "" || msg.trustedSteering()
-	})
+	return slices.ContainsFunc(d.pending, boundarySteering)
+}
+
+func boundarySteering(msg QueuedMessage) bool {
+	return msg.RequestID == "" || msg.trustedSteering() || msg.activeSteering
 }
 
 func (d *sessionDriver) refreshSteeringLocked() {
-	d.interruptRequested = slices.ContainsFunc(d.steering, func(msg QueuedMessage) bool {
+	interrupts := func(msg QueuedMessage) bool {
 		return normalizedInputOrigin(msg.InputOrigin) != session.InputOriginRuntime
+	}
+	d.interruptRequested = slices.ContainsFunc(d.steering, interrupts) || slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool {
+		return boundarySteering(msg) && interrupts(msg)
 	})
 	if d.steeringChanged == nil {
 		d.steeringChanged = make(chan struct{})

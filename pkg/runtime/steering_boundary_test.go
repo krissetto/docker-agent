@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -429,4 +430,206 @@ func (g *steeringListingGate) Tools(ctx context.Context) ([]tools.Tool, error) {
 		}
 	}
 	return []tools.Tool{g.tool}, nil
+}
+
+func TestSteeringBoundaryReservedCompaction(t *testing.T) {
+	for _, kind := range []string{"user", "agent", "runtime_report", "new_turn"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				firstRelease, summaryRelease, restartRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				var firstOnce, summaryOnce, restartOnce sync.Once
+				var calls, summaryCalls atomic.Int32
+				var attempt context.Context
+				var restarted, summaryInput []chat.Message
+				summaryEntered, restartEntered := make(chan struct{}), make(chan struct{})
+				provider := coordinationReply("done")
+				provider.call = func(ctx context.Context, messages []chat.Message) (chat.MessageStream, error) {
+					if calls.Add(1) == 1 {
+						attempt = ctx
+						return &steeringBoundaryStream{done: ctx.Done(), err: ctx.Err, chunks: newStreamBuilder().AddContent("old partial").responses, release: firstRelease}, nil
+					}
+					restarted = messages
+					close(restartEntered)
+					select {
+					case <-restartRelease:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(), nil
+				}
+				summarizer := coordinationReply("reserved summary")
+				summarizer.call = func(ctx context.Context, messages []chat.Message) (chat.MessageStream, error) {
+					summaryCalls.Add(1)
+					summaryInput = messages
+					close(summaryEntered)
+					select {
+					case <-summaryRelease:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return newStreamBuilder().AddContent("reserved summary").AddStopWithUsage(10, 5).Build(), nil
+				}
+				store := session.NewInMemorySessionStore()
+				a := agent.New("root", "prompt", agent.WithModel(provider), agent.WithCompactionModel(summarizer))
+				r, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithSessionStore(store), WithSessionCompaction(false), WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+				require.NoError(t, err)
+				owner := NewSessionRuntimeSupervisor(r)
+				t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+				t.Cleanup(func() {
+					firstOnce.Do(func() { close(firstRelease) })
+					summaryOnce.Do(func() { close(summaryRelease) })
+					restartOnce.Do(func() { close(restartRelease) })
+				})
+				h := coordinationCreate(t, owner.Runtime(), "reserved-boundary", "")
+				active, err := h.Submit(t.Context(), TurnInput{Content: "active", RequestID: "active"})
+				require.NoError(t, err)
+				synctest.Wait()
+				compactEvents := make(chan Event, 16)
+				require.NoError(t, h.Compact(t.Context(), "", NewChannelSink(compactEvents)))
+				d := h.(*sessionHandle).driver
+				requestID := "communication"
+				switch kind {
+				case "user":
+					input, err := h.Steer(t.Context(), TurnInput{Content: "STEERING correction", RequestID: requestID})
+					require.NoError(t, err)
+					requestID = input.TurnID
+				default:
+					mode := subagent.DeliveryGuidance
+					if kind == "new_turn" {
+						mode = subagent.DeliveryNewTurn
+					}
+					input := agentCommunication("STEERING correction", requestID, "sender", "worker", mode)
+					if kind == "runtime_report" {
+						input.InputOrigin = session.InputOriginRuntime
+					}
+					receipt, err := d.postCommunication(t.Context(), input)
+					require.NoError(t, err)
+					require.True(t, receipt.Accepted)
+					require.True(t, receipt.Durable)
+				}
+				synctest.Wait()
+				if kind == "runtime_report" || kind == "new_turn" {
+					require.NoError(t, attempt.Err(), "runtime reports and new_turn must not interrupt")
+					require.Zero(t, summaryCalls.Load())
+					firstOnce.Do(func() { close(firstRelease) })
+					synctest.Wait()
+				} else {
+					require.ErrorIs(t, context.Cause(attempt), errSteeringBoundary)
+				}
+				select {
+				case <-summaryEntered:
+				default:
+					t.Fatal("compaction must run at the interrupted boundary")
+				}
+				require.Equal(t, int32(1), calls.Load(), "restart must await compaction")
+				pending, err := h.Snapshot(t.Context())
+				require.NoError(t, err)
+				for _, item := range pending.MessagesSnapshot() {
+					if item.Message != nil && item.Message.TurnID == requestID {
+						require.True(t, item.Message.Pending)
+					}
+				}
+				for _, message := range summaryInput {
+					require.NotContains(t, message.Content, "STEERING correction")
+				}
+				summaryOnce.Do(func() { close(summaryRelease) })
+				synctest.Wait()
+				select {
+				case <-restartEntered:
+				default:
+					t.Fatal("provider must resume after compaction")
+				}
+				if kind != "new_turn" {
+					require.Equal(t, active.TurnID, d.ActiveRequestID())
+				}
+				corrections := 0
+				for _, message := range restarted {
+					if strings.Contains(message.Content, "STEERING correction") {
+						corrections++
+					}
+				}
+				require.Equal(t, 1, corrections)
+				restartOnce.Do(func() { close(restartRelease) })
+				coordinationAwait(t, h, requestID)
+				coordinationSettled(t, h)
+				require.Equal(t, int32(2), calls.Load(), "no repeated empty restart")
+				require.Equal(t, int32(1), summaryCalls.Load())
+				live, err := h.Snapshot(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, "reserved summary", live.LastSummary())
+				persisted, err := store.GetSession(t.Context(), h.ID())
+				require.NoError(t, err)
+				require.Equal(t, "reserved summary", persisted.LastSummary())
+				require.Len(t, persisted.MessagesSnapshot(), len(live.MessagesSnapshot()))
+				close(compactEvents)
+				var outcomes []string
+				for event := range compactEvents {
+					if e, ok := event.(*SessionCompactionEvent); ok && e.Status == "completed" {
+						outcomes = append(outcomes, e.Outcome)
+					}
+				}
+				require.Equal(t, []string{CompactionOutcomeApplied}, outcomes)
+			})
+		})
+	}
+}
+
+func TestSteeringBoundaryDuringStartupKeepsActiveRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		startEntered, startRelease := make(chan struct{}), make(chan struct{})
+		providerEntered, providerRelease := make(chan struct{}), make(chan struct{})
+		var startOnce, providerOnce sync.Once
+		var calls atomic.Int32
+		var messages []chat.Message
+		provider := coordinationReply("done")
+		provider.call = func(ctx context.Context, input []chat.Message) (chat.MessageStream, error) {
+			calls.Add(1)
+			messages = input
+			close(providerEntered)
+			select {
+			case <-providerRelease:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(), nil
+		}
+		_, owner := coordinationRuntime(t, session.NewInMemorySessionStore(), provider, coordinationReply("unused"))
+		h := coordinationCreate(t, owner.Runtime(), "startup-steering", "")
+		d := h.(*sessionHandle).driver
+		d.SetPreStartErrorGate(func() error { close(startEntered); <-startRelease; return nil }, nil)
+		t.Cleanup(func() {
+			startOnce.Do(func() { close(startRelease) })
+			providerOnce.Do(func() { close(providerRelease) })
+		})
+		activeInput := make(chan Submission, 1)
+		go func() {
+			active, err := h.Submit(t.Context(), TurnInput{Content: "active", RequestID: "active"})
+			require.NoError(t, err)
+			activeInput <- active
+		}()
+		<-startEntered
+		guide, err := h.Steer(t.Context(), TurnInput{Content: "startup STEERING", RequestID: "guidance"})
+		require.NoError(t, err)
+		startOnce.Do(func() { close(startRelease) })
+		active := <-activeInput
+		synctest.Wait()
+		select {
+		case <-providerEntered:
+		default:
+			t.Fatal("provider did not start")
+		}
+		require.Equal(t, active.TurnID, d.ActiveRequestID())
+		corrections := 0
+		for _, message := range messages {
+			if strings.Contains(message.Content, "startup STEERING") {
+				corrections++
+			}
+		}
+		require.Equal(t, 1, corrections, "startup STEERING belongs in the first active provider request")
+		coordinationAwait(t, h, guide.TurnID)
+		providerOnce.Do(func() { close(providerRelease) })
+		coordinationAwait(t, h, active.TurnID)
+		coordinationSettled(t, h)
+		require.Equal(t, int32(1), calls.Load(), "startup guidance must not become a successor turn")
+	})
 }

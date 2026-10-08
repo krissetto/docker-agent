@@ -161,6 +161,9 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 	if !waitForObserverDelivery(ctx, events) {
 		return steerResult{}
 	}
+	// Reserved compaction sees the observed assistant/tool boundary before
+	// accepted STEERING is promoted into the active transcript.
+	r.runOwnerQueuedCompaction(ctx, sess)
 	steered := r.drainSessionSteer(sess.ID)
 	if err := refreshExecutionInput(ctx, sess); err != nil {
 		return steerResult{stop: true, stopMsg: err.Error()}

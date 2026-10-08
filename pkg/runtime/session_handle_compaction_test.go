@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -130,19 +131,29 @@ func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) 
 	compactStarted := make(chan struct{})
 	releaseCompact := make(chan struct{})
 	prov := &stepProvider{id: "test/mock-model", steps: []providerStep{
-		{stream: newStreamBuilder().AddToolCallName("call", "unknown_tool").AddToolCallArguments("call", "{}").AddToolCallStopWithUsage(1, 1).Build(), started: turnStarted, release: releaseTurn},
+		{stream: newStreamBuilder().AddToolCallName("call", "boundary_tool").AddToolCallArguments("call", "{}").AddToolCallStopWithUsage(1, 1).Build()},
 		{stream: newStreamBuilder().AddContent("reserved summary").AddStopWithUsage(10, 5).Build(), started: compactStarted, release: releaseCompact},
 		{stream: newStreamBuilder().AddStopWithUsage(1, 1).Build()},
 	}}
-	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000})
+	boundaryTool := tools.Tool{Name: "boundary_tool", Parameters: map[string]any{}, Handler: func(ctx context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+		close(turnStarted)
+		select {
+		case <-releaseTurn:
+			return tools.ResultSuccess("paired boundary result"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	rt := newLiveSessionsRuntime(t, prov, mockModelStoreWithLimit{limit: 100_000}, agent.WithToolSets(newStubToolSet(nil, []tools.Tool{boundaryTool}, nil)))
 	sess := newWorkerSession("session-reserved")
+	sess.ToolsApproved = true
 	// Force compaction to summarize old bulk while retaining the recent
 	// assistant/tool boundary tail verbatim.
 	sess.AddMessage(session.UserMessage(strings.Repeat("old context ", 20_000)))
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
 	require.NoError(t, err)
 	stream := rt.runExecution(t.Context(), handle.(*sessionHandle).driver.session())
-	waitClosed(t, turnStarted, "active session turn")
+	waitClosed(t, turnStarted, "committed tool execution")
 	require.NoError(t, handle.Compact(t.Context(), "", nil))
 
 	// Admit while the active turn is still in flight, before the live loop can

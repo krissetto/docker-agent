@@ -32,6 +32,8 @@ type QueuedMessage struct {
 	Retry       bool
 	RuntimeNote bool
 	InputMode   string
+	// User STEERING admitted during active work may reside behind a compaction barrier.
+	activeSteering bool
 }
 
 // PendingMessageCanceler is implemented by session handles that can withdraw
