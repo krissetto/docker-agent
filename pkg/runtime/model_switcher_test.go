@@ -436,17 +436,11 @@ func TestSetAgentThinkingLevel(t *testing.T) {
 	})
 }
 
-// TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply is
-// the regression test for the single-snapshot fix: applyAgentThinkingLevel
-// must resolve capabilities and re-create providers from the SAME
-// EffectiveModels snapshot. A second, later snapshot would let a
-// concurrent /model change or scoped override land between resolution and
-// application, validating the effort against one model but applying it to
-// another (see #3731 follow-up).
+// Provider recreation must not overwrite a newer canonical model binding.
 func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *testing.T) {
 	t.Parallel()
 
-	t.Run("override swapped mid-flight does not leak into the applied provider", func(t *testing.T) {
+	t.Run("override swapped mid-flight rejects stale application", func(t *testing.T) {
 		t.Parallel()
 
 		// gpt-5 tops out at high; opus 4.7 accepts max. If applyAgentThinkingLevel
@@ -477,18 +471,14 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 			h.driver.SetModelBinding("", []provider.Provider{modelB})
 			return effort.High, nil
 		})
-		require.NoError(t, err)
-		assert.Equal(t, effort.High, level)
-
-		override := sessionModel(t, h)
-		assert.Equal(t, "openai", override.BaseConfig().ModelConfig.Provider,
-			"the applied provider must be re-created from the model validated against (A), not the one swapped in mid-flight (B)")
-		budget := override.BaseConfig().ModelConfig.ThinkingBudget
-		require.NotNil(t, budget)
-		assert.Equal(t, "high", budget.Effort)
+		var stale *SessionError
+		require.ErrorAs(t, err, &stale)
+		assert.Equal(t, SessionErrorStale, stale.Kind)
+		assert.Empty(t, level)
+		assert.Equal(t, "anthropic", sessionModel(t, h).BaseConfig().ModelConfig.Provider)
 	})
 
-	t.Run("override cleared mid-flight does not install an empty override", func(t *testing.T) {
+	t.Run("override cleared mid-flight rejects stale application", func(t *testing.T) {
 		t.Parallel()
 
 		// No configured models: the session's only model comes from its
@@ -513,11 +503,11 @@ func TestSetAgentThinkingLevel_ConcurrentOverrideBetweenResolutionAndApply(t *te
 			h.driver.SetModelBinding("", nil)
 			return effort.High, nil
 		})
-		require.NoError(t, err)
-		assert.Equal(t, effort.High, level)
-
-		override := sessionModel(t, h)
-		assert.Equal(t, "openai", override.BaseConfig().ModelConfig.Provider, "must not silently install an empty override while reporting success")
+		var stale *SessionError
+		require.ErrorAs(t, err, &stale)
+		assert.Equal(t, SessionErrorStale, stale.Kind)
+		assert.Empty(t, level)
+		assert.True(t, h.driver.ModelProvidersEmpty())
 	})
 }
 

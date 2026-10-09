@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,7 +130,8 @@ func TestCanonicalSnapshotAndEpochObservation(t *testing.T) {
 	snap, err := client.Snapshot(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, "Current", snap.Title)
-	assert.True(t, snap.Paused)
+	assert.False(t, snap.Paused)
+	assert.Equal(t, []string{"ask"}, snap.InteractionIDs)
 	err = client.StreamEvents(t.Context(), snap.LastEventSeq, func(ev event) bool {
 		if ev.Type == eventBaseline {
 			require.NotNil(t, ev.Baseline)
@@ -151,4 +153,47 @@ func TestCanonicalFollowupKeepsIdempotency(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	require.NoError(t, newClient(socket, "s").Followup(t.Context(), "key", "follow up"))
+}
+
+func TestCanonicalInteractionSnapshotAndTail(t *testing.T) {
+	t.Parallel()
+	socket := serveUnix(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/snapshot") {
+			fmt.Fprint(w, `{"session":{"id":"sess-1","title":"Task"},"status":{"session_id":"sess-1","state":"running"},"epoch":"one","cursor":7,"interactions":[{"session_id":"sess-1","interaction_id":"first","kind":"confirmation"},{"session_id":"sess-1","interaction_id":"second","kind":"elicitation"}]}`)
+			return
+		}
+		assert.Equal(t, "7", r.URL.Query().Get("since"))
+		assert.Equal(t, "one", r.URL.Query().Get("since_epoch"))
+		for i, kind := range []string{"tool_call_confirmation", "elicitation_request", "max_iterations_reached", "interaction_resolved"} {
+			fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"sess-1\",\"epoch\":\"one\",\"sequence\":%d,\"interaction_id\":\"request-%d\",\"event\":{\"type\":%q}}}\n\n", 8+i, i, kind)
+		}
+	}))
+	c := newClient(socket, "sess-1")
+	snap, err := c.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.False(t, snap.Paused, "explicit pause is separate from attention")
+	assert.Equal(t, []string{"first", "second"}, snap.InteractionIDs)
+	var events []event
+	require.NoError(t, c.StreamEvents(t.Context(), snap.LastEventSeq, func(ev event) bool { events = append(events, ev); return len(events) < 4 }))
+	for i, ev := range events {
+		assert.Equal(t, fmt.Sprintf("request-%d", i), ev.InteractionID)
+		if i < 3 {
+			assert.Equal(t, eventInteraction, ev.Type)
+		} else {
+			assert.Equal(t, eventInteractionResolved, ev.Type)
+		}
+	}
+}
+
+func TestInteractionResolutionPayloadTokenWithoutEnvelopeToken(t *testing.T) {
+	t.Parallel()
+	socket := serveUnix(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":\"s\",\"epoch\":\"one\",\"sequence\":8,\"event\":{\"type\":\"interaction_resolved\",\"session_id\":\"s\",\"interaction_id\":\"request\",\"reason\":\"responded\"}}}\n\n")
+	}))
+	c := newClient(socket, "s")
+	require.NoError(t, c.StreamEvents(t.Context(), 0, func(ev event) bool {
+		assert.Equal(t, eventInteractionResolved, ev.Type)
+		assert.Equal(t, "request", ev.InteractionID)
+		return false
+	}))
 }

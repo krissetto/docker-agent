@@ -90,6 +90,7 @@ func TestStopSuccessRequiresToolDrain(t *testing.T) {
 	stopped := make(chan error, 1)
 	go func() { _, err := m.stopChildContext(t.Context(), "target-root", "target-node"); stopped <- err }()
 	controlWait(t, runCtx.Done())
+	require.NoError(t, child.awaitStop(t.Context()))
 	require.True(t, child.isStopped())
 	select {
 	case <-child.Done():

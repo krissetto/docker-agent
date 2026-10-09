@@ -1785,10 +1785,15 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 		if err != nil {
 			continue
 		}
-		seen := make(map[tools.ChangeSubscriber]bool)
+		seen := make(map[notifierIdentity]struct{})
 		for _, ts := range a.ToolSets() {
-			if n, ok := tools.As[tools.ChangeSubscriber](ts); ok && !seen[n] {
-				seen[n] = true
+			if n, ok := tools.As[tools.ChangeSubscriber](ts); ok {
+				if key, identifiable := notifierDedupKey(n); identifiable {
+					if _, dup := seen[key]; dup {
+						continue
+					}
+					seen[key] = struct{}{}
+				}
 				release := n.SubscribeToolsChanged(func() { r.emitToolsChanged(a) })
 				stop := context.AfterFunc(r.lifetime(), release)
 				r.toolsChangedReleases = append(r.toolsChangedReleases, func() { stop(); release() })

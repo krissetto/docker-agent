@@ -42,6 +42,7 @@ var defaultMaxTokens int64 = 32000
 
 type loadOptions struct {
 	ownedResources   *[]io.Closer
+	ownedToolSets    *[]*tools.StartableToolSet
 	workingDir       string
 	modelOverrides   []string
 	promptFiles      []string
@@ -260,6 +261,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	ownsResources := loadOpts.ownedResources == nil
 	if ownsResources {
 		loadOpts.ownedResources = new([]io.Closer)
+		loadOpts.ownedToolSets = new([]*tools.StartableToolSet)
 		defer func() {
 			if err != nil {
 				for _, resource := range *loadOpts.ownedResources {
@@ -647,13 +649,16 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}
 
 	var ownedResources []io.Closer
+	var ownedToolSets []*tools.StartableToolSet
 	if ownsResources {
 		ownedResources = *loadOpts.ownedResources
+		ownedToolSets = *loadOpts.ownedToolSets
 	}
 	return &LoadResult{
 		Team: team.New(
 			team.WithAgents(agents...),
 			team.WithOwnedResources(ownedResources...),
+			team.WithOwnedToolSets(ownedToolSets...),
 			team.WithPermissions(permChecker),
 			team.WithAgentConfigs(agentConfigs),
 			team.WithRuntimeSafety(runtimeSafety),
@@ -1168,7 +1173,11 @@ func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			// Wrap for lazy, single-flight start + failure-dedup, matching
 			// agent.WithToolSets. skillSubSessionTools calls Start() on every
 			// run-loop iteration, so the toolset must tolerate repeated starts.
-			built = append(built, tools.NewStartable(wrapped))
+			startable := tools.NewStartable(wrapped)
+			built = append(built, startable)
+			if loadOpts.ownedToolSets != nil {
+				*loadOpts.ownedToolSets = append(*loadOpts.ownedToolSets, startable)
+			}
 		}
 		if len(built) > 0 {
 			if result == nil {
@@ -1363,6 +1372,7 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 func inheritOptions(parent *loadOptions) Opt {
 	return func(opts *loadOptions) error {
 		opts.ownedResources = parent.ownedResources
+		opts.ownedToolSets = parent.ownedToolSets
 		opts.toolsetRegistry = parent.toolsetRegistry
 		opts.providerRegistry = parent.providerRegistry
 		opts.sourceResolver = parent.sourceResolver

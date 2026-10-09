@@ -646,6 +646,30 @@ func (d *sessionDriver) ModelSnapshot() (string, []provider.Provider) {
 	return d.modelRef, slices.Clone(d.modelProviders)
 }
 
+type activeSessionBinding struct {
+	version   uint64
+	agentName string
+	modelRef  string
+	models    []provider.Provider
+}
+
+func (d *sessionDriver) activeBinding() activeSessionBinding {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return activeSessionBinding{d.bindingVersion, d.AgentNameLocked(), d.modelRef, slices.Clone(d.modelProviders)}
+}
+
+func (d *sessionDriver) validateBinding(ctx context.Context, binding activeSessionBinding) error {
+	return d.ownerCall(ctx, func() error { return d.validateBindingLocked(binding) })
+}
+
+func (d *sessionDriver) validateBindingLocked(binding activeSessionBinding) error {
+	if d.bindingVersion != binding.version || d.AgentNameLocked() != binding.agentName {
+		return &SessionError{Kind: SessionErrorStale, SessionID: d.identityID, Operation: "active_binding"}
+	}
+	return nil
+}
+
 func (d *sessionDriver) ModelBindingSnapshot() (uint64, string, []provider.Provider) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -657,8 +681,8 @@ func (d *sessionDriver) ModelBindingSnapshot() (uint64, string, []provider.Provi
 // accounting and the agent/team info the sidebar renders — sees the same
 // per-session override instead of the agent's YAML default.
 func (d *sessionDriver) scopeModels(ctx context.Context) context.Context {
-	_, models := d.ModelSnapshot()
-	return agent.WithContextModels(ctx, d.AgentName(), models)
+	binding := d.activeBinding()
+	return agent.WithContextModels(ctx, binding.agentName, binding.models)
 }
 
 func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Provider) {
@@ -671,7 +695,17 @@ func (d *sessionDriver) SetModelBinding(modelRef string, providers []provider.Pr
 }
 
 func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRef string, providers []provider.Provider) error {
+	return d.setModelOverride(ctx, d.activeBinding(), agentName, modelRef, providers)
+}
+
+func (d *sessionDriver) setModelOverride(ctx context.Context, binding activeSessionBinding, agentName, modelRef string, providers []provider.Provider) error {
 	return d.durableIO(ctx, func() (sessionIOReservation, error) {
+		if err := d.validateBindingLocked(binding); err != nil {
+			return sessionIOReservation{}, err
+		}
+		if agentName != binding.agentName {
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorStale, SessionID: d.identityID, Operation: "set_model"}
+		}
 		if d.stopped || d.sess == nil {
 			return sessionIOReservation{}, ErrSessionStopped
 		}
@@ -686,6 +720,9 @@ func (d *sessionDriver) SetModelOverride(ctx context.Context, agentName, modelRe
 			},
 			commit: func(err error) error {
 				if err != nil {
+					return err
+				}
+				if err := d.validateBindingLocked(binding); err != nil {
 					return err
 				}
 				d.sess.SetAgentModelOverride(agentName, modelRef)
@@ -1425,7 +1462,7 @@ func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uin
 		return d.finishRun(generation, err.Error())
 	}
 	defer release()
-	ctx, cancelBudget := d.r.budgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
+	ctx, cancelBudget := d.r.executionBudgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
 	defer cancelBudget()
 	run := d.r.runStreamRaw(ctx, scratch)
 	for event := range run {
@@ -1470,7 +1507,7 @@ func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint
 		return d.finishRun(generation, err.Error())
 	}
 	defer release()
-	ctx, cancelBudget := d.r.budgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
+	ctx, cancelBudget := d.r.executionBudgetContext(ctx, scratch, d.r.resolveSessionAgent(scratch))
 	defer cancelBudget()
 	for event := range d.r.runStreamRaw(ctx, scratch) {
 		if errEvent, ok := event.(*ErrorEvent); ok && runErr == "" {
@@ -1659,11 +1696,15 @@ func (d *sessionDriver) replaceSession(sess *session.Session) error {
 		if d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.ioReservations != 0 || d.compactReserved || d.editReserved || d.switchReserved || d.skillOperationID != "" || d.retryRunning || d.completionInFlight || len(d.interactions) != 0 || d.pauseCh != nil {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, Operation: "replace_settled_session"}
 		}
-		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName {
+		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName || next.AttributesSnapshot()[SessionAgentAttribute] != d.sess.AttributesSnapshot()[SessionAgentAttribute] {
 			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "replace_pinned_session"}
+		}
+		if next.AgentModelOverrides[next.AgentName] != d.sess.AgentModelOverrides[d.sess.AgentName] {
+			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, Operation: "replace_pinned_session"}
 		}
 		d.invalidateTitleLocked()
 		d.sess = next
+		d.bindingVersion++
 		return nil
 	})
 }

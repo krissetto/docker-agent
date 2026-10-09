@@ -902,6 +902,7 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 	}
 	m.publishStopFenceLocked()
 	m.mu.Unlock()
+	var cleanupErrs []error
 	for _, child := range stopped {
 		d, ok := m.r.sessionDrivers.Lookup(child.sessionID)
 		if !ok {
@@ -927,6 +928,7 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 		if err != nil {
 			return "", err
 		}
+		cleanupErrs = append(cleanupErrs, d.cleanupResources(ctx))
 	}
 	m.signalCapacityRelease()
 	m.persistSnapshot()
@@ -954,11 +956,11 @@ func (m *subagentManager) stopChildAuthorized(ctx context.Context, parentID stri
 	for _, sessionID := range ids {
 		if d, ok := m.r.sessionDrivers.Lookup(sessionID); ok {
 			if err := d.ownerCall(ctx, d.applyTreeProjectionLocked); err != nil {
-				return "", err
+				return "", errors.Join(append(cleanupErrs, err)...)
 			}
 		}
 	}
-	return name, nil
+	return name, errors.Join(cleanupErrs...)
 }
 
 // commitChildren requires atomic storage for subtree changes. An ambiguous

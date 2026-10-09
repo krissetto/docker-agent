@@ -573,6 +573,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		r.runOwnerQueuedCompaction(ctx, sess)
 
 		a = r.resolveSessionAgent(sess)
+		if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok {
+			if driver, found := r.sessionDrivers.Lookup(sess.ID); found && identity.driver == driver {
+				ctx = driver.scopeModels(ctx) //nolint:fatcontext // refresh the canonical binding at the handoff boundary
+			}
+		}
 
 		// Clear per-tool model override on agent switch so it doesn't
 		// leak from one agent's toolset into another agent's turn. Also
@@ -1775,11 +1780,16 @@ func (r *LocalRuntime) subscribeRAGChanges(sess *session.Session, events EventSi
 			toolsets = append(toolsets, a.ToolSets()...)
 		}
 	}
-	seen := make(map[ragtypes.EventSubscriber]bool)
+	seen := make(map[notifierIdentity]struct{})
 	var releases []func()
 	for _, ts := range toolsets {
-		if notifier, ok := tools.As[ragtypes.EventSubscriber](ts); ok && !seen[notifier] {
-			seen[notifier] = true
+		if notifier, ok := tools.As[ragtypes.EventSubscriber](ts); ok {
+			if key, identifiable := notifierDedupKey(notifier); identifiable {
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
 			releases = append(releases, notifier.SubscribeEvents(ragEventForwarder(notifier.Name(), r, nonBlocking(events).Emit)))
 		}
 	}
@@ -1852,7 +1862,7 @@ func (r *LocalRuntime) subscribePlanChanges(sess *session.Session, events EventS
 	}
 }
 
-// notifierIdentity keys subscribePlanChanges' dedup map: dynamic type plus
+// notifierIdentity keys subscription dedup maps: dynamic type plus
 // pointer, so two pointers of different types sharing an address (an outer
 // struct and its first field) stay distinct.
 type notifierIdentity struct {
@@ -1869,7 +1879,7 @@ type notifierIdentity struct {
 // the registry-created *plan.ToolSet singleton shared by every agent.
 // Non-pointer implementations skip dedup — a duplicate subscription is
 // benign, a panic is not.
-func notifierDedupKey(n plan.ChangeNotifier) (notifierIdentity, bool) {
+func notifierDedupKey(n any) (notifierIdentity, bool) {
 	v := reflect.ValueOf(n)
 	if v.Kind() != reflect.Pointer {
 		return notifierIdentity{}, false

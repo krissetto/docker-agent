@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
+	"maps"
 	"sync"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,66 +37,78 @@ type sessionClient struct {
 	samplingHandler          tools.SamplingHandler
 	samplingWithToolsHandler tools.SamplingWithToolsHandler
 	oauthSuccessHandler      func()
-	inflight                 map[uint64]inflightCall
-	nextInflight             uint64
+	inflight                 map[string]inflightCall
 	mu                       sync.RWMutex
 }
 
+// CallbackTokenMetaKey carries an ephemeral capability for callbacks originating
+// from a tools/call. Cooperating servers copy it into the callback's _meta.
+const CallbackTokenMetaKey = "docker-agent.dev/callback-token"
+
+type callbackCallKey struct{}
+
 type inflightCall struct {
-	scope  tools.HandlerScope
-	ctx    context.Context //nolint:containedctx // bounded by CallTool and canceled when unregistered
-	cancel context.CancelFunc
+	session *gomcp.ClientSession
+	ctx     context.Context //nolint:containedctx // bounded by CallTool and canceled when unregistered
+	cancel  context.CancelFunc
 }
 
-func (c *sessionClient) registerCallContext(ctx context.Context) uint64 {
-	scope, _ := tools.HandlerScopeFrom(ctx)
+func (c *sessionClient) registerCallContext(ctx context.Context, session *gomcp.ClientSession) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.nextInflight++
+	if session != c.session || ctx.Err() != nil {
+		return ""
+	}
+	token := rand.Text()
 	if c.inflight == nil {
-		c.inflight = make(map[uint64]inflightCall)
+		c.inflight = make(map[string]inflightCall)
 	}
 	ownerCtx, cancel := context.WithCancel(ctx)
-	c.inflight[c.nextInflight] = inflightCall{scope: scope, ctx: ownerCtx, cancel: cancel}
-	return c.nextInflight
+	c.inflight[token] = inflightCall{session: session, ctx: ownerCtx, cancel: cancel}
+	return token
 }
 
-func (c *sessionClient) unregisterCallContext(id uint64) {
-	if id == 0 {
-		return
-	}
+func (c *sessionClient) unregisterCallContext(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if call, ok := c.inflight[id]; ok {
+	if call, ok := c.inflight[token]; ok {
 		call.cancel()
 	}
-	delete(c.inflight, id)
+	delete(c.inflight, token)
 }
 
-// elicitationContext routes callbacks only when exactly one tool call is active.
-// MCP carries no causal call ID; ambiguous and unsolicited scoped callbacks fail closed.
-func (c *sessionClient) elicitationContext(fallback context.Context) (context.Context, func()) {
+func callbackMeta(meta gomcp.Meta) gomcp.Meta {
+	clean := maps.Clone(meta)
+	delete(clean, CallbackTokenMetaKey)
+	return clean
+}
+
+// callbackContext never infers ownership from activity on the shared connection.
+func (c *sessionClient) callbackContext(fallback context.Context, session *gomcp.ClientSession, meta gomcp.Meta) (context.Context, func(), error) {
+	token, _ := fallback.Value(callbackCallKey{}).(string)
+	if token == "" {
+		token, _ = meta[CallbackTokenMetaKey].(string)
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if len(c.inflight) == 1 {
-		for _, call := range c.inflight {
-			// Connection contexts outlive turns; retain the owning call's trace instead.
-			owner := call.ctx
-			ctx, cancel := context.WithCancel(tools.WithHandlerScope(owner, call.scope))
-			stop := context.AfterFunc(fallback, cancel)
-			if call.ctx.Err() != nil {
-				cancel()
-			}
-			return ctx, func() { stop(); cancel() }
-		}
+	call, ok := c.inflight[token]
+	if token == "" || !ok || session != call.session || session != c.session || call.ctx.Err() != nil || fallback.Err() != nil {
+		return nil, nil, errors.New("MCP callback has no active causal call capability")
 	}
-	return tools.WithoutHandlerScope(fallback), func() {}
+	// Connection contexts outlive turns; retain the owning call's trace instead.
+	ctx, cancel := context.WithCancel(call.ctx)
+	stop := context.AfterFunc(fallback, cancel)
+	return ctx, func() { stop(); cancel() }, nil
 }
 
-// setSession stores the session under the write lock.
+// setSession invalidates capabilities from the previous connection generation.
 func (c *sessionClient) setSession(s *gomcp.ClientSession) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for token, call := range c.inflight {
+		call.cancel()
+		delete(c.inflight, token)
+	}
 	c.session = s
 }
 
@@ -160,7 +174,9 @@ func (c *sessionClient) Wait() error {
 }
 
 func (c *sessionClient) Close(context.Context) error {
-	if s := c.getSession(); s != nil {
+	s := c.getSession()
+	c.setSession(nil)
+	if s != nil {
 		return s.Close()
 	}
 	return nil
@@ -232,13 +248,25 @@ func (c *sessionClient) CallTool(ctx context.Context, request *gomcp.CallToolPar
 	defer span.End()
 
 	if request != nil {
+		cloned := *request
+		cloned.Meta = maps.Clone(request.Meta)
+		request = &cloned
 		request.Meta = otelmcp.EnsureMeta(request.Meta)
 		otelmcp.InjectMeta(spanCtx, request.Meta)
 	}
 
-	callID := c.registerCallContext(spanCtx)
-	defer c.unregisterCallContext(callID)
-	result, err := s.CallTool(spanCtx, request)
+	token := c.registerCallContext(spanCtx, s)
+	if token == "" {
+		return nil, errors.New("MCP call scope is no longer active")
+	}
+	defer c.unregisterCallContext(token)
+	if request != nil {
+		request.Meta[CallbackTokenMetaKey] = token
+	}
+	// The SDK retains this private marker only when fulfilling response-derived
+	// InputRequests inline, never on independently received reverse requests.
+	callCtx := context.WithValue(spanCtx, callbackCallKey{}, token)
+	result, err := s.CallTool(callCtx, request)
 	if err != nil {
 		span.RecordError(err, "")
 	}
@@ -309,7 +337,10 @@ func (c *sessionClient) GetPrompt(ctx context.Context, request *gomcp.GetPromptP
 // server to the registered handler. It is used as the gomcp ElicitationHandler
 // callback for both stdio and remote clients.
 func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp.ElicitRequest) (*gomcp.ElicitResult, error) {
-	ctx, release := c.elicitationContext(ctx)
+	ctx, release, err := c.callbackContext(ctx, req.Session, req.Params.GetMeta())
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 	slog.DebugContext(ctx, "Received elicitation request from MCP server", "message", req.Params.Message)
 
@@ -321,7 +352,9 @@ func (c *sessionClient) handleElicitationRequest(ctx context.Context, req *gomcp
 		return nil, errors.New("no elicitation handler configured")
 	}
 
-	result, err := handler(ctx, req.Params)
+	params := *req.Params
+	params.Meta = callbackMeta(req.Params.Meta)
+	result, err := handler(ctx, &params)
 	if err != nil {
 		return nil, fmt.Errorf("elicitation failed: %w", err)
 	}
@@ -344,7 +377,10 @@ func (c *sessionClient) SetElicitationHandler(handler tools.ElicitationHandler) 
 // from the MCP server to the registered handler. It is used as the gomcp
 // CreateMessageHandler callback for both stdio and remote clients.
 func (c *sessionClient) handleSamplingRequest(ctx context.Context, req *gomcp.CreateMessageRequest) (*gomcp.CreateMessageResult, error) {
-	ctx, release := c.elicitationContext(ctx)
+	ctx, release, err := c.callbackContext(ctx, req.Session, req.Params.GetMeta())
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 	slog.DebugContext(ctx, "Received sampling request from MCP server", "messages", len(req.Params.Messages))
 
@@ -356,7 +392,9 @@ func (c *sessionClient) handleSamplingRequest(ctx context.Context, req *gomcp.Cr
 		return nil, errors.New("no sampling handler configured")
 	}
 
-	result, err := handler(ctx, req.Params)
+	params := *req.Params
+	params.Meta = callbackMeta(req.Params.Meta)
+	result, err := handler(ctx, &params)
 	if err != nil {
 		return nil, fmt.Errorf("sampling failed: %w", err)
 	}
@@ -377,7 +415,10 @@ func (c *sessionClient) SetSamplingHandler(handler tools.SamplingHandler) {
 // the gomcp CreateMessageWithToolsHandler callback for both stdio and remote
 // clients when the with-tools handler is registered.
 func (c *sessionClient) handleSamplingWithToolsRequest(ctx context.Context, req *gomcp.CreateMessageWithToolsRequest) (*gomcp.CreateMessageWithToolsResult, error) {
-	ctx, release := c.elicitationContext(ctx)
+	ctx, release, err := c.callbackContext(ctx, req.Session, req.Params.GetMeta())
+	if err != nil {
+		return nil, err
+	}
 	defer release()
 	slog.DebugContext(ctx, "Received sampling-with-tools request from MCP server",
 		"messages", len(req.Params.Messages),
@@ -392,7 +433,9 @@ func (c *sessionClient) handleSamplingWithToolsRequest(ctx context.Context, req 
 		return nil, errors.New("no sampling-with-tools handler configured")
 	}
 
-	result, err := handler(ctx, req.Params)
+	params := *req.Params
+	params.Meta = callbackMeta(req.Params.Meta)
+	result, err := handler(ctx, &params)
 	if err != nil {
 		return nil, fmt.Errorf("sampling failed: %w", err)
 	}

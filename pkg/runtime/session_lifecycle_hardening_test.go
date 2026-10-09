@@ -84,7 +84,7 @@ func TestSettledReplacementRejectsAcceptedSteeringAndBindingChanges(t *testing.T
 	r := newDriverTestRuntime(t)
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
 	h := &sessionHandle{runtime: r, driver: d, sessionID: d.identityID}
-	before, err := h.Snapshot(t.Context())
+	before, err := d.ownerSnapshot(t.Context())
 	require.NoError(t, err)
 	for _, change := range []func(*session.Session){
 		func(s *session.Session) { s.ParentID = "other" },
@@ -99,7 +99,7 @@ func TestSettledReplacementRejectsAcceptedSteeringAndBindingChanges(t *testing.T
 	accepted, err := h.Steer(t.Context(), TurnInput{RequestID: "guidance", Content: "keep this"})
 	require.NoError(t, err)
 	require.False(t, ReplaceSettledSession(h, before))
-	after, err := h.Snapshot(t.Context())
+	after, err := d.ownerSnapshot(t.Context())
 	require.NoError(t, err)
 	require.Len(t, after.Messages, 1)
 	require.Equal(t, accepted.TurnID, after.Messages[0].Message.TurnID)

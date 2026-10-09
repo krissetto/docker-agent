@@ -81,8 +81,11 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 					return nil
 				}
 				// Retry the atomic operation to reconcile a lost acknowledgment.
-				if !errors.Is(err, session.ErrNotFound) && ctx.Err() == nil {
-					if retryErr := store.WithdrawPendingUserMessage(ctx, d.identityID, turnID); retryErr == nil {
+				if !errors.Is(err, session.ErrNotFound) {
+					reconcileCtx, cancel := context.WithTimeout(d.r.durabilityContext(), defaultSubagentPersistenceTimeout)
+					retryErr := store.WithdrawPendingUserMessage(reconcileCtx, d.identityID, turnID)
+					cancel()
+					if retryErr == nil {
 						return nil
 					}
 				}
@@ -108,7 +111,10 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 			return nil
 		}}, nil
 	})
-	return withdrawn, err
+	if err != nil {
+		return false, err
+	}
+	return withdrawn, nil
 }
 
 func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOutcome, error) {

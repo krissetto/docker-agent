@@ -15,6 +15,8 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
+
+	agentmcp "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 // TestExec_Gemini_SamplingWithTools exercises the MCP sampling-with-tools
@@ -107,6 +109,9 @@ func askWithCalculator(ctx context.Context, req *gomcp.CallToolRequest, in askIn
 
 	for round := 1; round <= 4; round++ {
 		res, err := req.Session.CreateMessageWithTools(ctx, &gomcp.CreateMessageWithToolsParams{
+			Meta: gomcp.Meta{
+				agentmcp.CallbackTokenMetaKey: req.Params.Meta[agentmcp.CallbackTokenMetaKey],
+			},
 			MaxTokens:    1024,
 			Messages:     messages,
 			Tools:        []*gomcp.Tool{calculator},

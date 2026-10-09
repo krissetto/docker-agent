@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
@@ -73,7 +74,7 @@ func (h *sessionHandle) stopRootTree(ctx context.Context) error {
 	if settling {
 		h.driver.finishRunContext(ctx, generation, runErr)
 	}
-	err = h.driver.ownerCall(ctx, func() error { return h.driver.completionErr })
+	err = h.driver.ownerCall(ctx, func() error { return errors.Join(h.driver.completionErr, h.driver.ioLane.withdrawalErr) })
 	return errors.Join(result, err)
 }
 
@@ -89,6 +90,11 @@ func (d *sessionDriver) reserveStoppedWithdrawal() (sessionIOReservation, error)
 	for _, item := range next.Messages {
 		if item.Message != nil && item.Message.Pending && item.Message.Accepted {
 			turnIDs = append(turnIDs, item.Message.TurnID)
+		}
+	}
+	for id := range d.ioLane.uncertainInputs {
+		if !slices.Contains(turnIDs, id) {
+			turnIDs = append(turnIDs, id)
 		}
 	}
 	var write func(context.Context) error
@@ -110,16 +116,18 @@ func (d *sessionDriver) reserveStoppedWithdrawal() (sessionIOReservation, error)
 	}
 	return sessionIOReservation{write: write, commit: func(err error) error {
 		if err != nil {
-			d.completionErr = err
+			d.ioLane.withdrawalErr = err
 			return err
 		}
 		for _, id := range turnIDs {
+			delete(d.ioLane.uncertainInputs, id)
 			d.sess.RemovePendingUserMessageByTurnID(id)
 			d.sess.SetTurnOutcome(id, string(TurnCanceled))
 			d.completeTurnLocked(id)
 		}
 		d.pending, d.steering = nil, nil
 		d.durableStopRequested = false
+		d.ioLane.withdrawalErr = nil
 		d.refreshSteeringLocked()
 		return nil
 	}}, nil

@@ -134,3 +134,58 @@ All three agents (`root`, `designer`, `engineer`) appear as separate tools in Cl
 - **Permission errors:** Ensure `docker-agent` has execute permissions (`chmod +x`)
 - **Missing API keys:** Pass all required keys in the `env` section
 - **Working directory issues:** Verify the `--working-dir` path exists and is accessible
+
+## Attach to an existing canonical session
+
+Attachment borrows execution from a running TUI control plane or authenticated
+`serve api` authority. It does not create another runtime or change approval
+policy. For a trusted local run, use `docker agent serve mcp --attach` (latest),
+or `--attach <pid|address|session-id>`.
+
+For an explicit authority and canonical session ID:
+
+```console
+$ docker agent serve mcp --attach-address https://agents.example.com --attach-session SESSION_ID --attach-token-env DOCKER_AGENT_ATTACH_TOKEN
+```
+
+Provision `DOCKER_AGENT_ATTACH_TOKEN` through your MCP client's secret environment
+configuration. Do not put tokens in command arguments or URLs. URLs containing
+credentials, queries or fragments are rejected; non-loopback authorities require
+HTTPS and a token. This is a server-wide bearer authorization boundary, not a
+per-user/per-session ACL. Only attach to an authority you trust with session data.
+Child sessions additionally require `--attach-confirm-child`; attachment uses the
+canonical confirmed-view route rather than bypassing child admission.
+
+The attachment exposes these tools:
+
+| Tool | Behavior |
+| --- | --- |
+| `send` | Asynchronous steer, or FIFO submission with `followup: true`. Returns canonical `session_id`, accepted `turn_id`, and `disposition`; optional `request_id` makes admission retryable. |
+| `read` | Current canonical status, epoch/cursor, supported controls and outstanding interaction IDs/kinds/payloads, including elicitation form schemas. |
+| `transcript` | Read recent text messages (`limit: 0` means all). |
+| `await_turn` | Wait for settlement of exactly `turn_id`. Cancelling the wait only detaches. |
+| `cancel_turn` | Cancel exactly `turn_id`, never a newer or unrelated turn. Use `await_turn` to join settlement. |
+| `respond` | Answer exactly one discovered interaction; stale or foreign tokens fail. |
+| `stop_subtree` | Advertised only when supported. Fence and drain the attached subtree, retaining history. |
+| `delegation_policy` | Advertised only when supported. Omit `enabled` to read; supply a boolean to update under the authority's root policy rules. |
+
+For example, a form response discovered by `read` is:
+
+```json
+{"interaction_id":"REQUEST_ID","kind":"elicitation","elicitation_id":"ELICITATION_ID","action":"accept","content":{"answer":"yes"}}
+```
+
+Use `action: "decline"` or `"cancel"` to decline/cancel elicitation. For confirmation
+or max-iteration requests use the discovered kind (`confirmation` or
+`max_iterations`) with `confirmation: "approve"` or `"reject"`. Confirmation also
+accepts canonical `approve-balanced`, `approve-autonomous`, and `approve-tool`
+(with `tool_name`) decisions; these explicitly change policy and are never chosen
+automatically. Form content is validated by the canonical authority.
+
+`send` intentionally does not synchronously own an execution lifetime: accepted
+input survives completion/cancellation of the MCP request. Cancellation before
+acknowledgement can leave admission uncertain; retry with the same `request_id`
+and unchanged input to reconcile it, rather than sending a new identity. Closing
+the MCP connection only detaches; it never cancels, deletes, stops, or shuts down
+the borrowed session. Unsupported optional controls are not listed and cannot
+be invoked.

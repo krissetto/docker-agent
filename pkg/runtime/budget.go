@@ -240,6 +240,7 @@ type budgetSet struct {
 	order        []string
 	contextMu    sync.Mutex
 	contexts     map[*context.CancelFunc]string
+	rebindings   map[*executionBudgetBinding]struct{}
 }
 
 func (s *budgetSet) budgetsFor(agentName string) []namedTracker {
@@ -360,6 +361,93 @@ func (r *LocalRuntime) rootBudget(sess *session.Session) *budgetSet {
 	return b
 }
 
+type executionBudgetKey struct{}
+
+type executionBudgetBinding struct {
+	wallet    *budgetSet
+	agentName string
+	cancel    context.CancelFunc
+	timer     *time.Timer
+	revision  uint64
+}
+
+// The generation context stays stable while named-wallet membership changes.
+func (r *LocalRuntime) executionBudgetContext(ctx context.Context, sess *session.Session, a *agent.Agent) (context.Context, context.CancelFunc) {
+	wallet := r.rootBudget(sess)
+	if wallet == nil || a == nil {
+		return context.WithCancel(ctx)
+	}
+	bounded, cancel := context.WithCancel(ctx)
+	binding := &executionBudgetBinding{wallet: wallet, cancel: cancel}
+	wallet.contextMu.Lock()
+	if wallet.rebindings == nil {
+		wallet.rebindings = make(map[*executionBudgetBinding]struct{})
+	}
+	wallet.rebindings[binding] = struct{}{}
+	binding.rebindLocked(a.Name())
+	wallet.contextMu.Unlock()
+	cleanup := func() {
+		wallet.contextMu.Lock()
+		delete(wallet.rebindings, binding)
+		binding.revision++
+		if binding.timer != nil {
+			binding.timer.Stop()
+		}
+		wallet.contextMu.Unlock()
+		cancel()
+	}
+	context.AfterFunc(bounded, cleanup)
+	wallet.cancelExceeded()
+	return context.WithValue(bounded, executionBudgetKey{}, binding), cleanup
+}
+
+func (b *executionBudgetBinding) rebindLocked(name string) {
+	b.agentName = name
+	b.revision++
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	var deadline time.Time
+	now := time.Now()
+	for _, nt := range b.wallet.budgetsFor(name) {
+		t := nt.Tracker
+		t.mu.Lock()
+		if t.started.IsZero() {
+			t.started = now
+		}
+		if t.maxTime > 0 {
+			end := t.started.Add(t.maxTime)
+			if deadline.IsZero() || end.Before(deadline) {
+				deadline = end
+			}
+		}
+		t.mu.Unlock()
+	}
+	if !deadline.IsZero() {
+		revision := b.revision
+		b.timer = time.AfterFunc(time.Until(deadline), func() {
+			b.wallet.contextMu.Lock()
+			defer b.wallet.contextMu.Unlock()
+			if b.revision == revision {
+				b.cancel()
+			}
+		})
+	}
+	if b.wallet.exceededFor(name) != nil {
+		b.cancel()
+	}
+}
+
+func rebindExecutionBudget(ctx context.Context, name string) {
+	if binding, ok := ctx.Value(executionBudgetKey{}).(*executionBudgetBinding); ok {
+		binding.wallet.contextMu.Lock()
+		if _, registered := binding.wallet.rebindings[binding]; registered {
+			binding.rebindLocked(name)
+		}
+		binding.wallet.contextMu.Unlock()
+	}
+}
+
 // budgetContext bounds the whole execution, including provider and tool waits.
 func (r *LocalRuntime) budgetContext(ctx context.Context, sess *session.Session, a *agent.Agent) (context.Context, context.CancelFunc) {
 	wallet := r.rootBudget(sess)
@@ -410,6 +498,11 @@ func (s *budgetSet) cancelExceeded() {
 	for cancel, agentName := range s.contexts {
 		if s.exceededFor(agentName) != nil {
 			cancels = append(cancels, *cancel)
+		}
+	}
+	for binding := range s.rebindings {
+		if s.exceededFor(binding.agentName) != nil {
+			binding.cancel()
 		}
 	}
 	s.contextMu.Unlock()

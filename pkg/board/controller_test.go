@@ -603,3 +603,41 @@ func TestCanonicalOutstandingInteractionNeedsAttachment(t *testing.T) {
 	store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", LastEventSeq: 7}, []event{{Type: eventInteraction, Seq: 8}})
 	waitForStatus(t, store, StatusPaused)
 }
+
+func TestCanonicalAttentionOnlyMatchingResolutionClears(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		events []event
+		want   CardStatus
+	}{
+		{"metadata", []event{{Type: "metadata_changed"}}, StatusPaused},
+		{"foreign resolution", []event{{Type: eventInteractionResolved, InteractionID: "foreign"}}, StatusPaused},
+		{"one of many", []event{{Type: eventInteractionResolved, InteractionID: "first"}}, StatusPaused},
+		{"last resolution", []event{{Type: eventInteractionResolved, InteractionID: "first"}, {Type: eventInteractionResolved, InteractionID: "second"}}, StatusRunning},
+		{"snapshot reset", []event{{Type: eventBaseline, Baseline: &snapshot{Epoch: "one", State: "running"}}}, StatusRunning},
+		{"stream traffic", []event{{Type: eventStreamStarted}, {Type: eventError}, {Type: eventStreamStopped, Reason: reasonNormal}}, StatusPaused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", InteractionIDs: []string{"first", "second"}}, tc.events)
+			waitForStatus(t, store, tc.want)
+		})
+	}
+}
+
+func TestCanonicalExplicitPauseSurvivesInteractionResolution(t *testing.T) {
+	t.Parallel()
+	store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", Paused: true, InteractionIDs: []string{"first"}}, []event{
+		{Type: eventInteractionResolved, InteractionID: "first"}, {Type: "metadata_changed"},
+	})
+	waitForStatus(t, store, StatusPaused)
+}
+
+func TestCanonicalExplicitResumeKeepsInteractionAttention(t *testing.T) {
+	t.Parallel()
+	store, _ := watchCard(t, snapshot{Epoch: "one", State: "running", Paused: true, InteractionIDs: []string{"first"}}, []event{
+		{Type: eventPauseChanged, Paused: false},
+	})
+	waitForStatus(t, store, StatusPaused)
+}

@@ -229,12 +229,12 @@ func (v *localSessionRuntimeView) RestoreSessionTree(ctx context.Context, root *
 }
 
 // sessionHandle is the stable-ID session-native API. A handle never permits the
-// pinned session or agent identity to be replaced.
+// pinned session or creation-agent identity to be replaced.
 type sessionHandle struct {
 	runtime   *LocalRuntime
 	driver    *sessionDriver
 	sessionID string
-	agentName string
+	agentName string // immutable creation binding, not active capability attribution
 
 	metadataMu          sync.Mutex
 	metadataInitialized bool
@@ -302,7 +302,49 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 			boundAgent = defaultAgent.Name()
 		}
 	}
-	if maxIterations == 0 {
+	canonicalStored := false
+	var stored *session.Session
+	var storedErr error
+	if r.sessionStore != nil {
+		stored, storedErr = r.sessionStore.GetSession(ctx, sess.ID)
+		if storedErr != nil && !errors.Is(storedErr, session.ErrNotFound) {
+			return nil, storedErr
+		}
+		if storedErr == nil && stored.AttributesSnapshot()[SessionAgentAttribute] != "" {
+			if binding.AgentName == "" && sess.AgentName == "" && sess.AttributesSnapshot()[SessionAgentAttribute] == "" {
+				boundAgent = stored.AttributesSnapshot()[SessionAgentAttribute]
+			}
+			if sess.ParentID != "" && sess.ParentID != stored.ParentID {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "create_session"}
+			}
+			if stored.AttributesSnapshot()[SessionAgentAttribute] != boundAgent {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "bind_agent"}
+			}
+			if (sess.Origin != "" && sess.Origin != stored.Origin) ||
+				(sess.AttributesSnapshot()["docker-agent.actor.source"] != "" && sess.AttributesSnapshot()["docker-agent.actor.source"] != stored.AttributesSnapshot()["docker-agent.actor.source"]) {
+				return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "create_session"}
+			}
+			if existing, resident := r.sessionDrivers.Lookup(sess.ID); !resident || existing.isStopped() {
+				if stored.ParentID != "" || sess.ParentID != "" {
+					return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "create_session"}
+				}
+				storedActiveAgent := stored.AgentName
+				if storedActiveAgent == "" {
+					storedActiveAgent = boundAgent
+				}
+				if binding.Model != "" && binding.Model != stored.AgentModelOverrides[storedActiveAgent] {
+					return nil, &SessionError{Kind: SessionErrorConflict, SessionID: sess.ID, Operation: "bind_model"}
+				}
+				boundSession = stored.OwnSnapshot()
+				canonicalStored = true
+				activeAgent, maxIterations = storedActiveAgent, boundSession.MaxIterations
+				if boundSession.WorkingDir == "" {
+					boundSession.WorkingDir = sess.WorkingDir
+				}
+			}
+		}
+	}
+	if maxIterations == 0 && !canonicalStored {
 		if bound, agentErr := r.team.Agent(boundAgent); agentErr == nil {
 			maxIterations = bound.MaxIterations()
 		}
@@ -319,7 +361,7 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 	boundSession.SetAttribute(SessionAgentAttribute, boundAgent)
 	createdRow := false
 	if r.sessionStore != nil {
-		if stored, err := r.sessionStore.GetSession(ctx, sess.ID); errors.Is(err, session.ErrNotFound) {
+		if errors.Is(storedErr, session.ErrNotFound) {
 			boundSession.SetAttribute(SessionAgentAttribute, boundAgent)
 			if err := r.sessionStore.AddSession(ctx, boundSession.OwnSnapshot()); err != nil {
 				if !errors.Is(err, session.ErrAlreadyExists) {
@@ -328,8 +370,6 @@ func (r *LocalRuntime) createSession(ctx context.Context, sess *session.Session,
 			} else {
 				createdRow = true
 			}
-		} else if err != nil {
-			return nil, err
 		} else {
 			persistedAgent := stored.AttributesSnapshot()[SessionAgentAttribute]
 			if persistedAgent != "" && persistedAgent != boundAgent {
@@ -408,16 +448,20 @@ func (r *LocalRuntime) SessionByID(sessionID string) (SessionHandle, error) {
 		return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sessionID, Operation: "lookup"}
 	}
 	sess := d.session()
-	agentName := ""
+	agentName, creationAgent := "", ""
 	if sess != nil {
 		agentName = sess.AgentName
+		creationAgent = sess.AttributesSnapshot()[SessionAgentAttribute]
+		if creationAgent == "" {
+			creationAgent = agentName
+		}
 	}
 	if d.ModelProvidersEmpty() && r.team != nil {
 		if a, err := r.team.Agent(agentName); err == nil {
 			d.SetModelBinding("", a.ConfiguredModels())
 		}
 	}
-	return &sessionHandle{runtime: r, driver: d, sessionID: sessionID, agentName: agentName}, nil
+	return &sessionHandle{runtime: r, driver: d, sessionID: sessionID, agentName: creationAgent}, nil
 }
 
 func (h *sessionHandle) Todos(ctx context.Context) ([]session.Todo, error) {
@@ -524,13 +568,14 @@ func (h *sessionHandle) ID() string        { return h.sessionID }
 func (h *sessionHandle) AgentName() string { return h.driver.AgentName() }
 func (h *sessionHandle) Metadata() SessionMetadata {
 	durability := h.runtime.sessionDurability()
-	model, available, levels, current := h.metadataModelBinding()
+	agentName, model, available, levels, current := h.metadataModelBinding()
 	modelSwitching := h.runtime.SupportsModelSwitching()
 	forkSkills := false
-	if st := agentSkillsToolset(h.runtime.resolveSessionAgent(h.driver.session())); st != nil {
+	a, _ := h.runtime.team.Agent(agentName)
+	if st := agentSkillsToolset(a); st != nil {
 		forkSkills = slices.ContainsFunc(st.Skills(), func(skill skills.Skill) bool { return skill.IsFork() })
 	}
-	return SessionMetadata{SessionID: h.sessionID, AgentName: h.AgentName(), Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
+	return SessionMetadata{SessionID: h.sessionID, AgentName: agentName, Model: model, ThinkingLevels: levels, ThinkingLevel: current, Capabilities: SessionCapabilities{
 		PendingMessageRemoval: true,
 		Snapshots:             h.runtime.snapshots != nil && h.runtime.snapshots.controller.Enabled(),
 		DelegationPolicy:      true, StopSubtree: true, ToolInspection: true, ToolsetRestart: true, PermissionsInspection: true, MCPPrompts: true, TodoEditing: true, Branching: true,
@@ -540,9 +585,10 @@ func (h *sessionHandle) Metadata() SessionMetadata {
 	}}
 }
 
-func (h *sessionHandle) metadataModelBinding() (string, []string, []effort.Level, effort.Level) {
+func (h *sessionHandle) metadataModelBinding() (string, string, []string, []effort.Level, effort.Level) {
 	for {
-		version, model, providers := h.driver.ModelBindingSnapshot()
+		binding := h.driver.activeBinding()
+		version, model, providers := binding.version, binding.modelRef, binding.models
 		h.metadataMu.Lock()
 		if h.metadataInitialized && h.metadataVersion == version {
 			cachedModel := h.metadataModel
@@ -550,13 +596,13 @@ func (h *sessionHandle) metadataModelBinding() (string, []string, []effort.Level
 			levels := slices.Clone(h.metadataLevels)
 			current := h.metadataCurrent
 			h.metadataMu.Unlock()
-			return cachedModel, available, levels, current
+			return binding.agentName, cachedModel, available, levels, current
 		}
 		h.metadataMu.Unlock()
 
 		var available []string
 		if h.runtime.SupportsModelSwitching() {
-			available = modelChoiceRefs(h.runtime.availableModels(context.Background(), h.agentName))
+			available = modelChoiceRefs(h.runtime.availableModels(context.Background(), binding.agentName))
 		}
 		levels, current, err := h.runtime.resolveThinkingLevelsForModels(context.Background(), providers)
 		if err != nil {
@@ -574,7 +620,7 @@ func (h *sessionHandle) metadataModelBinding() (string, []string, []effort.Level
 		h.metadataLevels = slices.Clone(levels)
 		h.metadataCurrent = current
 		h.metadataMu.Unlock()
-		return model, available, levels, current
+		return binding.agentName, model, available, levels, current
 	}
 }
 
@@ -788,10 +834,12 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 	var operationCtx context.Context
 	var cancel context.CancelFunc
 	var generation uint64
+	var activeAgent string
 	if err := h.driver.ownerCall(ctx, func() error {
 		if err := h.driver.admitLocked(SessionOperationRunSkill); err != nil {
 			return err
 		}
+		activeAgent = h.driver.AgentNameLocked()
 		operationCtx, cancel = context.WithCancel(ctx) //nolint:gosec,fatcontext // owner stores cancel; worker defers it and stop fences it
 		h.driver.skillGeneration++
 		generation = h.driver.skillGeneration
@@ -802,7 +850,7 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 	}); err != nil {
 		return err
 	}
-	h.PublishOperation(SkillOperation(h.sessionID, h.agentName, operationID, args.Name, "accepted", ""))
+	h.PublishOperation(SkillOperation(h.sessionID, activeAgent, operationID, args.Name, "accepted", ""))
 	go func() {
 		defer h.driver.wg.Done()
 		defer cancel()
@@ -826,7 +874,7 @@ func (h *sessionHandle) StartSkillFork(ctx context.Context, operationID string, 
 				// Publish while reservation remains held. Event hub publication does
 				// not acquire the driver lock, so no admission can enter between the
 				// terminal boundary and reservation release.
-				h.driver.events.Publish(h.sessionID, SkillOperation(h.sessionID, h.agentName, operationID, args.Name, status, failure))
+				h.driver.events.Publish(h.sessionID, SkillOperation(h.sessionID, activeAgent, operationID, args.Name, status, failure))
 				h.driver.skillOperationID = ""
 				h.driver.skillCancel = nil
 			}
@@ -936,13 +984,13 @@ func (h *sessionHandle) RemoveAttachment(ctx context.Context, path string) error
 	return h.driver.RemoveAttachment(ctx, path)
 }
 
-// AvailableModels returns choices decorated for the pinned agent's configured
+// AvailableModels returns choices decorated for the active agent's configured
 // default. Current/session-history decoration remains an App concern.
 func (h *sessionHandle) AvailableModels(ctx context.Context) []ModelChoice {
-	return h.runtime.availableModels(ctx, h.agentName)
+	return h.runtime.availableModels(ctx, h.driver.activeBinding().agentName)
 }
 
-// SetModel applies an override to the pinned agent without consulting the
+// SetModel applies an override to the active agent without consulting the
 // runtime-global current-agent selection.
 func (h *sessionHandle) SetModel(ctx context.Context, modelRef string) error {
 	if err := ctx.Err(); err != nil {
@@ -951,11 +999,12 @@ func (h *sessionHandle) SetModel(ctx context.Context, modelRef string) error {
 	if !h.runtime.SupportsModelSwitching() {
 		return sessionUnsupported(h.sessionID, SessionOperationSetModel)
 	}
-	providers, err := h.runtime.resolveModelProviders(ctx, h.agentName, modelRef)
+	binding := h.driver.activeBinding()
+	providers, err := h.runtime.resolveModelProviders(ctx, binding.agentName, modelRef)
 	if err != nil {
 		return err
 	}
-	return h.driver.SetModelOverride(ctx, h.agentName, modelRef, providers)
+	return h.driver.setModelOverride(ctx, binding, binding.agentName, modelRef, providers)
 }
 
 // RefreshModelsCatalog refreshes the local runtime's shared model catalog.
@@ -990,7 +1039,7 @@ func (h *sessionHandle) CurrentThinkingLevel(ctx context.Context) effort.Level {
 	return current
 }
 
-// CycleThinkingLevel changes the pinned agent through the owning session
+// CycleThinkingLevel changes the active agent through the owning session
 // session handle, preserving session identity while the runtime recreates the
 // effective providers.
 func (h *sessionHandle) CycleThinkingLevel(ctx context.Context) (effort.Level, error) {
@@ -1002,7 +1051,7 @@ func (h *sessionHandle) CycleThinkingLevel(ctx context.Context) (effort.Level, e
 	})
 }
 
-// SetThinkingLevel applies a concrete level to the pinned agent through the
+// SetThinkingLevel applies a concrete level to the active agent through the
 // owning session handle.
 func (h *sessionHandle) SetThinkingLevel(ctx context.Context, level effort.Level) (effort.Level, error) {
 	if err := ctx.Err(); err != nil {
@@ -1025,10 +1074,11 @@ func (h *sessionHandle) applyThinkingLevel(ctx context.Context, pick func([]effo
 	if !h.runtime.SupportsModelSwitching() {
 		return "", sessionUnsupported(h.sessionID, SessionOperationThinkingLevel)
 	}
-	if _, err := h.runtime.team.Agent(h.agentName); err != nil {
+	binding := h.driver.activeBinding()
+	if _, err := h.runtime.team.Agent(binding.agentName); err != nil {
 		return "", fmt.Errorf("agent not found: %w", err)
 	}
-	ref, models := h.driver.ModelSnapshot()
+	ref, models := binding.modelRef, binding.models
 	supported, current, err := h.runtime.resolveThinkingLevelsForModels(ctx, models)
 	if err != nil {
 		return "", err
@@ -1048,27 +1098,26 @@ func (h *sessionHandle) applyThinkingLevel(ctx context.Context, pick func([]effo
 		}
 		updated = append(updated, p)
 	}
-	if err := h.driver.SetModelOverride(ctx, h.agentName, ref, updated); err != nil {
+	if err := h.driver.setModelOverride(ctx, binding, binding.agentName, ref, updated); err != nil {
 		return "", err
 	}
 	return next, nil
 }
 
-// EmitPinnedAgentInfo re-emits the agent/team info for the pinned agent with
+// EmitPinnedAgentInfo re-emits the agent/team info for the active agent with
 // this session's model binding in scope, so a /model or thinking-level change
 // made on this session is what the sidebar shows — not the agent's default.
 func (h *sessionHandle) EmitPinnedAgentInfo(ctx context.Context, sink EventSink) {
-	a, err := h.runtime.team.Agent(h.agentName)
-	if err != nil || a == nil {
+	info, err := h.SessionAgentInfo(ctx)
+	if err != nil {
 		return
 	}
-	h.runtime.emitAgentAndTeamInfo(h.driver.scopeModels(ctx), a, func(event Event) bool {
-		if ctx.Err() != nil {
-			return false
-		}
-		sink.Emit(event)
-		return true
-	})
+	if info.Agent != nil {
+		sink.Emit(info.Agent)
+	}
+	if info.Team != nil {
+		sink.Emit(info.Team)
+	}
 }
 
 // Cancel requests cancellation of the active generation. The session remains

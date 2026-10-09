@@ -13,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/session"
@@ -62,7 +63,8 @@ func SnapshotProof(sess *session.Session) string {
 }
 
 func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, error) {
-	available, err := h.runtime.AgentTools(ctx, h.agentName)
+	binding := h.driver.activeBinding()
+	available, err := h.runtime.AgentTools(ctx, binding.agentName)
 	if err != nil {
 		return SessionToolsInfo{}, err
 	}
@@ -71,7 +73,7 @@ func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, err
 	for i := range available {
 		available[i].Handler = nil
 	}
-	statuses := h.runtime.AgentToolsetStatuses(h.agentName)
+	statuses := h.runtime.AgentToolsetStatuses(binding.agentName)
 	out := SessionToolsInfo{Tools: available, Statuses: make([]SessionToolsetStatus, 0, len(statuses))}
 	for _, status := range statuses {
 		safeError := ""
@@ -80,17 +82,27 @@ func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, err
 		}
 		out.Statuses = append(out.Statuses, SessionToolsetStatus{Name: status.Name, Kind: status.Kind, Description: status.Description, State: status.State, LastError: safeError, RestartCount: status.RestartCount, Restartable: status.Restartable})
 	}
+	if err := h.driver.validateBinding(ctx, binding); err != nil {
+		return SessionToolsInfo{}, err
+	}
 	return out, nil
 }
 func (h *sessionHandle) RestartToolset(ctx context.Context, name string) error {
-	a, err := h.runtime.team.Agent(h.agentName)
+	binding := h.driver.activeBinding()
+	a, err := h.runtime.team.Agent(binding.agentName)
 	if err != nil {
 		return err
 	}
 	for _, ts := range a.ToolSets() {
 		if nameFor(ts, tools.DescribeToolSet(ts)) == name {
 			if restartable, ok := tools.As[tools.Restartable](ts); ok {
-				return restartable.Restart(ctx)
+				if err := h.driver.validateBinding(ctx, binding); err != nil {
+					return err
+				}
+				if err := restartable.Restart(ctx); err != nil {
+					return err
+				}
+				return h.driver.validateBinding(ctx, binding)
 			}
 		}
 	}
@@ -111,15 +123,17 @@ func (h *sessionHandle) EffectivePermissions(ctx context.Context) (SessionPermis
 type boundPrompt struct {
 	info    tools.PromptInfo
 	toolset mcpPromptToolset
+	binding activeSessionBinding
 }
 
 func (h *sessionHandle) boundPrompts(ctx context.Context) (map[string]boundPrompt, error) {
-	a, err := h.runtime.team.Agent(h.agentName)
+	binding := h.driver.activeBinding()
+	a, err := h.runtime.team.Agent(binding.agentName)
 	if err != nil {
 		return nil, err
 	}
 	result := make(map[string]boundPrompt)
-	// Qualify every discovery key by its immutable bound-agent toolset index.
+	// Qualify every discovery key by its active-agent toolset index.
 	// Names may contain slashes; execution passes the original name unchanged.
 	for i, ts := range a.ToolSets() {
 		if provider, ok := tools.As[mcpPromptToolset](ts); ok {
@@ -128,11 +142,11 @@ func (h *sessionHandle) boundPrompts(ctx context.Context) (map[string]boundPromp
 				return nil, err
 			}
 			for _, prompt := range prompts {
-				result[strconv.Itoa(i)+"/"+prompt.Name] = boundPrompt{prompt, provider}
+				result[strconv.Itoa(i)+"/"+prompt.Name] = boundPrompt{prompt, provider, binding}
 			}
 		}
 	}
-	return result, nil
+	return result, h.driver.validateBinding(ctx, binding)
 }
 func (h *sessionHandle) MCPPrompts(ctx context.Context) (map[string]tools.PromptInfo, error) {
 	prompts, err := h.boundPrompts(ctx)
@@ -156,6 +170,9 @@ func (h *sessionHandle) ExecuteMCPPrompt(ctx context.Context, key string, args m
 	}
 	result, err := prompt.toolset.GetPrompt(ctx, prompt.info.Name, args)
 	if err != nil {
+		return "", err
+	}
+	if err := h.driver.validateBinding(ctx, prompt.binding); err != nil {
 		return "", err
 	}
 	if result == nil || len(result.Messages) == 0 {
@@ -263,20 +280,25 @@ func (h *sessionHandle) SessionAgentInfo(ctx context.Context) (SessionAgentInfo,
 	if err := ctx.Err(); err != nil {
 		return SessionAgentInfo{}, err
 	}
-	a, err := h.runtime.team.Agent(h.agentName)
+	binding := h.driver.activeBinding()
+	a, err := h.runtime.team.Agent(binding.agentName)
 	if err != nil {
 		return SessionAgentInfo{}, err
 	}
 	out := SessionAgentInfo{Commands: maps.Clone(a.Commands())}
-	h.EmitPinnedAgentInfo(ctx, EventSinkFunc(func(event Event) {
+	h.runtime.emitAgentAndTeamInfo(agent.WithContextModels(ctx, binding.agentName, binding.models), a, func(event Event) bool {
 		switch event := event.(type) {
 		case *AgentInfoEvent:
 			out.Agent = event
 		case *TeamInfoEvent:
 			out.Team = event
 		}
-	}))
-	return out, ctx.Err()
+		return ctx.Err() == nil
+	})
+	if err := h.driver.validateBinding(ctx, binding); err != nil {
+		return SessionAgentInfo{}, err
+	}
+	return out, nil
 }
 
 // SessionIDCreator creates a fresh root with an explicit caller-selected ID.

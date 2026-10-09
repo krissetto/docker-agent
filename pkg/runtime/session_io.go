@@ -5,7 +5,9 @@ import "context"
 // sessionIOLane permits one reserved durable effect, including its owner
 // acknowledgement. A timed-out caller cannot release a still-running write.
 type sessionIOLane struct {
-	slot chan struct{}
+	slot            chan struct{}
+	withdrawalErr   error // owner-owned, separate from generation settlement failure
+	uncertainInputs map[string]bool
 }
 
 func newSessionIOLane() *sessionIOLane {

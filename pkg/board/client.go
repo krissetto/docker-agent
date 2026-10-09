@@ -38,10 +38,12 @@ const (
 	// eventRuntimePaused is emitted when the run loop blocks at an iteration
 	// boundary because /pause was toggled on. There is no matching resume
 	// event: the loop simply starts emitting events again once resumed.
-	eventRuntimePaused = "runtime_paused"
-	eventGap           = "gap"
-	eventInteraction   = "board_interaction"
-	eventBaseline      = "board_baseline"
+	eventRuntimePaused       = "runtime_paused"
+	eventGap                 = "gap"
+	eventInteraction         = "board_interaction"
+	eventInteractionResolved = "interaction_resolved"
+	eventPauseChanged        = "runtime_pause_changed"
+	eventBaseline            = "board_baseline"
 )
 
 // reasonNormal is the stream_stopped reason for a turn that completed
@@ -61,9 +63,11 @@ var errStreamIdle = errors.New("event stream idle: heartbeats stopped")
 
 // event is the subset of a runtime event the board cares about.
 type event struct {
-	Type     string    `json:"type"`
-	Baseline *snapshot `json:"-"`
-	Title    string    `json:"title"`
+	Type          string    `json:"type"`
+	InteractionID string    `json:"interaction_id,omitempty"`
+	Paused        bool      `json:"paused,omitempty"`
+	Baseline      *snapshot `json:"-"`
+	Title         string    `json:"title"`
 	// Reason classifies how a stream ended (stream_stopped only). It is
 	// authoritative for the turn's outcome, unlike mid-turn error events
 	// which a parent agent may have recovered from.
@@ -77,12 +81,13 @@ type event struct {
 // snapshot is the part of GET /snapshot the board uses to (re)build a card's
 // state and find the stream position to resume from.
 type snapshot struct {
-	Title        string `json:"title"`
-	LastEventSeq uint64 `json:"last_event_seq"`
-	Epoch        string `json:"epoch,omitempty"`
-	State        string `json:"state,omitempty"`
-	Paused       bool   `json:"paused,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
+	Title          string   `json:"title"`
+	LastEventSeq   uint64   `json:"last_event_seq"`
+	Epoch          string   `json:"epoch,omitempty"`
+	State          string   `json:"state,omitempty"`
+	Paused         bool     `json:"paused,omitempty"`
+	InteractionIDs []string `json:"-"`
+	LastError      string   `json:"last_error,omitempty"`
 }
 
 // client drives one session's control plane over its unix socket.
@@ -133,7 +138,7 @@ func (c *client) Snapshot(ctx context.Context) (snapshot, error) {
 		return snapshot{}, fmt.Errorf("decode snapshot: %w", err)
 	}
 	c.epoch = wire.Epoch
-	snap := snapshot{LastEventSeq: wire.Cursor, Epoch: wire.Epoch, State: wire.Status.State, Paused: wire.Status.Paused || len(wire.Interactions) > 0, LastError: wire.Status.LastError}
+	snap := snapshot{LastEventSeq: wire.Cursor, Epoch: wire.Epoch, State: wire.Status.State, Paused: wire.Status.Paused, InteractionIDs: interactionIDs(wire), LastError: wire.Status.LastError}
 	if wire.Session != nil {
 		snap.Title = wire.Session.TitleSnapshot()
 	}
@@ -254,8 +259,11 @@ func (c *client) StreamEvents(ctx context.Context, since uint64, onEvent func(ev
 			} else if json.Unmarshal(envelope.Event, &ev) != nil {
 				continue
 			}
-			if envelope.InteractionID != "" && (ev.Type == "tool_call_confirmation" || ev.Type == "elicitation_request") {
+			if envelope.InteractionID != "" && (ev.Type == "tool_call_confirmation" || ev.Type == "elicitation_request" || ev.Type == "max_iterations_reached") {
 				ev.Type = eventInteraction
+			}
+			if envelope.InteractionID != "" {
+				ev.InteractionID = envelope.InteractionID
 			}
 			seq = envelope.Sequence
 		case message.Type == "snapshot_begin":
@@ -288,7 +296,7 @@ func (c *client) StreamEvents(ctx context.Context, since uint64, onEvent func(ev
 				ev.Type = eventGap
 			} else {
 				ev.Type = eventBaseline
-				ev.Baseline = &snapshot{Epoch: wire.Epoch, LastEventSeq: wire.Cursor, State: wire.Status.State, Paused: wire.Status.Paused || len(wire.Interactions) > 0, LastError: wire.Status.LastError}
+				ev.Baseline = &snapshot{Epoch: wire.Epoch, LastEventSeq: wire.Cursor, State: wire.Status.State, Paused: wire.Status.Paused, InteractionIDs: interactionIDs(*wire), LastError: wire.Status.LastError}
 				if wire.Session != nil {
 					ev.Baseline.Title = wire.Session.TitleSnapshot()
 				}
@@ -328,4 +336,14 @@ func (c *client) StopSubtree(ctx context.Context) error {
 	}
 	_, err = io.Copy(io.Discard, resp.Body)
 	return err
+}
+
+func interactionIDs(wire api.SessionSnapshot[string, string, json.RawMessage]) []string {
+	ids := make([]string, 0, len(wire.Interactions))
+	for _, interaction := range wire.Interactions {
+		if interaction.InteractionID != "" {
+			ids = append(ids, interaction.InteractionID)
+		}
+	}
+	return ids
 }

@@ -221,13 +221,29 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 		return ErrSessionClosed
 	}
 	d := identity.driver
-	a, err := r.team.Agent(name)
+	var nextBinding *session.Session
+	var binding activeSessionBinding
+	if err := d.ownerCall(ctx, func() error {
+		if d.stopped || d.generation != identity.generation {
+			return ErrSessionStopped
+		}
+		nextBinding = d.sess.OwnSnapshot()
+		nextBinding.AgentName = name
+		binding = activeSessionBinding{version: d.bindingVersion, agentName: d.AgentNameLocked()}
+		return nil
+	}); err != nil {
+		return err
+	}
+	ref, models, err := r.resolveSessionModelBinding(ctx, nextBinding, "")
 	if err != nil {
 		return err
 	}
 	err = d.durableIO(ctx, func() (sessionIOReservation, error) {
 		if d.stopped || d.generation != identity.generation {
 			return sessionIOReservation{}, ErrSessionStopped
+		}
+		if err := d.validateBindingLocked(binding); err != nil {
+			return sessionIOReservation{}, err
 		}
 		next := d.sess.OwnSnapshot()
 		next.AgentName = name
@@ -245,10 +261,14 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 				if d.generation != identity.generation || d.stopped {
 					return ErrSessionStopped
 				}
+				if err := d.validateBindingLocked(binding); err != nil {
+					return err
+				}
 				d.sess.AgentName = name
-				d.modelProviders = a.ConfiguredModels()
-				d.modelRef = ""
+				d.modelProviders = models
+				d.modelRef = ref
 				d.bindingVersion++
+				rebindExecutionBudget(ctx, name)
 				return nil
 			},
 		}, nil
@@ -652,6 +672,7 @@ type resourceCleanupAttempt struct {
 func (d *sessionDriver) cleanupResources(ctx context.Context) error {
 	var attempt *resourceCleanupAttempt
 	var start bool
+	var toolsets []tools.ToolSet
 	if err := d.ownerCall(ctx, func() error {
 		attempt = d.resourceCleanup
 		if attempt != nil {
@@ -668,6 +689,9 @@ func (d *sessionDriver) cleanupResources(ctx context.Context) error {
 		d.resourceCleanup = attempt
 		d.wg.Add(1)
 		start = true
+		if d.sess != nil {
+			toolsets = append(toolsets, d.sess.ExtraToolSets...)
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -684,13 +708,10 @@ func (d *sessionDriver) cleanupResources(ctx context.Context) error {
 					if err != nil {
 						continue
 					}
-					for _, toolset := range a.ToolSets() {
-						if scoped, ok := tools.As[tools.ResourceOwnerStopper](toolset); ok {
-							errs = append(errs, scoped.StopResourceOwner(cleanupCtx))
-						}
-					}
+					toolsets = append(toolsets, a.ToolSets()...)
 				}
 			}
+			errs = append(errs, tools.StopResourceOwners(cleanupCtx, toolsets...))
 			_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
 				attempt.err = errors.Join(errs...)
 				close(attempt.done)

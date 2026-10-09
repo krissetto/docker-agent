@@ -260,19 +260,25 @@ func (s *remoteSession) Retry(ctx context.Context) (Submission, error) {
 	return Submission(out), err
 }
 
-func (s *remoteSession) Snapshot(ctx context.Context) (*session.Session, error) {
+// ReadSessionSnapshot reads canonical state and outstanding correlated interactions.
+func (c *Client) ReadSessionSnapshot(ctx context.Context, sessionID string) (SessionSnapshot, error) {
 	var raw remoteSessionSnapshot
-	if err := s.runtime.client.sessionJSON(ctx, http.MethodGet, s.endpoint("snapshot"), nil, &raw); err != nil {
-		return nil, err
+	if err := c.sessionJSON(ctx, http.MethodGet, api.SessionAPIPath+"/"+url.PathEscape(sessionID)+"/snapshot", nil, &raw); err != nil {
+		return SessionSnapshot{}, err
 	}
-	decoded, err := s.runtime.client.decodeSessionSnapshot(raw)
+	decoded, err := c.decodeSessionSnapshot(raw)
 	if err != nil {
-		return nil, err
+		return SessionSnapshot{}, err
 	}
-	if decoded.Session.ID != s.ID() {
-		return nil, protocolError(fmt.Errorf("snapshot identity differs from requested session %q", s.ID()))
+	if decoded.Session.ID != sessionID {
+		return SessionSnapshot{}, protocolError(errors.New("snapshot identity differs from requested session"))
 	}
-	return decoded.Session, nil
+	return decoded, nil
+}
+
+func (s *remoteSession) Snapshot(ctx context.Context) (*session.Session, error) {
+	snapshot, err := s.runtime.client.ReadSessionSnapshot(ctx, s.ID())
+	return snapshot.Session, err
 }
 
 func (s *remoteSession) Hydrate(ctx context.Context) error {

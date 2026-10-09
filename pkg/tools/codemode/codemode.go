@@ -315,13 +315,7 @@ func (c *codeModeTool) IsStarted() bool {
 }
 
 func (c *codeModeTool) StopResourceOwner(ctx context.Context) error {
-	var errs []error
-	for _, t := range c.toolsets {
-		if stopper, ok := tools.As[tools.ResourceOwnerStopper](t); ok {
-			errs = append(errs, stopper.StopResourceOwner(ctx))
-		}
-	}
-	return errors.Join(errs...)
+	return tools.StopResourceOwners(ctx, c.toolsets...)
 }
 
 func (c *codeModeTool) Stop(ctx context.Context) error {

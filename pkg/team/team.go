@@ -12,11 +12,13 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type Team struct {
 	stopMu         sync.Mutex
 	ownedResources []io.Closer
+	ownedToolSets  []*tools.StartableToolSet
 	closeOnce      sync.Once
 	closeErr       error
 	agents         []*agent.Agent
@@ -46,6 +48,12 @@ func WithAgents(agents ...*agent.Agent) Opt {
 // independently of session-level toolset retirement.
 func WithOwnedResources(resources ...io.Closer) Opt {
 	return func(t *Team) { t.ownedResources = append(t.ownedResources, resources...) }
+}
+
+// WithOwnedToolSets binds loader-created assistive definitions to final teardown.
+// Session retirement releases only their resource owner, never these definitions.
+func WithOwnedToolSets(toolsets ...*tools.StartableToolSet) Opt {
+	return func(t *Team) { t.ownedToolSets = append(t.ownedToolSets, toolsets...) }
 }
 
 func WithPermissions(checker *permissions.Checker) Opt {
@@ -176,6 +184,12 @@ func (t *Team) StopToolSets(ctx context.Context) error {
 		// later agents' toolsets running: keep stopping and aggregate.
 		if err := agent.StopToolSets(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop tool sets of agent %s: %w", agent.Name(), err))
+		}
+	}
+
+	for _, toolset := range t.ownedToolSets {
+		if err := toolset.StopIfStarted(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to stop owned toolset %s: %w", tools.DescribeToolSet(toolset), err))
 		}
 	}
 

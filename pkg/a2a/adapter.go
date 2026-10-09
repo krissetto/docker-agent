@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/host/invocation"
 	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/runtime"
 	runtimeclient "github.com/docker/docker-agent/pkg/runtime/client"
@@ -32,6 +33,10 @@ import (
 // When agentName is empty, the team's default agent (one explicitly named "root" if it
 // exists, otherwise the first agent declared) is used.
 func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string, registries ...runtime.SessionRuntime) (agent.Agent, error) {
+	return newDockerAgentAdapterWithLifetime(t, agentName, sessStore, safety, workingDir, nil, registries...)
+}
+
+func newDockerAgentAdapterWithLifetime(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string, lifetime *invocation.Group, registries ...runtime.SessionRuntime) (agent.Agent, error) {
 	a, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent %s: %w", agentName, err)
@@ -44,13 +49,25 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 		Name:        agentName,
 		Description: desc,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir, registries...)
+			return func(yield func(*adksession.Event, error) bool) {
+				invocationCtx, done, err := lifetime.Begin(ctx)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				defer done()
+				runDockerAgentWithLifetime(ctx.WithContext(invocationCtx), t, agentName, a, sessStore, safety, workingDir, lifetime, registries...)(yield)
+			}
 		},
 	})
 }
 
 // runDockerAgent executes a docker agent and returns ADK session events
 func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string, registries ...runtime.SessionRuntime) iter.Seq2[*adksession.Event, error] {
+	return runDockerAgentWithLifetime(ctx, t, agentName, a, sessStore, safety, workingDir, nil, registries...)
+}
+
+func runDockerAgentWithLifetime(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string, lifetime *invocation.Group, registries ...runtime.SessionRuntime) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
 		// Decorate the inbound `a2a.message` SERVER span (created by
 		// otelhttp.NewHandler in server.go) with the GenAI semconv
@@ -114,13 +131,13 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			sessionRuntime = registries[0]
 		}
 		if sessionRuntime == nil {
-			rt, err := runtime.NewLocalRuntime(ctx, t, runtime.WithSessionStore(sessStore), runtime.WithTracer(otel.Tracer(version.AppName)))
+			rt, err := runtime.NewLocalRuntime(context.WithoutCancel(ctx), t, runtime.WithSessionStore(sessStore), runtime.WithTracer(otel.Tracer(version.AppName)))
 			if err != nil {
 				yield(nil, fmt.Errorf("failed to create runtime: %w", err))
 				return
 			}
 			supervisor := runtime.NewSessionRuntimeSupervisor(rt)
-			defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+			defer lifetime.JoinCleanup(ctx, supervisor.Shutdown)
 			sessionRuntime = supervisor.Runtime()
 		}
 
@@ -215,6 +232,11 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 			}
 			return runtimeclient.TurnContinue, nil
 		})
+		var drainErr *turn.DrainError
+		if errors.As(termination.Err, &drainErr) {
+			// Retain invocation dependencies until the exact accepted turn settles.
+			_ = handle.AwaitTurn(context.WithoutCancel(ctx), ownedTurn.Submission.TurnID)
+		}
 		if termination.Err != nil {
 			if errors.Is(termination.Err, context.Canceled) && ctx.Ended() {
 				return

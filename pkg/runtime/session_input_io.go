@@ -22,8 +22,9 @@ func (d *sessionDriver) admitInput(ctx context.Context, msg QueuedMessage, op Se
 	return admission.queued, err
 }
 
-func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, steer bool) (admission inputAdmission, err error) {
-	msg, err = detachQueuedInput(msg)
+func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, steer bool) (inputAdmission, error) {
+	var admission inputAdmission
+	msg, err := detachQueuedInput(msg)
 	if err != nil {
 		return admission, err
 	}
@@ -93,6 +94,13 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				} else {
 					id, err = d.r.sessionStore.AddMessage(ctx, d.identityID, message)
 				}
+				if err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+					if appender, ok := d.r.sessionStore.(session.ItemAppender); ok {
+						reconcileCtx, cancel := context.WithTimeout(d.r.durabilityContext(), defaultSubagentPersistenceTimeout)
+						id, err = appender.AppendItem(reconcileCtx, d.identityID, "input:"+msg.RequestID, session.NewMessageItem(message))
+						cancel()
+					}
+				}
 				if errors.Is(err, session.ErrInputWithdrawn) {
 					return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: msg.RequestID, Operation: op, Detail: "input identity was withdrawn"}
 				}
@@ -108,14 +116,25 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 		}
 		return sessionIOReservation{write: write, commit: func(err error) error {
 			if err != nil {
+				if write != nil {
+					if d.ioLane.uncertainInputs == nil {
+						d.ioLane.uncertainInputs = make(map[string]bool)
+					}
+					d.ioLane.uncertainInputs[msg.RequestID] = true
+				}
 				return err
+			}
+			delete(d.ioLane.uncertainInputs, msg.RequestID)
+			admission.durable = msg.AcceptedPersisted
+			// The append receipt remains authoritative even after execution is fenced.
+			if !msg.Retry && msg.RequestID != "" {
+				msg.AcceptedPosition = d.sess.AddMessageAt(message)
 			}
 			if d.r.subagents != nil {
 				if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
 					return err
 				}
 			}
-			admission.durable = msg.AcceptedPersisted
 			if msg.RequestID != "" {
 				if d.inputFingerprints == nil {
 					d.inputFingerprints = make(map[string]string)
@@ -125,7 +144,6 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 				d.inputFingerprints[msg.RequestID] = hex.EncodeToString(hash[:])
 			}
 			if !msg.Retry && msg.RequestID != "" {
-				msg.AcceptedPosition = d.sess.AddMessageAt(message)
 				d.events.PublishForRequest(d.identityID, msg.RequestID, inputEventMetadata(PendingUserMessageAccepted(d.identityID, msg.RequestID, msg.Content, msg.MultiContent, msg.AcceptedPosition), msg))
 			} else if msg.Retry {
 				if d.recentRetries == nil {
@@ -153,8 +171,12 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			return nil
 		}}, nil
 	})
+	if err != nil {
+		// A canceled caller must not read acknowledgement-owned result storage.
+		return inputAdmission{}, err
+	}
 	admission.queued = queued
-	return admission, err
+	return admission, nil
 }
 
 func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume func(QueuedMessage)) error {
@@ -231,7 +253,6 @@ func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []Qu
 		}
 		d.steering = slices.DeleteFunc(d.steering, remove)
 		d.pending = slices.DeleteFunc(d.pending, remove)
-		drained = append(drained, msg)
 		d.refreshSteeringLocked()
 		d.notifyTurnChangedLocked()
 	}
@@ -240,8 +261,16 @@ func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []Qu
 			if err := d.ownerCall(ctx, func() error { consume(msg); return nil }); err != nil {
 				break
 			}
-		} else if err := d.promoteInput(ctx, msg.RequestID, consume); err != nil {
-			break
+			drained = append(drained, msg)
+		} else {
+			completed := make(chan QueuedMessage, 1)
+			if err := d.promoteInput(ctx, msg.RequestID, func(value QueuedMessage) {
+				consume(value)
+				completed <- value
+			}); err != nil {
+				break
+			}
+			drained = append(drained, <-completed)
 		}
 	}
 	return drained

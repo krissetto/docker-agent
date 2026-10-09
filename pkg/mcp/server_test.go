@@ -78,7 +78,7 @@ func TestCreateMCPServer_AcceptsAutonomousYAMLSafetyForStdio(t *testing.T) {
 	server, cleanup, err := createMCPServer(t.Context(), "testdata/autonomous.yaml", "root", &config.RuntimeConfig{})
 	require.NoError(t, err)
 	require.NotNil(t, server)
-	cleanup()
+	require.NoError(t, cleanup())
 }
 
 func TestHTTPBearerAuth(t *testing.T) {
@@ -223,7 +223,7 @@ func newTestHTTPHandler(t *testing.T) http.Handler {
 
 	server, cleanup, err := createMCPServer(t.Context(), "testdata/autonomous.yaml", "root", &config.RuntimeConfig{})
 	require.NoError(t, err)
-	t.Cleanup(cleanup)
+	t.Cleanup(func() { require.NoError(t, cleanup()) })
 
 	return newStreamableHTTPHandler(server)
 }

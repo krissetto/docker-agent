@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host/invocation"
 	"github.com/docker/docker-agent/pkg/host/turn"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -48,14 +49,14 @@ type HTTPOptions struct {
 	OnSafetyPolicy func(servesafety.Resolved)
 }
 
-func StartMCPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig) error {
+func StartMCPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig) (result error) {
 	slog.DebugContext(ctx, "Starting MCP server", "agent", agentFilename)
 
 	server, cleanup, err := createMCPServer(ctx, agentFilename, agentName, runConfig)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer func() { result = errors.Join(result, cleanup()) }()
 
 	slog.DebugContext(ctx, "MCP server starting with stdio transport")
 
@@ -67,7 +68,7 @@ func StartMCPServer(ctx context.Context, agentFilename, agentName string, runCon
 }
 
 // StartHTTPServer starts a streaming HTTP MCP server on the given listener
-func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig, ln net.Listener, options HTTPOptions) error {
+func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig, ln net.Listener, options HTTPOptions) (result error) {
 	// Fail fast, before any config or team loading: the stateless HTTP
 	// transport (MCP 2026-07-28) rejects server-initiated requests such as
 	// ping, so keep-alive can never work here.
@@ -85,10 +86,11 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 	if err != nil {
 		return fmt.Errorf("failed to load agents: %w", err)
 	}
+	lifetime := invocation.New(func() error { return t.StopToolSets(context.WithoutCancel(ctx)) })
 	defer func() {
-		if err := t.StopToolSets(ctx); err != nil {
-			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
-		}
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		result = errors.Join(result, lifetime.Close(drainCtx))
 	}()
 
 	selectedAgent, err := t.AgentOrDefault(agentName)
@@ -103,7 +105,7 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 		options.OnSafetyPolicy(resolvedSafety)
 	}
 
-	server, err := createMCPServerForTeam(ctx, t, agentFilename, agentName, runConfig, resolvedSafety.Policy, options.SessionRuntime)
+	server, err := createMCPServerForTeamWithLifetime(ctx, t, agentFilename, agentName, runConfig, resolvedSafety.Policy, lifetime, options.SessionRuntime)
 	if err != nil {
 		return err
 	}
@@ -131,9 +133,8 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 
 	select {
 	case <-ctx.Done():
-		// ctx is done; detach from its cancellation but keep its trace
-		// context so the graceful shutdown can still run. Bound it so a
-		// hung client connection can't block shutdown indefinitely.
+		lifetime.Fence()
+		// Transport shutdown alone is not invocation settlement.
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		return httpServer.Shutdown(shutdownCtx)
@@ -155,7 +156,7 @@ func newStreamableHTTPHandler(server *mcp.Server) http.Handler {
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
 }
 
-func createMCPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig) (*mcp.Server, func(), error) {
+func createMCPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig) (*mcp.Server, func() error, error) {
 	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return nil, nil, err
@@ -166,21 +167,21 @@ func createMCPServer(ctx context.Context, agentFilename, agentName string, runCo
 		return nil, nil, fmt.Errorf("failed to load agents: %w", err)
 	}
 
-	cleanup := func() {
-		if err := t.StopToolSets(ctx); err != nil {
-			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
-		}
+	lifetime := invocation.New(func() error { return t.StopToolSets(context.WithoutCancel(ctx)) })
+	cleanup := func() error {
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return lifetime.Close(drainCtx)
 	}
 
-	server, err := createMCPServerForTeam(ctx, t, agentFilename, agentName, runConfig, session.SafetyPolicyAutonomous)
+	server, err := createMCPServerForTeamWithLifetime(ctx, t, agentFilename, agentName, runConfig, session.SafetyPolicyAutonomous, lifetime)
 	if err != nil {
-		cleanup()
-		return nil, nil, err
+		return nil, nil, errors.Join(err, cleanup())
 	}
 	return server, cleanup, nil
 }
 
-func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, agentName string, runConfig *config.RuntimeConfig, safety session.SafetyPolicy, registries ...runtime.SessionRuntime) (*mcp.Server, error) {
+func createMCPServerForTeamWithLifetime(ctx context.Context, t *team.Team, agentFilename, agentName string, runConfig *config.RuntimeConfig, safety session.SafetyPolicy, lifetime *invocation.Group, registries ...runtime.SessionRuntime) (*mcp.Server, error) {
 	// The SDK only starts keep-alive when KeepAlive > 0. StartHTTPServer (and
 	// the CLI, for early UX) rejects a nonzero keep-alive, so this only ever
 	// takes effect for stdio: the stateless HTTP transport (MCP 2026-07-28)
@@ -236,7 +237,7 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 			OutputSchema: tools.MustSchemaFor[ToolOutput](),
 		}
 
-		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety, workingDir, registries...))
+		mcp.AddTool(server, toolDef, createToolHandlerWithLifetime(t, agentName, safety, workingDir, lifetime, registries...))
 	}
 
 	return server, nil
@@ -247,7 +248,16 @@ func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 }
 
 func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string, registries ...runtime.SessionRuntime) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+	return createToolHandlerWithLifetime(t, agentName, safety, workingDir, nil, registries...)
+}
+
+func createToolHandlerWithLifetime(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string, lifetime *invocation.Group, registries ...runtime.SessionRuntime) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input ToolInput) (result *mcp.CallToolResult, output ToolOutput, err error) {
+		ctx, done, err := lifetime.Begin(ctx)
+		if err != nil {
+			return nil, ToolOutput{}, err
+		}
+		defer done()
 		// Extract W3C trace context from `params._meta` (per the OTel
 		// MCP semconv) so the SERVER span chains onto the calling
 		// CLIENT span. Then start a `tools/call {agent}` SERVER span
@@ -291,12 +301,12 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			registry = registries[0]
 		}
 		if registry == nil {
-			rt, err := runtime.New(ctx, t, runtime.WithCurrentAgent(agentName), runtime.WithNonInteractive(true), runtime.WithTracer(otel.Tracer(version.AppName)))
+			rt, err := runtime.New(context.WithoutCancel(ctx), t, runtime.WithCurrentAgent(agentName), runtime.WithNonInteractive(true), runtime.WithTracer(otel.Tracer(version.AppName)))
 			if err != nil {
 				return nil, ToolOutput{}, fmt.Errorf("failed to create runtime: %w", err)
 			}
 			supervisor := runtime.NewSessionRuntimeSupervisor(rt)
-			defer func() { _ = supervisor.Shutdown(context.WithoutCancel(ctx)) }()
+			defer lifetime.JoinCleanup(ctx, supervisor.Shutdown)
 			registry = supervisor.Runtime()
 		}
 		handle, err := registry.CreateSession(ctx, sess, runtime.SessionBinding{AgentName: agentName})
@@ -320,6 +330,11 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			}
 			return runtimeclient.TurnContinue, nil
 		})
+		var drainErr *turn.DrainError
+		if errors.As(termination.Err, &drainErr) {
+			// Retain invocation dependencies until the exact accepted turn settles.
+			_ = handle.AwaitTurn(context.WithoutCancel(ctx), ownedTurn.Submission.TurnID)
+		}
 		if termination.Err != nil {
 			return nil, ToolOutput{}, fmt.Errorf("agent execution failed: %w", termination.Err)
 		}

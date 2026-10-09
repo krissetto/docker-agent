@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/host/invocation"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -58,7 +61,7 @@ type RunOptions struct {
 	CORSOrigin     string
 }
 
-func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) error {
+func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) (result error) {
 	slog.DebugContext(ctx, "Starting A2A server", "source", agentFilename, "agent", agentName, "addr", ln.Addr().String())
 
 	agentSource, err := sources.Resolve(agentFilename, nil)
@@ -70,10 +73,13 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	if err != nil {
 		return fmt.Errorf("failed to load agents: %w", err)
 	}
+	lifetime := invocation.New(func() error {
+		return t.StopToolSets(context.WithoutCancel(ctx))
+	})
 	defer func() {
-		if err := t.StopToolSets(ctx); err != nil {
-			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
-		}
+		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		result = errors.Join(result, lifetime.Close(drainCtx))
 	}()
 
 	selectedAgent, err := t.AgentOrDefault(agentName)
@@ -96,11 +102,16 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	if err != nil {
 		return fmt.Errorf("failed to open session store: %w", err)
 	}
-	defer func() {
-		if err := sessStore.Close(); err != nil {
-			slog.ErrorContext(ctx, "Failed to close session store", "error", err)
+	toolsStopped := false
+	lifetime = invocation.New(func() error {
+		if !toolsStopped {
+			if err := t.StopToolSets(context.WithoutCancel(ctx)); err != nil {
+				return err
+			}
+			toolsStopped = true
 		}
-	}()
+		return sessStore.Close()
+	})
 
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
@@ -110,14 +121,14 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 		return err
 	}
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
+	e, err := newServerWithLifetime(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options, lifetime)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
 
-	// Stop serving when ctx is canceled so Run returns and the deferred
-	// cleanups (session store, tool sets) release their resources.
+	// HTTP Close does not join the ADK task workers tracked by lifetime.
 	stop := context.AfterFunc(ctx, func() {
+		lifetime.Fence()
 		_ = e.Server.Close()
 	})
 	defer stop()
@@ -131,7 +142,11 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 }
 
 func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir, options.SessionRuntime)
+	return newServerWithLifetime(t, agentFilename, agentName, sessStore, safety, workingDir, listenAddr, options, nil)
+}
+
+func newServerWithLifetime(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions, lifetime *invocation.Group) (*echo.Echo, error) {
+	adkAgent, err := newDockerAgentAdapterWithLifetime(t, agentName, sessStore, safety, workingDir, lifetime, options.SessionRuntime)
 	if err != nil {
 		return nil, err
 	}

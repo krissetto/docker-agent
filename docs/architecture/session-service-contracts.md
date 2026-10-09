@@ -23,6 +23,18 @@ supervisor and calls `Shutdown`; stores remain caller-owned. A supplied team,
 backend or transport also retains its own lifecycle owner: service shutdown is
 not a universal resource destructor.
 
+A handle's immutable creation-agent binding is distinct from its current active
+agent. Capabilities resolve the canonical active agent, model and binding revision,
+not the age of the handle or runtime-global selection. Results resolved across a
+binding change fail stale validation; skill-operation events retain the active
+agent captured at admission. Settled snapshot replacement cannot change creation
+identity or the active model override and invalidates earlier binding revisions.
+
+Creating an existing bound durable root loads its canonical stored state when
+cold, rather than adopting the caller's transcript or safety defaults. Explicit
+agent, model, origin, source or parent conflicts fail. Resident retries retain
+owner state; cold child attachment still requires the prepared ancestry route.
+
 ## Persistence and turn evidence
 
 Resident metadata writes use the session owner's reserved I/O lane. Detached
@@ -104,16 +116,57 @@ execution token or a durable event log.
 
 Shared toolsets use stable callback dispatchers that resolve elicitation,
 sampling and OAuth ownership from the operation's `tools.HandlerScope`.
-Missing scopes fail closed. Scoped MCP callbacks without an unambiguous causal
-call identity, including unsolicited callbacks, are rejected rather than routed
-to whichever runtime most recently installed a handler. Legacy direct setters
-remain a single-owner integration boundary. Subscription APIs are required for
-custom notifiers/RAG integrations; unsupported opaque todo composites or extra
+Missing scopes fail closed. MCP callback ownership is established in two ways:
+response-derived `InputRequests` fulfilled inline by the installed SDK retain a
+private exact-operation context marker; older reverse JSON-RPC callbacks must
+explicitly echo the originating `tools/call` capability described below. Both
+paths validate active call membership, exact SDK session, connection generation
+and cancellation before elicitation or either sampling handler. Temporal
+activity (even a sole in-flight call) and connection-level scopes never confer
+ownership. Legacy direct setters remain a single-owner integration boundary,
+but cannot bypass this MCP causal validation. Callback contexts retain the
+originating operation's scope, including an explicit `WithoutHandlerScope` opt-out;
+causal ownership does not install or re-enable a scoped handler. Subscription APIs
+are required for custom notifiers/RAG integrations; unsupported opaque todo composites or extra
 toolsets without binding fail explicitly. Unsolicited tool-list notifications
 retain their subscribed agent identity; a shared toolset fans out to every
 affected agent in each runtime, without inferring a session from global current
 selection. Memory accepts an injected backend
 factory; selecting one does not create a native directory as a side effect.
+
+#### MCP callback interoperability
+
+The public metadata key `docker-agent.dev/callback-token` has a JSON string
+value. Each `tools/call` carries a fresh cryptographically random capability in
+`params._meta`; input metadata maps are copied rather than modified. A
+cooperating server implementing reverse elicitation or sampling copies that
+string into the callback's `params._meta`:
+
+```go
+meta := mcp.Meta{
+    "docker-agent.dev/callback-token": req.Params.Meta["docker-agent.dev/callback-token"],
+}
+result, err := req.Session.Elicit(ctx, &mcp.ElicitParams{
+    Meta: meta, Message: "Confirm deployment?",
+})
+```
+
+The same key applies to both sampling variants. Missing, non-string, unknown,
+expired or foreign-session capabilities are rejected **before** any registered
+handler runs. Capabilities expire when the call completes, its owning context
+is canceled (including resource-owner retirement), or the connection closes or
+changes generation. They authorize only callbacks for that active tool call,
+not API access, OAuth, tool execution or other host handlers. Tokens are removed
+from metadata before dispatch to application handlers; integrations must never
+log, persist, put them in transcripts, or treat them as API/bearer credentials.
+
+Stock modern servers returning response-derived `InputRequests` need no token
+echo: the installed SDK fulfills those inline with the exact private outgoing
+call context. Stock older servers sending untagged reverse callbacks receive an
+error (no prompt or sampling/provider invocation), even with only one active
+operation; ordinary tool calls remain supported. Explicit echo is a cooperating
+server protocol, not proof against a server that knowingly misuses another
+active call's capability. Connection isolation alone is not callback causality.
 
 Startup tool-info projection admits at most **64 subscribers per agent** and
 retains at most **128 history events**; each live subscriber queue also caps at
@@ -191,8 +244,11 @@ must not substitute deletion or cancellation for subtree stop.
   replay currently projects user/assistant text, not complete tool or multimodal
   history. Delegated filesystem clients own final I/O race containment.
 - MCP and A2A adapters may borrow a registry without shutting it down. Their
-  default invocation-local supervisors are explicitly owned and drained. This
-  does not transfer shared team/transport ownership to each invocation.
+  default invocation-local supervisors are explicitly owned and drained. Server
+  teardown fences new invocations and joins accepted workers before closing
+  owned dependencies. A drain deadline retains that ownership and returns a
+  retriable drain error, not permission to close dependencies early. This does
+  not transfer shared team/transport ownership to each invocation.
 - Board uses canonical snapshots/events, interaction IDs and native attachment;
   cards reflect paused/attention state. Destructive card/worktree cleanup first
   attempts a bounded subtree stop and retains the card on failure. Only verified

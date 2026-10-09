@@ -298,8 +298,11 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 		depth := 0
 		canonical := snap.Epoch != ""
 		if canonical {
+			if snap.State == "running" || snap.State == "cancelling" {
+				depth = 1
+			}
 			switch {
-			case snap.Paused:
+			case snap.Paused || len(snap.InteractionIDs) > 0:
 				c.setStatus(cardID, StatusPaused)
 			case snap.State == "running" || snap.State == "cancelling":
 				depth = 1
@@ -314,11 +317,13 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 		// applied immediately (the error event is delivered reliably, the
 		// stream_stopped that follows is not), and cleared when the
 		// outermost stop reports a "normal" completion or a new turn begins.
-		failed := false
-		// paused marks that the run loop is blocked on /pause. There is no
-		// matching resume event, so any subsequent event — the loop emits
-		// nothing while blocked — means the session resumed.
-		paused := false
+		failed := canonical && snap.LastError != ""
+		// Explicit pause and outstanding interactions have independent lifetimes.
+		paused := snap.Paused
+		outstanding := make(map[string]bool)
+		for _, id := range snap.InteractionIDs {
+			outstanding[id] = true
+		}
 
 		// Events at or below the snapshot's seq are replayed history. Their
 		// intermediate statuses must not be broadcast on every reconnect — a
@@ -335,6 +340,9 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 			}
 		}
 		setStatus := func(status CardStatus) {
+			if paused || len(outstanding) > 0 {
+				status = StatusPaused
+			}
 			if replaying {
 				replayStatus = status
 			} else {
@@ -359,12 +367,19 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 				}
 				depth = 0
 				failed = baseline.LastError != ""
+				if baseline.State == "running" || baseline.State == "cancelling" {
+					depth = 1
+				}
 				paused = baseline.Paused
+				outstanding = make(map[string]bool)
+				for _, id := range baseline.InteractionIDs {
+					outstanding[id] = true
+				}
 				if baseline.Title != "" {
 					c.setTitle(cardID, baseline.Title)
 				}
 				switch {
-				case paused:
+				case paused || len(outstanding) > 0:
 					setStatus(StatusPaused)
 				case baseline.State == "running" || baseline.State == "cancelling":
 					depth = 1
@@ -387,16 +402,22 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 				failed = false
 			case eventStreamStarted:
 				failed = false
-				paused = false
+				if !canonical {
+					paused = false
+				}
 				c.setExpectTurn(cardID, false) // the expected turn arrived
 				depth++
 				setStatus(StatusRunning)
 			case eventError:
 				failed = true
-				paused = false
+				if !canonical {
+					paused = false
+				}
 				setStatus(StatusError)
 			case eventStreamStopped:
-				paused = false
+				if !canonical {
+					paused = false
+				}
 				if depth > 0 {
 					depth--
 				}
@@ -413,8 +434,31 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 					}
 				}
 			case eventInteraction:
-				paused = true
+				outstanding[ev.InteractionID] = true
 				setStatus(StatusPaused)
+			case eventInteractionResolved:
+				if !outstanding[ev.InteractionID] {
+					break
+				}
+				delete(outstanding, ev.InteractionID)
+				switch {
+				case depth > 0:
+					setStatus(StatusRunning)
+				case failed:
+					setStatus(StatusError)
+				default:
+					setStatus(StatusWaiting)
+				}
+			case eventPauseChanged:
+				paused = ev.Paused
+				switch {
+				case depth > 0:
+					setStatus(StatusRunning)
+				case failed:
+					setStatus(StatusError)
+				default:
+					setStatus(StatusWaiting)
+				}
 			case eventRuntimePaused:
 				paused = true
 				setStatus(StatusPaused)
@@ -423,9 +467,8 @@ func (c *controller) watch(ctx context.Context, cardID string) {
 					c.setTitle(cardID, ev.Title)
 				}
 			default:
-				// The run loop emits nothing while blocked on /pause, so any
-				// other event means the session resumed mid-turn.
-				if paused {
+				// Legacy streams have no explicit pause transition event.
+				if paused && !canonical {
 					paused = false
 					setStatus(StatusRunning)
 				}
