@@ -30,20 +30,20 @@ func TestTeam(t *testing.T) {
 		toolsets  []string
 		readFile  bool
 	}{
-		{"root", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", []string{"director", "engineer", "designer", "reviewer"}, []string{"filesystem", "shell", "todo"}, false},
+		{"root", "openai", "gpt-6-astra", "gpt-6-astra", "medium", []string{"director", "engineer", "designer", "reviewer"}, []string{"shell", "todo"}, false},
 		{"director", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"shell"}, false},
-		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell", "todo"}, true},
-		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"filesystem", "shell", "todo"}, false},
-		{"reviewer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"filesystem", "shell"}, false},
+		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"shell", "todo"}, false},
+		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"shell", "todo"}, false},
+		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", []string{"designer"}, []string{"shell", "todo"}, false},
+		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"shell", "filesystem", "todo"}, true},
+		{"reviewer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"shell"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
 			require.True(t, ok)
 			assert.Empty(t, a.SubAgents)
-			assert.Equal(t, []string{"AGENTS.md", "ASYNC_AGENT_KIT.md"}, a.AddPromptFiles)
-			assert.Equal(t, expected.name == "root" || expected.name == "engineer" || expected.name == "designer", a.Skills.Enabled())
+			assert.Empty(t, a.AddPromptFiles)
+			assert.False(t, a.Skills.Enabled())
 			assert.Equal(t, expected.model, a.Model)
 			model, ok := cfg.Models[a.Model]
 			require.True(t, ok)
@@ -60,7 +60,7 @@ func TestTeam(t *testing.T) {
 			require.Len(t, a.Toolsets, len(expected.toolsets))
 			for i, toolset := range a.Toolsets {
 				assert.Equal(t, expected.toolsets[i], toolset.Type)
-				if i == 0 && expected.readFile {
+				if toolset.Type == "filesystem" && expected.readFile {
 					assert.Equal(t, []string{"read_file"}, toolset.Tools)
 				} else {
 					assert.Empty(t, toolset.Tools)
@@ -107,10 +107,10 @@ func TestTeamGuidance(t *testing.T) {
 		name     string
 		guidance []string
 	}{
-		{"root", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the maker explicitly asks"}},
-		{"director", []string{"use engineer more often than designer", "short, standalone goal", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
+		{"root", []string{"use engineer more often than designer", "only when the maker explicitly asks"}},
+		{"director", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
 		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
-		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "not for every ui edit"}},
+		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "directly recruit the declared designer subagent", "not routine ui delegation", "engineer retains implementation and integration ownership", "define file boundaries before assigning designer coding work", "other recruitment and material scope changes go through the assigning lead"}},
 		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change"}},
 		{"reviewer", []string{"only when the user explicitly asks", "never as a routine gate"}},
 	} {
@@ -120,6 +120,14 @@ func TestTeamGuidance(t *testing.T) {
 			instruction := strings.Join(strings.Fields(strings.ToLower(a.Instruction)), " ")
 			for _, guidance := range expected.guidance {
 				assert.Contains(t, instruction, guidance)
+			}
+			if expected.name == "root" || expected.name == "director" {
+				for _, guidance := range []string{"a task is a few plain sentences, like a message to a teammate", "what needs doing, what to bring back, and only the facts that would change what they do", "a clear request may be the whole assignment", "explicit requirements", "leave the approach"} {
+					assert.Contains(t, instruction, guidance)
+				}
+				for _, checklist := range []string{"success criteria", "standalone goal", "don't copy your roster"} {
+					assert.NotContains(t, instruction, checklist)
+				}
 			}
 			if expected.name == "root" || expected.name == "director" || expected.name == "engineer" || expected.name == "designer" {
 				for _, guidance := range []string{"simplicity", "safety or correctness", "single-line commit subjects", "descriptive branch names", "unless the user explicitly asks"} {

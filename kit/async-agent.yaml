@@ -1,8 +1,8 @@
 # syntax=docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09
 schemaVersion: "3"
 kind: workload
-displayName: Custom Docker Agent async subagents
-description: Static Docker Agent with the seven-agent async hackerspace team.
+displayName: krissetto's Docker Agent hack with async subagents
+description: krissetto's Docker Agent hack with an opinionated agent team
 sourceUrl: https://github.com/docker/docker-agent
 licenses: [Apache-2.0]
 version: "${{ kit.args.kitVersion }}"
