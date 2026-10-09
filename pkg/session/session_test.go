@@ -301,7 +301,7 @@ func TestGetMessages_AsyncSubagentHarnessPromptFirst(t *testing.T) {
 	require.Len(t, messages, 3)
 
 	assert.True(t, strings.HasPrefix(messages[0].Content, "# Async subagents"))
-	assert.Contains(t, strings.Join(strings.Fields(messages[0].Content), " "), "Write to a colleague you respect")
+	assert.Contains(t, strings.Join(strings.Fields(messages[0].Content), " "), "message a capable colleague")
 	assert.Contains(t, messages[0].Content, "- worker: Does work")
 	assert.Equal(t, "user instructions", messages[1].Content)
 	assert.Contains(t, messages[2].Content, "Todo Tools")

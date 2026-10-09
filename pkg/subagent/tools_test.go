@@ -81,13 +81,14 @@ func TestInstructionsExplainDelegationAndLifecycle(t *testing.T) {
 	for _, semantic := range []string{
 		// The task is the child's whole world.
 		"sees only your task, not this conversation",
-		"Write a standalone assignment: goal and why, paths, constraints",
-		`what "done" looks like`,
-		"relevant findings, error output, decisions and plan steps in full",
-		"Supply facts rather than unexplained references to earlier work, decisions or teams",
+		"message a capable colleague",
+		"a few plain sentences on what needs doing and what to bring back",
+		"any fact they can't find themselves that would change what they do",
+		"Point at paths rather than pasting",
+		"if something from earlier matters, one sentence covers it",
 		"Mention concurrent work only as a concrete dependency or ownership boundary",
-		"a colleague you respect",
-		"room for pushback",
+		"A clear request may be the whole assignment",
+		"web/src/Login.tsx",
 		// Delegation threshold, parallelism, and ownership.
 		"specialization or substantial independent work justifies the coordination cost",
 		"handle small tasks directly",
@@ -131,7 +132,7 @@ func TestInstructionsExplainDelegationAndLifecycle(t *testing.T) {
 		assert.Contains(t, instr, name, "instructions mention %s", name)
 	}
 	// No bureaucratic register: the model mirrors the tone it is instructed in.
-	for _, rejected := range []string{"work card", "nonredundant", "material gaps", "synthesis", "grant autonomy", "independent pieces of work? start several subagents"} {
+	for _, rejected := range []string{"work card", "nonredundant", "material gaps", "synthesis", "grant autonomy", "independent pieces of work? start several subagents", "everything it needs", "in full", "standalone"} {
 		assert.NotContains(t, strings.ToLower(normalized), rejected)
 	}
 }
@@ -150,7 +151,8 @@ func TestSpawnDefinitionRequiresSelfContainedTask(t *testing.T) {
 
 	description := strings.Join(strings.Fields(spawn.Description), " ")
 	assert.Contains(t, description, "It sees only task")
-	assert.Contains(t, description, "write it like a message to a colleague")
+	assert.Contains(t, description, "like a message to a colleague")
+	assert.NotContains(t, description, "everything it needs")
 	assert.NotContains(t, description, "rationale")
 	assert.NotContains(t, description, "validation")
 }
