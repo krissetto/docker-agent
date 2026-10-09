@@ -47,7 +47,7 @@ func TestKitBuildInputIsolation(t *testing.T) {
 		"!pkg/modelsdev/snapshot.json", "!pkg/modelsdev/snapshot_date.txt",
 		"!pkg/safety/safety_patterns.json", "!pkg/tools/builtin/mcpcatalog/servers.json",
 		"!pkg/tui/styles/themes/*.yaml",
-		"!kit/launch.sh", "!kit/hackerspace.yaml", "!kit/user-config.yaml",
+		"!kit/start.sh", "!kit/launch.sh", "!kit/hackerspace.yaml", "!kit/user-config.yaml",
 		"**/*_test.go", "**/testdata/**", "**/fixtures/**",
 	}, rules)
 }

@@ -83,6 +83,7 @@ type runExecFlags struct {
 	remoteAuthTokenFile string
 	remoteWorkingDir    string
 	managedAPI          bool
+	managedAPIAttach    bool
 	managedAPIStateDir  string
 	modelOverrides      []string
 	promptFiles         []string
@@ -203,6 +204,8 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVar(&flags.remoteAuthTokenFile, "remote-auth-token-file", "", "Read remote API bearer token from a private file")
 	cmd.PersistentFlags().StringVar(&flags.remoteWorkingDir, "remote-working-dir", "", "Select a working directory on the remote server (not a local path)")
 	cmd.PersistentFlags().BoolVar(&flags.managedAPI, "managed-api", false, "Start or reuse a private managed API server")
+	cmd.PersistentFlags().BoolVar(&flags.managedAPIAttach, "managed-api-attach", false, "Attach to a lifecycle-owned managed API without starting it")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api-attach")
 	cmd.PersistentFlags().StringVar(&flags.managedAPIStateDir, "managed-api-state-dir", "", "Private managed API state directory")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api")
 	_ = cmd.PersistentFlags().MarkHidden("managed-api-state-dir")
@@ -307,6 +310,17 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 	if f.remoteAddress == "" && !f.managedAPI && (f.remoteAuthTokenFile != "" || f.remoteWorkingDir != "") {
 		return errors.New("--remote-auth-token-file and --remote-working-dir require --remote")
+	}
+	if os.Getenv("ASYNC_AGENT_KIT_CONNECTION") == "1" && (!f.managedAPI || !f.managedAPIAttach) {
+		return errors.New("Kit connections must attach to the lifecycle-owned API; managed mode cannot be disabled")
+	}
+	if f.managedAPIAttach {
+		if !f.managedAPI {
+			return errors.New("--managed-api-attach requires --managed-api")
+		}
+		if err := validateManagedAttachFlags(cmd); err != nil {
+			return err
+		}
 	}
 	if !f.managedAPI && f.managedAPIStateDir != "" {
 		return errors.New("--managed-api-state-dir requires --managed-api")

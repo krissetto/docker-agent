@@ -19,18 +19,25 @@ import (
 func newSessionsListCmd() *cobra.Command {
 	var sessionDB string
 	var quiet bool
-	var managed bool
+	var managed, attach bool
 	var stateDir, workingDir, remote, tokenFile string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List resumable sessions, newest first",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if attach && !managed {
+				return errors.New("--managed-api-attach requires --managed-api")
+			}
 			var ids []string
 			var err error
 			switch {
 			case managed:
-				ids, err = managedSessionIDs(cmd.Context(), stateDir, workingDir)
+				if attach {
+					ids, err = attachedManagedSessionIDs(cmd.Context(), stateDir, workingDir)
+				} else {
+					ids, err = managedSessionIDs(cmd.Context(), stateDir, workingDir)
+				}
 			case remote != "":
 				ids, err = remoteSessionIDs(cmd.Context(), remote, tokenFile, "", "")
 			default:
@@ -59,6 +66,7 @@ func newSessionsListCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&sessionDB, "session-db", "s", "", "Path to the session database (default: <data-dir>/session.db)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Print only full session IDs, one per line")
 	cmd.Flags().BoolVar(&managed, "managed-api", false, "List sessions from the workspace managed API")
+	cmd.Flags().BoolVar(&attach, "managed-api-attach", false, "List from a lifecycle-owned API without starting it")
 	cmd.Flags().StringVar(&stateDir, "managed-api-state-dir", "", "Private managed API state directory")
 	cmd.Flags().StringVar(&workingDir, "working-dir", "", "Managed API workspace (default: current directory)")
 	cmd.Flags().StringVar(&remote, "remote", "", "List sessions from this API address")

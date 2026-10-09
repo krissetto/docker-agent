@@ -1,4 +1,4 @@
-# syntax=docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09
+# syntax=docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557
 schemaVersion: "3"
 kind: workload
 displayName: krissetto's Docker Agent hack with async subagents
@@ -15,6 +15,18 @@ args:
     pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
     buildArg: ASYNC_AGENT_KIT_VERSION
     description: Kit packaging version, not the Docker Agent application version.
+  team:
+    default: "auto"
+    env: ASYNC_AGENT_KIT_TEAM
+    description: Creation-bound guest team path; auto selects workspace hackerspace.yaml then bundled team.
+  model:
+    default: ""
+    env: ASYNC_AGENT_KIT_MODEL
+    description: Creation-bound team-wide model override; empty retains team models.
+  stateDir:
+    default: "/home/agent/.cagent/managed-api"
+    env: ASYNC_AGENT_KIT_STATE_DIR
+    description: Creation-bound private managed API state base, outside the workspace.
   diagnostics:
     default: "off"
     enum: ["off", "on"]
@@ -86,7 +98,7 @@ capabilities:
       prompt: ["--exec", "--", "{{.Prompt}}"]
       resume: ["--exec", "--session", "{{.SessionID}}"]
       continue: ["--exec", "--session=-1"]
-      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
   - type: com.docker.sandbox/agent-interactive-sessions@1
     optional: true
     config:
@@ -94,7 +106,7 @@ capabilities:
       resume: ["--session", "{{.SessionID}}"]
       continue: ["--session=-1"]
       newSession: []
-      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
   - type: com.docker.sandbox/agent-context@1
     optional: true
     config:
@@ -113,9 +125,7 @@ capabilities:
       unrestricted: false
       sign: [git]
   - type: com.docker.sandbox/long-running@1
-    optional: true
   - type: com.docker.sandbox/lifecycle@1
-    optional: true
     config:
       install:
         - command:
@@ -148,3 +158,31 @@ capabilities:
           user: agent
           env: [ASYNC_AGENT_KIT_DIAGNOSTICS]
           description: Atomically refresh the same startup marker when diagnostics are enabled.
+        - command: ["/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}"]
+          user: agent
+          background: true
+          env:
+            - ASYNC_AGENT_KIT_TEAM
+            - ASYNC_AGENT_KIT_MODEL
+            - ASYNC_AGENT_KIT_STATE_DIR
+            - OPENAI_API_KEY
+            - ANTHROPIC_API_KEY
+            - GOOGLE_API_KEY
+            - GH_TOKEN
+            - HTTP_PROXY
+            - HTTPS_PROXY
+            - NO_PROXY
+            - http_proxy
+            - https_proxy
+            - no_proxy
+            - SSL_CERT_FILE
+            - SSL_CERT_DIR
+            - SANDBOX_VM_ID
+            - SSH_AUTH_SOCK
+            - BASH_ENV
+            - XDG_CACHE_HOME
+            - TMPDIR
+            - DOCKER_AGENT_CONFIG_DIR
+            - DOCKER_AGENT_TOOLS_DIR
+            - DOCKER_AGENT_AUTO_INSTALL
+          description: Own the foreground authenticated workspace API until sandbox stop.

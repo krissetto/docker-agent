@@ -280,7 +280,8 @@ func TestRemoteExecUsesCanonicalSession(t *testing.T) {
 					fmt.Fprint(w, `{"version":1,"session_api_version":2,"instance_id":"test","capabilities":["session_explicit_ids"]}`)
 				case r.URL.Path == "/api/agents/team.yaml":
 					fmt.Fprint(w, `{"agents":[{"name":"bound-agent"}]}`)
-				case strings.HasSuffix(r.URL.Path, "/status"):
+				case r.URL.Path == api.SessionAPIPath+"/"+id && r.Method == http.MethodGet:
+					assert.Equal(t, "prepare-info", r.URL.Query().Get("view"))
 					if mode == "missing" {
 						w.WriteHeader(http.StatusNotFound)
 						fmt.Fprint(w, `{"error":"not_found"}`)
@@ -291,7 +292,17 @@ func TestRemoteExecUsesCanonicalSession(t *testing.T) {
 						fmt.Fprint(w, `{"error":"forbidden"}`)
 						return
 					}
-					fmt.Fprintf(w, `{"metadata":{"session_id":%q,"agent_name":"bound-agent","model":"saved-model"},"status":{"session_id":%q}}`, id, id)
+					info := runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id, Session: sess, ActiveAgentName: "bound-agent", Binding: runtime.SessionBinding{AgentName: "bound-agent", Model: "saved-model"}, WorkingDir: sess.WorkingDir}
+					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"version": 2, "view": "prepare-info", "info": info}))
+				case r.URL.Path == api.SessionAPIPath+"/"+id && r.Method == http.MethodPatch:
+					assert.Equal(t, "selected", mode)
+					assert.Equal(t, "open-view", r.URL.Query().Get("view"))
+					var edit runtime.SessionEdit
+					if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&edit)) {
+						return
+					}
+					assert.Equal(t, runtime.SessionEditOpenView, edit.Kind)
+					writeReadyOpening(t, w, runtime.PreparedSessionViewInfo{SessionID: id, RootSessionID: id, Session: sess, ActiveAgentName: "bound-agent", Binding: runtime.SessionBinding{AgentName: "bound-agent", Model: "saved-model"}, WorkingDir: sess.WorkingDir})
 				case r.URL.Path == api.SessionAPIPath && r.Method == http.MethodPost:
 					creates.Add(1)
 					var request api.SessionCreateRequest

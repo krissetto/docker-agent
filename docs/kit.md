@@ -53,14 +53,12 @@ ending in **`kagent`**, not `docker-agent`: v3 registration uses the final repos
 component and otherwise collides with built-in `docker-agent`.
 
 The descriptor pins the published development frontend for specification commit
-[`4be7f4dff4d647f10c51dcdb392ce3fa18dc3e96`](https://github.com/docker/sandbox-kit-spec/commit/4be7f4dff4d647f10c51dcdb392ce3fa18dc3e96):
-`docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09`.
-Checked on 2026-10-08, this is the current upstream specification, newer than the
-latest tagged milestone [`v3.0.0-m.8`](https://github.com/docker/sandbox-kit-spec/releases/tag/v3.0.0-m.8)
-(commit `129be2ff45e8f9463450eb3cf04ddcb52c2b76e5`). Main commits publish short-SHA
-frontend tags rather than moving floating `:3`. Anonymous registry metadata
-confirmed the immutable amd64/arm64 OCI index digest; its published BuildKit
-provenance names the full specification commit and frontend version `4be7f4d`.
+[`a1d110de252bcc3cb2fa6d47fe37137a1a328b97`](https://github.com/docker/sandbox-kit-spec/commit/a1d110de252bcc3cb2fa6d47fe37137a1a328b97):
+`docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557`.
+GitHub remote HEAD was rechecked on 2026-10-09; the commit is dated 2026-10-08.
+Anonymous registry HTTP metadata confirmed the immutable Linux amd64/arm64 index
+digest. Build provenance was not separately inspected. Main commits publish
+short-SHA frontend tags rather than moving floating `:3`.
 
 This frontend emits the expanded descriptor, schema-version and capabilities
 annotations on both platform manifests and the top-level index. `task kit`
@@ -88,60 +86,99 @@ incur charges. Use a fresh workspace and sandbox name for changed builds:
 ```sh
 workspace="$HOME/async-agent-trial-1"
 mkdir "$workspace" &&
-sbx run --name async-agent-trial-1 "$KIT_REF" "$workspace" -- \
-  --model openai/ACCESSIBLE_MODEL
+sbx create --name async-agent-trial-1 \
+  --kit-arg model=openai/ACCESSIBLE_MODEL "$KIT_REF" "$workspace"
+sbx run --name async-agent-trial-1
 ```
 
-A global `--model` overrides every agent; omit it to use the bundled models.
-`ACCESSIBLE_MODEL` means a model your account can use. Append `--exec --dry-run`
-for initialization without a model turn; SBX may still require credentials.
-Intentionally reattach with the same name, model and team arguments:
-`sbx run --name async-agent-trial-1 -- --model openai/ACCESSIBLE_MODEL`.
+### Creation-bound server configuration
 
-The launcher uses workspace `hackerspace.yaml`, falling back to the bundled team.
-An explicit team must be the first argument after SBX's `--`:
+The Kit deliberately differs from standalone `docker-agent run`: workspace,
+team, model override and private state belong to **sandbox creation**, not each
+connection. A conforming `sbx@1` consumer maps the host workspace to the image's
+explicit `/workspace` WorkingDir. There is no alternate workspace argument.
+Startup explicitly changes to that path; it never assumes hook cwd.
+
+Create arguments are:
+
+| Kit argument | Default | Meaning |
+| --- | --- | --- |
+| `team` | `auto` | Workspace `hackerspace.yaml`, otherwise bundled team; or a readable guest file path relative to `/workspace` or absolute. |
+| `model` | empty | Team-wide model override, e.g. `openai/ACCESSIBLE_MODEL`; comma-separated targeted overrides follow the CLI's normal model syntax. Empty keeps team models. |
+| `stateDir` | `/home/agent/.cagent/managed-api` | Absolute private guest state base outside the mounted workspace. |
+| `diagnostics` | `off` | Local install/boot markers; no provider calls. |
+
+For a consumer supporting SBX's `--kit-arg` creation interface:
 
 ```sh
-sbx run "$KIT_REF" /path/project -- --team './my team.yaml' \
-  --model openai/ACCESSIBLE_MODEL
+sbx create --name async-agent-trial-1 \
+  --kit-arg model=openai/ACCESSIBLE_MODEL \
+  --kit-arg 'team=./my team.yaml' "$KIT_REF" /path/project
+sbx run --name async-agent-trial-1
+# Initialization without a model turn:
+sbx run --name async-agent-trial-1 -- --exec --dry-run
+# Reattach to retained history:
+sbx run --name async-agent-trial-1 -- --session=-1
 ```
 
-`--team=PATH` also works. Paths resolve inside the sandbox, not arbitrary host
-files. Missing, unreadable or non-file paths fail. Remaining arguments pass
-unchanged, including `--exec`, `--session ID`, `--session=-1` and prompts after `--`.
+Use only a model your account can access. Both required provider credential
+bindings remain required with a single-provider override. `team=auto` and no
+`model` argument retain the bundled/workspace defaults. Paths are guest paths,
+not arbitrary host files. Missing, unreadable and non-file team paths fail.
 
-### Persistent API and recovery
+Connection-time `--team` and `--model` are rejected: recreate with `team` and
+`model` respectively. `--managed-api-state-dir` cannot change the creation-bound
+base: recreate with `stateDir`. `--working-dir` is rejected: select the host
+workspace when creating the sandbox; its guest location is `/workspace`.
+Server-changing flags (`--env-from-file`, `--flavor`, `--models-gateway`,
+`--code-mode-tools`, runtime hook flags, `--mcp-oauth-redirect-uri`, explicit
+remote auth/workdir, `--listen`, `--session-workingdir-root`) are unsupported on
+Kit connections, with no corresponding Kit create argument. Use reviewed
+creation-time team/settings configuration or standalone CLI for those options.
+Managed fake/record, worktree and local database modes remain unsupported.
+`--exec`, `--dry-run`, `--session ID`, `--session=-1`, agent selection, prompts
+following `--`, and client `--safety` / `--yolo` remain connection options.
+Standalone managed/remote CLI flexibility is unchanged.
 
-The launcher runs the foreground TUI (or `--exec` client) with `--managed-api`.
-The Go helper starts or reuses one authenticated API server per sandbox workspace;
-concurrent launches serialize startup and verify server identity and readiness.
-The daemon has its own process group and private logs, with no terminal stdio.
-**Exiting or killing the TUI detaches the client, not accepted server work.** Use
-an explicit cancellation action to stop work. Reattach with `--session ID` or
-`--session=-1`; omitting these creates a new session.
+### Lifecycle-owned API and recovery
 
-The optional long-running integration allows background sandbox lifetime when the
-host grants it. It is not a supervisor or a guarantee the sandbox stays running.
-After a server or sandbox restart, launch again with the same team, models and
-startup options to recover durable session state on the retained sandbox disk.
-This does **not** promise uninterrupted tools, surviving in-memory execution, or
-automatic replay of interrupted side effects. Deleting the sandbox deletes its
-local state.
+Required `lifecycle@1` runs `start.sh` as agent on every boot with
+`background: true`. The script execs one **foreground** managed API, not a
+launcher that detaches another daemon. It freezes creation-bound team/models
+using the existing managed manifest, private token, canonical workspace hash,
+owner lock and database. No new mailbox or runtime owner is introduced.
+`launch.sh` waits up to 30 seconds for authenticated identity/readiness and
+attaches a TUI or headless client; session listing also attaches only. Neither
+starts/restarts an API or opens a local database. Missing hooks/dead servers
+fail clearly; restart the sandbox instead of relying on a connection fallback.
 
-Team instructions, models and referenced team configuration are frozen in a
-committed startup snapshot. Different team contents, models or startup options
-fail clearly rather than silently reconfiguring or killing existing work; this
-also applies after a restart. Use the original inputs or a separate private
-`--managed-api-state-dir /home/agent/.cagent/managed-api-other` for a deliberately
-separate server and session history. Workspace context files and skill contents
-remain live inputs, not frozen instructions: their configured loaders read them
-at the usual runtime discovery points. Changing files is not a guarantee that
-already-assembled prompts or running tools reload immediately.
+**Client exit detaches, not cancels accepted server work.** Explicit cancellation
+remains necessary to stop work. Required `long-running@1` prevents sandbox
+session-based auto-stop; it is not process supervision. After an API failure,
+explicit sandbox stop/start runs startup again. Durable session state and the
+stable token/endpoint survive on retained sandbox disk, but in-memory execution,
+interrupted tools and side effects are not automatically replayed. Deleting the
+sandbox deletes its local state.
 
-Managed mode currently rejects `--fake`, `--fake-stream-delay` and `--record`;
-it does not proxy a foreground fake/record provider. For deterministic provider
-fixtures, use a separately configured `serve api` daemon and an explicit remote
-client outside the kit launcher.
+Frozen team/model/startup changes fail rather than silently reconfiguring or
+killing existing work, including after restart. Retain original team inputs or
+create a separate sandbox/state base deliberately. Context/skills, if configured
+by the team, remain live discovery inputs, not frozen file contents.
+
+The spec's [creation-time environment expansion](https://github.com/docker/sandbox-kit-spec/blob/a1d110de252bcc3cb2fa6d47fe37137a1a328b97/docs/spec/SPEC-v3.md#61-final-container-environment)
+persists team/model/state argv for restart. Hook inheritance is deny-by-default:
+the descriptor lists credential sentinels, proxy/CA settings, approved SSH socket,
+config/tool paths and sandbox detection names explicitly; shell baseline is
+provided by the consumer. Real keys must never enter argv, snapshots or guest
+files. Arbitrary custom environment names/providers are not implicitly admitted;
+review and extend the descriptor before using them. No additional credential
+services, domains, permissions or host mounts are granted.
+
+**Live consumer support remains unverified.** The actual consumer must implement
+required lifecycle/background launch, workspace mapping, final-env expansion and
+runtime credential sentinel/proxy availability before the foreground process
+starts. An allowlist alone cannot make absent startup credentials available.
+Offline checks do not establish DAP/cloud/SBX conformance or model entitlement.
 
 ### API access and troubleshooting
 
@@ -156,8 +193,8 @@ authenticated non-loopback listener requires separate review; keep any host port
 binding loopback unless deliberately exposing it.
 
 Default managed state is under
-`/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/`. A custom
-`--managed-api-state-dir BASE` changes the base, not the workspace hash suffix.
+`/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/`. Creation-time
+`stateDir=BASE` changes the base, not the workspace hash suffix.
 The directory is agent-owned `0700`; private `0600` files include `token`,
 `manifest.json`, `server.json`, `server.log` and `session.db`. The manifest contains
 frozen configuration; logs and the database can contain sensitive session data.
@@ -171,18 +208,17 @@ ownership/modes and free disk space, and check that the original workspace and
 startup inputs are still available. Stale server metadata is recovered under
 locks; a mismatched identity or occupied endpoint fails without killing another
 process. A settings/custom database path is not a substitute for the managed
-state base. Session listing from the SBX workspace uses:
+state base. Session listing from inside the guest uses:
 
 ```sh
-/opt/async-agent/docker-agent sessions list --managed-api --quiet
+/opt/async-agent/docker-agent sessions list --managed-api --managed-api-attach \
+  --working-dir /workspace \
+  --managed-api-state-dir "$ASYNC_AGENT_KIT_STATE_DIR" --quiet
 ```
 
-Outside that directory supply `--working-dir /path/to/guest/workspace`; when using
-a custom state base supply the same `--managed-api-state-dir BASE`. Listing uses
-the active/committed server's source, not a newly selected default team. It may
-restart the committed server, but creates no sessions and opens no second local
-database. The descriptor uses the default state base; custom bases require the
-explicit list command.
+Both descriptor session surfaces use these explicit workspace/state inputs.
+Listing uses committed server source and creates no sessions; a dead API yields
+an error rather than restarting it or opening a second local database.
 
 ## Credentials and network
 
@@ -213,8 +249,9 @@ its token through `sbx secret set github --sandbox "$NAME" --command 'gh auth to
 SBX captures the output on the host. Do not print tokens or expose host CLI config
 to sandbox writes. Secret storage and approval of exact domain bindings are
 separate steps; noninteractive creation is not automatic approval. Successful
-startup does not prove authentication: the inspected SBX warns on missing
-required bindings but still withholds unapproved credentials.
+startup does not prove provider authentication. Actual startup sentinel delivery
+and proxy enforcement are unverified; conforming consumers must reject missing
+required bindings and withhold unapproved credentials.
 
 The base includes `gh` and `git`. Use credential-free HTTPS Git remotes; the proxy
 adapts GitHub authentication. Leave `GH_HOST` unset or `github.com`, not
@@ -253,19 +290,21 @@ provide filesystem isolation.
   mount may need to be replaced with a fresh sandbox. Keep SQLite WAL/FULL
   durability on sandbox-local Linux storage, not shared or network filesystems.
   Reusing old custom-branch databases is not guaranteed.
-- **Detached lifetime:** the API server survives TUI exit; optional host support
-  permits background sandbox lifetime, not process supervision or uninterrupted
-  execution across server/sandbox restarts.
+- **Detached lifetime:** the lifecycle-owned foreground API survives TUI exit;
+  required long-running support prevents session-based auto-stop, but does not
+  supervise/restart crashed processes or preserve interrupted execution.
 - **Sessions:** headless prompt `--exec -- PROMPT`, resume `--exec --session ID`,
   continue `--exec --session=-1`; interactive prompt `-- PROMPT`, resume
   `--session ID`, continue `--session=-1`, and a fresh session with no extra argv.
   Interactive invocations require a terminal. No dedicated startup picker is
-  declared. `/opt/async-agent/docker-agent sessions list --managed-api --quiet`
+  declared. The attach-only list command above
   lists root IDs newest first from the same server-owned history used by resume,
   without creating sessions or opening a second local database.
 - **Diagnostics:** off by default; `--kit-arg diagnostics=on` permits local markers
-  under `/home/agent/.local/state/async-agent-kit/probe`. Hooks run as agent without
-  network or credentials; install appends per invocation, startup replaces `ready`.
+  under `/home/agent/.local/state/async-agent-kit/probe`. Diagnostic hooks run as
+  agent without network or credentials; install appends per invocation, startup
+  replaces `ready`. This marker means the diagnostic hook
+  ran, not API readiness; authenticated API probing is separate.
 - **Settings:** [user-config.yaml](../kit/user-config.yaml) hides the banner,
   enables **YOLO (automatic tool approval)** and restores tabs within saved state.
   Config directories are agent-owned `0700`, settings `0600`. Ordinary Settings
@@ -278,7 +317,7 @@ the workspace. Do not combine this workload with built-in Docker Agent.
 ## Offline checks
 
 ```sh
-sh -n kit/launch.sh
+sh -n kit/launch.sh kit/start.sh
 go test -count=1 ./tests/kit
 go vet ./tests/kit
 ```

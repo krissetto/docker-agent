@@ -49,10 +49,10 @@ func readAPIAuthToken(path string) (string, error) { return readPrivateAuthToken
 // SQLite is opened. Its cleanup must run AFTER the session store is closed.
 func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 	noop := func() {}
-	if f.managedState == "" && f.managedManifest == "" {
+	if f.managedState == "" && f.managedManifest == "" && f.manifest == nil {
 		return noop, nil
 	}
-	if f.managedState == "" || f.managedManifest == "" {
+	if f.managedState == "" || (f.managedManifest == "" && f.manifest == nil) {
 		return nil, errors.New("managed state and manifest must be supplied together")
 	}
 	if err := managedPlatformSupported(); err != nil {
@@ -61,11 +61,13 @@ func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 	if err := managedPrivateDir(f.managedState); err != nil {
 		return nil, err
 	}
-	if filepath.Dir(f.managedManifest) != f.managedState || !strings.HasPrefix(filepath.Base(f.managedManifest), "candidate-") {
+	if f.manifest == nil && (filepath.Dir(f.managedManifest) != f.managedState || !strings.HasPrefix(filepath.Base(f.managedManifest), "candidate-")) {
 		return nil, errors.New("managed candidate must be inside private state directory")
 	}
 	// Each candidate belongs to exactly this spawn attempt, not another launcher.
-	defer os.Remove(f.managedManifest)
+	if f.managedManifest != "" {
+		defer os.Remove(f.managedManifest)
+	}
 	owner, ok, err := managedTryLock(filepath.Join(f.managedState, "owner.lock"))
 	if err != nil {
 		return nil, err
@@ -75,13 +77,16 @@ func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 	}
 	release := func() { _ = owner.Close() }
 	fail := func(err error) (func(), error) { release(); return nil, err }
-	data, err := managedRead(f.managedManifest)
-	if err != nil {
-		return fail(err)
-	}
-	m, err := snapshot.Parse(data)
-	if err != nil {
-		return fail(err)
+	m := f.manifest
+	if m == nil {
+		data, err := managedRead(f.managedManifest)
+		if err != nil {
+			return fail(err)
+		}
+		m, err = snapshot.Parse(data)
+		if err != nil {
+			return fail(err)
+		}
 	}
 	previous, err := managedReadManifest(f.managedState)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -128,7 +133,7 @@ func (f *apiFlags) prepareManagedDaemon() (func(), error) {
 	// Flavors have already been materialized in the immutable source graph.
 	f.runConfig.Flavors = nil
 	f.manifest = m
-	data, err = m.Marshal()
+	data, err := m.Marshal()
 	if err != nil {
 		return fail(err)
 	}

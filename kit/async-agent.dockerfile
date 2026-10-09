@@ -56,6 +56,7 @@ COPY --from=task --chown=root:root --chmod=0755 /task/task /usr/local/bin/task
 RUN install -d -m 0755 /usr/local/share/licenses /usr/local/share/licenses/task
 COPY --from=task --chown=root:root --chmod=0644 /task/LICENSE /usr/local/share/licenses/task/LICENSE
 COPY --chmod=0755 kit/launch.sh /opt/async-agent/launch.sh
+COPY --chmod=0755 kit/start.sh /opt/async-agent/start.sh
 COPY kit/hackerspace.yaml /opt/async-agent/hackerspace.yaml
 RUN install -d -m 0700 -o agent -g agent /home/agent/.config /home/agent/.config/cagent /home/agent/.cagent
 COPY --chown=agent:agent --chmod=0600 kit/user-config.yaml /home/agent/.config/cagent/config.yaml
@@ -63,6 +64,10 @@ ENV DOCKER_AGENT_AUTO_UPDATE=0 \
     DOCKER_AGENT_NO_TOUR=1 \
     DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 \
     TELEMETRY_ENABLED=false
+WORKDIR /workspace
+ENV ASYNC_AGENT_KIT_TEAM=auto \
+    ASYNC_AGENT_KIT_MODEL="" \
+    ASYNC_AGENT_KIT_STATE_DIR=/home/agent/.cagent/managed-api
 USER agent
 
 FROM runtime AS runtime-v3

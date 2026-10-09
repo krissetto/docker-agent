@@ -20,6 +20,7 @@
 !pkg/safety/safety_patterns.json
 !pkg/tools/builtin/mcpcatalog/servers.json
 !pkg/tui/styles/themes/*.yaml
+!kit/start.sh
 !kit/launch.sh
 !kit/hackerspace.yaml
 !kit/user-config.yaml

@@ -53,7 +53,7 @@ func TestExplicitDefaultWorkingDir(t *testing.T) {
 func TestKitLauncherKeepsImplicitWorkspaceOutOfNewTabDefault(t *testing.T) {
 	launcher, err := os.ReadFile("../../kit/launch.sh")
 	require.NoError(t, err)
-	require.Contains(t, string(launcher), `--managed-api "$@"`)
+	require.Contains(t, string(launcher), `--managed-api --managed-api-attach`)
 	require.False(t, strings.Contains(string(launcher), "--working-dir"), "the launcher's CWD is implicit; only user arguments may select a default")
 	flags := &runExecFlags{managedAPI: true, remoteAddress: "http://127.0.0.1:1234"}
 	sess := session.New(session.WithWorkingDir("/mounted/workspace"))

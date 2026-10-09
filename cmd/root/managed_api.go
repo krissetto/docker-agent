@@ -199,23 +199,33 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	if err != nil {
 		return "", err
 	}
-	source, err := sources.Resolve(agentFileName, f.runConfig.EnvProvider())
-	if err != nil {
-		return "", err
+	var manifest *snapshot.Manifest
+	if !f.managedAPIAttach {
+		manifest, err = f.managedSnapshot(ctx, agentFileName, workspace)
+		if err != nil {
+			return "", err
+		}
 	}
-	startup := snapshot.Startup{Snapshots: f.snapshotsEnabled, Workspace: workspace, SourceKey: agentFileName, ModelOverrides: f.modelOverrides, Runtime: f.runConfig.Config}
-	startup.Runtime.WorkingDir = workspace
-	manifest, err := snapshot.Snapshot(ctx, source, snapshot.Options{Startup: startup, Environment: f.runConfig.EnvProvider(), Resolve: func(ref string, env environment.Provider) (config.Source, error) { return sources.Resolve(ref, env) }})
-	if err != nil {
-		return "", err
+	if f.managedAPIAttach {
+		if bound := os.Getenv("ASYNC_AGENT_KIT_STATE_DIR"); bound != "" && filepath.Clean(bound) != filepath.Clean(f.managedAPIStateDir) {
+			return "", errors.New("Kit state directory is bound at creation; recreate with stateDir instead of --managed-api-state-dir")
+		}
 	}
 	dir, err := managedStateDir(f.managedAPIStateDir, workspace)
 	if err != nil {
 		return "", err
 	}
-	d, err := ensureManagedAPI(ctx, dir, manifest)
+	var d managedDescriptor
+	if f.managedAPIAttach {
+		d, err = attachManagedAPI(ctx, dir)
+	} else {
+		d, err = ensureManagedAPI(ctx, dir, manifest)
+	}
 	if err != nil {
 		return "", err
+	}
+	if d.Workspace != workspace {
+		return "", errors.New("managed API workspace identity mismatch")
 	}
 	f.remoteAddress = d.Address
 	f.remoteAuthTokenFile = filepath.Join(dir, "token")
@@ -223,6 +233,40 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	// Only clear after the daemon has authenticated its exact immutable inputs.
 	f.modelOverrides = nil
 	return d.Source, nil
+}
+
+func (f *runExecFlags) managedSnapshot(ctx context.Context, sourceKey, workspace string) (*snapshot.Manifest, error) {
+	source, err := sources.Resolve(sourceKey, f.runConfig.EnvProvider())
+	if err != nil {
+		return nil, err
+	}
+	startup := snapshot.Startup{Snapshots: f.snapshotsEnabled, Workspace: workspace, SourceKey: sourceKey, ModelOverrides: f.modelOverrides, Runtime: f.runConfig.Config}
+	startup.Runtime.WorkingDir = workspace
+	return snapshot.Snapshot(ctx, source, snapshot.Options{Startup: startup, Environment: f.runConfig.EnvProvider(), Resolve: func(ref string, env environment.Provider) (config.Source, error) { return sources.Resolve(ref, env) }})
+}
+
+// Attach never starts a process, commits configuration, or opens SQLite.
+func attachManagedAPI(ctx context.Context, dir string) (managedDescriptor, error) {
+	for {
+		m, err := managedReadManifest(dir)
+		if err == nil {
+			d, probeErr := managedReadDescriptor(dir)
+			if probeErr == nil {
+				probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+				probeErr = managedProbe(probeCtx, dir, d, m)
+				cancel()
+				if probeErr == nil {
+					return d, nil
+				}
+			}
+			err = probeErr
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return managedDescriptor{}, err
+		}
+		if pauseErr := managedPause(ctx); pauseErr != nil {
+			return managedDescriptor{}, fmt.Errorf("lifecycle-owned API is not authenticated and ready; no daemon was started; restart the sandbox and inspect %s: %w (last probe: %v)", filepath.Join(dir, "server.log"), pauseErr, err)
+		}
+	}
 }
 
 func managedCompatible(a, b *snapshot.Manifest) error {

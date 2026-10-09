@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,6 +38,9 @@ type apiFlags struct {
 	recordPath            string
 	authToken             string
 	authTokenFile         string
+	managedAPI            bool
+	managedAPIStateDir    string
+	modelOverrides        []string
 	managedState          string
 	managedManifest       string
 	manifest              *snapshot.Manifest
@@ -65,6 +69,11 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
 	cmd.PersistentFlags().StringVar(&flags.authTokenFile, "auth-token-file", "", "Private file containing the API bearer token")
 	cmd.MarkFlagsMutuallyExclusive("auth-token", "auth-token-file")
+	cmd.PersistentFlags().BoolVar(&flags.managedAPI, "managed-api", false, "Own the private workspace API in this foreground process")
+	cmd.PersistentFlags().StringVar(&flags.managedAPIStateDir, "managed-api-state-dir", "", "Private managed API state base")
+	cmd.PersistentFlags().StringArrayVar(&flags.modelOverrides, "model", nil, "Override managed team models")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api")
+	_ = cmd.PersistentFlags().MarkHidden("managed-api-state-dir")
 	cmd.PersistentFlags().StringVar(&flags.managedState, "managed-state", "", "Managed daemon state")
 	cmd.PersistentFlags().StringVar(&flags.managedManifest, "managed-manifest", "", "Managed daemon candidate manifest")
 	_ = cmd.PersistentFlags().MarkHidden("managed-state")
@@ -87,13 +96,39 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"api"}, args...), commandErr)
 	}()
 
+	if !f.managedAPI && (f.managedAPIStateDir != "" || len(f.modelOverrides) != 0) {
+		return errors.New("API --model and --managed-api-state-dir require --managed-api")
+	}
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	agentsPath := args[0]
+	if f.managedAPI {
+		if err := f.prepareForegroundManagedAPI(ctx, agentsPath); err != nil {
+			return err
+		}
+	}
 	releaseOwner, err := f.prepareManagedDaemon()
 	if err != nil {
 		return err
 	}
 	defer releaseOwner() // registered before store.Close: release ownership last
+	if f.managedAPI {
+		log, err := managedOpenPrivate(filepath.Join(f.managedState, "server.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND)
+		if err != nil {
+			return err
+		}
+		defer log.Close()
+		previousLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(log, nil)))
+		defer slog.SetDefault(previousLogger)
+		defer func() {
+			if commandErr != nil {
+				slog.ErrorContext(ctx, "Managed API stopped", "error", commandErr)
+			}
+		}()
+		cmd.SetOut(log)
+		cmd.SetErr(log)
+		out = cli.NewPrinter(log)
+	}
 	if f.authTokenFile != "" {
 		f.authToken, err = readAPIAuthToken(f.authTokenFile)
 		if err != nil {

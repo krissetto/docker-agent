@@ -179,14 +179,20 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "${{ kit.args.kitVersion }}", kit.Version)
 	assert.Equal(t, []string{"async-agent-kit@${{ kit.args.kitVersion }}"}, kit.Provides)
 	assert.Equal(t, "./async-agent.dockerfile", kit.Dockerfile)
-	require.Len(t, kit.Args, 2)
+	require.Len(t, kit.Args, 5)
 	assert.Equal(t, "0.1.0", kit.Args["kitVersion"]["default"])
 	assert.Equal(t, `^[0-9]+\.[0-9]+\.[0-9]+$`, kit.Args["kitVersion"]["pattern"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_VERSION", kit.Args["kitVersion"]["buildArg"])
+	assert.Equal(t, "auto", kit.Args["team"]["default"])
+	assert.Equal(t, "ASYNC_AGENT_KIT_TEAM", kit.Args["team"]["env"])
+	assert.Equal(t, "", kit.Args["model"]["default"])
+	assert.Equal(t, "ASYNC_AGENT_KIT_MODEL", kit.Args["model"]["env"])
+	assert.Equal(t, "/home/agent/.cagent/managed-api", kit.Args["stateDir"]["default"])
+	assert.Equal(t, "ASYNC_AGENT_KIT_STATE_DIR", kit.Args["stateDir"]["env"])
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:4be7f4d@sha256:1deea2a8edfff7e2a2749bc2e47b2fb15d91c39568a62860592e4dd7d8a43d09\n"))
+	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557\n"))
 	byType := make(map[string][]int)
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
@@ -200,7 +206,7 @@ func TestNativeKit(t *testing.T) {
 		switch capability.Type {
 		case "com.docker.sandbox/credential@1":
 			// Per-service requiredness and exact grants are checked in providers_test.go.
-		case "com.docker.sandbox/network-policy@1", "com.docker.sandbox/sbx@1":
+		case "com.docker.sandbox/network-policy@1", "com.docker.sandbox/sbx@1", "com.docker.sandbox/lifecycle@1", "com.docker.sandbox/long-running@1":
 			assert.False(t, capability.Optional)
 		default:
 			assert.True(t, capability.Optional, capability.Type)
@@ -220,7 +226,7 @@ func TestNativeKit(t *testing.T) {
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--exec", "--session", "{{.SessionID}}"},
 		"continue": []any{"--exec", "--session=-1"},
-		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"},
+		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
 	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
 	interactive := kit.Capabilities[byType["com.docker.sandbox/agent-interactive-sessions@1"][0]]
 	assert.Equal(t, map[string]any{
@@ -228,15 +234,17 @@ func TestNativeKit(t *testing.T) {
 		"resume":     []any{"--session", "{{.SessionID}}"},
 		"continue":   []any{"--session=-1"},
 		"newSession": []any{},
-		"list":       []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--quiet"},
+		"list":       []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
 	}, interactive.Config)
 	assert.Equal(t, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config["list"], interactive.Config["list"])
 	assert.NotContains(t, interactive.Config, "sessionPicker", "the CLI has no dedicated startup picker")
 	lifecycle := kit.Capabilities[byType["com.docker.sandbox/lifecycle@1"][0]]
-	assert.True(t, lifecycle.Optional)
+	assert.False(t, lifecycle.Optional)
 	require.Len(t, lifecycle.Config, 2)
 	recipe, err := os.ReadFile(kitPath(t, "async-agent.dockerfile"))
 	require.NoError(t, err)
+	assert.Contains(t, string(recipe), "WORKDIR /workspace")
+	assert.Contains(t, string(recipe), "COPY --chmod=0755 kit/start.sh /opt/async-agent/start.sh")
 	assert.Contains(t, string(recipe), "xx-go build")
 	assert.Contains(t, string(recipe), `ARG ASYNC_AGENT_KIT_VERSION="0.1.0"`)
 	assert.Contains(t, string(recipe), `LABEL com.docker.async-agent.kit.version=$ASYNC_AGENT_KIT_VERSION`)
@@ -261,9 +269,10 @@ func TestKitDiagnostics(t *testing.T) {
 	descriptor, err := os.ReadFile(kitPath(t, "async-agent.yaml"))
 	require.NoError(t, err)
 	type hook struct {
-		Command []string `yaml:"command"`
-		User    string   `yaml:"user"`
-		Env     []string `yaml:"env"`
+		Command    []string `yaml:"command"`
+		User       string   `yaml:"user"`
+		Env        []string `yaml:"env"`
+		Background bool     `yaml:"background"`
 	}
 	var kit struct {
 		Capabilities []struct {
@@ -282,7 +291,15 @@ func TestKitDiagnostics(t *testing.T) {
 		}
 	}
 	require.Len(t, install, 1)
-	require.Len(t, startup, 1)
+	require.Len(t, startup, 2)
+	assert.True(t, startup[1].Background)
+	assert.Equal(t, "agent", startup[1].User)
+	assert.Equal(t, []string{"/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}"}, startup[1].Command)
+	assert.Contains(t, startup[1].Env, "OPENAI_API_KEY")
+	assert.Contains(t, startup[1].Env, "ANTHROPIC_API_KEY")
+	assert.Contains(t, startup[1].Env, "GOOGLE_API_KEY")
+	assert.Contains(t, startup[1].Env, "GH_TOKEN")
+	assert.NotContains(t, startup[1].Env, "CAGENT_PPROF_ADDR")
 	home := t.TempDir()
 	directory := filepath.Join(home, ".local/state/async-agent-kit/probe")
 	run := func(h hook, enabled string) {
@@ -317,43 +334,4 @@ func TestKitDiagnostics(t *testing.T) {
 	require.Len(t, entries, 2)
 	assert.Equal(t, "install.log", entries[0].Name())
 	assert.Equal(t, "ready", entries[1].Name())
-}
-
-func TestLauncher(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX runtime launcher")
-	}
-	script, err := os.ReadFile(kitPath(t, "launch.sh"))
-	require.NoError(t, err)
-	home := t.TempDir()
-	workspace := filepath.Join(home, "workspace")
-	require.NoError(t, os.Mkdir(workspace, 0o700))
-	workspace, err = filepath.EvalSymlinks(workspace)
-	require.NoError(t, err)
-	// Substitute only the installation prefix; the runtime arguments remain real.
-	script = []byte(strings.ReplaceAll(string(script), "/opt/async-agent", home))
-	path := filepath.Join(home, "launch.sh")
-	require.NoError(t, os.WriteFile(path, script, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(home, "docker-agent"), []byte("#!/bin/sh\nprintf '%s\\n' \"$DOCKER_AGENT_AUTO_UPDATE\" \"$@\"\n"), 0o700))
-	for _, editable := range []bool{false, true} {
-		if editable {
-			require.NoError(t, os.WriteFile(filepath.Join(workspace, "hackerspace.yaml"), []byte("agents: {}"), 0o600))
-		}
-		cmd := exec.CommandContext(t.Context(), "sh", path, "--model", "openai/example", "--dry-run")
-		cmd.Dir = workspace
-		cmd.Env = append(os.Environ(), "DOCKER_AGENT_AUTO_UPDATE=1")
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, string(out))
-		configDir := home
-		if editable {
-			configDir = workspace
-		}
-		expected := []string{
-			"0", "run", filepath.Join(configDir, "hackerspace.yaml"),
-			"--managed-api",
-			"--model", "openai/example", "--dry-run",
-		}
-		assert.Equal(t, expected, strings.Split(strings.TrimSpace(string(out)), "\n"))
-		assert.NoDirExists(t, filepath.Join(workspace, ".docker-agent-try"))
-	}
 }
