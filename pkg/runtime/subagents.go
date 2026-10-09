@@ -1163,7 +1163,7 @@ func (m *subagentManager) sendCommunicationToChild(ctx context.Context, parentID
 	transition.Lock()
 	defer transition.Unlock()
 	parentDriver, known := m.r.sessionDrivers.Lookup(parentID)
-	if (known && !m.r.sessionDelegationEnabled(parentDriver.session())) || (!known && !m.r.UseSubagents()) {
+	if (known && !m.r.sessionDelegationEnabledState(parentDriver.delegationState())) || (!known && !m.r.UseSubagents()) {
 		return receipt, errSubagentsDisabled
 	}
 	m.mu.Lock()

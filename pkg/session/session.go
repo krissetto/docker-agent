@@ -371,8 +371,8 @@ type Session struct {
 	Permissions *PermissionsConfig `json:"permissions,omitempty"`
 
 	// Attributes stores generic, namespaced metadata supplied by embedders.
-	// Shared-session callers must use AttributesSnapshot, SetAttribute, and
-	// DeleteAttribute rather than mutating this map directly.
+	// Shared-session callers must use Attribute/AttributesSnapshot, SetAttribute,
+	// and DeleteAttribute rather than mutating this map directly.
 	Attributes map[string]string `json:"attributes,omitempty"`
 
 	// AgentModelOverrides stores per-agent model overrides for this session.
@@ -1407,6 +1407,22 @@ func (s *Session) GetAllMessages() []Message {
 	return messages
 }
 
+// AllMessageCount counts the same non-system messages as GetAllMessages without copying history.
+func (s *Session) AllMessageCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := 0
+	for _, item := range s.Messages {
+		if item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem {
+			n++
+		} else if item.IsSubSession() {
+			n += item.SubSession.AllMessageCount()
+		}
+	}
+	return n
+}
+
 // GetAllErrors extracts all recorded errors from the session, including from
 // sub-sessions, in item order. Recorded errors live alongside messages as
 // session items but are not part of the conversation, so exports that build
@@ -1474,13 +1490,26 @@ func (s *Session) GetLastUserMessages(n int) []string {
 }
 
 func (s *Session) getLastMessageContentByRole(role chat.MessageRole) string {
-	messages := s.GetAllMessages()
-	for _, message := range slices.Backward(messages) {
-		if message.Message.Role == role {
-			return strings.TrimSpace(message.Message.Content)
+	content, _ := s.lastMessageContentByRole(role)
+	return strings.TrimSpace(content)
+}
+
+func (s *Session) lastMessageContentByRole(role chat.MessageRole) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, item := range slices.Backward(s.Messages) {
+		if item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem {
+			if item.Message.Message.Role == role {
+				return item.Message.Message.Content, true
+			}
+		} else if item.IsSubSession() {
+			if content, found := item.SubSession.lastMessageContentByRole(role); found {
+				return content, true
+			}
 		}
 	}
-	return ""
+	return "", false
 }
 
 // AddMessageUsageRecord appends a usage record for remote mode where messages aren't stored locally.
@@ -1561,6 +1590,14 @@ func (s *Session) AttributesSnapshot() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return maps.Clone(s.Attributes)
+}
+
+// Attribute returns one session attribute without copying the attribute map.
+func (s *Session) Attribute(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, exists := s.Attributes[key]
+	return value, exists
 }
 
 // SetAttribute sets a session attribute. Empty keys are ignored because they

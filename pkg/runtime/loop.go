@@ -1412,7 +1412,9 @@ func (r *LocalRuntime) recordAssistantMessage(
 	} else {
 		addAgentMessage(sess, a, &assistantMessage, events)
 	}
-	slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", len(sess.GetAllMessages()))
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", sess.AllMessageCount())
+	}
 
 	// Build per-message usage for the event.
 	if res.Usage == nil {

@@ -16,74 +16,103 @@ type SessionDelegationController interface {
 	SetDelegationPolicy(ctx context.Context, enabled bool) error
 }
 
-func (r *LocalRuntime) delegationRoot(sess *session.Session) (*session.Session, error) {
+type delegationPolicyState struct {
+	id, parentID, value string
+	hasValue, present   bool
+}
+
+func delegationState(sess *session.Session) delegationPolicyState {
+	if sess == nil {
+		return delegationPolicyState{}
+	}
+	value, exists := sess.Attribute(SessionDelegationAttribute)
+	return delegationPolicyState{id: sess.ID, parentID: sess.ParentID, value: value, hasValue: exists, present: true}
+}
+
+func (d *sessionDriver) delegationState() delegationPolicyState {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return delegationState(d.sess)
+}
+
+func (r *LocalRuntime) delegationRoot(state delegationPolicyState) (delegationPolicyState, error) {
 	seen := map[string]bool{}
-	for sess != nil {
-		if seen[sess.ID] {
-			return nil, &SessionError{Kind: SessionErrorWrongSession, SessionID: sess.ID, Operation: "delegation_policy"}
+	for state.present {
+		if seen[state.id] {
+			return delegationPolicyState{}, &SessionError{Kind: SessionErrorWrongSession, SessionID: state.id, Operation: "delegation_policy"}
 		}
-		seen[sess.ID] = true
-		if driver, ok := r.sessionDrivers.Lookup(sess.ID); ok {
-			sess = driver.session()
+		seen[state.id] = true
+		if driver, ok := r.sessionDrivers.Lookup(state.id); ok {
+			state = driver.delegationState()
 		}
-		if sess.ParentID == "" {
-			return sess, nil
+		if !state.present {
+			break
 		}
-		parent, ok := r.sessionDrivers.Lookup(sess.ParentID)
+		if state.parentID == "" {
+			return state, nil
+		}
+		parent, ok := r.sessionDrivers.Lookup(state.parentID)
 		if ok {
-			sess = parent.session()
+			state = parent.delegationState()
 			continue
 		}
 		if r.subagents != nil {
 			r.subagents.mu.Lock()
-			tracked := r.subagents.sessions[sess.ParentID]
+			tracked := r.subagents.sessions[state.parentID]
 			var liveParent *session.Session
 			if tracked != nil {
 				liveParent = tracked.sess
 			}
 			r.subagents.mu.Unlock()
 			if liveParent != nil {
-				sess = liveParent
+				state = delegationState(liveParent)
 				continue
 			}
 		}
 		if r.sessionStore != nil {
-			stored, err := r.sessionStore.GetSession(r.lifetime(), sess.ParentID)
+			stored, err := r.sessionStore.GetSession(r.lifetime(), state.parentID)
 			if err == nil {
-				sess = stored
+				state = delegationState(stored)
 				continue
 			}
 		}
-		return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ParentID, Operation: "delegation_policy"}
+		return delegationPolicyState{}, &SessionError{Kind: SessionErrorNotFound, SessionID: state.parentID, Operation: "delegation_policy"}
 	}
-	return nil, &SessionError{Kind: SessionErrorNotFound, Operation: "delegation_policy"}
+	return delegationPolicyState{}, &SessionError{Kind: SessionErrorNotFound, Operation: "delegation_policy"}
+}
+
+func (r *LocalRuntime) delegationEnabled(root delegationPolicyState) bool {
+	if !root.hasValue {
+		return r.UseSubagents()
+	}
+	enabled, err := strconv.ParseBool(root.value)
+	return err == nil && enabled
 }
 
 func (r *LocalRuntime) sessionDelegationEnabled(sess *session.Session) bool {
-	if sess == nil {
+	return r.sessionDelegationEnabledState(delegationState(sess))
+}
+
+func (r *LocalRuntime) sessionDelegationEnabledState(state delegationPolicyState) bool {
+	if !state.present {
 		return r.UseSubagents()
 	}
-	root, err := r.delegationRoot(sess)
+	root, err := r.delegationRoot(state)
 	if err != nil {
 		return false
 	}
-	value, exists := root.AttributesSnapshot()[SessionDelegationAttribute]
-	if !exists {
-		return r.UseSubagents()
-	}
-	enabled, err := strconv.ParseBool(value)
-	return err == nil && enabled
+	return r.delegationEnabled(root)
 }
 
 func (h *sessionHandle) DelegationPolicy(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	root, err := h.runtime.delegationRoot(h.driver.session())
+	root, err := h.runtime.delegationRoot(h.driver.delegationState())
 	if err != nil {
 		return false, err
 	}
-	return h.runtime.sessionDelegationEnabled(root), nil
+	return h.runtime.delegationEnabled(root), nil
 }
 
 func (h *sessionHandle) SetDelegationPolicy(ctx context.Context, enabled bool) error {
@@ -91,24 +120,24 @@ func (h *sessionHandle) SetDelegationPolicy(ctx context.Context, enabled bool) e
 		return err
 	}
 	r := h.runtime
-	root, err := r.delegationRoot(h.driver.session())
+	root, err := r.delegationRoot(h.driver.delegationState())
 	if err != nil {
 		return err
 	}
-	driver, ok := r.sessionDrivers.Lookup(root.ID)
+	driver, ok := r.sessionDrivers.Lookup(root.id)
 	if !ok {
-		return &SessionError{Kind: SessionErrorNotFound, SessionID: root.ID, Operation: "delegation_policy"}
+		return &SessionError{Kind: SessionErrorNotFound, SessionID: root.id, Operation: "delegation_policy"}
 	}
-	transition := r.subagents.transition(root.ID)
+	transition := r.subagents.transition(root.id)
 	transition.Lock()
 	defer transition.Unlock()
 	if r.sessionStore == nil {
-		return sessionUnsupported(root.ID, "delegation_policy")
+		return sessionUnsupported(root.id, "delegation_policy")
 	}
 	value := strconv.FormatBool(enabled)
 	return driver.durableIO(ctx, func() (sessionIOReservation, error) {
 		if driver.stopped {
-			return sessionIOReservation{}, &SessionError{Kind: SessionErrorStopped, SessionID: root.ID, Operation: "delegation_policy"}
+			return sessionIOReservation{}, &SessionError{Kind: SessionErrorStopped, SessionID: root.id, Operation: "delegation_policy"}
 		}
 		next := driver.sess.OwnSnapshot()
 		next.SetAttribute(SessionDelegationAttribute, value)

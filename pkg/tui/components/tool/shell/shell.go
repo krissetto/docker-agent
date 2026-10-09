@@ -44,6 +44,19 @@ func formatShellOutput(output string, width int) string {
 		return ""
 	}
 
+	// Every source line produces at least one wrapped line. Keep a leading
+	// newline when discarding a prefix so the overflow marker is preserved.
+	start := len(output)
+	for range maxVisibleShellOutputLines {
+		newline := strings.LastIndexByte(output[:start], '\n')
+		if newline < 0 {
+			start = 0
+			break
+		}
+		start = newline
+	}
+	output = output[start:]
+
 	availableWidth := max(width-styles.ToolCallResult.GetHorizontalFrameSize(), 10)
 	lines := toolcommon.WrapLines(output, availableWidth)
 	if len(lines) > maxVisibleShellOutputLines {
