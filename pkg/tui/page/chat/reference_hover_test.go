@@ -53,7 +53,7 @@ func TestMessageReferenceHoverChatPresentationRouting(t *testing.T) {
 			x, y = p.splitPresentation.Transcript.X, p.splitPresentation.Transcript.Y
 		}
 		for row, line := range strings.Split(frame, "\n") {
-			before, _, found := strings.Cut(ansi.Strip(line), "(abcde)")
+			before, _, found := strings.Cut(ansi.Strip(line), "Worker 界")
 			if found {
 				p.handleMouseMotion(tea.MouseMotionMsg{X: x + ansi.StringWidth(before), Y: y + row})
 				return

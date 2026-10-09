@@ -102,13 +102,16 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			parent := session.New(session.WithID("sidebar-parent-full-session"), session.WithAgentName("director"))
 			parent.Title = "PARENT-TAB"
-			child := session.New(session.WithID("sidebar-child-full-session"), session.WithAgentName("worker"))
+			parent.SetAttribute(runtime.SessionAgentAttribute, "director")
+			child := session.New(session.WithID("sidebar-child-full-session"), session.WithAgentName("worker"), session.WithParentID(parent.ID))
+			child.SetAttribute(runtime.SessionAgentAttribute, "worker")
 			child.Title = "CHILD-TAB"
 			child.AddMessage(session.UserMessage("SELECTED-CHILD-TRANSCRIPT"))
-			childNode := subagent.NodeSnapshot{Node: subagent.Node{ID: "child-full-canonical-node", SessionID: child.ID, Agent: "worker", Name: "SelectedWorker", State: subagent.NodeCompleted}}
-			grand := session.New(session.WithID("sidebar-grandchild-full-session"), session.WithAgentName("reviewer"))
+			childNode := subagent.NodeSnapshot{Node: subagent.Node{ID: "child-full-canonical-node", SessionID: child.ID, Parent: subagent.SessionRootID(parent.ID), Agent: "worker", Name: "SelectedWorker", State: subagent.NodeCompleted}}
+			grand := session.New(session.WithID("sidebar-grandchild-full-session"), session.WithAgentName("reviewer"), session.WithParentID(child.ID))
+			grand.SetAttribute(runtime.SessionAgentAttribute, "reviewer")
 			if withChildren {
-				childNode.Children = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "grand-full-canonical-node", SessionID: grand.ID, Agent: "reviewer", Name: "NestedReviewer", State: subagent.NodeCompleted}}}
+				childNode.Children = []subagent.NodeSnapshot{{Node: subagent.Node{ID: "grand-full-canonical-node", SessionID: grand.ID, Parent: childNode.Node.ID, Agent: "reviewer", Name: "NestedReviewer", State: subagent.NodeCompleted}}}
 			}
 			tree := subagent.Snapshot{Root: subagent.SessionRootID(parent.ID), Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: subagent.SessionRootID(parent.ID), SessionID: parent.ID, Agent: "director", State: subagent.NodeCompleted}, Children: []subagent.NodeSnapshot{childNode}}}}
 			parent.SetSubagentTree(&tree)
@@ -128,6 +131,11 @@ func TestActualProgramSidebarAttachedTreeUsesSelectedCanonicalRoot(t *testing.T)
 			x, y := sidebarProgramPoint(t, frame.content, "SelectedWorker")
 			program.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 			var selected shellSnapshot
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("sidebar attach click=(%d,%d) lookups=%d active_id=%q leases=%d tabs=%v frame=\n%s", x, y, services.lookups.Load(), selected.activeID, selected.active, selected.tabIDs, ansi.Strip(selected.content))
+				}
+			})
 			require.Eventually(t, func() bool {
 				selected = sidebarProgramSnapshot(t, program)
 				plain := ansi.Strip(selected.content)

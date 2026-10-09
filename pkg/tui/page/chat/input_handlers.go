@@ -24,9 +24,6 @@ import (
 // handleKeyPress handles keyboard input events for the chat page.
 // Returns the updated model and command. All key presses are handled (forwarded to messages if no match).
 func (p *chatPage) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
-	if p.lastSidebarClick.nodeID != "" {
-		p.lastSidebarClick = sidebarClick{}
-	}
 	// When editing title, route keypresses to the sidebar
 	if p.sidebarInteractive() && p.sidebar.IsEditingTitle() {
 		switch msg.Key().Code {
@@ -133,7 +130,6 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 		clickNow = p.sidebarClickNow
 	}
 	now := clickNow()
-	previousSidebarClick := p.lastSidebarClick
 	doubleClick := sessionID != "" && msg.Button == tea.MouseLeft && p.lastSidebarClick.sessionID == sessionID && p.lastSidebarClick.target == target && p.lastSidebarClick.turnID == hit.QueueTurnID && now.Sub(p.lastSidebarClick.at) < styles.DoubleClickThreshold
 	p.lastSidebarClick = sidebarClick{}
 	if msg.Button == tea.MouseLeft && (target == TargetSidebarTitle || target == TargetSidebarQueuedMessage) && !doubleClick {
@@ -240,17 +236,8 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			if hintSession == "" {
 				hintSession = sessionID
 			}
-			if node := hit.SubagentNode; node.ID != "" {
-				current := sidebarClick{sessionID: sessionID, target: target, nodeID: hit.SubagentID, nodeSessionID: node.SessionID, parentID: string(node.Parent), x: msg.X, y: msg.Y, width: p.width, height: p.height}
-				elapsed := now.Sub(previousSidebarClick.at)
-				previousSidebarClick.at = time.Time{}
-				paired := sessionID != "" && current == previousSidebarClick && elapsed >= 0 && elapsed < styles.DoubleClickThreshold
-				if hit.OnSubagentIdentity || paired {
-					return p, tea.Batch(p.sidebar.ClearSubagentHover(), core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession}), core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID}))
-				}
-				current.at = now
-				p.lastSidebarClick = current
-				return p, tea.Batch(p.routeMouseEvent(msg, msg.Y), core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession, Text: "Double-click to attach"}))
+			if hit.OnSubagentName {
+				return p, tea.Batch(p.sidebar.ClearSubagentHover(), core.CmdHandler(msgtypes.ShowInteractionHintMsg{SessionID: hintSession}), core.CmdHandler(msgtypes.OpenSubagentMsg{NodeID: hit.SubagentID}))
 			}
 			return p, p.routeMouseEvent(msg, msg.Y)
 		}
@@ -263,7 +250,7 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 
 	case TargetMessages:
 		if !p.messages.IsMouseOnScrollbar(msg.X, msg.Y) {
-			// Identity clicks navigate directly; the remaining header cells disclose.
+			// Name clicks navigate directly; the remaining header cells disclose.
 			if msg.Button == tea.MouseLeft {
 				if ref, ok := p.messages.InputReferenceAt(msg.X, msg.Y); ok {
 					hintSession := p.routingID
@@ -313,9 +300,6 @@ func (p *chatPage) agentClickCmd(agentName string, button tea.MouseButton, mod t
 
 // handleMouseMotion handles mouse motion events.
 func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd) {
-	if p.lastSidebarClick.nodeID != "" && (msg.Button != tea.MouseNone || msg.X != p.lastSidebarClick.x || msg.Y != p.lastSidebarClick.y) {
-		p.lastSidebarClick = sidebarClick{}
-	}
 	if p.isDraggingSidebar {
 		p.messages.CancelReferenceHover()
 		delta := p.sidebarDragStartX - msg.X
@@ -367,9 +351,6 @@ func (p *chatPage) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.
 // Release is broadcast to all scrollable components so that a scrollbar drag
 // that ends outside the component's bounds still terminates correctly.
 func (p *chatPage) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.Cmd) {
-	if p.lastSidebarClick.nodeID != "" && (msg.X != p.lastSidebarClick.x || msg.Y != p.lastSidebarClick.y) {
-		p.lastSidebarClick = sidebarClick{}
-	}
 	if p.isDraggingSidebar {
 		p.isDraggingSidebar = false
 		cmd := p.SetSize(p.width, p.height)

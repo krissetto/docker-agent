@@ -71,8 +71,11 @@ func TestInputIdentityCoordinatesCanonicalAcrossResizeScrollAndRestore(t *testin
 
 						for x := col; x < col+ansi.StringWidth("Worker 界 (a1b2c)"); x++ {
 							id, ok := m.SubagentNodeAt(7+x, 3+labelLine)
-							require.True(t, ok, "visible identity cell x=%d y=%d width=%d", x, labelLine, width)
-							assert.Equal(t, subagent.NodeID(nodeID), id)
+							onName := x < col+ansi.StringWidth("Worker 界")
+							require.Equal(t, onName, ok, "only visible name cell navigates x=%d y=%d width=%d", x, labelLine, width)
+							if onName {
+								assert.Equal(t, subagent.NodeID(nodeID), id)
+							}
 						}
 						_, outside := m.SubagentNodeAt(7+col-1, 3+labelLine)
 						assert.False(t, outside, "border/icon is not a target")

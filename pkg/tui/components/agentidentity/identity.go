@@ -28,7 +28,7 @@ func Label(ref lifecycle.InputReference, width int) string {
 	suffix := ansi.Cut(text, nameWidth, ansi.StringWidth(text))
 	label := nameLink + styles.AgentIdentityStyle(ref.Agent, false).Render(name) + ansi.ResetHyperlink()
 	if suffix != "" {
-		label += ansi.SetHyperlink(Link) + styles.MutedStyle.Render(suffix) + ansi.ResetHyperlink()
+		label += styles.MutedStyle.Render(suffix)
 	}
 	return label
 }
@@ -108,30 +108,18 @@ func Border(rendered string, ref lifecycle.InputReference, width int, messageSty
 	return strings.Join(lines, "\n")
 }
 
-// Wrap keeps each wrapped identity fragment independently hit-testable.
+// Wrap keeps each wrapped name fragment independently hit-testable.
 func Wrap(prefix string, ref lifecycle.InputReference, suffix string, width int) string {
 	text := ansi.Wrap(prefix+Label(ref, ansi.StringWidth(ref.Label()))+suffix, max(width, 1), "")
-	open, reset := ansi.SetHyperlink(Link), ansi.ResetHyperlink()
+	reset := ansi.ResetHyperlink()
 	lines := strings.Split(text, "\n")
-	active := ""
+	active := false
 	for i, line := range lines {
-		if active != "" {
-			color := styles.MutedStyle.GetForeground()
-			if active == nameLink {
-				color = styles.AgentIdentityStyle(ref.Agent, false).GetForeground()
-			}
-			line = active + ansi.Style{}.ForegroundColor(color).String() + line
+		if active {
+			line = nameLink + ansi.Style{}.ForegroundColor(styles.AgentIdentityStyle(ref.Agent, false).GetForeground()).String() + line
 		}
-		lastName, lastOpen, lastClose := strings.LastIndex(line, nameLink), strings.LastIndex(line, open), strings.LastIndex(line, reset)
-		switch {
-		case lastName > lastClose && lastName > lastOpen:
-			active = nameLink
-		case lastOpen > lastClose:
-			active = open
-		default:
-			active = ""
-		}
-		if active != "" {
+		active = strings.LastIndex(line, nameLink) > strings.LastIndex(line, reset)
+		if active {
 			line += reset
 		}
 		lines[i] = line

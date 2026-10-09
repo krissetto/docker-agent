@@ -128,16 +128,20 @@ func TestMessageCardIdentitySingleAttachAndStableHeader(t *testing.T) {
 					require.Equal(t, ref, refAfter)
 					require.Equal(t, expanded, strings.Contains(ansi.Strip(p.messages.View()), "literal request"))
 					require.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "tab-routing-id", Text: "Double-click to attach"})
-					// The visible neutral ID shares navigation, never disclosure.
-					_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x + ansi.StringWidth(ref.Name) + 2, Y: y, Button: tea.MouseLeft})
-					idEvents := runTimerCmd(t, cmd)
-					if target == "parent" {
-						require.Contains(t, idEvents, msgtypes.SwitchTabMsg{SessionID: parentSession})
-					} else {
-						require.Contains(t, idEvents, msgtypes.OpenSubagentMsg{NodeID: targetNode})
+					// The neutral ID discloses, even on repeated clicks, without navigation.
+					for i := range 2 {
+						_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x + ansi.StringWidth(ref.Name) + 2, Y: y, Button: tea.MouseLeft})
+						requireNoSidebarNavigation(t, runTimerCmd(t, cmd))
+						settle()
+						require.Equal(t, expanded == (i == 1), strings.Contains(ansi.Strip(p.messages.View()), "literal request"))
+						xID, yID, afterID := findHeader()
+						require.Equal(t, x0, xID, "disclosure preserves the name column")
+						require.Equal(t, y0, yID, "disclosure preserves the header row")
+						require.Equal(t, 1, strings.Count(afterID, ref.Label()))
+						if i == 1 {
+							require.Equal(t, before, afterID, "second ID click restores the integrated header")
+						}
 					}
-					_, _, afterID := findHeader()
-					require.Equal(t, before, afterID)
 				})
 			}
 		}

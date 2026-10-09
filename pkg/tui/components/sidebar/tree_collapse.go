@@ -264,18 +264,17 @@ func (m *model) participantLine(name string, width int) string {
 
 type identityColumns struct {
 	nameStart, nameEnd int
-	idStart, idEnd     int
 }
 
 func (c identityColumns) shift(indent int) identityColumns {
-	return identityColumns{c.nameStart + indent, c.nameEnd + indent, c.idStart + indent, c.idEnd + indent}
+	return identityColumns{c.nameStart + indent, c.nameEnd + indent}
 }
 
 func (c identityColumns) contains(x int) bool {
-	return (x >= c.nameStart && x < c.nameEnd) || (x >= c.idStart && x < c.idEnd)
+	return x >= c.nameStart && x < c.nameEnd
 }
 
-// SubagentIdentityAt returns the row node and whether its name or visible ID is hit.
+// SubagentIdentityAt returns the row node and whether its rendered name is hit.
 func (m *model) SubagentIdentityAt(x, y int) (subagent.Node, bool) {
 	kind, id := m.HandleClickType(x, y)
 	if kind != ClickSubagent {
@@ -301,6 +300,9 @@ func (m *model) subagentIdentityColumnsAt(x, y int) (identityColumns, bool) {
 func (m *model) subagentDisclosureAt(x, y int) (treeControl, bool) {
 	kind, id := m.HandleClickType(x, y)
 	if kind != ClickSubagent {
+		return treeControl{}, false
+	}
+	if _, onName := m.SubagentIdentityAt(x, y); onName {
 		return treeControl{}, false
 	}
 	node, found := subagentview.Find(m.subagentNodes, subagent.NodeID(id))

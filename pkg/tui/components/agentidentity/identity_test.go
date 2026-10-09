@@ -131,7 +131,7 @@ func TestHoverProgressRebasesNameOnlyAcrossWarmThemes(t *testing.T) {
 			assert.Equal(t, color.RGBAModel.Convert(want), foregroundAt(got, start))
 			suffixAt := start + ansi.StringWidth(ref.Name)
 			assert.Equal(t, foregroundAt(line, suffixAt), foregroundAt(got, suffixAt))
-			assert.Contains(t, got, ansi.SetHyperlink(Link))
+			assert.Contains(t, got, nameLink)
 			assert.Contains(t, ansi.Strip(got), ref.DisplayID)
 		}
 	}
@@ -197,5 +197,24 @@ func TestBorderPreservesCallerBodyANSIAndGraphemesAcrossResize(t *testing.T) {
 		got := Border("padding\n"+body, ref, 40, styles.UserMessageStyle)
 		require.NotContains(t, got, Link, "unresolved identity cannot fabricate navigation")
 		require.Equal(t, body, strings.SplitN(got, "\n", 2)[1])
+	}
+}
+
+func TestWrappedIdentityLinksOnlyRenderedNameCells(t *testing.T) {
+	ref := lifecycle.InputReference{Kind: lifecycle.InputReferenceNode, ID: "canonical-node", Name: "Cafe\u0301 👩‍💻 worker 界", Agent: "worker", DisplayID: "canonical-node"}
+	for _, width := range []int{1, 4, 8, 18, 80} {
+		wrapped := Wrap("✓ ", ref, " sent a message >", width)
+		hits := 0
+		for line := range strings.SplitSeq(wrapped, "\n") {
+			require.NotContains(t, line, ansi.SetHyperlink(Link), "neutral suffix cannot open a navigation link")
+			if _, rest, linked := strings.Cut(line, nameLink); linked {
+				name, _, closed := strings.Cut(rest, ansi.ResetHyperlink())
+				require.True(t, closed, "every wrapped name fragment closes its link")
+				require.NotContains(t, ansi.Strip(name), "canonical-node")
+				require.NotContains(t, ansi.Strip(name), "sent a message")
+				hits += ansi.StringWidth(name)
+			}
+		}
+		require.Positive(t, hits, "wrapped name remains actionable at width %d", width)
 	}
 }

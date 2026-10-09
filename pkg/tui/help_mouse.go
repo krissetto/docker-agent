@@ -30,9 +30,9 @@ func rootMouseHelp() []help.Section {
 			{ID: "nd.sidebar.mouse.agent.agent.details", Keys: []string{"right click", "ctrl+left click"}, Description: "Agent details", Condition: "agent hit target visible"},
 			{ID: "nd.sidebar.mouse.context.usage.context.details", Keys: []string{"left click"}, Description: "Context details", Condition: "context usage hit target visible"},
 			{ID: "nd.sidebar.mouse.cost.usage.cost.details", Keys: []string{"left click"}, Description: "Cost details", Condition: "cost usage hit target visible"},
-			{ID: "nd.sidebar.mouse.subagent.open.subagent.tab", Keys: []string{"left click"}, Description: "Open subagent tab", Condition: "subagent hit target visible"},
+			{ID: "nd.sidebar.mouse.subagent.open.subagent.tab", Keys: []string{"left click"}, Description: "Open subagent tab", Condition: "rendered subagent name hit target visible"},
 			{ID: "nd.sidebar.mouse.parent.switch.parent.tab", Keys: []string{"left click"}, Description: "Switch parent tab", Condition: "parent hit target visible"},
-			{ID: "nd.sidebar.mouse.recap.branch.toggle.tree.branch", Keys: []string{"left click"}, Description: "Toggle tree branch", Condition: "recap/branch hit target visible"},
+			{ID: "nd.sidebar.mouse.recap.branch.toggle.tree.branch", Keys: []string{"left click"}, Description: "Toggle tree branch", Condition: "recap, branch chevron or non-name branch row hit target visible"},
 			{ID: "nd.sidebar.mouse.scroll.content.scroll.sidebar", Keys: []string{"wheel", "scrollbar drag", "scrollbar track click"}, Description: "Scroll sidebar", Condition: "scroll content hit target visible"},
 		}},
 		{ID: "mouse.transcript", Title: "Transcript \u2014 mouse", Entries: []help.Entry{
@@ -45,8 +45,8 @@ func rootMouseHelp() []help.Section {
 			{ID: "nd.transcript.mouse.body.select.word.and.auto.copy", Keys: []string{"double click"}, Description: "Select word and auto-copy", Condition: "body hit target visible"},
 			{ID: "nd.transcript.mouse.body.select.line.and.auto.copy", Keys: []string{"triple click"}, Description: "Select line and auto-copy", Condition: "body hit target visible"},
 			{ID: "nd.transcript.mouse.body.select.range.and.auto.copy", Keys: []string{"drag release"}, Description: "Select range and auto-copy", Condition: "body hit target visible"},
-			{ID: "nd.transcript.mouse.input.parent.reference.switch.parent.tab", Keys: []string{"left click"}, Description: "Switch parent tab", Condition: "input parent reference hit target visible"},
-			{ID: "nd.transcript.mouse.input.subagent.reference.open.subagent.tab", Keys: []string{"left click"}, Description: "Open subagent tab", Condition: "input subagent reference hit target visible"},
+			{ID: "nd.transcript.mouse.input.parent.reference.switch.parent.tab", Keys: []string{"left click"}, Description: "Switch parent tab", Condition: "input parent name hit target visible"},
+			{ID: "nd.transcript.mouse.input.subagent.reference.open.subagent.tab", Keys: []string{"left click"}, Description: "Open subagent tab", Condition: "input subagent name hit target visible"},
 			{ID: "nd.transcript.mouse.scroll.area.scroll.transcript", Keys: []string{"wheel", "scrollbar drag", "scrollbar track click"}, Description: "Scroll transcript", Condition: "scroll area hit target visible"},
 		}},
 		{ID: "mouse.chrome", Title: "Application chrome \u2014 mouse", Entries: []help.Entry{

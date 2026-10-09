@@ -42,6 +42,9 @@ func TestSubagentRowDisclosureScrolledNarrowAndLeaf(t *testing.T) {
 			node, ok := m.SubagentIdentityAt(ansi.StringWidth(before), y)
 			require.True(t, ok)
 			require.Equal(t, subagent.NodeID("branch-full-identity"), node.ID)
+			beforeNameClick := m.collapsedBranches[node.ID]
+			m.Update(tea.MouseClickMsg{X: m.xPos + ansi.StringWidth(before), Y: m.yPos + y, Button: tea.MouseLeft})
+			require.Equal(t, beforeNameClick, m.collapsedBranches[node.ID], "name never toggles disclosure in the component")
 			_, ok = m.SubagentIdentityAt(m.layoutCfg.PaddingLeft+m.contentWidth(m.cachedNeedsScrollbar)-1, y)
 			require.False(t, ok, "right status does not become an attachment identity")
 		}
@@ -103,8 +106,12 @@ func TestSubagentNameHoverOnlyWithinRenderedName(t *testing.T) {
 			row, ok = m.placementRowAt(m.layoutCfg.PaddingLeft, y)
 			require.True(t, ok)
 			if width == 60 {
-				require.Greater(t, row.identity.idEnd, row.identity.idStart)
-				motion(m.layoutCfg.PaddingLeft + row.identity.idStart)
+				before, _, found := strings.Cut(ansi.Strip(row.text), "(branch-full-identity)")
+				require.True(t, found)
+				idX := m.layoutCfg.PaddingLeft + ansi.StringWidth(before)
+				motion(idX)
+				_, linked := m.SubagentIdentityAt(idX, y)
+				require.False(t, linked, "visible ID is disclosure-only")
 				require.Zero(t, m.hoverValues[nameKey].value, "visible ID leaves the name unhighlighted")
 				_, cmd := m.Update(tea.MouseClickMsg{X: m.xPos + m.layoutCfg.PaddingLeft, Y: m.yPos + y, Button: tea.MouseLeft})
 				settleTreePresentation(t, m, cmd)

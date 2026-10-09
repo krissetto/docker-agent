@@ -96,7 +96,17 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				} else {
 					assert.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: childNode})
 				}
-				assert.Equal(t, ansi.Strip(frame), ansi.Strip(p.messages.View()), "identity attaches without disclosing")
+				assert.Equal(t, ansi.Strip(frame), ansi.Strip(p.messages.View()), "name attaches without disclosing")
+				name, _, _ := strings.Cut(label, " (")
+				idX := x + ansi.StringWidth(name) + 2
+				_, linked := p.messages.InputReferenceAt(idX, y)
+				require.False(t, linked, "neutral ID never navigates")
+				for i := range 2 {
+					_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: idX, Y: y, Button: tea.MouseLeft})
+					requireNoSidebarNavigation(t, runTimerCmd(t, cmd))
+					settleSidebarGesture(t, p)
+					require.Equal(t, i == 0, strings.Contains(ansi.Strip(p.messages.View()), "literal body should not navigate"), "ID toggles the incoming card")
+				}
 				return
 			}
 			t.Fatal("rendered sender coordinate missing")

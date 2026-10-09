@@ -40,11 +40,10 @@ type HitTest struct {
 	// SubagentID is the subagent node id when At() returns
 	// TargetSidebarSubagent; ParentSessionID is the parent tab's session id
 	// when it returns TargetSidebarParent.
-	QueueTurnID        string
-	SubagentID         string
-	ParentSessionID    string
-	SubagentNode       subagent.Node
-	OnSubagentIdentity bool
+	QueueTurnID     string
+	SubagentID      string
+	ParentSessionID string
+	OnSubagentName  bool
 }
 
 // NewHitTest creates a hit tester for the given chat page.
@@ -181,7 +180,7 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 			if g := h.page.splitPresentation; g != nil {
 				localX, localY = x-g.Shell.Sidebar.X, y-g.Shell.Sidebar.Y
 			}
-			h.SubagentNode, h.OnSubagentIdentity = identities.SubagentIdentityAt(localX, localY)
+			_, h.OnSubagentName = identities.SubagentIdentityAt(localX, localY)
 		}
 		return TargetSidebarSubagent
 	case sidebar.ClickSubagentParent:

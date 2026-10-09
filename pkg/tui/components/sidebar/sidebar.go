@@ -1254,7 +1254,7 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 		return ClickSubagentParent, m.parentSessionID
 	}
 
-	// A subagent swarm row opens (or focuses) a tab attached to its session.
+	// The caller separates a swarm row's name attachment from branch disclosure.
 	if id, ok := m.subagentHoverZone[contentY]; ok && id != "" {
 		return ClickSubagent, string(id)
 	}
@@ -2835,7 +2835,6 @@ func (m *model) subagentRowIdentity(n subagent.Node, guides string, contentWidth
 	idProgress := m.branchSpans[n.ID].idValue
 	idWidth := spanWidth(suffix, idProgress)
 	if suffix != "" && lipgloss.Width(left)+idWidth+controlReserve <= leftBudget {
-		identity.idStart, identity.idEnd = lipgloss.Width(left)+1, lipgloss.Width(left)+idWidth
 		left += neutralSpan(suffix, idProgress, idWidth)
 	}
 	if controlReserve > 0 {

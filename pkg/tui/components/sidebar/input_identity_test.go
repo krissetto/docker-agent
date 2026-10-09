@@ -42,8 +42,12 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.Equal(t, ref.Label(), ansi.Strip(label))
 	linked := identityLinkCells(label)
 	require.Len(t, linked, ansi.StringWidth(ref.Label()))
-	for _, url := range linked {
-		assert.Equal(t, agentidentity.Link, url, "name and neutral ID share the full clickable identity range")
+	for x, url := range linked {
+		if x < ansi.StringWidth(node.DisplayName()) {
+			assert.Equal(t, agentidentity.Link, url, "name cell navigates")
+		} else {
+			assert.Empty(t, url, "neutral ID cell is not linked")
+		}
 	}
 	cells := sidebarCells(label)
 	nameCells := ansi.StringWidth(node.DisplayName())
@@ -59,7 +63,7 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.NotContains(t, inputView.Render(80), "literal **body**")
 	inputView.SetExpanded(true)
 	border := inputView.Render(80)
-	assert.Contains(t, border, ansi.SetHyperlink(agentidentity.Link))
+	assert.Contains(t, border, "id=docker-agent-identity-name")
 	assert.Contains(t, border, ansi.ResetHyperlink())
 	// The border reapplies its USER background after each inner style reset.
 	assert.Contains(t, border, strings.TrimSuffix(name, "\x1b[m"))
@@ -81,10 +85,10 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	require.Len(t, borderLinks, 80)
 	start := ansi.StringWidth(prefix)
 	for x, url := range borderLinks {
-		if x >= start && x < start+ansi.StringWidth(ref.Label()) {
-			assert.Equal(t, agentidentity.Link, url, "canonical name and neutral ID remain linked at border cell %d", x)
+		if x >= start && x < start+ansi.StringWidth(ref.Name) {
+			assert.Equal(t, agentidentity.Link, url, "canonical name remains linked at border cell %d", x)
 		} else {
-			assert.NotEqual(t, agentidentity.Link, url, "border rules and controls are not identity targets at cell %d", x)
+			assert.NotEqual(t, agentidentity.Link, url, "neutral ID, border rules and controls are not identity targets at cell %d", x)
 		}
 	}
 }

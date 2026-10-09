@@ -116,7 +116,7 @@ func TestReferenceHoverRenderedFramesShareFiniteTransition(t *testing.T) {
 				for i, line := range m.renderedLines {
 					if strings.Contains(line, "id=docker-agent-identity-name") {
 						nameRows++
-						require.NotEqual(t, line, referenceLines[i], "suffix hover lights every wrapped name row")
+						require.NotEqual(t, line, referenceLines[i], "name hover lights every wrapped name row")
 					}
 					for _, span := range extractOSC8Links(line) {
 						if span.url == agentidentity.Link && !strings.Contains(ansi.Cut(line, span.startCol, span.endCol), "id=docker-agent-identity-name") {
