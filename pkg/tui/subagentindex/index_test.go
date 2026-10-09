@@ -175,3 +175,15 @@ func TestParentReferenceUsesExactAttachSessionAndCanonicalIdentity(t *testing.T)
 	index.Clear()
 	assert.Equal(t, lifecycle.InputReference{Name: "parent"}, index.Parent(), "clearing page identity cannot leak another session's parent")
 }
+
+func TestSyntheticRootSessionUsesCanonicalVisibleIdentity(t *testing.T) {
+	index := New()
+	root := subagent.SessionRootID("parent-session-full")
+	index.Reset(subagent.Snapshot{Root: root, Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: root, Agent: "director"}}}})
+	index.SetParent("parent-session-full", "director")
+	parent := index.Parent()
+	node := index.Resolve("", string(root), "")
+	assert.Equal(t, node.Label(), parent.Label(), "parent header uses the tree root identity, not an unrelated session abbreviation")
+	assert.Equal(t, lifecycle.InputReferenceParent, parent.Kind)
+	assert.Equal(t, "parent-session-full", parent.ID, "visible node identity must not change parent tab routing")
+}

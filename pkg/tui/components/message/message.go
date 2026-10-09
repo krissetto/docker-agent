@@ -683,7 +683,7 @@ func (mv *messageModel) render(width int) string {
 		}
 		actions := actionRow(agentmessage.InnerWidth(width), mv.hovered || mv.selected, types.MessageCopyLabel)
 		body := agentmessage.Body(content, width, mv.selected, actions)
-		return mv.disclosure.Render(header, body)
+		return mv.disclosure.Render(header, body, width, mv.selected)
 	}
 	switch msg.Type {
 	case types.MessageTypeSpinner:

@@ -45,7 +45,12 @@ func (m *sendModel) View() string {
 		return header
 	}
 	body := agentmessage.Body(params.Message, m.width, false, "")
-	return m.disclosure.Render(header, body)
+	lines := strings.Split(header, "\n")
+	content := m.disclosure.Render(strings.Join(lines[:m.headerLines], "\n"), body, m.width, false)
+	if len(lines) > m.headerLines {
+		content += "\n" + strings.Join(lines[m.headerLines:], "\n")
+	}
+	return content
 }
 
 func (m *sendModel) ExpandedView() string { return m.View() }

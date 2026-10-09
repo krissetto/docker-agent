@@ -1,6 +1,7 @@
 package subagentindex
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -80,6 +81,11 @@ func (i *Index) Reset(snapshot subagent.Snapshot) bool {
 			// Last depth-first match wins, just as in ResolveInputReference.
 			i.byID[node.ID] = position
 			i.bySession[node.SessionID] = position
+			if node.ID == snapshot.Root && node.SessionID == "" {
+				if sessionID, ok := strings.CutPrefix(string(node.ID), "root:"); ok && sessionID != "" {
+					i.bySession[sessionID] = position
+				}
+			}
 			walk(item.Children)
 		}
 	}

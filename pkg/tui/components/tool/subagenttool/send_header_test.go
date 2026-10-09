@@ -60,7 +60,7 @@ func TestSendParentHeaderUsesSharedIdentityInBothDisclosureStates(t *testing.T) 
 	for _, expanded := range []bool{false, true} {
 		view.SetExpanded(expanded)
 		header := strings.Split(view.View(), "\n")[0]
-		require.Contains(t, header, styles.AgentIdentityStyle("root", false).Render("root"))
+		require.Contains(t, header, strings.TrimSuffix(styles.AgentIdentityStyle("root", false).Render("root"), "\x1b[m"))
 		require.Contains(t, header, ansi.SetHyperlink(agentidentity.Link, "id=docker-agent-identity-name"))
 		require.NotContains(t, ansi.Strip(header), "Messaged parent")
 		resolved, ok := view.InputReferenceForLine(0)

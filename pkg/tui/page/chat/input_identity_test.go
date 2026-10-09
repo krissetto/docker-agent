@@ -56,7 +56,6 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 			ar := animation.NewRuntimeWithScheduler(&referenceHoverScheduler{now: time.Unix(1, 0)})
 			p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 			t.Cleanup(func() { Cleanup(p); ar.Stop() })
-			p.messageClickNow = func() time.Time { return time.Unix(10, 0) }
 			p.SetSize(160, 40)
 			p.resetProjection(runtime.SessionSnapshot{Session: sess})
 			input := session.UserMessage("literal body should not navigate")
@@ -89,17 +88,15 @@ func TestInputIdentityChatClickUsesCanonicalChildAndNestedParent(t *testing.T) {
 				}
 				x := styles.AppPadding + sl.chatStartX + ansi.StringWidth(before)
 				_, cmd := p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-				first := runTimerCmd(t, cmd)
-				assert.NotContains(t, first, msgtypes.SwitchTabMsg{SessionID: parentSession})
-				assert.NotContains(t, first, msgtypes.OpenSubagentMsg{NodeID: childNode})
-				assert.Contains(t, first, msgtypes.ShowInteractionHintMsg{SessionID: sess.ID, Text: "Double-click to attach"})
-				_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				require.NotNil(t, cmd)
+				events := runTimerCmd(t, cmd)
+				assert.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: sess.ID, Text: "Double-click to attach"})
 				if parentSender {
-					assert.Contains(t, runTimerCmd(t, cmd), msgtypes.SwitchTabMsg{SessionID: parentSession})
+					assert.Contains(t, events, msgtypes.SwitchTabMsg{SessionID: parentSession})
 				} else {
-					assert.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: childNode})
+					assert.Contains(t, events, msgtypes.OpenSubagentMsg{NodeID: childNode})
 				}
+				assert.Equal(t, ansi.Strip(frame), ansi.Strip(p.messages.View()), "identity attaches without disclosing")
 				return
 			}
 			t.Fatal("rendered sender coordinate missing")

@@ -47,7 +47,7 @@ func TestSendDisclosurePreservesRequestLiveReplayAndError(t *testing.T) {
 				}
 				view.SetExpanded(true)
 				body := ansi.Strip(view.View())
-				require.Contains(t, body, strings.TrimSuffix(ansi.Strip(collapsedHeader), ">")+"v", "expanded send retains collapsed icon, wording and order")
+				require.Contains(t, body, strings.TrimLeft(strings.TrimSuffix(ansi.Strip(collapsedHeader), ">"), " ")+"v", "expanded send retains collapsed icon, wording and order")
 				if status == types.ToolStatusError {
 					require.Contains(t, body, "✗ Messaging")
 					require.Contains(t, body, `Message delivered to subagent "worker" (abcde-child).`)

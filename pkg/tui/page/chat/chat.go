@@ -217,10 +217,8 @@ type chatPage struct {
 
 	sessionState *service.SessionState
 
-	lastSidebarClick         sidebarClick
-	sidebarClickNow          func() time.Time
-	lastMessageIdentityClick messageIdentityClick
-	messageClickNow          func() time.Time
+	lastSidebarClick sidebarClick
+	sidebarClickNow  func() time.Time
 
 	// State
 	working              bool
@@ -618,7 +616,6 @@ func WatchGitBranch(page Page) tea.Cmd {
 func ClearSidebarHover(page Page) tea.Cmd {
 	if p, ok := page.(*chatPage); ok {
 		p.lastSidebarClick = sidebarClick{}
-		p.lastMessageIdentityClick = messageIdentityClick{}
 		return tea.Batch(p.sidebar.ClearSubagentHover(), p.messages.ClearReferenceHover())
 	}
 	return nil
@@ -631,7 +628,6 @@ func SetSidebarPresentationActive(page Page, active bool) tea.Cmd {
 		active = active && p.sidebarInteractive()
 		if !active {
 			p.lastSidebarClick = sidebarClick{}
-			p.lastMessageIdentityClick = messageIdentityClick{}
 		}
 		if owner, ok := p.sidebar.(interface{ SetPresentationActive(active bool) tea.Cmd }); ok {
 			return owner.SetPresentationActive(active)
@@ -671,7 +667,6 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if p.lastSidebarClick.nodeID != "" {
 			p.lastSidebarClick = sidebarClick{}
 		}
-		p.lastMessageIdentityClick = messageIdentityClick{}
 		p.sidebar.ResetTodoClick()
 	}
 

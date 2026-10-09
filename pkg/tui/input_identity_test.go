@@ -46,7 +46,7 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 	t.Cleanup(root.cleanupManagedResources)
 	driver := tuitest.New(t, root, 120, 40)
 	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
-	click := func(label string, double bool) {
+	click := func(label string) {
 		t.Helper()
 		frame := driver.Frame()
 		for y, line := range strings.Split(frame, "\n") {
@@ -66,35 +66,27 @@ func TestInputIdentityFullTUIPointerAttachesChildAndSelectsParent(t *testing.T) 
 			assert.Equal(t, ansi.Strip(line), hoveredLine, "identity row stays at the same screen coordinates")
 			t.Logf("actual full TUI click label=%q x=%d y=%d\n%s", label, x, y, ansi.Strip(hovered))
 			driver.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			if double {
-				if label == "worker (a1b2c)" {
-					assert.NotContains(t, ansi.Strip(driver.Frame()), "director (paren) sent a message", "first identity click discloses without attaching")
-				} else {
-					assert.Contains(t, ansi.Strip(driver.Frame()), "director (paren) sent a message", "first parent-identity click discloses without switching")
-				}
-				driver.Send(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
-			}
 			return
 		}
 		t.Fatalf("identity %q missing from frame:\n%s", label, ansi.Strip(frame))
 	}
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
-	click(">", false)
+	click(">")
 	driver.WaitFor(tuitest.Contains("private runtime payload"))
-	click("v", false)
+	click("v")
 	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 	// The chevron follows the target state before the closing animation ends.
 	driver.WaitFor(tuitest.Absent("private runtime payload"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
-	click("worker (a1b2c)", true)
-	driver.WaitFor(tuitest.Contains("director (paren) sent a message >"))
+	click("worker (a1b2c)")
+	driver.WaitFor(tuitest.Contains("director (root:) sent a message >"))
 	driver.WaitFor(tuitest.Contains("↳"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "CHILD-DELEGATION-BODY", "attached message card starts collapsed")
-	click(">", false)
+	click(">")
 	driver.WaitFor(tuitest.Contains("CHILD-DELEGATION-BODY"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "private runtime payload")
-	click("director (paren)", true)
-	// The first child-identity click disclosed this retained parent card.
-	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received v"))
+	click("director (root:)")
+	// Attaching the child did not disclose the retained parent card.
+	driver.WaitFor(tuitest.Contains("worker (a1b2c) · report received >"))
 	assert.NotContains(t, ansi.Strip(driver.Frame()), "CHILD-DELEGATION-BODY")
 }

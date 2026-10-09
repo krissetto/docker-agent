@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
@@ -61,7 +62,7 @@ func (d *Disclosure) Settle() {
 	}
 }
 
-func (d *Disclosure) Render(header, body string) string {
+func (d *Disclosure) Render(header, body string, width int, selected bool) string {
 	if d.visible <= 0 || body == "" {
 		return header
 	}
@@ -70,7 +71,36 @@ func (d *Disclosure) Render(header, body string) string {
 	if rows == 0 {
 		return header
 	}
-	return header + "\n" + strings.Join(lines[:rows], "\n")
+	return surfaceHeader(header, width, selected) + "\n" + strings.Join(lines[:rows], "\n")
+}
+
+// Keep the compact header's cells in place while joining the revealed USER surface.
+// Existing leading space and trailing space become rails; identity hit spans stay unchanged.
+func surfaceHeader(header string, width int, selected bool) string {
+	messageStyle := styles.UserMessageStyle
+	if selected {
+		messageStyle = styles.SelectedUserMessageStyle
+	}
+	surface := lipgloss.NewStyle().Foreground(messageStyle.GetForeground()).Background(messageStyle.GetBackground())
+	rule := surface.Foreground(messageStyle.GetBorderLeftForeground())
+	lines := strings.Split(header, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, " ") {
+			edge := messageStyle.GetBorderStyle().Left
+			if i == 0 {
+				edge = messageStyle.GetBorderStyle().TopLeft
+			}
+			line = rule.Render(edge) + strings.TrimPrefix(line, " ")
+		}
+		tail := max(0, width-ansi.StringWidth(line))
+		if i == len(lines)-1 && tail > 1 {
+			line += rule.Render(" " + strings.Repeat(messageStyle.GetBorderStyle().Top, tail-1))
+		} else {
+			line += strings.Repeat(" ", tail)
+		}
+		lines[i] = styles.RenderComposite(surface, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 const toggleLink = "docker-agent:disclosure"

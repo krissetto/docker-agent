@@ -23,7 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func TestMessageCardIdentitySingleToggleDoubleAttachAndStableHeader(t *testing.T) {
+func TestMessageCardIdentitySingleAttachAndStableHeader(t *testing.T) {
 	const parentSession = "parent-session-full"
 	const parentNode = "abcde-parent-full"
 	const targetNode = "abcde-target-full"
@@ -39,8 +39,6 @@ func TestMessageCardIdentitySingleToggleDoubleAttachAndStableHeader(t *testing.T
 					ar := animation.NewRuntimeWithScheduler(&referenceHoverScheduler{now: time.Unix(1, 0)})
 					p := New(ar, t.Context(), a, service.NewSessionState(sess)).(*chatPage)
 					t.Cleanup(func() { Cleanup(p); ar.Stop() })
-					now := time.Unix(10, 0)
-					p.messageClickNow = func() time.Time { return now }
 					p.sessionState.SetExpandThinking(false)
 					p.SetRoutingID("tab-routing-id")
 					p.SetSize(160, 40)
@@ -112,30 +110,6 @@ func TestMessageCardIdentitySingleToggleDoubleAttachAndStableHeader(t *testing.T
 					click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
 					_, cmd := p.handleMouseClick(click)
 					events := runTimerCmd(t, cmd)
-					require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "tab-routing-id", Text: "Double-click to attach"})
-					for _, event := range events {
-						switch event.(type) {
-						case msgtypes.OpenSubagentMsg, msgtypes.SwitchTabMsg:
-							t.Fatal("identity attached on single click")
-						}
-					}
-					settle()
-					x1, y1, after := findHeader()
-					require.Equal(t, x0, x1, "expansion never shifts identity columns")
-					require.Equal(t, y0, y1)
-					require.Equal(t, before[:len(before)-1], after[:len(after)-1], "only disclosure glyph changes")
-					require.NotEqual(t, before[len(before)-1:], after[len(after)-1:])
-					if expanded {
-						require.NotContains(t, ansi.Strip(p.messages.View()), "literal request", "first click collapses the open body")
-					} else {
-						require.Contains(t, ansi.Strip(p.messages.View()), "literal request", "first click reveals the body before attachment")
-					}
-					refAfter, ok := p.messages.InputReferenceAt(x, y)
-					require.True(t, ok)
-					require.Equal(t, ref, refAfter, "parent session/node target is stable across expansion")
-					now = now.Add(100 * time.Millisecond)
-					_, cmd = p.handleMouseClick(click)
-					events = runTimerCmd(t, cmd)
 					if target == "parent" {
 						require.Contains(t, events, msgtypes.SwitchTabMsg{SessionID: parentSession})
 					} else {
@@ -143,15 +117,35 @@ func TestMessageCardIdentitySingleToggleDoubleAttachAndStableHeader(t *testing.T
 					}
 					require.Contains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "tab-routing-id"})
 					_, _, attached := findHeader()
-					require.Equal(t, after, attached, "qualifying second click attaches without a second toggle")
+					require.Equal(t, before, attached, "single identity click attaches without toggling")
+					settle()
+					x1, y1, after := findHeader()
+					require.Equal(t, x0, x1)
+					require.Equal(t, y0, y1)
+					require.Equal(t, before, after)
+					refAfter, ok := p.messages.InputReferenceAt(x, y)
+					require.True(t, ok)
+					require.Equal(t, ref, refAfter)
+					require.Equal(t, expanded, strings.Contains(ansi.Strip(p.messages.View()), "literal request"))
+					require.NotContains(t, events, msgtypes.ShowInteractionHintMsg{SessionID: "tab-routing-id", Text: "Double-click to attach"})
+					// The visible neutral ID shares navigation, never disclosure.
+					_, cmd = p.handleMouseClick(tea.MouseClickMsg{X: x + ansi.StringWidth(ref.Name) + 2, Y: y, Button: tea.MouseLeft})
+					idEvents := runTimerCmd(t, cmd)
+					if target == "parent" {
+						require.Contains(t, idEvents, msgtypes.SwitchTabMsg{SessionID: parentSession})
+					} else {
+						require.Contains(t, idEvents, msgtypes.OpenSubagentMsg{NodeID: targetNode})
+					}
+					_, _, afterID := findHeader()
+					require.Equal(t, before, afterID)
 				})
 			}
 		}
 	}
 }
 
-func TestMessageCardDoubleClickRequiresSameTargetAndUninterruptedPair(t *testing.T) {
-	for _, interruption := range []string{"timeout", "key", "wheel", "outside", "modal"} {
+func TestMessageCardIdentityAttachesAfterOtherGestures(t *testing.T) {
+	for _, interruption := range []string{"key", "wheel", "outside", "modal"} {
 		t.Run(interruption, func(t *testing.T) {
 			sess := session.New()
 			tree := subagent.Snapshot{Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: "child-full", SessionID: "child-session", Agent: "worker"}}}}
@@ -164,8 +158,6 @@ func TestMessageCardDoubleClickRequiresSameTargetAndUninterruptedPair(t *testing
 			p.resetProjection(runtime.SessionSnapshot{Session: sess})
 			p.handleRuntimeEvent(&runtime.SubagentTreeEvent{Snapshot: tree})
 			p.messages.AddOrUpdateToolCall("root", tools.ToolCall{ID: "send", Function: tools.FunctionCall{Name: subagent.ToolSendMessage, Arguments: `{"to":"child-full","message":"payload"}`}}, tools.Tool{}, types.ToolStatusCompleted)
-			now := time.Unix(10, 0)
-			p.messageClickNow = func() time.Time { return now }
 			x, y := -1, -1
 			for row, line := range strings.Split(p.messages.View(), "\n") {
 				if before, _, found := strings.Cut(ansi.Strip(line), "worker (child)"); found {
@@ -175,10 +167,7 @@ func TestMessageCardDoubleClickRequiresSameTargetAndUninterruptedPair(t *testing
 			}
 			require.GreaterOrEqual(t, x, 0)
 			click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
-			p.handleMouseClick(click)
 			switch interruption {
-			case "timeout":
-				now = now.Add(styles.DoubleClickThreshold)
 			case "key":
 				p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyEscape})
 			case "wheel":
@@ -189,7 +178,9 @@ func TestMessageCardDoubleClickRequiresSameTargetAndUninterruptedPair(t *testing
 				ClearSidebarHover(p)
 			}
 			_, cmd := p.handleMouseClick(click)
-			require.NotContains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "child-full"})
+			require.Contains(t, runTimerCmd(t, cmd), msgtypes.OpenSubagentMsg{NodeID: "child-full"})
+			settleSidebarGesture(t, p)
+			require.NotContains(t, ansi.Strip(p.messages.View()), "payload", "identity never toggles")
 		})
 	}
 }

@@ -54,7 +54,7 @@ func TestSubagentRepliesCollapseWithoutRenderingDeliveredBody(t *testing.T) {
 				view.SetHovered(true)
 				view.Finalize()
 				out := ansi.Strip(view.View())
-				require.Contains(t, out, strings.TrimSuffix(collapsedHeader, ">")+"v", "expansion preserves incoming icon, wording and order")
+				require.Contains(t, out, strings.TrimLeft(strings.TrimSuffix(collapsedHeader, ">"), " ")+"v", "expansion preserves incoming icon, wording and order")
 				if origin == session.InputOriginRuntime {
 					assert.Contains(t, out, "· report received v")
 				} else {

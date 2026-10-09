@@ -178,25 +178,34 @@ func TestAgentBorderTinyResizeHitCellsExcludeRuleAndBody(t *testing.T) {
 	input := session.UserMessage("Natural spaced prose cafe\u0301 界 **literal**")
 	input.InputOrigin, input.SenderID, input.SenderName = session.InputOriginAgent, "child-session", "worker"
 	m.AddInputMessage(input, 0)
-	for _, width := range []int{80, 4, 8, 12, 28, 80} {
-		m.SetSize(width, 40)
-		m.SetPosition(7, 3)
-		m.ensureAllItemsRendered()
-		m.scrollOffset, m.userHasScrolled = 0, true
-		m.scrollview.SetScrollOffset(0)
-		m.View()
-		for y, line := range m.renderedLines {
-			for x := range m.contentWidth() {
-				expected := false
-				for _, span := range extractOSC8Links(line) {
-					if span.url == agentidentity.Link && x >= span.startCol && x < span.endCol {
-						expected = true
+	view := m.views[0].(interface{ SetExpanded(bool) })
+	for _, expanded := range []bool{false, true} {
+		view.SetExpanded(expanded)
+		for _, width := range []int{80, 4, 8, 12, 28, 80} {
+			m.SetSize(width, 3)
+			m.SetPosition(7, 3)
+			m.invalidateItem(0)
+			m.ensureAllItemsRendered()
+			for _, scroll := range []int{0, 1} {
+				m.scrollOffset, m.userHasScrolled = scroll, true
+				m.scrollview.SetScrollOffset(scroll)
+				m.View()
+				actualScroll := m.scrollOffset
+				for y := actualScroll; y < min(actualScroll+m.height, len(m.renderedLines)); y++ {
+					line := m.renderedLines[y]
+					for x := range m.contentWidth() {
+						expected := false
+						for _, span := range extractOSC8Links(line) {
+							if span.url == agentidentity.Link && x >= span.startCol && x < span.endCol {
+								expected = true
+							}
+						}
+						id, ok := m.SubagentNodeAt(7+x, 3+y-actualScroll)
+						assert.Equal(t, expected, ok, "expanded=%t width=%d scroll=%d cell=(%d,%d)", expanded, width, scroll, x, y)
+						if ok {
+							assert.Equal(t, subagent.NodeID("abcde-canonical-node"), id)
+						}
 					}
-				}
-				id, ok := m.SubagentNodeAt(7+x, 3+y)
-				assert.Equal(t, expected, ok, "width=%d cell=(%d,%d)", width, x, y)
-				if ok {
-					assert.Equal(t, subagent.NodeID("abcde-canonical-node"), id)
 				}
 			}
 		}

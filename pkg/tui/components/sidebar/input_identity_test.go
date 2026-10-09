@@ -29,7 +29,7 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	m := newSubagentTestModel(t)
 	m.hoveredSubagent = node.ID
 	m.branchSpans = map[subagent.NodeID]branchSpans{node.ID: {idValue: 1, idTarget: 1}}
-	m.hoverValues = map[string]hoverValue{"node:" + string(node.ID): {value: 1, target: 1}}
+	m.hoverValues = map[string]hoverValue{"node-name:" + string(node.ID): {value: 1, target: 1}}
 	sidebar := m.subagentLine(node, "", 80)
 	assert.Contains(t, ansi.Strip(sidebar), node.DisplayName()+" ✓ ("+ref.DisplayID+")", "sidebar state glyph precedes neutral canonical ID")
 	assert.Contains(t, sidebar, neutralSpan(" ("+ref.DisplayID+")", 1, ansi.StringWidth(" ("+ref.DisplayID+")")), "ID retains neutral foreground")
@@ -73,9 +73,9 @@ func TestInputIdentitySidebarToolNoticeAndBorderShareLabelColor(t *testing.T) {
 	assert.Contains(t, view.View(), label, "tool uses canonical name color and neutral ID despite display alias")
 	assert.NotContains(t, ansi.Strip(border), node.SessionID)
 	rows := strings.Split(border, "\n")
-	prefix := "┏━ "
-	header := prefix + ref.Label() + " v sent a message "
-	assert.Equal(t, header+strings.Repeat("━", 80-ansi.StringWidth(header)), ansi.Strip(rows[0]), "canonical identity is embedded in the top border")
+	prefix := ansi.Strip(styles.ToolCompletedIcon.Render("✓")) + " "
+	header := styles.UserMessageStyle.GetBorderStyle().TopLeft + strings.TrimPrefix(prefix, " ") + ref.Label() + " sent a message v "
+	assert.Equal(t, header+strings.Repeat("━", 80-ansi.StringWidth(header)), ansi.Strip(rows[0]), "canonical identity is embedded in the top surface without shifting columns")
 	assert.Equal(t, "┃ literal **body**", strings.TrimRight(ansi.Strip(rows[2]), " "), "literal USER body stays below the identity border")
 	borderLinks := identityLinkCells(rows[0])
 	require.Len(t, borderLinks, 80)

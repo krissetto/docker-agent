@@ -129,16 +129,3 @@ func (m *model) agentMessageReferenceForLine(index, line int) (lifecycle.InputRe
 	}
 	return lifecycle.InputReference{}, false
 }
-
-func (m *model) AgentMessageIdentityAt(x, y int) (*types.Message, bool) {
-	if _, ok := m.InputReferenceAt(x, y); !ok {
-		return nil, false
-	}
-	line, _ := m.mouseToLineCol(x, y)
-	index, local, _ := m.globalLineToMessageLine(line)
-	_, ok := m.agentMessageReferenceForLine(index, local)
-	if !ok {
-		return nil, false
-	}
-	return m.messages[index], true
-}

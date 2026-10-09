@@ -249,7 +249,6 @@ func (p *chatPage) sidebarInteractive() bool {
 
 func (p *chatPage) releaseSidebarInput() {
 	p.lastSidebarClick = sidebarClick{}
-	p.lastMessageIdentityClick = messageIdentityClick{}
 	p.isDraggingSidebar = false
 	// End capture at an outside coordinate without committing title/queue edits.
 	p.sidebar.Update(tea.MouseReleaseMsg{X: -1, Y: -1, Button: tea.MouseLeft})
