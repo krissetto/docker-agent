@@ -572,6 +572,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 			}
 		}
 	}
+	if remote, ok := b.(*remoteBackend); ok {
+		remote.restoreInitialTab = f.shouldRestoreInitialTab(useTUI, args, userSettings)
+	}
 	rt, sessions, sess, cleanup, err := b.CreateSession(ctx, loadResult, b.CreateSessionRequest(wd))
 	if err != nil {
 		return err

@@ -1,4 +1,5 @@
 settings:
+  theme: black-amber
   show_banner: false
   YOLO: true
   restore_tabs: true

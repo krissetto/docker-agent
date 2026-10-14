@@ -19,7 +19,7 @@ import (
 func TestTeam(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
-	require.Len(t, cfg.Agents, 7)
+	require.Len(t, cfg.Agents, 10)
 	for _, expected := range []struct {
 		name      string
 		provider  string
@@ -30,13 +30,16 @@ func TestTeam(t *testing.T) {
 		toolsets  []string
 		readFile  bool
 	}{
-		{"root", "openai", "gpt-6-astra", "gpt-6-astra", "medium", []string{"director", "engineer", "designer", "reviewer"}, []string{"shell", "todo"}, false},
-		{"director", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"greppy", "planner", "engineer", "designer", "reviewer"}, []string{"shell"}, false},
-		{"greppy", "openai", "gpt-6.1-sol", "gpt-6.1-sol-low", "low", nil, []string{"shell", "todo"}, false},
-		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"shell", "todo"}, false},
-		{"engineer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", []string{"designer"}, []string{"shell", "todo"}, false},
+		{"root", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"shell", "todo"}, false},
+		{"dev-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"greppy", "planner", "engineer", "designer", "review-team"}, []string{"shell"}, false},
+		{"greppy", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", nil, []string{"shell", "todo"}, false},
+		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"shell", "todo"}, false},
+		{"engineer", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", []string{"designer"}, []string{"shell", "todo"}, false},
 		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"shell", "filesystem", "todo"}, true},
-		{"reviewer", "openai", "gpt-6.1-sol", "gpt-6.1-sol-high", "high", nil, []string{"shell"}, false},
+		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer"}, []string{"shell"}, false},
+		{"technical-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
+		{"security-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
+		{"edge-case-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", nil, []string{"shell"}, false},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
@@ -75,7 +78,7 @@ func TestTeam(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "yo, shelly here.", root.WelcomeMessage)
 	allowed := []subagent.AllowedSubagent{{Agent: root.Subagents[0].Agent}}
-	_, ok = subagent.FindAllowed(allowed, "director")
+	_, ok = subagent.FindAllowed(allowed, "dev-team")
 	assert.True(t, ok)
 	_, ok = subagent.FindAllowed(allowed, "undeclared")
 	assert.False(t, ok)
@@ -107,12 +110,15 @@ func TestTeamGuidance(t *testing.T) {
 		name     string
 		guidance []string
 	}{
-		{"root", []string{"use engineer more often than designer", "only when the maker explicitly asks"}},
-		{"director", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
+		{"root", []string{"use engineer more often than designer", "only when the maker explicitly asks", "`dev-team`, led by development lead", "separate, dedicated review team"}},
+		{"dev-team", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
 		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
 		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "directly recruit the declared designer subagent", "not routine ui delegation", "engineer retains implementation and integration ownership", "define file boundaries before assigning designer coding work", "other recruitment and material scope changes go through the assigning lead"}},
 		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change"}},
-		{"reviewer", []string{"only when the user explicitly asks", "never as a routine gate"}},
+		{"review-team", []string{"only when the user explicitly asks", "never as a routine gate", "smallest useful review team", "not duplicate full reviews", "one consolidated verdict", "don't modify project or reviewed artifacts"}},
+		{"technical-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "integration assumptions"}},
+		{"security-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "trust boundaries", "don't expose secrets"}},
+		{"edge-case-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "partial failures", "recovery"}},
 	} {
 		t.Run(expected.name, func(t *testing.T) {
 			a, ok := cfg.Agents.Lookup(expected.name)
@@ -121,7 +127,7 @@ func TestTeamGuidance(t *testing.T) {
 			for _, guidance := range expected.guidance {
 				assert.Contains(t, instruction, guidance)
 			}
-			if expected.name == "root" || expected.name == "director" {
+			if expected.name == "root" || expected.name == "dev-team" {
 				for _, guidance := range []string{"a task is a few plain sentences, like a message to a teammate", "what needs doing, what to bring back, and only the facts that would change what they do", "a clear request may be the whole assignment", "explicit requirements", "leave the approach"} {
 					assert.Contains(t, instruction, guidance)
 				}
@@ -129,7 +135,7 @@ func TestTeamGuidance(t *testing.T) {
 					assert.NotContains(t, instruction, checklist)
 				}
 			}
-			if expected.name == "root" || expected.name == "director" || expected.name == "engineer" || expected.name == "designer" {
+			if expected.name == "root" || expected.name == "dev-team" || expected.name == "engineer" || expected.name == "designer" {
 				for _, guidance := range []string{"simplicity", "safety or correctness", "single-line commit subjects", "descriptive branch names", "unless the user explicitly asks"} {
 					assert.Contains(t, instruction, guidance)
 				}
@@ -222,11 +228,12 @@ func TestNativeKit(t *testing.T) {
 		assert.Equal(t, expected, kit.Capabilities[byType["com.docker.sandbox/"+kind+"@1"][0]].Config, kind)
 	}
 	assert.Nil(t, kit.Capabilities[byType["com.docker.sandbox/sbx@1"][0]].Config)
+	assert.NotContains(t, string(descriptor), "${{ kit.env.WORKSPACE_DIR }}", "SBX supplies WORKSPACE_DIR at runtime, after descriptor resolution")
 	assert.Equal(t, map[string]any{
 		"prompt":   []any{"--exec", "--", "{{.Prompt}}"},
 		"resume":   []any{"--exec", "--session", "{{.SessionID}}"},
 		"continue": []any{"--exec", "--session=-1"},
-		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
+		"list":     []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
 	}, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config)
 	interactive := kit.Capabilities[byType["com.docker.sandbox/agent-interactive-sessions@1"][0]]
 	assert.Equal(t, map[string]any{
@@ -234,7 +241,7 @@ func TestNativeKit(t *testing.T) {
 		"resume":     []any{"--session", "{{.SessionID}}"},
 		"continue":   []any{"--session=-1"},
 		"newSession": []any{},
-		"list":       []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
+		"list":       []any{"/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"},
 	}, interactive.Config)
 	assert.Equal(t, kit.Capabilities[byType["com.docker.sandbox/agent-sessions@1"][0]].Config["list"], interactive.Config["list"])
 	assert.NotContains(t, interactive.Config, "sessionPicker", "the CLI has no dedicated startup picker")

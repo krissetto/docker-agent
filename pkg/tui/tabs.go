@@ -86,6 +86,7 @@ func (m *appModel) restoreTabs(
 		}
 	}
 	restoredFirst := false
+	restoredCount := 0
 
 	for _, saved := range savedTabs {
 		// Startup presence/title checks use one metadata read, never per-tab
@@ -130,6 +131,10 @@ func (m *appModel) restoreTabs(
 					continue
 				}
 			}
+			if runtimeID == initialTabID {
+				sv.ReorderTab(0, restoredCount)
+			}
+			restoredCount++
 			restoredFirst = true
 			if saved.SidebarCollapsed {
 				m.pendingSidebarCollapsed[runtimeID] = true

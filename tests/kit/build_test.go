@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,4 +51,16 @@ func TestKitBuildInputIsolation(t *testing.T) {
 		"!kit/start.sh", "!kit/launch.sh", "!kit/hackerspace.yaml", "!kit/user-config.yaml",
 		"**/*_test.go", "**/testdata/**", "**/fixtures/**",
 	}, rules)
+}
+
+func TestKitDefaultTheme(t *testing.T) {
+	raw, err := os.ReadFile(kitPath(t, "user-config.yaml"))
+	require.NoError(t, err)
+	var config struct {
+		Settings struct {
+			Theme string `yaml:"theme"`
+		} `yaml:"settings"`
+	}
+	require.NoError(t, yaml.Unmarshal(raw, &config))
+	assert.Equal(t, "black-amber", config.Settings.Theme)
 }

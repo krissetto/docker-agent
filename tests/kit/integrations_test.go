@@ -83,7 +83,7 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 		})))
 	require.NoError(t, err)
 	defer team.StopToolSets(t.Context())
-	for _, name := range []string{"root", "director", "greppy", "planner", "engineer", "designer", "reviewer"} {
+	for _, name := range []string{"root", "dev-team", "greppy", "planner", "engineer", "designer", "review-team", "technical-reviewer", "security-reviewer", "edge-case-reviewer"} {
 		a, err := team.Agent(name)
 		require.NoError(t, err)
 		actual, err := a.Tools(t.Context())
@@ -99,7 +99,7 @@ func TestKitContextAndSkillsDiscovery(t *testing.T) {
 			assert.NotContains(t, names, "read_skill_file")
 			assert.NotContains(t, names, "run_skill")
 		}
-		if name == "director" {
+		if name == "dev-team" {
 			assert.ElementsMatch(t, []string{"read_file", "spawn_subagent", "send_message", "read_subagent", "stop_subagent"}, names)
 		}
 	}

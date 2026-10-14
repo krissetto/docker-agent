@@ -228,7 +228,7 @@ func TestPureBaseThemeVariantsCompleteAndContrasting(t *testing.T) {
 			require.NotEmpty(t, colors.FieldByName(field).String(), "%s/%s", variant.ref, field)
 		}
 		require.GreaterOrEqual(t, len(raw.Colors.AgentHues), 8)
-		for _, pair := range [][2]string{{raw.Colors.SelectedFg, raw.Colors.Selected}, {raw.Colors.TextPrimary, raw.Colors.CardBg}, {raw.Colors.Accent, raw.Colors.Background}} {
+		for _, pair := range [][2]string{{raw.Colors.TextPrimary, raw.Colors.Selected}, {raw.Colors.TextPrimary, raw.Colors.CardBg}, {raw.Colors.Accent, raw.Colors.Background}} {
 			ratio, ok := contrastRatioHex(pair[0], pair[1])
 			require.True(t, ok)
 			require.GreaterOrEqual(t, ratio, 4.5, "%s foreground/background selection and content readability", variant.ref)
@@ -270,5 +270,53 @@ func TestPureBaseThemeRenderedDimIdentitySelectionAndDialog(t *testing.T) {
 		require.Equal(t, strings.ToLower(theme.Colors.TextPrimary), RGBToHex(float64(sr)/255, float64(sg)/255, float64(sb)/255), "selection uses effective primary foreground, not an unreachable YAML promise")
 		require.Equal(t, "selected λ界", ansi.Strip(selection))
 		t.Logf("%s focused=%q inactive=%q model=%q selection=%q", ref, focused, inactive, modelStyle.Render("Friendly Model provider (high)"), selection)
+	}
+}
+
+func TestBlackThemeMenuAndSpinnerContrast(t *testing.T) { //nolint:paralleltest // ApplyTheme mutates style globals.
+	original := CurrentTheme()
+	t.Cleanup(func() { ApplyTheme(original) })
+	for _, ref := range []string{"black-amber", "black-cyan", "black-violet"} {
+		theme, err := loadBuiltinTheme(ref)
+		require.NoError(t, err)
+		ApplyTheme(theme)
+		for name, style := range map[string]lipgloss.Style{
+			"palette action":         PaletteSelectedActionStyle,
+			"palette description":    PaletteSelectedDescStyle,
+			"completion label":       CompletionSelectedStyle,
+			"completion description": CompletionSelectedDescStyle,
+		} {
+			assert.Equal(t, MobyBlue, style.GetBackground(), "%s %s", ref, name)
+			assert.GreaterOrEqual(t, contrastRatio(style.GetForeground(), style.GetBackground()), 7.0, "%s %s", ref, name)
+			r, g, b := extractFirstFgRGB(style.Render("selected"))
+			assert.Equal(t, strings.ToLower(theme.Colors.SelectedFg), RGBToHex(float64(r)/255, float64(g)/255, float64(b)/255), "%s %s rendered foreground", ref, name)
+		}
+		assert.Equal(t, TextPrimary, SelectionStyle.GetForeground(), "dark selection retains light text")
+		assert.GreaterOrEqual(t, contrastRatio(SelectionStyle.GetForeground(), SelectionStyle.GetBackground()), 7.0, ref)
+
+		// The sweep must brighten the resting accent without a dark halo or a white flash.
+		previous := relativeLuminanceColor(Accent)
+		accentHue, _, _ := rgbToHSL(ColorToRGB(Accent))
+		for _, step := range []struct {
+			style lipgloss.Style
+			want  string
+		}{
+			{SpinnerTextDimmestStyle, theme.Colors.Accent},
+			{SpinnerTextDimStyle, theme.Colors.SpinnerDim},
+			{SpinnerTextBrightStyle, theme.Colors.SpinnerBright},
+			{SpinnerTextBrightestStyle, theme.Colors.SpinnerBrightest},
+		} {
+			fg := step.style.GetForeground()
+			assert.Equal(t, strings.ToLower(step.want), RGBToHex(ColorToRGB(fg)), ref)
+			assert.GreaterOrEqual(t, contrastRatio(fg, ShellBg), 4.5, "%s spinner on page", ref)
+			assert.GreaterOrEqual(t, contrastRatio(fg, EditorBg), 4.5, "%s spinner on editor", ref)
+			luminance := relativeLuminanceColor(fg)
+			assert.GreaterOrEqual(t, luminance, previous, "%s spinner ramp only brightens", ref)
+			previous = luminance
+			r, g, b := ColorToRGB(fg)
+			hue, saturation, _ := rgbToHSL(r, g, b)
+			assert.InDelta(t, accentHue, hue, 5.0, "%s spinner keeps its accent hue", ref)
+			assert.Greater(t, saturation, 0.5, "%s spinner remains saturated", ref)
+		}
 	}
 }

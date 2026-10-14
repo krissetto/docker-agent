@@ -24,7 +24,7 @@ func kitScriptFixture(t *testing.T, name string) (string, string) {
 	require.NoError(t, os.Mkdir(workspace, 0700))
 	script, err := os.ReadFile(kitPath(t, name))
 	require.NoError(t, err)
-	script = []byte(strings.ReplaceAll(strings.ReplaceAll(string(script), "/opt/async-agent", home), "/workspace", workspace))
+	script = []byte(strings.ReplaceAll(strings.ReplaceAll(string(script), "/opt/async-agent", home), "/workspace", filepath.Join(home, "unused image workdir")))
 	launcher := filepath.Join(home, name)
 	require.NoError(t, os.WriteFile(launcher, script, 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "docker-agent"), []byte("#!/bin/sh\nprintf '%s\\0' \"$PWD\" \"$@\"\n"), 0700))
@@ -34,12 +34,16 @@ func kitScriptFixture(t *testing.T, name string) (string, string) {
 func TestLauncherAttachOnly(t *testing.T) {
 	home, workspace := kitScriptFixture(t, "launch.sh")
 	for _, args := range [][]string{
-		{}, {"--exec", "--dry-run"}, {"--session", "session id"}, {"--session=-1"},
+		{},
+		{"--working-dir", "subdirectory with spaces"},
+		{"--exec", "--dry-run"},
+		{"--session", "session id"},
+		{"--session=-1"},
 		{"--exec", "--safety", "strict", "--", "--team", "line one\n$(touch INJECTED); *", ""},
 	} {
 		cmd := exec.CommandContext(t.Context(), "/bin/sh", append([]string{filepath.Join(home, "launch.sh")}, args...)...)
-		cmd.Dir = home
-		cmd.Env = append(os.Environ(), "ASYNC_AGENT_KIT_STATE_DIR="+home+"/private")
+		cmd.Dir = workspace
+		cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+home, "ASYNC_AGENT_KIT_STATE_DIR="+home+"/private")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 		expected := append([]string{workspace, "run", filepath.Join(home, "hackerspace.yaml"), "--managed-api", "--managed-api-attach", "--managed-api-state-dir", home + "/private"}, args...)
@@ -69,6 +73,7 @@ func TestStartupTeamSelection(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(home, "hackerspace.yaml"), []byte("agents: {}"), 0600))
 		cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), tc.team, home+"/private", tc.model)
 		cmd.Dir = home
+		cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+workspace)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 		expected := []string{workspace, "serve", "api", "--managed-api", "--working-dir", workspace, "--managed-api-state-dir", home + "/private"}
@@ -81,10 +86,14 @@ func TestStartupTeamSelection(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "hackerspace.yaml"), []byte("agents: {}"), 0600))
 	cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "auto", home+"/private", "")
+	cmd.Dir = workspace
+	cmd.Env = append(os.Environ(), "WORKSPACE_DIR=")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err)
 	assert.Contains(t, string(out), filepath.Join(workspace, "hackerspace.yaml"))
 	cmd = exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "missing.yaml", home+"/private", "")
+	cmd.Dir = workspace
+	cmd.Env = append(os.Environ(), "WORKSPACE_DIR=")
 	out, err = cmd.CombinedOutput()
 	require.Error(t, err)
 	assert.Contains(t, string(out), "team file is not a readable regular file")
@@ -125,7 +134,7 @@ func TestStartupDeclaredEnvironment(t *testing.T) {
 			continue
 		}
 		hook := capability.Config.Startup[1]
-		values := map[string]string{"ASYNC_AGENT_KIT_TEAM": "auto", "ASYNC_AGENT_KIT_MODEL": "openai/fixture", "ASYNC_AGENT_KIT_STATE_DIR": home + "/private", "OPENAI_API_KEY": "fixture-sentinel", "ANTHROPIC_API_KEY": "fixture-sentinel", "GOOGLE_API_KEY": "fixture-sentinel", "GH_TOKEN": "fixture-sentinel"}
+		values := map[string]string{"WORKSPACE_DIR": workspace, "ASYNC_AGENT_KIT_TEAM": "auto", "ASYNC_AGENT_KIT_MODEL": "openai/fixture", "ASYNC_AGENT_KIT_STATE_DIR": home + "/private", "OPENAI_API_KEY": "fixture-sentinel", "ANTHROPIC_API_KEY": "fixture-sentinel", "GOOGLE_API_KEY": "fixture-sentinel", "GH_TOKEN": "fixture-sentinel"}
 		args := append([]string(nil), hook.Command...)
 		for i, arg := range args {
 			arg = strings.ReplaceAll(arg, "/opt/async-agent", home)

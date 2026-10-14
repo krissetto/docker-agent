@@ -95,15 +95,17 @@ sbx run --name async-agent-trial-1
 
 The Kit deliberately differs from standalone `docker-agent run`: workspace,
 team, model override and private state belong to **sandbox creation**, not each
-connection. A conforming `sbx@1` consumer maps the host workspace to the image's
-explicit `/workspace` WorkingDir. There is no alternate workspace argument.
-Startup explicitly changes to that path; it never assumes hook cwd.
+connection. Startup uses SBX's `WORKSPACE_DIR` when supplied, otherwise the
+startup process working directory. `/workspace` is the image default, not a
+forced mount location. The connection preserves SBX's requested working
+directory; `--working-dir` can select a session directory inside that workspace
+without changing the lifecycle-owned API's workspace identity.
 
 Create arguments are:
 
 | Kit argument | Default | Meaning |
 | --- | --- | --- |
-| `team` | `auto` | Workspace `hackerspace.yaml`, otherwise bundled team; or a readable guest file path relative to `/workspace` or absolute. |
+| `team` | `auto` | Workspace `hackerspace.yaml`, otherwise bundled team; or a readable guest file path relative to the startup workspace or absolute. |
 | `model` | empty | Team-wide model override, e.g. `openai/ACCESSIBLE_MODEL`; comma-separated targeted overrides follow the CLI's normal model syntax. Empty keeps team models. |
 | `stateDir` | `/home/agent/.cagent/managed-api` | Absolute private guest state base outside the mounted workspace. |
 | `diagnostics` | `off` | Local install/boot markers; no provider calls. |
@@ -128,8 +130,8 @@ not arbitrary host files. Missing, unreadable and non-file team paths fail.
 
 Connection-time `--team` and `--model` are rejected: recreate with `team` and
 `model` respectively. `--managed-api-state-dir` cannot change the creation-bound
-base: recreate with `stateDir`. `--working-dir` is rejected: select the host
-workspace when creating the sandbox; its guest location is `/workspace`.
+base: recreate with `stateDir`. `--working-dir` selects the session directory,
+not a different API; the server rejects paths outside the creation workspace.
 Server-changing flags (`--env-from-file`, `--flavor`, `--models-gateway`,
 `--code-mode-tools`, runtime hook flags, `--mcp-oauth-redirect-uri`, explicit
 remote auth/workdir, `--listen`, `--session-workingdir-root`) are unsupported on
@@ -139,6 +141,9 @@ Managed fake/record, worktree and local database modes remain unsupported.
 `--exec`, `--dry-run`, `--session ID`, `--session=-1`, agent selection, prompts
 following `--`, and client `--safety` / `--yolo` remain connection options.
 Standalone managed/remote CLI flexibility is unchanged.
+
+The Kit starts with the Black Amber theme. Choose another theme in the TUI or
+pass `--theme NAME` when connecting to override it.
 
 ### Lifecycle-owned API and recovery
 
@@ -212,13 +217,15 @@ state base. Session listing from inside the guest uses:
 
 ```sh
 /opt/async-agent/docker-agent sessions list --managed-api --managed-api-attach \
-  --working-dir /workspace \
   --managed-api-state-dir "$ASYNC_AGENT_KIT_STATE_DIR" --quiet
 ```
 
-Both descriptor session surfaces use these explicit workspace/state inputs.
-Listing uses committed server source and creates no sessions; a dead API yields
-an error rather than restarting it or opening a second local database.
+Both descriptor session surfaces use the creation-bound state base. API discovery
+uses runtime `WORKSPACE_DIR`, falling back to the listing process cwd; it does not
+require a workspace value during descriptor resolution. Kit listing includes
+sessions in workspace subdirectories, uses the committed server source
+and creates no sessions; a dead API yields an error rather than restarting it
+or opening a second local database.
 
 ## Credentials and network
 

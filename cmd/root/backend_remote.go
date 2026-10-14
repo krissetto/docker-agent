@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 // newRemoteClient never places credentials in argv, URLs, or diagnostics.
@@ -51,6 +54,13 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	}
 	var handle runtime.SessionHandle
 	var sess *session.Session
+	if id == "" && b.restoreInitialTab {
+		var err error
+		handle, sess, err = b.restoreInitialSession(ctx, transport)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	if id != "" {
 		var err error
 		prepared, prepareErr := transport.PrepareSessionView(ctx, id)
@@ -157,6 +167,50 @@ func (b *remoteBackend) openSession(ctx context.Context, client *runtime.Client,
 	sess.AgentName = handle.AgentName()
 	sess.HideToolResults = req.HideToolResults
 	return handle, sess, nil
+}
+
+func (f *runExecFlags) shouldRestoreInitialTab(useTUI bool, args []string, settings *userconfig.Settings) bool {
+	return useTUI && f.managedAPIAttach && settings.GetRestoreTabs() &&
+		f.sessionID == "" && f.agentName == "" && !f.workingDirChanged && len(args) < 2 && f.attachmentPath == ""
+}
+
+// Reuse a saved view before creating the startup session; remote tab restoration
+// cannot replace a blank server-owned session after it has been created.
+func (b *remoteBackend) restoreInitialSession(ctx context.Context, transport *runtime.SessionTransport) (runtime.SessionHandle, *session.Session, error) {
+	store, err := tuistate.New(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to open TUI state store", "error", err)
+		return nil, nil, nil
+	}
+	defer store.Close()
+	tabs, active, err := store.GetTabs(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to read saved tabs", "error", err)
+		return nil, nil, nil
+	}
+	ids := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		if tab.SessionID == active && active != "" {
+			ids = append(ids, active)
+		}
+	}
+	for _, tab := range tabs {
+		if tab.SessionID != "" && tab.SessionID != active {
+			ids = append(ids, tab.SessionID)
+		}
+	}
+	for _, id := range ids {
+		committed, err := runtime.RestoreSessionView(ctx, transport, id)
+		if err != nil {
+			var sessionErr *runtime.SessionError
+			if errors.As(err, &sessionErr) && (sessionErr.Kind == runtime.SessionErrorNotFound || sessionErr.Kind == runtime.SessionErrorWrongSession) {
+				continue
+			}
+			return nil, nil, err
+		}
+		return committed.SessionHandle, committed.Info.Session, nil
+	}
+	return nil, nil, nil
 }
 
 // Generic remote clients cannot change the server's shared agent configuration.

@@ -53,6 +53,14 @@ func managedWorkspace(root string) (string, error) {
 	return filepath.EvalSymlinks(root)
 }
 
+func managedAttachWorkspace(root string) (string, error) {
+	// SBX's workspace identifies the API; a connection may run in a subdirectory.
+	if bound := os.Getenv("WORKSPACE_DIR"); bound != "" && os.Getenv("ASYNC_AGENT_KIT_STATE_DIR") != "" {
+		root = bound
+	}
+	return managedWorkspace(root)
+}
+
 func managedStateDir(base, workspace string) (string, error) {
 	if err := managedPlatformSupported(); err != nil {
 		return "", err
@@ -195,9 +203,16 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	}
 	ctx, cancel := context.WithTimeout(ctx, managedStartupTimeout)
 	defer cancel()
-	workspace, err := managedWorkspace(f.runConfig.WorkingDir)
+	workingDir, err := managedWorkspace(f.runConfig.WorkingDir)
 	if err != nil {
 		return "", err
+	}
+	workspace := workingDir
+	if f.managedAPIAttach {
+		workspace, err = managedAttachWorkspace(f.runConfig.WorkingDir)
+		if err != nil {
+			return "", err
+		}
 	}
 	var manifest *snapshot.Manifest
 	if !f.managedAPIAttach {
@@ -229,7 +244,7 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	}
 	f.remoteAddress = d.Address
 	f.remoteAuthTokenFile = filepath.Join(dir, "token")
-	f.remoteWorkingDir = workspace
+	f.remoteWorkingDir = workingDir
 	// Only clear after the daemon has authenticated its exact immutable inputs.
 	f.modelOverrides = nil
 	return d.Source, nil

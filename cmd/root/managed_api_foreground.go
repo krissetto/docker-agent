@@ -89,7 +89,7 @@ func (f *apiFlags) prepareForegroundManagedAPI(ctx context.Context, source strin
 }
 
 func validateManagedAttachFlags(cmd *cobra.Command) error {
-	for _, name := range []string{"working-dir", "agent-picker", "model", "env-from-file", "flavor", "models-gateway", "code-mode-tools", "hook-pre-tool-use", "hook-post-tool-use", "hook-session-start", "hook-session-end", "hook-on-user-input", "hook-stop", "mcp-oauth-redirect-uri", "remote-auth-token-file", "remote-working-dir", "listen", "session-workingdir-root"} {
+	for _, name := range []string{"agent-picker", "model", "env-from-file", "flavor", "models-gateway", "code-mode-tools", "hook-pre-tool-use", "hook-post-tool-use", "hook-session-start", "hook-session-end", "hook-on-user-input", "hook-stop", "mcp-oauth-redirect-uri", "remote-auth-token-file", "remote-working-dir", "listen", "session-workingdir-root"} {
 		if cmd.Flags().Changed(name) {
 			return errors.New("--" + name + " cannot change a lifecycle-owned API; bind server configuration when creating the sandbox")
 		}
@@ -100,7 +100,7 @@ func validateManagedAttachFlags(cmd *cobra.Command) error {
 func attachedManagedSessionIDs(ctx context.Context, base, root string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, managedStartupTimeout)
 	defer cancel()
-	workspace, err := managedWorkspace(root)
+	workspace, err := managedAttachWorkspace(root)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +114,9 @@ func attachedManagedSessionIDs(ctx context.Context, base, root string) ([]string
 	}
 	if d.Workspace != workspace {
 		return nil, errors.New("managed API workspace identity mismatch")
+	}
+	if os.Getenv("WORKSPACE_DIR") != "" && os.Getenv("ASYNC_AGENT_KIT_STATE_DIR") != "" {
+		return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), d.Source, "")
 	}
 	return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), d.Source, workspace)
 }

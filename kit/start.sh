@@ -1,21 +1,21 @@
 #!/bin/sh
 set -eu
-cd "/workspace"
+cd "${WORKSPACE_DIR:-$PWD}"
 team=$1
 state=$2
 model=$3
 shift 3
 case "$state" in
     /*) ;;
-    *) printf '%s\n' 'start.sh: stateDir must be an absolute private guest path outside /workspace' >&2; exit 2 ;;
+    *) printf '%s\n' 'start.sh: stateDir must be an absolute private guest path outside the workspace' >&2; exit 2 ;;
 esac
 if [ "$team" = auto ]; then
-    team="/workspace/hackerspace.yaml"
+    team="$PWD/hackerspace.yaml"
     [ -f "$team" ] || team=/opt/async-agent/hackerspace.yaml
 fi
 case "$team" in
     /*) ;;
-    *) team="/workspace/$team" ;;
+    *) team="$PWD/$team" ;;
 esac
 if [ ! -f "$team" ] || [ ! -r "$team" ]; then
     printf 'start.sh: team file is not a readable regular file: %s\n' "$team" >&2
@@ -27,6 +27,6 @@ if [ -n "$model" ]; then
     set -- --model "$model"
 fi
 exec /opt/async-agent/docker-agent serve api --managed-api \
-    --working-dir "/workspace" \
+    --working-dir "$PWD" \
     --managed-api-state-dir "$state" \
     "$@" -- "$team"

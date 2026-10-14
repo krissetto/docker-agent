@@ -100,6 +100,12 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 		return err
 	}
 	identity := f.freshViewOwnerIdentity(initial)
+	if initial.ParentID != "" {
+		identity, err = resolve(ctx, initial.ID)
+		if err != nil {
+			return err
+		}
+	}
 	resources := viewhost.ViewOwnerResources{Services: services, Sessions: sessions, Cleanup: cleanup}
 	opts := withTitleGenerator(ctx, services, []app.Opt{app.WithRuntimeServices(services)})
 	if f.snapshotController != nil {

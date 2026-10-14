@@ -186,10 +186,11 @@ func (b *localBackend) Close() error {
 
 // remoteBackend talks to a docker-agent server.
 type remoteBackend struct {
-	handle        runtime.SessionHandle
-	flags         *runExecFlags
-	agentFileName string
-	model         string
+	restoreInitialTab bool
+	handle            runtime.SessionHandle
+	flags             *runExecFlags
+	agentFileName     string
+	model             string
 }
 
 func (b *remoteBackend) LoadTeamRequest() runtime.LoadTeamRequest {

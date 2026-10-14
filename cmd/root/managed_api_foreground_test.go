@@ -75,6 +75,29 @@ func TestForegroundManagedAPIAndAttach(t *testing.T) {
 	list.SetArgs([]string{"--managed-api", "--managed-api-attach", "--working-dir", workspace, "--managed-api-state-dir", base, "--quiet"})
 	require.NoError(t, list.ExecuteContext(ctx))
 	assert.Empty(t, listed.String())
+	t.Setenv("WORKSPACE_DIR", workspace)
+	t.Setenv("ASYNC_AGENT_KIT_STATE_DIR", base)
+	subdir := filepath.Join(workspace, "subdirectory with spaces")
+	require.NoError(t, os.Mkdir(subdir, 0o700))
+	for _, root := range []string{"", ".", subdir} {
+		t.Chdir(subdir)
+		clientFlags := &runExecFlags{managedAPI: true, managedAPIAttach: true, managedAPIStateDir: base, runConfig: config.RuntimeConfig{Config: config.Config{WorkingDir: root}}}
+		attachedSource, err := clientFlags.bootstrapManagedAPI(ctx, "not-a-real-source")
+		require.NoError(t, err)
+		assert.Equal(t, team, attachedSource)
+		assert.Equal(t, d.Address, clientFlags.remoteAddress)
+		assert.Equal(t, subdir, clientFlags.remoteWorkingDir)
+		request := (&remoteBackend{flags: clientFlags}).CreateSessionRequest("ignored-client-path")
+		assert.Equal(t, subdir, request.WorkingDir)
+	}
+	ids, err = attachedManagedSessionIDs(ctx, base, subdir)
+	require.NoError(t, err)
+	assert.Empty(t, ids, "listing from a subdirectory discovers the workspace API")
+	list = newSessionsListCmd()
+	list.SetOut(&listed)
+	list.SetArgs([]string{"--managed-api", "--managed-api-attach", "--managed-api-state-dir", base, "--quiet"})
+	require.NoError(t, list.ExecuteContext(ctx), "descriptor listing needs no creation-time workspace flag")
+	assert.Empty(t, listed.String())
 	token, err := managedRead(filepath.Join(dir, "token"))
 	require.NoError(t, err)
 	second := &apiFlags{managedState: dir, manifest: m}
@@ -122,8 +145,11 @@ func TestManagedAttachMissingHookNeverStarts(t *testing.T) {
 func TestManagedAttachCLIRejectsServerChanges(t *testing.T) {
 	home := isolateSessionsList(t)
 	for _, args := range [][]string{
-		{"--model", "openai/changed"}, {"--working-dir", home}, {"--flavor", "changed"},
-		{"--env-from-file", "changed"}, {"--models-gateway", "http://changed"}, {"--hook-stop", "true"},
+		{"--model", "openai/changed"},
+		{"--flavor", "changed"},
+		{"--env-from-file", "changed"},
+		{"--models-gateway", "http://changed"},
+		{"--hook-stop", "true"},
 	} {
 		cmd := newRunCmd()
 		require.NoError(t, cmd.ParseFlags(args))
@@ -131,7 +157,7 @@ func TestManagedAttachCLIRejectsServerChanges(t *testing.T) {
 		require.ErrorContains(t, err, "bind server configuration")
 	}
 	cmd := newRunCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--exec", "--session=-1", "--safety", "strict", "--yolo=false", "--dry-run"}))
+	require.NoError(t, cmd.ParseFlags([]string{"--working-dir", home, "--exec", "--session=-1", "--safety", "strict", "--yolo=false", "--dry-run"}))
 	require.NoError(t, validateManagedAttachFlags(cmd))
 	var output bytes.Buffer
 	root := NewRootCmd()

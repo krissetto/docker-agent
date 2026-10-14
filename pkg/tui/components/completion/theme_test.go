@@ -1,11 +1,11 @@
 package completion
 
 import (
-	uv "github.com/charmbracelet/ultraviolet"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +38,7 @@ func TestWarmCompletionThemeSwitchPreservesLayoutAndSelection(t *testing.T) { //
 func TestSelectedCompletionBackgroundSpansLabelDescriptionAndPadding(t *testing.T) {
 	original := styles.CurrentTheme()
 	t.Cleanup(func() { styles.ApplyTheme(original) })
-	for _, ref := range []string{"default", "nord", "default-light"} {
+	for _, ref := range []string{"default", "nord", "default-light", "black-amber", "black-cyan", "black-violet"} {
 		theme, err := styles.LoadTheme(ref)
 		require.NoError(t, err)
 		styles.ApplyTheme(theme)
@@ -58,6 +58,7 @@ func TestSelectedCompletionBackgroundSpansLabelDescriptionAndPadding(t *testing.
 				for x := left; x < left+inner; x++ {
 					if index == 0 {
 						assert.Equal(t, styles.MobyBlue, cells[x].Style.Bg, "selected content cell %d has no seam", x)
+						assert.Equal(t, styles.White, cells[x].Style.Fg, "selected content cell %d uses the menu foreground", x)
 					} else {
 						assert.Nil(t, cells[x].Style.Bg, "unselected rows retain terminal transparency")
 					}

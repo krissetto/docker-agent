@@ -98,7 +98,7 @@ capabilities:
       prompt: ["--exec", "--", "{{.Prompt}}"]
       resume: ["--exec", "--session", "{{.SessionID}}"]
       continue: ["--exec", "--session=-1"]
-      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
   - type: com.docker.sandbox/agent-interactive-sessions@1
     optional: true
     config:
@@ -106,7 +106,7 @@ capabilities:
       resume: ["--session", "{{.SessionID}}"]
       continue: ["--session=-1"]
       newSession: []
-      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--working-dir", "/workspace", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
+      list: ["/opt/async-agent/docker-agent", "sessions", "list", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "--quiet"]
   - type: com.docker.sandbox/agent-context@1
     optional: true
     config:
@@ -162,6 +162,7 @@ capabilities:
           user: agent
           background: true
           env:
+            - WORKSPACE_DIR
             - ASYNC_AGENT_KIT_TEAM
             - ASYNC_AGENT_KIT_MODEL
             - ASYNC_AGENT_KIT_STATE_DIR
