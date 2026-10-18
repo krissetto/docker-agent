@@ -13,8 +13,9 @@ import (
 
 type removalConfirmationDialog struct {
 	BaseDialog
-	confirm     tea.Cmd
-	title, text string
+	confirm      tea.Cmd
+	title, text  string
+	confirmLabel string
 }
 
 // NewPendingMessageRemovalDialog requires an explicit affirmative action before withdrawal.
@@ -31,7 +32,7 @@ func NewTodoRemovalDialog(description string, confirm tea.Cmd) Dialog {
 }
 
 func newRemovalConfirmationDialog(title, text string, confirm tea.Cmd) Dialog {
-	return &removalConfirmationDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, title: title, text: safeAttachmentText(strings.ReplaceAll(text, "\r\n", "\n")), confirm: confirm}
+	return &removalConfirmationDialog{BaseDialog: BaseDialog{bodyCompactTitle: true}, title: title, confirmLabel: "Remove", text: safeAttachmentText(strings.ReplaceAll(text, "\r\n", "\n")), confirm: confirm}
 }
 
 func (d *removalConfirmationDialog) Init() tea.Cmd { return nil }
@@ -110,7 +111,7 @@ func (d *removalConfirmationDialog) content() (width int, header, body, footer s
 	padding := min(2, max(0, (contentWidth-3)/2))
 	footer = d.renderActions(contentWidth, lipgloss.Right, 2, padding,
 		Action{Label: "Cancel", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: true, HideShortcut: true},
-		Action{Label: "Remove", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}, HideShortcut: true})
+		Action{Label: d.confirmLabel, Key: tea.KeyPressMsg{Code: 'y', Text: "y"}, HideShortcut: true})
 	return width, header, body, footer
 }
 

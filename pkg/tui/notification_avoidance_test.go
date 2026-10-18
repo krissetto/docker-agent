@@ -27,7 +27,7 @@ func TestRootNotificationAvoidanceBothCompositorsAndHitGeometry(t *testing.T) {
 			root.panelSettings = messages.PanelSettings{Elements: []messages.PanelElement{}}
 			root.resizeAll()
 			root.Update(notification.ShowMsg{Text: "Notification avoids typed input"})
-			resting := root.notification.GetLayer().GetY()
+			resting := root.notification.GetLayers()[0].GetY()
 			root.editor.SetValue(strings.Repeat("界", 42) + "\n" + strings.Repeat("字", 42))
 			root.focusedPanel = PanelEditor
 			root.editor.Focus()
@@ -42,7 +42,7 @@ func TestRootNotificationAvoidanceBothCompositorsAndHitGeometry(t *testing.T) {
 				root.updateWithLifecycle(cmd())
 				root.syncNotificationAvoidance()
 			}
-			layer := root.notification.GetLayer()
+			layer := root.notification.GetLayers()[0]
 			require.Less(t, layer.GetY(), resting)
 			frame := root.editorFrame()
 			origin := image.Pt(frame.GetMarginLeft()+frame.GetBorderLeftSize()+frame.GetPaddingLeft(), root.editorTop()+frame.GetMarginTop()+frame.GetBorderTopSize()+frame.GetPaddingTop())
@@ -64,7 +64,7 @@ func TestRootNotificationAvoidanceBothCompositorsAndHitGeometry(t *testing.T) {
 				root.updateWithLifecycle(cmd())
 				root.syncNotificationAvoidance()
 			}
-			require.Equal(t, resting, root.notification.GetLayer().GetY())
+			require.Equal(t, resting, root.notification.GetLayers()[0].GetY())
 			require.False(t, root.ar.HasActive(), "settled empty editor leaves no avoidance tick")
 			root.notification.Cleanup()
 		})
@@ -92,9 +92,9 @@ func TestRootNotificationAvoidanceIgnoresLoadingEmptyAndUnfocused(t *testing.T) 
 				root.width = 0
 				root.height = 0
 			}
-			resting := root.notification.GetLayer().GetY()
+			resting := root.notification.GetLayers()[0].GetY()
 			root.syncNotificationAvoidance()
-			require.Equal(t, resting, root.notification.GetLayer().GetY())
+			require.Equal(t, resting, root.notification.GetLayers()[0].GetY())
 			require.False(t, root.ar.HasActive(), "invisible occupancy cannot register motion")
 			root.notification.Cleanup()
 		})

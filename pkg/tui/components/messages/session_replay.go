@@ -16,6 +16,7 @@ import (
 
 type sessionReplay struct {
 	preparedReasoning        *reasoningblock.PreparedReasoning
+	initial                  bool
 	renderOnly               bool
 	waiting                  bool
 	preparedIndex            int
@@ -55,6 +56,7 @@ func replayToolResults(items []session.Item) map[string]string {
 func BeginReplay(list Model, prepared PreparedReplay, media map[int][]types.AssistantMedia) {
 	m := list.(*model)
 	m.startSessionReplay(prepared.Session, media, prepared.toolResults)
+	m.replay.initial = true
 }
 
 func ContinueReplay(list Model) (bool, tea.Cmd) { return list.(*model).applySessionReplay(true) }
@@ -94,7 +96,11 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 		return true, tea.Batch(cmds...)
 	}
 	if r.ranges == nil || r.theme != styles.ThemeGeneration() || r.agents != styles.AgentColorGeneration() || r.width != m.contentWidth() {
-		r.renderPosition = 0
+		if r.initial {
+			// A minimum row per view fills the first viewport even for short cards.
+			m.historyStart = max(0, len(m.views)-max(8, m.height))
+		}
+		r.renderPosition = m.historyStart
 		r.lines = nil
 		r.ranges = make(renderedItemIndex, len(m.views))
 		r.offsets = make([]int, len(m.views))
@@ -165,6 +171,9 @@ func (m *model) applySessionReplay(render bool) (bool, tea.Cmd) {
 	m.themeGeneration = styles.ThemeGeneration()
 	m.urlSpans.clear()
 	m.replay = nil
+	if m.historyStart > 0 && m.historyReplay == nil {
+		m.historyReplay = &sessionReplay{}
+	}
 	m.scrollOffset = max(0, m.totalHeight-m.height)
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	m.invalidateView()
@@ -182,13 +191,13 @@ type ReplayRenderedMsg struct {
 func ReplayWaiting(list Model) bool { m := list.(*model); return m.replay != nil && m.replay.waiting }
 func ApplyReplayRender(list Model, msg ReplayRenderedMsg) {
 	m := list.(*model)
-	if m.replay != msg.replay {
+	if m.replay != msg.replay && m.historyReplay != msg.replay {
 		return
 	}
-	m.replay.waiting = false
-	m.replay.preparedIndex = msg.index
-	m.replay.prepared = msg.prepared
-	m.replay.preparedReasoning = msg.reasoning
+	msg.replay.waiting = false
+	msg.replay.preparedIndex = msg.index
+	msg.replay.prepared = msg.prepared
+	msg.replay.preparedReasoning = msg.reasoning
 }
 
 // ReconcileReplay prepares invalidated geometry without reloading the snapshot.
@@ -199,4 +208,123 @@ func ReconcileReplay(list Model) bool {
 	}
 	m.replay = &sessionReplay{renderOnly: true}
 	return true
+}
+
+// HistoryPending reports retained older views not yet added to transcript geometry.
+func HistoryPending(list Model) bool { return list.HistoryPending() }
+
+func (m *model) HistoryPending() bool { return m.historyReplay != nil }
+
+// ContinueHistory warms older rows separately from authoritative replay so live
+// events and the recent viewport never wait for historical markdown rendering.
+func ContinueHistory(list Model) tea.Cmd {
+	m := list.(*model)
+	r := m.historyReplay
+	if r == nil || r.waiting || m.replay != nil {
+		return nil
+	}
+	m.ensureAllItemsRendered()
+	var prefix []historyItem
+	defer func() { m.prependHistory(prefix) }()
+	deadline := time.Now().Add(2 * time.Millisecond)
+	for count := 0; m.historyStart-len(prefix) > 0 && count < 8; count++ {
+		i := m.historyStart - len(prefix) - 1
+		if view, ok := m.views[i].(message.Model); ok {
+			view.SetSelected(false)
+			view.SetHovered(false)
+			if r.prepared != nil && r.preparedIndex == i {
+				message.ApplyPreparedRender(view, r.prepared)
+				r.prepared = nil
+			}
+			if prepare := message.PrepareRender(view); prepare != nil {
+				r.waiting = true
+				return func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, prepared: prepare()} }
+			}
+		}
+		if block, ok := m.views[i].(*reasoningblock.Model); ok {
+			block.SetSelected(false)
+			if r.preparedReasoning != nil && r.preparedIndex == i {
+				block.ApplyPreparedReasoning(r.preparedReasoning)
+				r.preparedReasoning = nil
+			}
+			if prepare := block.PrepareReasoning(); prepare != nil {
+				r.waiting = true
+				return func() tea.Msg { return ReplayRenderedMsg{replay: r, index: i, reasoning: prepare()} }
+			}
+		}
+		item := m.renderItem(i, m.views[i])
+		if view, ok := m.views[i].(message.Model); ok {
+			message.ReleasePreparedRender(view)
+		}
+		lines := item.lines
+		if item.segments != nil {
+			lines = append(append(append([]string(nil), item.segments.Header...), item.segments.Stable...), item.segments.Tail...)
+		}
+		if item.height > 0 && m.needsSeparator(i) {
+			lines = append(lines, "")
+		}
+		prefix = append(prefix, historyItem{index: i, lines: lines, height: item.height})
+		if time.Now().After(deadline) {
+			break
+		}
+	}
+	return nil
+}
+
+type historyItem struct {
+	index, height int
+	lines         []string
+}
+
+func (m *model) prependHistory(prefix []historyItem) {
+	if len(prefix) == 0 {
+		return
+	}
+	delta := 0
+	for _, item := range prefix {
+		delta += len(item.lines)
+	}
+	lines := make([]string, 0, delta+len(m.renderedLines))
+	for i := len(prefix) - 1; i >= 0; i-- {
+		lines = append(lines, prefix[i].lines...)
+	}
+	lines = append(lines, m.renderedLines...)
+	m.renderedLines = lines
+	for i := m.historyStart; i < len(m.lineOffsets); i++ {
+		m.lineOffsets[i] += delta
+	}
+	for i, cached := range m.renderedItems {
+		cached.start += delta
+		m.renderedItems[i] = cached
+	}
+	offset := 0
+	for i := len(prefix) - 1; i >= 0; i-- {
+		item := prefix[i]
+		m.lineOffsets[item.index] = offset
+		if m.shouldCacheMessage(item.index) {
+			m.renderedItems[item.index] = renderedItemRange{start: offset, height: item.height}
+		}
+		offset += len(item.lines)
+	}
+	m.historyStart = prefix[len(prefix)-1].index
+	if m.historyStart == 0 {
+		m.historyReplay = nil
+	}
+	if m.activeSegments != nil {
+		m.activeSegments.start += delta
+	}
+	m.totalHeight += delta
+	m.scrollOffset += delta
+	m.scrollview.SetScrollOffset(m.scrollOffset)
+	if m.selection.active {
+		m.selection.startLine += delta
+		m.selection.endLine += delta
+		m.selection.anchorStartLine += delta
+		m.selection.anchorEndLine += delta
+	}
+	m.CancelReferenceHover()
+	m.cancelImageClick()
+	m.urlSpans.clear()
+	m.invalidateFrameContent()
+	m.invalidateView()
 }

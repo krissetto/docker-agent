@@ -36,6 +36,7 @@ func TestDetachedSubsessionDoesNotDrainRootInbox(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	root := session.New(session.WithID("root"))
 	d := r.sessionDrivers.Get(root)
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionRunning; d.activeRequestID = "active"; return nil }))
 	require.NoError(t, r.Steer(t.Context(), QueuedMessage{Content: "root steer"}))
 	child := session.New(session.WithID("child"), session.WithParentID("root"), session.WithNonInteractive(true))
 	result := r.drainAndEmitSteered(t.Context(), child, agent.New("worker", ""), NewChannelSink(make(chan Event, 4)))
@@ -133,7 +134,7 @@ func TestSubagentStoreDefaulting(t *testing.T) {
 	assert.Same(t, custom, rt.subagentStore, "explicit WithSubagentStore wins")
 }
 
-func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
+func TestSessionIdleSteerWakesAndRunsImmediately(t *testing.T) {
 	rt, sess := newSessionFixture(t)
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{})
 	require.NoError(t, err)
@@ -144,9 +145,11 @@ func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
 	require.NoError(t, err)
 	second, err := handle.Steer(t.Context(), TurnInput{Content: "guide two"})
 	require.NoError(t, err)
+	coordinationAwait(t, handle, first.TurnID)
+	coordinationAwait(t, handle, second.TurnID)
 	status, err := handle.Status(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, SessionStateSettled, status.State, "idle steer accepts but does not wake a response")
+	assert.Equal(t, SessionStateSettled, status.State, "idle guidance starts an execution")
 	seen := map[string]string{}
 	for len(seen) < 2 {
 		e := <-obs.Events
@@ -156,9 +159,6 @@ func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
 	}
 	assert.Equal(t, "guide one", seen[first.TurnID])
 	assert.Equal(t, "guide two", seen[second.TurnID])
-	_, err = handle.Submit(t.Context(), TurnInput{Content: "start"})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool { return rt.sessionDrivers.Settled(sess.ID) }, 5*time.Second, time.Millisecond)
 	items := sessionHandleSnapshot(t, handle).MessagesSnapshot()
 	counts := map[string]int{}
 	for _, item := range items {
@@ -168,7 +168,7 @@ func TestSessionIdleSteerAcceptsImmediatelyAndDrainsOnNextSend(t *testing.T) {
 	}
 	assert.Equal(t, 1, counts["guide one"])
 	assert.Equal(t, 1, counts["guide two"])
-	assert.Equal(t, 1, counts["start"])
+	assert.Equal(t, 0, counts["start"])
 }
 
 func TestSteeringDrainWaitsForDurableSessionPromotion(t *testing.T) {

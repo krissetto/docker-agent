@@ -40,6 +40,7 @@ Most endpoints are under the `/api` prefix. The process health and readiness pro
 | Method | Path              | Description                       |
 | ------ | ----------------- | --------------------------------- |
 | `GET`  | `/api/agents`     | List all available agents         |
+| `POST` | `/api/v2/sources` | Register an authenticated workspace YAML source for session creation. Kit-managed APIs validate path containment and preserve stable source identity across immutable configuration revisions. |
 | `GET`  | `/api/agents/:id` | Get an agent's full configuration |
 | `GET`  | `/api/agents/:id/:agent_name/tools/count` | Count the named agent's available tools |
 
@@ -70,8 +71,14 @@ The canonical endpoints are:
 | `GET` / `DELETE` | `/api/v2/sessions/:id` | Inspect or delete the session. Legacy stored rows remain inspectable but are not attachable. |
 | `PATCH` | `/api/v2/sessions/:id` | Canonical edit: `kind` is `policy`, `permissions`, `title`, `message`, `summary`, `tokens`, or `attachment`; returns the updated session. Transcript edits require a quiescent session. |
 | `GET` | `/api/v2/sessions/:id/status` | Session state, active turn, pending inputs, and last error. |
+| `GET` | `/api/v2/sessions/:id/recent-chat` | Read a bounded, chronological recent chat window and page older with an opaque cursor; never attaches or restores a session. |
 | `GET` | `/api/v2/sessions/:id/snapshot` | Canonical transcript/status/interactions snapshot and cursor. |
 | `GET` | `/api/v2/sessions/:id/events` | Versioned SSE snapshot, replay, ready barrier, and live ordered envelopes. |
+| `POST` | `/api/v2/sessions/:id/workflow/wait` | Wait for the session and active descendants, pending reports, and follow-up turns to settle; returns the journal epoch and output cursor. Disconnecting cancels only the wait. |
+| `GET` | `/api/v2/sessions/:id/git-review` | Discover repositories and worktrees within the authorized session workspace using bounded read-only inspection. |
+| `POST` | `/api/v2/sessions/:id/git-review/worktree` | Read status for a discovered worktree at the requested review generation. |
+| `POST` | `/api/v2/sessions/:id/git-review/directory` | Read a bounded directory listing within the session review scope. |
+| `POST` | `/api/v2/sessions/:id/git-review/document` | Read a bounded file or diff within the session review scope; stale generations are rejected. |
 | `POST` | `/api/v2/sessions/start` | Recoverable idempotent root creation and initial submission. Requires `session_id` and `input.request_id`; retry the identical creation/input payload. |
 | `POST` | `/api/v2/sessions/:id/messages` | Submit input. `mode` is `submit` (starts a turn, or queues one when a turn is running) or `steer` (urgent in-turn input). |
 | `POST` | `/api/v2/sessions/:id/responses` | Answer a confirmation, max-iteration, or elicitation using required `interaction_id` and `kind`. |

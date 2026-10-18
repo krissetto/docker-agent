@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/session"
@@ -28,7 +29,7 @@ func TestConsumedOnlyTerminalEvidenceSurvivesRestart(t *testing.T) {
 			r.sessionDrivers.closed = true
 			r.sessionDrivers.mu.Unlock()
 			d := h.(*sessionHandle).driver
-			_, err = d.admitInput(t.Context(), QueuedMessage{RequestID: "consumed", Content: "guide", InputMode: "steer", InputOrigin: session.InputOriginUser}, SessionOperationSteer, true, true)
+			_, err = d.admitInput(t.Context(), QueuedMessage{RequestID: "consumed", Content: "guide", InputMode: "steer", InputOrigin: session.InputOriginUser}, SessionOperationSteer, true)
 			require.NoError(t, err)
 			require.Len(t, d.DrainSteering(), 1)
 			require.NoError(t, d.ownerCall(t.Context(), func() error {
@@ -84,10 +85,10 @@ func TestConsumedOnlySettlementConcurrentSteeringRetry(t *testing.T) {
 	r.sessionDrivers.closed = true
 	r.sessionDrivers.mu.Unlock()
 	d := h.(*sessionHandle).driver
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase, d.generation = sessionRunning, 1; return nil }))
 	first, err := h.Steer(t.Context(), TurnInput{Content: "first guidance", RequestID: "first"})
 	require.NoError(t, err)
 	require.Len(t, d.DrainSteering(), 1)
-	require.NoError(t, d.ownerCall(t.Context(), func() error { d.generation = 1; d.phase = sessionRunning; return nil }))
 
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -112,7 +113,7 @@ func TestConsumedOnlySettlementConcurrentSteeringRetry(t *testing.T) {
 	lateInput := TurnInput{Content: "late guidance", RequestID: "late"}
 	late, err := h.Steer(t.Context(), lateInput)
 	require.NoError(t, err)
-	require.Empty(t, late.Disposition)
+	assert.Equal(t, SubmissionDispositionQueued, late.Disposition, "unfinished settlement retains newly admitted guidance for its successor")
 	type result struct {
 		submission Submission
 		err        error
@@ -126,16 +127,15 @@ func TestConsumedOnlySettlementConcurrentSteeringRetry(t *testing.T) {
 		require.NoError(t, retry.err)
 		require.Equal(t, late, retry.submission, "exact retries retain the STEERING receipt")
 	}
-	var pending, steering int
+	var pending int
 	var consumed []string
 	readLanes := func() error {
-		pending, steering = len(d.pending), len(d.steering)
+		pending = len(d.pending)
 		consumed = slices.Clone(d.consumedSteering)
 		return nil
 	}
 	require.NoError(t, d.ownerCall(t.Context(), readLanes))
-	require.Zero(t, pending)
-	require.Equal(t, 1, steering)
+	require.Equal(t, 1, pending)
 	require.Equal(t, []string{first.TurnID}, consumed)
 	once.Do(func() { close(release) })
 	next := <-finished
@@ -147,7 +147,6 @@ func TestConsumedOnlySettlementConcurrentSteeringRetry(t *testing.T) {
 	require.Equal(t, map[string]string{first.TurnID: string(TurnCompleted)}, loaded.TurnOutcomesSnapshot(), "late input is not falsely settled with prior consumed inputs")
 	require.NoError(t, d.ownerCall(t.Context(), readLanes))
 	require.Zero(t, pending)
-	require.Zero(t, steering)
 	require.Equal(t, []string{late.TurnID}, consumed)
 	d.finishRun(next.generation, "")
 	d.finishRun(next.generation, "")
@@ -169,5 +168,4 @@ func TestConsumedOnlySettlementConcurrentSteeringRetry(t *testing.T) {
 	defer restored.closeOwner()
 	require.Zero(t, restored.Status().InterruptedTurns)
 	require.Empty(t, restored.pending)
-	require.Empty(t, restored.steering)
 }

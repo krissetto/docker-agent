@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
@@ -34,6 +35,10 @@ func TestRootBackgroundAllThemesAndLiveSwitch(t *testing.T) {
 			root.chatPage.Init()
 		}
 		root.messageBar = messagebar.New()
+		if !lean {
+			root.storeContextUsage("profile", root.sessionState.CurrentAgentName(), runtime.Usage{ContextLimit: 100})
+			root.setContextUsageReady("profile", root.sessionState.CurrentAgentName(), true)
+		}
 		root.resizeAll()
 		for _, ref := range refs {
 			if !styles.IsBuiltinTheme(ref) {

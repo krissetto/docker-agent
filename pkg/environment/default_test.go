@@ -86,3 +86,13 @@ func TestDefaultSources_SkipsMalformedConfigEnvFile(t *testing.T) {
 	// A stray edit must not lock every command out of the default chain.
 	assert.NotContains(t, defaultSourceNames(), "config-env-file")
 }
+
+func TestDefaultSources_DoesNotUseConfiguredCredentialHelperUnderGoTest(t *testing.T) {
+	dir := withTempConfigDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(`version: v1
+credential_helper:
+  command: nonexistent-test-credential-helper
+`), 0o600))
+
+	assert.NotContains(t, defaultSourceNames(), "credential-helper")
+}

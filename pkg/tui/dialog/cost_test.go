@@ -924,3 +924,26 @@ func TestCostCacheHitRateUpToTwoDecimalPrecision(t *testing.T) {
 		})
 	}
 }
+
+func TestCostDialogSubtreeTotalLabelsTranscriptBreakdown(t *testing.T) {
+	t.Parallel()
+	sess := session.New()
+	sess.AddMessage(&session.Message{AgentName: "root", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Content: "done", Model: "test/model", Cost: 1, Usage: &chat.Usage{InputTokens: 10, OutputTokens: 5},
+	}})
+	total := 6.0
+	d := NewCostDialog(sess, func() float64 { return total }).(*costDialog)
+	text := d.renderPlainText()
+	assert.Contains(t, text, "Total (subtree)  $6.00")
+	assert.Contains(t, text, "Attached-session transcript breakdown")
+	assert.Contains(t, text, "Transcript total  $1.00")
+	assert.Contains(t, text, "tokens: 15")
+	assert.Equal(t, 1.0, d.gatherCostData().total.cost, "breakdown allocation is not invented")
+	d.SetSize(100, 60)
+	assert.Contains(t, d.View(), "$6.00")
+	key := d.cacheKey(70)
+	total = 7
+	assert.NotEqual(t, key, d.cacheKey(70), "idle descendant spend invalidates the dialog total")
+	assert.Contains(t, d.View(), "$7.00", "open dialog refreshes without keyboard input")
+	assert.Contains(t, d.renderPlainText(), "Total (subtree)  $7.00")
+}

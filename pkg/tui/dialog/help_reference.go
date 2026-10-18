@@ -56,6 +56,7 @@ func dialogReferenceSections() []help.Section {
 			{ID: "dialog.subagents.close", Keys: []string{"esc", "q", "ctrl+c"}, Description: "Close without cancelling work", Condition: "content"},
 		}},
 		{ID: "dialog.close-root-with-subagents", Title: "Close root with attached sessions", Entries: []help.Entry{
+			{ID: "dialog.close-root-with-subagents.remember", Keys: []string{"tab", "shift+tab", "space"}, Description: "Focus/toggle Remember this choice", Condition: "Only explicit Yes or No remembers the choice. Reset in Settings > Behavior."},
 			{ID: "dialog.close-root-with-subagents.affirmative-decision", Keys: []string{"y", "Y"}, Description: "Close root; retain attached views", Condition: "content"},
 			{ID: "dialog.close-root-with-subagents.negative-cancel-decision", Keys: []string{"n", "N", "esc"}, Description: "Negative/cancel decision", Condition: "Default No; Yes closes only this root, without cascading attached views."},
 			{ID: "dialog.close-root-with-subagents.selected-default-decision", Keys: []string{"enter"}, Description: "Selected/default decision", Condition: "content default No or action focus"},

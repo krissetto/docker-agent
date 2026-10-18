@@ -4,7 +4,8 @@ cd "${WORKSPACE_DIR:-$PWD}"
 team=$1
 state=$2
 model=$3
-shift 3
+team_edit=$4
+shift 4
 case "$state" in
     /*) ;;
     *) printf '%s\n' 'start.sh: stateDir must be an absolute private guest path outside the workspace' >&2; exit 2 ;;
@@ -23,8 +24,9 @@ if [ ! -f "$team" ] || [ ! -r "$team" ]; then
 fi
 export DOCKER_AGENT_AUTO_UPDATE=0 DOCKER_AGENT_NO_TOUR=1
 export DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 TELEMETRY_ENABLED=false
+set -- --team-edit "$team_edit" "$@"
 if [ -n "$model" ]; then
-    set -- --model "$model"
+    set -- --model "$model" "$@"
 fi
 exec /opt/async-agent/docker-agent serve api --managed-api \
     --working-dir "$PWD" \

@@ -104,7 +104,9 @@ type SessionManager struct {
 
 	refreshInterval time.Duration
 
-	mux sync.Mutex
+	mux                 sync.Mutex
+	sourceMu            sync.RWMutex
+	sourcePublicationMu sync.Mutex
 
 	// serverCtx owns accepted background session operations after request return.
 	serverCtx context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
@@ -550,8 +552,9 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 	}
 	registry := sm.sessionRegistry
 	if source := sess.AttributesSnapshot()[sessionSourceAttribute]; source != "" {
-		registry = sm.sessionRegistries[source]
-		if registry == nil {
+		var ok bool
+		registry, ok = sm.sourceRegistry(source)
+		if !ok {
 			return &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: sessionID, Operation: "source"}
 		}
 	}
@@ -744,6 +747,8 @@ func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename str
 // the same stable identity, resolving would be a guess, so it returns the
 // not-found error instead of silently picking one.
 func (sm *SessionManager) resolveSource(agentFilename string) (config.Source, error) {
+	sm.sourceMu.RLock()
+	defer sm.sourceMu.RUnlock()
 	if agentSource, found := sm.Sources[agentFilename]; found {
 		return agentSource, nil
 	}

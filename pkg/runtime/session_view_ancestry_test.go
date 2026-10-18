@@ -18,13 +18,15 @@ import (
 type ancestryViewStore struct {
 	*session.InMemorySessionStore
 
-	reads        []string
-	ids          []string
-	afterRead    func(int)
-	admissions   int
-	writes       int
-	childLoads   int
-	childRecords []session.ChildRecord
+	reads           []string
+	metadataReads   []string
+	ownHistoryReads []string
+	ids             []string
+	afterRead       func(int)
+	admissions      int
+	writes          int
+	childLoads      int
+	childRecords    []session.ChildRecord
 }
 
 func (s *ancestryViewStore) GetSession(ctx context.Context, id string) (*session.Session, error) {
@@ -34,6 +36,21 @@ func (s *ancestryViewStore) GetSession(ctx context.Context, id string) (*session
 		s.afterRead(len(s.reads))
 	}
 	return loaded, err
+}
+
+func (s *ancestryViewStore) GetSessionMetadata(ctx context.Context, id string) (*session.Session, error) {
+	s.reads = append(s.reads, id)
+	s.metadataReads = append(s.metadataReads, id)
+	loaded, err := s.InMemorySessionStore.GetSessionMetadata(ctx, id)
+	if s.afterRead != nil {
+		s.afterRead(len(s.reads))
+	}
+	return loaded, err
+}
+
+func (s *ancestryViewStore) GetSessionOwnHistory(ctx context.Context, id string) (*session.Session, error) {
+	s.ownHistoryReads = append(s.ownHistoryReads, id)
+	return s.InMemorySessionStore.GetSessionOwnHistory(ctx, id)
 }
 
 func (s *ancestryViewStore) LoadChildren(ctx context.Context, rootID string) ([]session.ChildRecord, error) {
@@ -237,9 +254,12 @@ func TestSessionViewAncestryAtCapacityPreservesArchivedChildBeyondSpawnDepth(t *
 	assert.Equal(t, selected.ParentID, info.Attach.ParentSessionID)
 	require.GreaterOrEqual(t, len(store.reads), count)
 	for i := range count {
-		assert.Equal(t, chain[count-1-i].ID, store.reads[i], "ancestry reads reach the canonical root at the inclusive capacity boundary")
+		assert.Equal(t, chain[count-1-i].ID, store.metadataReads[i], "metadata ancestry reaches the canonical root at the inclusive capacity boundary")
 	}
-	assert.Len(t, store.reads, count+count-1, "only ancestry and tree preflight read sessions")
+	assert.Len(t, store.metadataReads, count+1, "ancestry metadata and canonical root identity are read without transcripts")
+	assert.Equal(t, chain[0].ID, store.metadataReads[count], "the root is revalidated after ancestry discovery")
+	assert.Len(t, store.ownHistoryReads, 1, "only the selected child transcript is hydrated separately")
+	assert.Len(t, store.reads, 2*count+1, "metadata ancestry, root identity/history and descendant preflight remain bounded")
 	prepared.Abort()
 	assertAncestryViewUnpublished(t, rt, store, before)
 	records, err := store.LoadChildren(t.Context(), chain[0].ID)
@@ -321,7 +341,12 @@ func TestSessionViewTreeHydrationBudgetCountsStoppedHistoryBeforePreflight(t *te
 				assert.Equal(t, SessionErrorReasonLimit, typed.Reason)
 				assert.Equal(t, tc.limit, typed.Limit)
 			}
-			assert.Equal(t, []string{root.ID}, store.reads, "tree budget rejects before loading any historical child sessions")
+			assert.GreaterOrEqual(t, len(store.metadataReads), 1)
+			assert.True(t, slices.Equal(store.metadataReads, slices.Repeat([]string{root.ID}, len(store.metadataReads))), "only root metadata is consulted before tree budget rejection")
+			for _, childID := range store.ids[1:] {
+				assert.NotContains(t, store.reads, childID, "tree budget rejects before loading child transcripts")
+			}
+			assert.Empty(t, store.ownHistoryReads)
 			assert.Equal(t, tc.childLoads, store.childLoads)
 			assertAncestryViewUnpublished(t, rt, store, before)
 			assert.Equal(t, beforeRecords, store.childRecords)

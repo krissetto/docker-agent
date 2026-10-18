@@ -62,19 +62,20 @@ func (m *appModel) setTabs(tabs []messages.TabInfo, activeIdx int) tea.Cmd {
 	for i := range m.tabInfos {
 		m.tabInfos[i].AgentName, m.tabInfos[i].AgentNodeID = m.tabAgentIdentity(m.tabInfos[i])
 	}
-	return m.tabBar.SetTabs(m.tabInfos, activeIdx)
+	changed := m.syncPaneWorkspaceTabs()
+	if changed {
+		m.persistPaneWorkspaceState()
+	}
+	return m.refreshWorkspaceTabs()
 }
 
 func (m *appModel) syncTabAgents() tea.Cmd {
 	if m.tabBar == nil {
 		return nil
 	}
-	changed, activeIdx := false, 0
+	changed := false
 	for i := range m.tabInfos {
 		tab := &m.tabInfos[i]
-		if tab.IsActive {
-			activeIdx = i
-		}
 		name, nodeID := m.tabAgentIdentity(*tab)
 		if tab.AgentName != name || tab.AgentNodeID != nodeID {
 			tab.AgentName, tab.AgentNodeID = name, nodeID
@@ -85,7 +86,10 @@ func (m *appModel) syncTabAgents() tea.Cmd {
 		return nil
 	}
 	m.viewCacheValid = false
-	return m.tabBar.SetTabs(m.tabInfos, activeIdx)
+	if m.syncPaneWorkspaceTabs() {
+		m.persistPaneWorkspaceState()
+	}
+	return m.refreshWorkspaceTabs()
 }
 
 func tabOrderIDs(tabs []messages.TabInfo) []string {

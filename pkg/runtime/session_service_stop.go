@@ -125,7 +125,7 @@ func (d *sessionDriver) reserveStoppedWithdrawal() (sessionIOReservation, error)
 			d.sess.SetTurnOutcome(id, string(TurnCanceled))
 			d.completeTurnLocked(id)
 		}
-		d.pending, d.steering = nil, nil
+		d.pending = nil
 		d.durableStopRequested = false
 		d.ioLane.withdrawalErr = nil
 		d.refreshSteeringLocked()

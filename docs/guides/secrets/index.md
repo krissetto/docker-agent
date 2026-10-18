@@ -206,6 +206,8 @@ docker agent run agent.yaml
 
 References follow the `op://<vault>/<item>/<field>` format. Make sure the `op` CLI is installed and you are signed in (`op signin`) so that non-interactive reads succeed.
 
+Credential helpers and agent-executed shell, script, and background commands run without a controlling terminal on Unix: they cannot prompt through the TUI's `/dev/tty`. This does not suppress 1Password desktop-app unlock dialogs. For unattended use, configure a service-account token or an existing CLI session and disable biometric unlock for that environment (`OP_BIOMETRIC_UNLOCK_ENABLED=false`); otherwise, authorize desktop integration before starting the agent. Ordinary Go tests never invoke the real 1Password resolver or the default user-configured credential helper.
+
 > [!WARNING]
 > **Behaviour when resolution fails**
 >

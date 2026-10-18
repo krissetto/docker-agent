@@ -5,8 +5,6 @@ import (
 	"errors"
 	"slices"
 	"time"
-
-	"github.com/docker/docker-agent/pkg/session"
 )
 
 var errSteeringBoundary = errors.New("provider attempt interrupted by steering")
@@ -53,24 +51,12 @@ func steeringSignal(ctx context.Context) <-chan struct{} {
 	return signal
 }
 
-func (d *sessionDriver) hasSteeringLocked() bool {
-	if len(d.steering) != 0 {
-		return true
-	}
-	return slices.ContainsFunc(d.pending, boundarySteering)
-}
-
-func boundarySteering(msg QueuedMessage) bool {
-	return msg.RequestID == "" || msg.trustedSteering() || msg.activeSteering
+func (d *sessionDriver) hasGuidanceLocked() bool {
+	return slices.ContainsFunc(d.pending, QueuedMessage.guidance)
 }
 
 func (d *sessionDriver) refreshSteeringLocked() {
-	interrupts := func(msg QueuedMessage) bool {
-		return normalizedInputOrigin(msg.InputOrigin) != session.InputOriginRuntime
-	}
-	d.interruptRequested = slices.ContainsFunc(d.steering, interrupts) || slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool {
-		return boundarySteering(msg) && interrupts(msg)
-	})
+	d.interruptRequested = d.hasGuidanceLocked()
 	if d.steeringChanged == nil {
 		d.steeringChanged = make(chan struct{})
 	}
@@ -96,9 +82,9 @@ func (d *sessionDriver) steeringContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, steeringBoundaryContextKey{}, signal)
 }
 
-// Promotion is one mailbox transaction across origins; ordinary turns stay queued.
+// Guidance is promoted as one accepted-order batch at a safe boundary.
 func (d *sessionDriver) drainBoundarySteering() []QueuedMessage {
-	return d.drainInputs(d.r.lifetime(), false)
+	return d.drainGuidance(d.r.lifetime())
 }
 
 func waitForRetryBoundary(ctx context.Context, delay time.Duration) error {

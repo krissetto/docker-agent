@@ -539,3 +539,67 @@ func TestSessionViewMetadataDiscoveryReleasesPublicationLocks(t *testing.T) {
 	assert.Same(t, result.SessionHandle, again.SessionHandle)
 	assert.Equal(t, result.Metadata, again.Metadata)
 }
+
+func TestDormantChildExactAcceptedRetryAuthorizesAndWakes(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("retry-root"), session.WithAgentName("root"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
+	child := session.New(session.WithID("retry-child"), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{SessionAgentAttribute: "worker", SessionParentAgentAttribute: "root"}))
+	accepted := session.UserMessage("accepted later")
+	acceptedID, err := sessionInputID(child.ID, "accepted-turn")
+	require.NoError(t, err)
+	accepted.TurnID, accepted.Pending, accepted.Accepted = acceptedID, true, true
+	accepted.InputOrigin, accepted.InputMode = session.InputOriginUser, "turn"
+	child.AddMessage(accepted)
+	require.NoError(t, store.AddSession(t.Context(), root))
+	require.NoError(t, store.AddSession(t.Context(), child))
+	rt, owner := coordinationRuntime(t, store, coordinationReply("root"), coordinationReply("resumed"), WithWorkingDir(root.WorkingDir))
+	record := session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: "retry-child-node", Parent: subagent.SessionRootID(root.ID), SessionID: child.ID, Agent: "worker", State: subagent.NodeIdle}, Revision: 1}
+	require.NoError(t, store.(session.CoordinationStore).AdmitChild(t.Context(), session.ChildAdmission{Child: child, Record: record}))
+	require.NoError(t, rt.subagentStore.SaveTree(t.Context(), root.ID, subagent.Snapshot{Version: subagent.SnapshotVersion, Root: subagent.SessionRootID(root.ID), Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: "root", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{{Node: record.Node}}}}}))
+	prepared, err := owner.Runtime().(SessionViewPreparer).PrepareSessionView(t.Context(), child.ID)
+	require.NoError(t, err)
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	handle := committed.SessionHandle
+	status, err := handle.Status(t.Context())
+	require.NoError(t, err)
+	require.True(t, status.Dormant)
+	require.Equal(t, 1, status.Pending)
+	// A generic/terminal duplicate must not authorize a dormant view; this
+	// fixture represents an exact accepted pending request, so retrying the same
+	// payload/ID is the explicit user boundary that admits it.
+	submission, err := handle.Submit(t.Context(), TurnInput{Content: "accepted later", RequestID: "accepted-turn"})
+	require.NoError(t, err)
+	require.Equal(t, acceptedID, submission.TurnID)
+	coordinationAwait(t, handle, submission.TurnID)
+	status, err = handle.Status(t.Context())
+	require.NoError(t, err)
+	require.False(t, status.Dormant)
+}
+
+func TestDormantChildMismatchedAcceptedRetryDoesNotAuthorize(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("retry-negative-root"), session.WithAgentName("root"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}))
+	child := session.New(session.WithID("retry-negative-child"), session.WithParentID(root.ID), session.WithAgentName("worker"), session.WithAttributes(map[string]string{SessionAgentAttribute: "worker", SessionParentAgentAttribute: "root"}))
+	accepted := session.UserMessage("original")
+	acceptedID, err := sessionInputID(child.ID, "accepted-turn")
+	require.NoError(t, err)
+	accepted.TurnID, accepted.Pending, accepted.Accepted = acceptedID, true, true
+	accepted.InputOrigin, accepted.InputMode = session.InputOriginUser, "turn"
+	child.AddMessage(accepted)
+	require.NoError(t, store.AddSession(t.Context(), root))
+	require.NoError(t, store.AddSession(t.Context(), child))
+	rt, owner := coordinationRuntime(t, store, coordinationReply("root"), coordinationReply("resumed"), WithWorkingDir(root.WorkingDir))
+	record := session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: "retry-negative-node", Parent: subagent.SessionRootID(root.ID), SessionID: child.ID, Agent: "worker", State: subagent.NodeIdle}, Revision: 1}
+	require.NoError(t, store.(session.CoordinationStore).AdmitChild(t.Context(), session.ChildAdmission{Child: child, Record: record}))
+	require.NoError(t, rt.subagentStore.SaveTree(t.Context(), root.ID, subagent.Snapshot{Version: subagent.SnapshotVersion, Root: subagent.SessionRootID(root.ID), Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: "root", State: subagent.NodeIdle}, Children: []subagent.NodeSnapshot{{Node: record.Node}}}}}))
+	prepared, err := owner.Runtime().(SessionViewPreparer).PrepareSessionView(t.Context(), child.ID)
+	require.NoError(t, err)
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	_, err = committed.SessionHandle.Submit(t.Context(), TurnInput{Content: "changed", RequestID: "accepted-turn"})
+	require.Error(t, err)
+	status, err := committed.SessionHandle.Status(t.Context())
+	require.NoError(t, err)
+	require.True(t, status.Dormant)
+}

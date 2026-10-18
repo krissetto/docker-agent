@@ -73,6 +73,9 @@ type Settings struct {
 	// SplitDiffView enables side-by-side split diff rendering for file edits.
 	// Defaults to true when not set.
 	SplitDiffView *bool `yaml:"split_diff_view,omitempty"`
+	// GitDiffLayout is the default Git review diff layout: "unified" or "split".
+	// Empty keeps the default unified layout.
+	GitDiffLayout string `yaml:"git_diff_layout,omitempty"`
 	// RenderImages displays images returned by tools in supported terminals.
 	// Defaults to true when not set.
 	RenderImages *bool `yaml:"render_images,omitempty"`
@@ -150,6 +153,9 @@ type Settings struct {
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
 	// pressing Esc twice within 1 second, "none" interrupts immediately.
 	InterruptConfirmation string `yaml:"interrupt_confirmation,omitempty"`
+	// CloseTabChoice remembers "yes" or "no" for closing tabs with subagents.
+	// Unset asks each time; managed via the close-tab dialog and /settings.
+	CloseTabChoice string `yaml:"close_tab_choice,omitempty"`
 	// Extra preserves settings keys this version does not know about (e.g.
 	// written by a newer docker-agent) across a load/save round trip.
 	Extra map[string]any `yaml:",inline"`
@@ -271,6 +277,14 @@ func (s *Settings) GetSplitDiffView() bool {
 		return true
 	}
 	return *s.SplitDiffView
+}
+
+// GetGitDiffLayout returns the configured Git review layout, defaulting to unified.
+func (s *Settings) GetGitDiffLayout() string {
+	if s != nil && s.GitDiffLayout == "split" {
+		return "split"
+	}
+	return "unified"
 }
 
 // GetRenderImages returns whether tool result images are displayed, defaulting to true.

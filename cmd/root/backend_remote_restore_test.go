@@ -48,7 +48,7 @@ func TestManagedReattachInitialTabSelection(t *testing.T) {
 }
 
 func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
-	for _, mode := range []string{"active", "child-active", "stale-active", "wrong-source", "first-run", "all-stale", "forbidden"} {
+	for _, mode := range []string{"active", "child-active", "child-unlisted", "stale-active", "stale-unlisted", "wrong-source", "foreign-unlisted", "first-run", "all-stale", "forbidden"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			paths.SetRoot(dir)
@@ -78,6 +78,12 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 			switch mode {
 			case "child-active":
 				ids, active = []string{"first", "child"}, "child"
+			case "child-unlisted":
+				active = "child"
+			case "stale-unlisted":
+				active = "missing"
+			case "foreign-unlisted":
+				active = "foreign"
 			case "stale-active":
 				ids, active = []string{"first", "missing"}, "missing"
 			case "wrong-source":
@@ -138,7 +144,7 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 			}))
 			defer server.Close()
 			passes := 1
-			if mode == "active" || mode == "child-active" {
+			if mode == "active" || mode == "child-active" || mode == "child-unlisted" {
 				passes = 2
 			}
 			for range passes {
@@ -155,7 +161,7 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 				if mode == "first-run" || mode == "all-stale" {
 					want, wantCreates = "fresh", 1
 				} else {
-					if mode == "child-active" {
+					if mode == "child-active" || mode == "child-unlisted" {
 						want = "child"
 					} else if mode != "active" {
 						want = "first"
@@ -169,20 +175,40 @@ func TestManagedReattachRestoresBeforeCreatingStartupSession(t *testing.T) {
 				model := tui.New(t.Context(), backend.Spawner(services, sessions), application, initial.WorkingDir, flags.sessionViewHost.Shutdown, tui.WithSupervisor(flags.sessionViewHost), tui.WithSessionRestorer(backend.Restorer(services, sessions)))
 				tabs, _ := flags.sessionViewHost.GetTabs()
 				count := 1
-				if mode == "active" || mode == "child-active" {
+				if mode == "active" || mode == "child-active" || mode == "stale-unlisted" || mode == "foreign-unlisted" {
 					count = 2
+				}
+				if mode == "child-unlisted" {
+					count = 3
 				}
 				require.Len(t, tabs, count, "reattach must not add an empty startup tab")
 				if count == 2 {
 					require.Equal(t, "first", tabs[0].SessionID, "saved tab ordering is preserved")
-					require.Equal(t, want, tabs[1].SessionID)
+					last := want
+					if mode == "stale-unlisted" || mode == "foreign-unlisted" {
+						last = "second"
+					}
+					require.Equal(t, last, tabs[1].SessionID)
 				}
 				require.Equal(t, want, flags.sessionViewHost.ActiveID())
 				require.Equal(t, wantCreates, creates.Load())
-				if mode == "child-active" {
+				if mode == "child-active" || mode == "child-unlisted" {
 					require.NotNil(t, application.AttachedSubagent())
 				}
+				model.Init()
+				require.Equal(t, want, flags.sessionViewHost.ActiveID(), "restoring saved roots must not override the active child")
 				model.(interface{ Shutdown() }).Shutdown()
+				if mode == "child-unlisted" {
+					store, err := tuistate.New(t.Context())
+					require.NoError(t, err)
+					saved, active, err := store.GetTabs(t.Context())
+					require.NoError(t, err)
+					require.Equal(t, "child", active)
+					require.Len(t, saved, 2, "attached child remains outside the persisted tab list")
+					require.Equal(t, "first", saved[0].SessionID)
+					require.Equal(t, "second", saved[1].SessionID)
+					require.NoError(t, store.Close())
+				}
 				require.Zero(t, destructive.Load(), "detaching never cancels/releases server execution")
 			}
 			if mode == "active" {

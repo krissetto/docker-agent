@@ -1,0 +1,6 @@
+/.tools/
+/watch/app/build/
+/watch/app/.lock-waf_*
+/watch/app/.wafpickle-*
+__pycache__/
+*.py[cod]

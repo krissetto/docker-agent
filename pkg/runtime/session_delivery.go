@@ -12,7 +12,7 @@ func (r *LocalRuntime) deliverOrBuffer(ctx context.Context, sessionID, content s
 
 func (r *LocalRuntime) drainSessionSteer(sessionID string) []QueuedMessage {
 	if d, ok := r.sessionDrivers.Lookup(sessionID); ok {
-		return d.drainBoundarySteering()
+		return d.drainGuidance(d.r.lifetime())
 	}
 	return nil
 }

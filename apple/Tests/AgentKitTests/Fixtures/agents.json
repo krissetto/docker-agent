@@ -1,0 +1,11 @@
+[
+  {
+    "name": "workspace-source.yaml",
+    "root_agent_name": "planner",
+    "description": "The actual configured root",
+    "multi": true,
+    "commands": [
+      "review"
+    ]
+  }
+]

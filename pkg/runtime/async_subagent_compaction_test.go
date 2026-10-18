@@ -117,8 +117,10 @@ func TestAsyncSubagentAutomaticCompactionSurvivesWakeAndReload(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	rootSession := session.New(session.WithID("async-compaction-root"))
-	require.NoError(t, storeA.AddSession(t.Context(), rootSession))
+	asyncRootHandle, err := rtA.CreateSession(t.Context(), session.New(session.WithID("async-compaction-root")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	rootSession, err := asyncRootHandle.Snapshot(t.Context())
+	require.NoError(t, err)
 	longTask := "retain this task context: " + strings.Repeat("x", 1_200)
 	id, err := rtA.subagents.Spawn(rootSession, "root", subagent.AllowedSubagent{Agent: "worker"}, longTask)
 	require.NoError(t, err)

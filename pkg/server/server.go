@@ -32,10 +32,11 @@ import (
 )
 
 type Server struct {
-	serverInfo api.ServerInfo
-	e          *echo.Echo
-	sm         *SessionManager
-	authToken  string
+	serverInfo      api.ServerInfo
+	e               *echo.Echo
+	sm              *SessionManager
+	authToken       string
+	sourceRegistrar SourceRegistrar
 	// heartbeatInterval is how often an idle /events stream emits an SSE
 	// comment (": ping") so clients can tell a quiet session from a dead
 	// transport. SSE comments are invisible to EventSource clients and carry
@@ -65,6 +66,7 @@ type serverOptions struct {
 	serverInfo      api.ServerInfo
 	maxRequestBytes int64
 	corsOrigin      string
+	sourceRegistrar SourceRegistrar
 }
 
 // WithMaxRequestBytes sets the maximum request body size in bytes. Requests
@@ -121,7 +123,7 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 			return next(c)
 		}
 	})
-	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, heartbeatInterval: defaultEventsHeartbeatInterval}
+	s := &Server{serverInfo: newServerInfo(o.serverInfo), e: e, sm: sm, authToken: authToken, sourceRegistrar: o.sourceRegistrar, heartbeatInterval: defaultEventsHeartbeatInterval}
 	s.registerRoutes()
 	return s
 }
@@ -135,6 +137,7 @@ func (s *Server) registerRoutes() {
 	group.GET("/v2/server", s.serverIdentity)
 
 	group.GET("/agents", s.getAgents)
+	group.POST("/v2/sources", s.registerSource)
 	group.GET("/agents/:id", s.getAgentConfig)
 
 	group.POST("/v2/sessions/:id/tools/toggle", s.toggleSessionYolo)
@@ -227,7 +230,7 @@ func (s *Server) sessionsReady(c echo.Context) error {
 func (s *Server) getAgents(c echo.Context) error {
 	// A failing source must not hide healthy agents from callers.
 	agents := []api.Agent{}
-	for k, agentSource := range s.sm.Sources {
+	for k, agentSource := range s.sm.sourceSnapshot() {
 		slog.Debug("API source", "source", agentSource.Name())
 
 		cfg, err := config.Load(c.Request().Context(), agentSource)
@@ -271,10 +274,11 @@ func agentsAPIEntry(name string, cfg *latest.Config) (api.Agent, bool) {
 		slices.Sort(commands)
 	}
 	return api.Agent{
-		Name:        name,
-		Multi:       len(cfg.Agents) > 1,
-		Description: root.Description,
-		Commands:    commands,
+		Name:          name,
+		RootAgentName: root.Name,
+		Multi:         len(cfg.Agents) > 1,
+		Description:   root.Description,
+		Commands:      commands,
 	}, true
 }
 

@@ -73,6 +73,9 @@ func (f *chatFlags) runChatCommand(cmd *cobra.Command, args []string) (commandEr
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"chat"}, args...), commandErr)
 	}()
 
+	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
+		return err
+	}
 	if err := validateSafetyFlag(f.safety); err != nil {
 		return err
 	}

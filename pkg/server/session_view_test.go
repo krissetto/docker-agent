@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,9 +14,14 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/teamdef"
 )
 
 func TestSessionViewRemoteConfirmedPrepareCommitAndResume(t *testing.T) {
@@ -143,4 +149,109 @@ func TestSessionViewHTTPRejectsChangedConfirmationBeforePublication(t *testing.T
 	var legacy session.Session
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &legacy))
 	assert.Equal(t, root.ID, legacy.ID)
+}
+
+func TestHistoricalRemovedChildRemotePrepareCommitAndMutationDenial(t *testing.T) {
+	base := session.NewInMemorySessionStore().(*session.InMemorySessionStore)
+	store := &historicalServerReadStore{InMemorySessionStore: base}
+	const source = "team.yaml"
+	root := session.New(session.WithID("history-root"), session.WithAgentName("root"), session.WithWorkingDir("/synthetic/workspace"), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root", sessionSourceAttribute: source}))
+	require.NoError(t, store.AddSession(t.Context(), root))
+	child := session.New(session.WithID("history-child"), session.WithAgentName("removed-worker"), session.WithParentID(root.ID), session.WithWorkingDir(root.WorkingDir), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "removed-worker", runtime.SessionParentAgentAttribute: "root", sessionSourceAttribute: source}), session.WithUserMessage("old child request"))
+	child.AddMessage(session.NewAgentMessage("removed-worker", &chat.Message{Role: "assistant", Content: "old child answer"}))
+	nodeID := subagent.NodeID("old-node")
+	record := session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: nodeID, Parent: subagent.SessionRootID(root.ID), SessionID: child.ID, Agent: "removed-worker", Name: "old worker", State: subagent.NodeStopped}}
+	require.NoError(t, store.AdmitChild(t.Context(), session.ChildAdmission{Child: child, Record: record}))
+	defs, err := teamdef.NewDefinitionSnapshot("old-team", []teamdef.AgentDefinition{
+		{TeamID: "old-team", AgentID: "root-id", AgentKey: "root", Name: "root"},
+		{TeamID: "old-team", AgentID: "removed-id", AgentKey: "removed-worker", Name: "removed-worker", Instruction: "Old instruction"},
+	})
+	require.NoError(t, err)
+	entry, _ := defs.AgentDefinition("removed-worker")
+	payloads := make([]session.TeamDefinitionPayload, 0, len(defs.Entries()))
+	for _, payload := range defs.Entries() {
+		payloads = append(payloads, session.TeamDefinitionPayload{Digest: payload.Digest, Kind: payload.Kind, Payload: payload.Payload})
+	}
+	_, err = store.StoreTeamRevision(t.Context(), session.TeamRevision{SessionID: child.ID, TeamID: defs.TeamID, TeamDigest: defs.TeamDigest, AgentDigest: entry.Digest, AgentKey: "removed-worker", AgentID: "removed-id", AgentName: "removed-worker", Origin: source}, payloads)
+	require.NoError(t, err)
+	trees := subagent.NewInMemoryStore()
+	rootNode := subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: "root", State: subagent.NodeIdle}
+	require.NoError(t, trees.SaveTree(t.Context(), root.ID, subagent.Snapshot{Version: subagent.SnapshotVersion, Root: rootNode.ID, Nodes: []subagent.NodeSnapshot{{Node: rootNode, Children: []subagent.NodeSnapshot{{Node: record.Node}}}}}))
+	rootAgent := agent.New("root", "current root", agent.WithModel(sessionHTTPProvider{}))
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(rootAgent)), runtime.WithSessionStore(store), runtime.WithSubagentStore(trees), runtime.WithWorkingDir(root.WorkingDir), runtime.WithSessionCompaction(false), runtime.WithModelStore(serverEmptyCatalogStore{}))
+	require.NoError(t, err)
+	owner := runtime.NewSessionRuntimeSupervisor(rt)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	sm := NewSessionManager(t.Context(), config.Sources{source: config.NewBytesSource(source, []byte("agents: {root: {model: openai/gpt-4o}}\n"))}, store, 0, &config.RuntimeConfig{}, WithSessionRuntimes(map[string]runtime.SessionRuntime{source: owner.Runtime()}))
+	srv := NewWithManager(sm, "secret")
+	server := httptest.NewServer(srv.e)
+	defer server.Close()
+	client, err := runtime.NewClient(server.URL, runtime.WithAuthToken("secret"), runtime.WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client, runtime.WithSessionTransportSource(source))
+	require.NoError(t, err)
+	prepared, err := transport.PrepareSessionView(t.Context(), child.ID)
+	require.NoError(t, err)
+	info := prepared.Info()
+	require.True(t, info.Historical)
+	require.Equal(t, "removed-worker", info.ActiveAgentName)
+	require.NotNil(t, info.Attach)
+	committed, err := prepared.Commit(t.Context())
+	require.NoError(t, err)
+	require.True(t, committed.Metadata.Historical)
+	require.False(t, committed.Metadata.Capabilities.ExecutionAvailable)
+	snapshot, err := committed.SessionHandle.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "old child answer", snapshot.GetLastAssistantMessageContent())
+	_, err = committed.SessionHandle.Submit(t.Context(), runtime.TurnInput{Content: "must not execute"})
+	var historical *runtime.SessionError
+	require.ErrorAs(t, err, &historical)
+	require.Equal(t, runtime.SessionErrorHistorical, historical.Kind)
+	response := sessionRequest(t, srv, http.MethodPost, api.SessionAPIPath+"/history-child/messages", `{"content":"must not execute"}`, "secret")
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
+	require.Equal(t, string(runtime.SessionErrorHistorical), payload["error"])
+	_, loaded := sm.runtimeSessions.Load(child.ID)
+	require.False(t, loaded, "historical view must not be registered as a live executable owner")
+	store.mu.Lock()
+	own, full := append([]string(nil), store.own...), append([]string(nil), store.full...)
+	store.mu.Unlock()
+	require.NotEmpty(t, own)
+	for _, loadedID := range own {
+		require.Equal(t, child.ID, loadedID, "server attach and later requests may reload selected history, never siblings")
+	}
+	require.Empty(t, full, "metadata-first server handle must never recursively hydrate root/sibling transcripts")
+}
+
+type historicalServerReadStore struct {
+	*session.InMemorySessionStore
+	mu   sync.Mutex
+	own  []string
+	full []string
+}
+
+func (s *historicalServerReadStore) GetSession(ctx context.Context, id string) (*session.Session, error) {
+	s.mu.Lock()
+	s.full = append(s.full, id)
+	s.mu.Unlock()
+	return s.InMemorySessionStore.GetSession(ctx, id)
+}
+func (s *historicalServerReadStore) GetSessionMetadata(ctx context.Context, id string) (*session.Session, error) {
+	return s.InMemorySessionStore.GetSessionMetadata(ctx, id)
+}
+func (s *historicalServerReadStore) GetSessionOwnHistory(ctx context.Context, id string) (*session.Session, error) {
+	s.mu.Lock()
+	s.own = append(s.own, id)
+	s.mu.Unlock()
+	return s.InMemorySessionStore.GetSessionOwnHistory(ctx, id)
+}
+
+type serverEmptyCatalogStore struct{ runtime.ModelStore }
+
+func (serverEmptyCatalogStore) GetModel(context.Context, modelsdev.ID) (*modelsdev.Model, error) {
+	return nil, nil
+}
+func (serverEmptyCatalogStore) GetDatabase(context.Context) (*modelsdev.Database, error) {
+	return &modelsdev.Database{}, nil
 }

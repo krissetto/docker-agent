@@ -194,7 +194,7 @@ func TestSteeringBoundaryAfterStreamCompletionCannotStrandInput(t *testing.T) {
 		synctest.Wait()
 		d := h.(*sessionHandle).driver
 		d.mu.Lock()
-		assert.Empty(t, d.steering, "steering accepted after final loop drain must not remain stranded")
+		assert.Empty(t, d.pending, "steering accepted after final loop drain must not remain stranded")
 		d.mu.Unlock()
 		coordinationAwait(t, h, active.TurnID)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -508,13 +508,13 @@ func TestSteeringBoundaryReservedCompaction(t *testing.T) {
 					require.True(t, receipt.Durable)
 				}
 				synctest.Wait()
-				if kind == "runtime_report" || kind == "new_turn" {
-					require.NoError(t, attempt.Err(), "runtime reports and new_turn must not interrupt")
+				if kind == "new_turn" {
+					require.NoError(t, attempt.Err(), "turn input must not interrupt")
 					require.Zero(t, summaryCalls.Load())
 					firstOnce.Do(func() { close(firstRelease) })
 					synctest.Wait()
 				} else {
-					require.ErrorIs(t, context.Cause(attempt), errSteeringBoundary)
+					require.ErrorIs(t, context.Cause(attempt), errSteeringBoundary, "guidance interrupts for every origin")
 				}
 				select {
 				case <-summaryEntered:

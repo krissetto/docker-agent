@@ -377,6 +377,28 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
+			ID:           "session.changes",
+			Label:        "Review changes",
+			SlashCommand: "/changes",
+			Description:  "Show Git changes in the sidebar (read-only)",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(string) tea.Cmd {
+				return core.CmdHandler(messages.RevealGitChangesMsg{})
+			},
+		},
+		{
+			ID:           "session.files",
+			Label:        "Browse files",
+			SlashCommand: "/files",
+			Description:  "Browse and read workspace files (read-only)",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(string) tea.Cmd {
+				return core.CmdHandler(messages.OpenGitReviewMsg{Files: true})
+			},
+		},
+		{
 			ID:           "session.history",
 			Label:        "Sessions",
 			SlashCommand: "/sessions",

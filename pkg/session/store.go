@@ -223,17 +223,19 @@ type Store interface {
 }
 
 type InMemorySessionStore struct {
-	coordinationMu sync.Mutex
-	appendReceipts map[itemAppendKey]itemAppendReceipt
-	batchReceipts  map[itemAppendKey]itemBatchReceipt
-	children       map[string]ChildRecord
-	reports        map[string]acceptedChildReport
-	sessions       *concurrent.Map[string, *Session]
-	generatedFiles *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
-	generatedBlobs *concurrent.Map[string, []byte]        // keyed by generatedFileKey
-	messageID      atomic.Int64                           // counter for message IDs, incremented via Add(1)
-	todos          *concurrent.Map[string, []Todo]
-	todosMu        sync.Mutex
+	coordinationMu  sync.Mutex
+	appendReceipts  map[itemAppendKey]itemAppendReceipt
+	batchReceipts   map[itemAppendKey]itemBatchReceipt
+	children        map[string]ChildRecord
+	reports         map[string]acceptedChildReport
+	teamDefinitions map[string]TeamDefinitionPayload
+	teamRevisions   map[string][]TeamRevision
+	sessions        *concurrent.Map[string, *Session]
+	generatedFiles  *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
+	generatedBlobs  *concurrent.Map[string, []byte]        // keyed by generatedFileKey
+	messageID       atomic.Int64                           // counter for message IDs, incremented via Add(1)
+	todos           *concurrent.Map[string, []Todo]
+	todosMu         sync.Mutex
 }
 
 func NewInMemorySessionStore() Store {
@@ -392,6 +394,7 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 		}
 	}
 	s.sessions.Delete(id)
+	delete(s.teamRevisions, id)
 	s.deleteGeneratedFiles(id)
 	s.deleteGeneratedBlobs(id)
 	s.todos.Delete(id)
@@ -1007,6 +1010,10 @@ type sessionItemRow struct {
 // Used both as the public read path (q == s.db) and recursively from inside
 // loadSession when resolving sub-sessions inside a transaction.
 func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, sessionID string) ([]Item, error) {
+	return s.loadSessionItemsMode(ctx, q, sessionID, true)
+}
+
+func (s *SQLiteSessionStore) loadSessionItemsMode(ctx context.Context, q querier, sessionID string, recurseChildren bool) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT id, position, item_type, agent_name, message_json, implicit, COALESCE(actor_pending, 0), COALESCE(actor_accepted, 0), COALESCE(actor_turn_id, ''), COALESCE(actor_input_mode, ''), input_origin, sender_id, sender_name, report_outcome, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
@@ -1066,6 +1073,10 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 				slog.WarnContext(ctx, "Skipping subsession item with NULL reference", "session_id", sessionID, "position", row.position)
 				continue
 			}
+			if !recurseChildren {
+				items = append(items, Item{SubSession: &Session{ID: row.subsessionID.String, ParentID: sessionID}})
+				continue
+			}
 			// Recursively load sub-session
 			subSession, err := s.loadSession(ctx, q, row.subsessionID.String)
 			if err != nil {
@@ -1121,6 +1132,10 @@ func (s *SQLiteSessionStore) GetSessionByOrigin(ctx context.Context, id, origin 
 
 // loadSession retrieves a session by ID using the supplied querier.
 func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id string) (*Session, error) {
+	return s.loadSessionWithItems(ctx, q, id, true)
+}
+
+func (s *SQLiteSessionStore) loadSessionWithItems(ctx context.Context, q querier, id string, recurseChildren bool) (*Session, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id)
 
@@ -1132,7 +1147,7 @@ func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id stri
 		return nil, classifySQLiteContextError(ctx, err)
 	}
 
-	sess.Messages, err = s.loadSessionItems(ctx, q, id)
+	sess.Messages, err = s.loadSessionItemsMode(ctx, q, id, recurseChildren)
 	if err != nil {
 		return nil, fmt.Errorf("loading session items: %w", classifySQLiteContextError(ctx, err))
 	}
@@ -1206,7 +1221,7 @@ func (s *SQLiteSessionStore) GetSessionSummariesWithScope(ctx context.Context, s
 
 func (s *SQLiteSessionStore) sessionSummaries(ctx context.Context, scope SummaryScope, page *SummaryPageOptions) ([]Summary, error) {
 	query := `SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
-		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message'),
+		        s.catalog_item_messages,
 		        s.parent_id, s.agent_model_overrides
 		 FROM sessions s`
 	if !scope.IncludeChildren {

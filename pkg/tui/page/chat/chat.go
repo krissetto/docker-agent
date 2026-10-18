@@ -224,6 +224,7 @@ type chatPage struct {
 	hideSidebar          bool
 	layoutSettings       msgtypes.LayoutSettings
 	splitSidebarSettings *SidebarSettings
+	contentOverlay       ContentOverlay
 	sendMode             msgtypes.SendMode
 
 	msgCancel       context.CancelFunc
@@ -710,6 +711,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// through the returned command or via TakeRoutedTimers); only this
 	// update's timers may be collected after it.
 	p.pendingTimers = nil
+	if handled, cmd := p.overlayMouse(msg); handled {
+		return p, cmd
+	}
 	if p.IsMessagesScrollbarDragging() {
 		switch msg.(type) {
 		case tea.MouseMotionMsg, tea.MouseReleaseMsg:
@@ -926,6 +930,9 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 }
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {
+	if p.contentOverlay != nil {
+		return p.contentOverlay.View()
+	}
 	messagesView := p.messages.View()
 	if messagesView != "" || !p.showStartupBanner || p.hideBanner {
 		return messagesView
@@ -1073,6 +1080,7 @@ func (p *chatPage) SetSize(width, height int) tea.Cmd {
 	}
 
 	cmds = append(cmds, p.messages.SetSize(sl.chatWidth, sl.chatHeight), p.reconcileSidebarLayout())
+	p.layoutOverlay()
 
 	return tea.Batch(cmds...)
 }
@@ -1772,4 +1780,14 @@ func (p *chatPage) CancelImagePreviewClick() {
 	if owner, ok := p.messages.(interface{ CancelImagePreviewClick() }); ok {
 		owner.CancelImagePreviewClick()
 	}
+}
+
+func (p *chatPage) SubtreeCost() float64 { return p.sidebar.SubtreeCost() }
+
+// SubtreeCostProvider captures this page, not whichever tab is focused later.
+func SubtreeCostProvider(page Page) func() float64 {
+	if provider, ok := page.(interface{ SubtreeCost() float64 }); ok {
+		return provider.SubtreeCost
+	}
+	return nil
 }

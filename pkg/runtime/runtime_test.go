@@ -653,15 +653,27 @@ func TestRunStreamReservesCanonicalDriverBeforeReturning(t *testing.T) {
 }
 
 func TestRecallRoutesToSoleRootInbox(t *testing.T) {
-	rt := newDriverTestRuntime(t)
-	d := rt.sessionDrivers.Get(session.New(session.WithID("recall-root")))
+	rt, sess := newSessionFixture(t)
+	d := rt.sessionDrivers.Get(sess)
 	handlerCalled := false
 	rt.SetRecallHandler(func(context.Context, QueuedMessage) bool { handlerCalled = true; return true })
 	require.NoError(t, rt.recall(t.Context(), QueuedMessage{Content: "job finished"}))
 	assert.False(t, handlerCalled)
-	got := d.DrainSteering()
-	require.Len(t, got, 1)
-	assert.Equal(t, "job finished", got[0].Content)
+	assert.Eventually(t, func() bool {
+		if !rt.sessionDrivers.Settled(sess.ID) {
+			return false
+		}
+		snapshot, err := d.ownerSnapshot(t.Context())
+		if err != nil {
+			return false
+		}
+		for _, item := range snapshot.MessagesSnapshot() {
+			if item.Message != nil && item.Message.InputOrigin == session.InputOriginRuntime && item.Message.Message.Content == "job finished" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "idle runtime Recall must wake its addressed session")
 }
 
 func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
@@ -686,7 +698,8 @@ func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
-	rt.sessionDrivers.Get(sess)
+	d := rt.sessionDrivers.Get(sess)
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase, d.activeRequestID = sessionRunning, "active"; return nil }))
 	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	events := make(chan Event, 16)
 	stopRun, stopMsg := rt.processToolCalls(t.Context(), sess, []tools.ToolCall{{
@@ -710,6 +723,10 @@ func TestProcessToolCallsRecallEnqueuesSteeringMessage(t *testing.T) {
 		if item.Message != nil && item.Message.Message.Content == recallMessage {
 			found = true
 			assert.False(t, item.Message.Pending)
+			assert.Equal(t, session.InputOriginRuntime, item.Message.InputOrigin, "Recall retains runtime provenance")
+			assert.Equal(t, "steer", item.Message.InputMode)
+			assert.Equal(t, recallMessage, item.Message.Message.Content)
+			assert.NotEmpty(t, item.Message.TurnID)
 		}
 	}
 	assert.True(t, found, "official recall is durably consumed by its owner")

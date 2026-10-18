@@ -20,6 +20,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/harness"
@@ -29,10 +30,13 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/teamdef"
+	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
@@ -89,9 +93,12 @@ type LocalRuntime struct {
 	lifecycleCtx              context.Context //nolint:containedctx // lifecycle root intentionally owned and cancelled by this long-lived component
 	toolMap                   map[string]ToolHandlerFunc
 	todoToolsets              map[*todotool.ToolSet]*todotool.ToolSet
+	todoStore                 session.TodoStore
 	toolDeferrals             tools.DeferralTracker
 	team                      *team.Team
 	agents                    *agentRouter
+	teamEnvironments          *TeamEnvironmentStore
+	teamEdit                  *teamEditRuntime
 	tracer                    trace.Tracer
 	modelsStore               ModelStore
 	sessionCompaction         bool
@@ -420,6 +427,55 @@ func WithSessionStore(store session.Store) Opt {
 	}
 }
 
+// WithTeamEnvironmentStore enables immutable, session-bound team revisions.
+// The store remains owned by its caller and must outlive the runtime.
+func WithTeamEnvironmentStore(store *TeamEnvironmentStore) Opt {
+	return func(r *LocalRuntime) { r.teamEnvironments = store }
+}
+
+// WithTeamEditor binds the trusted source editor and candidate builder to this runtime.
+// Tool exposure remains opt-in: the selected agent must declare team_edit and the
+// editor must be present in the active environment.
+func WithTeamEditor(editor *teamdef.Editor, environments *TeamEnvironmentStore, builder TeamEnvironmentBuilder, grant config.TeamEditGrant) Opt {
+	return func(r *LocalRuntime) {
+		r.teamEnvironments = environments
+		r.teamEdit = &teamEditRuntime{editor: editor, builder: builder, grant: grant}
+	}
+}
+
+func WithTeamEditToolsetPool(pool *teamloader.ToolsetLeasePool, sourceRuntimeScope string) Opt {
+	return func(r *LocalRuntime) {
+		if r.teamEdit != nil {
+			r.teamEdit.toolsetPool, r.teamEdit.poolScope = pool, sourceRuntimeScope
+		}
+	}
+}
+
+func WithTeamEditBuildConfig(runConfig *config.RuntimeConfig, options []teamloader.Opt, global *permissions.Checker, workingDir string) Opt {
+	return func(r *LocalRuntime) {
+		if r.teamEdit != nil {
+			r.teamEdit.runConfig = runConfig
+			r.teamEdit.loaderOptions = append([]teamloader.Opt(nil), options...)
+			r.teamEdit.globalPermissions = global
+			r.teamEdit.workingDir = workingDir
+		}
+	}
+}
+func WithTeamEditPersistence(persistence *TeamEditPersistence, exportRoot string) Opt {
+	return func(r *LocalRuntime) {
+		if r.teamEdit != nil {
+			r.teamEdit.persistence, r.teamEdit.exportRoot = persistence, exportRoot
+		}
+	}
+}
+
+func WithTeamEditInitialEnvironment(editor *teamdef.Editor, store *TeamEnvironmentStore, builder TeamEnvironmentBuilder, grant config.TeamEditGrant, runConfig *config.RuntimeConfig, loaderOptions []teamloader.Opt, pool *teamloader.ToolsetLeasePool, poolScope string, global *permissions.Checker, workingDir string) Opt {
+	return func(r *LocalRuntime) {
+		r.teamEnvironments = store
+		r.teamEdit = &teamEditRuntime{editor: editor, builder: builder, grant: grant, runConfig: runConfig, loaderOptions: append([]teamloader.Opt(nil), loaderOptions...), toolsetPool: pool, poolScope: poolScope, globalPermissions: global, workingDir: workingDir}
+	}
+}
+
 // WithSubagentStore sets the backend for subagent swarm snapshots. Without it
 // the runtime uses the session store when it implements [subagent.Store] (the
 // built-in SQLite store does, with a dedicated table), or an in-memory store.
@@ -634,7 +690,10 @@ func validateSessionNamespaces(agents *team.Team) error {
 			return err
 		}
 		seen := map[string]struct{}{subagent.ParentAlias: {}}
-		reservedTools := map[string]struct{}{subagent.ToolSpawnSubagent: {}, subagent.ToolSendMessage: {}, subagent.ToolReadSubagent: {}, subagent.ToolStopSubagent: {}}
+		reservedTools := map[string]struct{}{
+			subagent.ToolSpawnSubagent: {}, subagent.ToolSendMessage: {}, subagent.ToolReadSubagent: {},
+			subagent.ToolStopSubagent: {}, subagent.ToolListAgents: {},
+		}
 		for _, ref := range a.AsyncSubagents() {
 			alias := ref.Name
 			if alias == "" {
@@ -764,6 +823,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	if !ok {
 		store = session.NewInMemorySessionStore().(session.TodoStore)
 	}
+	r.todoStore = store
 	var sharedTodoStorage *todotool.SessionStorage
 	for _, name := range r.team.AgentNames() {
 		if a, err := r.team.Agent(name); err == nil {
@@ -920,11 +980,56 @@ func (r *LocalRuntime) AgentCommands(_ context.Context, agentName string) (types
 // AgentTools returns the tools bound to agentName, starting only that agent's
 // toolsets as required for command preparation.
 func (r *LocalRuntime) AgentTools(ctx context.Context, agentName string) ([]tools.Tool, error) {
-	a, err := r.team.Agent(agentName)
+	return r.AgentToolsForTeam(ctx, r.team, agentName)
+}
+
+func (r *LocalRuntime) AgentToolsForTeam(ctx context.Context, tm *team.Team, agentName string) ([]tools.Tool, error) {
+	if tm == nil {
+		return nil, &SessionError{Kind: SessionErrorNotFound, Operation: "agent_tools"}
+	}
+	a, err := tm.Agent(agentName)
 	if err != nil {
 		return nil, err
 	}
-	return a.Tools(todotool.WithBindings(ctx, r.todoToolsets))
+	return a.Tools(todotool.WithBindings(ctx, r.todoBindingsForTeam(tm)))
+}
+
+// todoBindingsForTeam binds runtime-owned todo storage to immutable toolset
+// definitions from a selected Team revision. The persisted store is shared;
+// only shared todo toolsets share the root-session scope.
+func (r *LocalRuntime) todoBindingsForTeam(tm *team.Team) map[*todotool.ToolSet]*todotool.ToolSet {
+	if tm == nil || tm == r.team {
+		return r.todoToolsets
+	}
+	store := r.todoStore
+	if store == nil {
+		store = session.NewInMemorySessionStore().(session.TodoStore)
+	}
+	bindings := make(map[*todotool.ToolSet]*todotool.ToolSet)
+	var sharedStorage *todotool.SessionStorage
+	for _, name := range tm.AgentNames() {
+		a, err := tm.Agent(name)
+		if err != nil {
+			continue
+		}
+		for _, toolset := range a.ToolSets() {
+			definition, ok := tools.As[*todotool.ToolSet](toolset)
+			if !ok {
+				continue
+			}
+			adapter := runtimeTodoStore{store: store, changed: r.publishTodosChanged}
+			if definition.Shared() {
+				if sharedStorage == nil {
+					adapter.scope = r.todoRootSessionID
+					sharedStorage = todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext)
+				}
+				bindings[definition] = definition.BindStorage(sharedStorage)
+			} else {
+				bindings[definition] = definition.BindStorage(todotool.NewSessionStorage(adapter, httpclient.SessionIDFromContext))
+			}
+		}
+	}
+	return bindings
 }
 
 func (r *LocalRuntime) CurrentAgentCommands(context.Context) types.Commands {
@@ -991,12 +1096,19 @@ type AgentConfigInfo struct {
 // agent whether or not it has run. Unknown agents yield the zero value, so the
 // modal omits the corresponding sections.
 func (r *LocalRuntime) AgentConfigInfo(ctx context.Context, agentName string) AgentConfigInfo {
-	a, err := r.team.Agent(agentName)
+	return r.AgentConfigInfoForTeam(ctx, r.team, agentName)
+}
+
+func (r *LocalRuntime) AgentConfigInfoForTeam(ctx context.Context, tm *team.Team, agentName string) AgentConfigInfo {
+	if tm == nil {
+		return AgentConfigInfo{}
+	}
+	a, err := tm.Agent(agentName)
 	if err != nil || a == nil {
 		return AgentConfigInfo{}
 	}
 
-	cfg, hasCfg := r.team.AgentConfig(agentName)
+	cfg, hasCfg := tm.AgentConfig(agentName)
 
 	var subAgents []string
 	for _, sub := range a.SubAgents() {
@@ -1209,7 +1321,14 @@ func (r *LocalRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus {
 // lifecycle (state, kind, last error, restart count) without starting it.
 // Unknown agents yield nil, so callers degrade gracefully.
 func (r *LocalRuntime) AgentToolsetStatuses(name string) []tools.ToolsetStatus {
-	a, err := r.team.Agent(name)
+	return r.AgentToolsetStatusesForTeam(r.team, name)
+}
+
+func (r *LocalRuntime) AgentToolsetStatusesForTeam(tm *team.Team, name string) []tools.ToolsetStatus {
+	if tm == nil {
+		return nil
+	}
+	a, err := tm.Agent(name)
 	if err != nil || a == nil {
 		return nil
 	}
@@ -1411,7 +1530,32 @@ func (r *LocalRuntime) currentAgent() *agent.Agent {
 // agentRouter.ResolveSession; kept on LocalRuntime for the existing callsites
 // in loop.go and elsewhere.
 func (r *LocalRuntime) resolveSessionAgent(sess *session.Session) *agent.Agent {
-	return r.agents.ResolveSession(sess)
+	return r.resolveSessionAgentContext(nil, sess)
+}
+
+func (r *LocalRuntime) resolveSessionAgentContext(ctx context.Context, sess *session.Session) *agent.Agent {
+	tm := r.teamForContext(ctx, sess)
+	if tm == nil {
+		return nil
+	}
+	if sess != nil {
+		if sess.AgentID != "" {
+			a, _, ok := tm.ResolveIdentity(sess.AgentID)
+			if ok {
+				return a
+			}
+			return nil
+		}
+		if sess.AgentName != "" {
+			a, _, ok := tm.ResolveLegacyName(sess.AgentName)
+			if ok {
+				return a
+			}
+			return nil
+		}
+	}
+	a, _ := tm.DefaultAgent()
+	return a
 }
 
 // CurrentAgentSkillsToolset returns the skills toolset for the current agent, or nil if not enabled.
@@ -1518,7 +1662,18 @@ func (r *LocalRuntime) getEffectiveModelID(ctx context.Context, a *agent.Agent) 
 // It accounts for active fallback cooldowns, returning the effective model
 // instead of the configured model when a fallback is in effect.
 func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails {
-	agentsInfo := r.team.AgentsInfo(ctx)
+	return r.agentDetailsFromTeamForTeam(ctx, r.team)
+}
+
+func (r *LocalRuntime) agentDetailsFromTeamForContext(ctx context.Context) []AgentDetails {
+	return r.agentDetailsFromTeamForTeam(ctx, r.teamForContext(ctx, nil))
+}
+
+func (r *LocalRuntime) agentDetailsFromTeamForTeam(ctx context.Context, teamView *team.Team) []AgentDetails {
+	if teamView == nil {
+		return nil
+	}
+	agentsInfo := teamView.AgentsInfo(ctx)
 	details := make([]AgentDetails, len(agentsInfo))
 	db := cachedModelDatabase(r.modelsStore)
 	for i, info := range agentsInfo {
@@ -1532,7 +1687,7 @@ func (r *LocalRuntime) agentDetailsFromTeam(ctx context.Context) []AgentDetails 
 		display.ThinkingLevel = "unknown"
 
 		// Get the agent to access fallbacks and the effective thinking level.
-		if a, err := r.team.Agent(info.Name); err == nil && a != nil {
+		if a, err := teamView.Agent(info.Name); err == nil && a != nil {
 			models := a.EffectiveModels(ctx)
 			var effective provider.Provider
 			usingFallback := false
@@ -1711,6 +1866,16 @@ func (r *LocalRuntime) shutdownSessions(ctx context.Context) error {
 			return err
 		}
 	}
+	if r.teamEnvironments != nil {
+		if err := r.teamEnvironments.Close(ctx); err != nil {
+			return err
+		}
+	}
+	if r.teamEdit != nil && r.teamEdit.toolsetPool != nil {
+		if err := r.teamEdit.toolsetPool.Close(ctx); err != nil {
+			return err
+		}
+	}
 	if r.sessionEvents != nil {
 		r.sessionEvents.Close()
 	}
@@ -1750,7 +1915,14 @@ func (r *LocalRuntime) UpdateSessionTitle(ctx context.Context, sess *session.Ses
 // PermissionsInfo returns the team-level permission patterns.
 // Returns nil if no permissions are configured.
 func (r *LocalRuntime) PermissionsInfo() *PermissionsInfo {
-	permChecker := r.team.Permissions()
+	return r.PermissionsInfoForTeam(r.team)
+}
+
+func (r *LocalRuntime) PermissionsInfoForTeam(tm *team.Team) *PermissionsInfo {
+	if tm == nil {
+		return nil
+	}
+	permChecker := tm.Permissions()
 	if permChecker == nil || permChecker.IsEmpty() {
 		return nil
 	}
@@ -1780,14 +1952,27 @@ func (r *LocalRuntime) OnToolsChanged(handler func(Event)) {
 	if handler == nil {
 		return
 	}
-	for _, name := range r.team.AgentNames() {
-		a, err := r.team.Agent(name)
-		if err != nil {
+	teams := []*team.Team{r.team}
+	if r.teamEnvironments != nil {
+		for _, env := range r.teamEnvironments.SnapshotEnvironments() {
+			teams = append(teams, env.Team())
+		}
+	}
+	seen := make(map[notifierIdentity]struct{})
+	for _, tm := range teams {
+		if tm == nil {
 			continue
 		}
-		seen := make(map[notifierIdentity]struct{})
-		for _, ts := range a.ToolSets() {
-			if n, ok := tools.As[tools.ChangeSubscriber](ts); ok {
+		for _, name := range tm.AgentNames() {
+			a, err := tm.Agent(name)
+			if err != nil {
+				continue
+			}
+			for _, ts := range a.ToolSets() {
+				n, ok := tools.As[tools.ChangeSubscriber](ts)
+				if !ok {
+					continue
+				}
 				if key, identifiable := notifierDedupKey(n); identifiable {
 					if _, dup := seen[key]; dup {
 						continue
@@ -2370,7 +2555,10 @@ func (r *LocalRuntime) CancelFollowUp(ctx context.Context, id string) bool {
 
 func (r *LocalRuntime) SetRecallHandler(_ RecallHandler) {}
 
-func (r *LocalRuntime) recall(ctx context.Context, msg QueuedMessage) error { return r.Steer(ctx, msg) }
+func (r *LocalRuntime) recall(ctx context.Context, msg QueuedMessage) error {
+	msg.InputOrigin = session.InputOriginRuntime
+	return r.Steer(ctx, msg)
+}
 
 func (r *LocalRuntime) QueueStatus() QueueStatus { return QueueStatus{} }
 

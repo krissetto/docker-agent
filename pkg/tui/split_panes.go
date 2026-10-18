@@ -308,7 +308,7 @@ func (m *appModel) removePane(id string) tea.Cmd {
 		return nil
 	}
 	m.cancelPaneGesture()
-	m.commitPaneWorkspace(layout)
+	m.hidePaneWorkspace(layout)
 	m.viewCacheValid = false
 	if id == m.paneFocus() {
 		_, cmd := m.handleSwitchTab(layout.Sessions()[0])
@@ -319,7 +319,7 @@ func (m *appModel) removePane(id string) tea.Cmd {
 
 func (m *appModel) singlePane() tea.Cmd {
 	m.cancelPaneGesture()
-	m.commitPaneWorkspace(newSplitLayout(m.paneFocus()))
+	m.hidePaneWorkspace(newSplitLayout(m.paneFocus()))
 	m.viewCacheValid = false
 	return m.resizeAll()
 }

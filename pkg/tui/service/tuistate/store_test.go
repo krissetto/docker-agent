@@ -225,3 +225,33 @@ func TestRemoveNonexistentTab(t *testing.T) {
 	// Should not error — just a no-op.
 	require.NoError(t, store.RemoveTab(ctx, "does-not-exist"))
 }
+
+func TestPaneWorkspaceStateRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+	want := PaneWorkspaceState{
+		Version:               1,
+		ActiveAnchorSessionID: "workspace-a",
+		Workspaces: []PaneWorkspace{{
+			AnchorSessionID: "workspace-a",
+			FocusSessionID:  "session-b",
+			Layout: &PaneLayoutNode{
+				Axis:  0,
+				Ratio: 0.63,
+				First: &PaneLayoutNode{SessionID: "session-a"},
+				Second: &PaneLayoutNode{
+					Axis:   1,
+					Ratio:  0.4,
+					First:  &PaneLayoutNode{SessionID: "session-b"},
+					Second: &PaneLayoutNode{SessionID: "session-c"},
+				},
+			},
+			SidebarCollapsed:      true,
+			SidebarPreferredWidth: 37,
+			HasSidebar:            true,
+		}},
+	}
+	require.NoError(t, store.SetPaneWorkspaceState(t.Context(), want))
+	got, err := store.GetPaneWorkspaceState(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}

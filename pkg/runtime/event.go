@@ -493,12 +493,14 @@ type TokenUsageEvent struct {
 }
 
 type Usage struct {
-	InputTokens   int64         `json:"input_tokens"`
-	OutputTokens  int64         `json:"output_tokens"`
-	ContextLength int64         `json:"context_length"`
-	ContextLimit  int64         `json:"context_limit"`
-	Cost          float64       `json:"cost"`
-	LastMessage   *MessageUsage `json:"last_message,omitempty"`
+	InputTokens   int64   `json:"input_tokens"`
+	OutputTokens  int64   `json:"output_tokens"`
+	ContextLength int64   `json:"context_length"`
+	ContextLimit  int64   `json:"context_limit"`
+	Cost          float64 `json:"cost"`
+	// OwnCost excludes embedded descendants; nil denotes a legacy aggregate-only snapshot.
+	OwnCost     *float64      `json:"own_cost,omitempty"`
+	LastMessage *MessageUsage `json:"last_message,omitempty"`
 	// CompactionThreshold is the fraction of the context window at which
 	// auto-compaction triggers for the agent that produced this snapshot,
 	// so UIs can color context gauges against it. 0 means unknown;
@@ -545,12 +547,14 @@ func SessionUsage(sess *session.Session, contextLimit int64, compactionThreshold
 	// Usage() snapshots both counters under sess.mu so a concurrent
 	// SetUsage/ApplyCompaction cannot tear the pair.
 	input, output := sess.Usage()
+	ownCost := sess.OwnCost()
 	u := &Usage{
 		InputTokens:   input,
 		OutputTokens:  output,
 		ContextLength: input + output,
 		ContextLimit:  contextLimit,
-		Cost:          sess.OwnCost() + sess.EmbeddedSubSessionCost(),
+		Cost:          ownCost + sess.EmbeddedSubSessionCost(),
+		OwnCost:       &ownCost,
 	}
 	if len(compactionThreshold) > 0 {
 		u.CompactionThreshold = compactionThreshold[0]

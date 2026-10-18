@@ -1,6 +1,7 @@
 package backgroundjobs
 
 import (
+	"errors"
 	"os"
 	"syscall"
 	"unsafe"
@@ -13,9 +14,8 @@ type processGroup struct {
 	processHandle windows.Handle
 }
 
-func platformSpecificSysProcAttr() *syscall.SysProcAttr {
-	return nil
-}
+func platformSpecificSysProcAttr() *syscall.SysProcAttr      { return nil }
+func platformSpecificShellSysProcAttr() *syscall.SysProcAttr { return nil }
 
 func createProcessGroup(proc *os.Process) (*processGroup, error) {
 	job, err := windows.CreateJobObject(nil, nil)
@@ -67,4 +67,13 @@ func terminateProcess(proc *os.Process, pg *processGroup, _ bool) error {
 	}
 
 	return proc.Kill()
+}
+
+func terminateShellProcessGroup(proc *os.Process, pg *processGroup, force bool) error {
+	return terminateProcess(proc, pg, force)
+}
+
+func shellBackgroundWaitSupported() bool { return false }
+func observeShellLeaderExit(*os.Process) (<-chan shellProcessExit, func(), error) {
+	return nil, func() {}, errors.New("safe shell process exit observation unavailable")
 }

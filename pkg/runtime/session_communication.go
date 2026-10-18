@@ -12,12 +12,12 @@ import (
 // are deliberately outside the commit point.
 func (d *sessionDriver) postCommunication(ctx context.Context, msg QueuedMessage) (subagent.DeliveryReceipt, error) {
 	receipt := subagent.DeliveryReceipt{RequestID: msg.RequestID, Target: d.sessionID()}
-	if msg.trustedSteering() {
+	if msg.guidance() {
 		receipt.Disposition = subagent.DeliveryGuidance
 	} else {
 		receipt.Disposition = subagent.DeliveryNewTurn
 	}
-	admission, err := d.admitInputReceipt(ctx, msg, SessionOperationPost, true, msg.trustedSteering())
+	admission, err := d.admitInputReceipt(ctx, msg, SessionOperationPost, true)
 	if err != nil {
 		return receipt, err
 	}

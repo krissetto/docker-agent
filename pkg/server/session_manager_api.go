@@ -112,7 +112,7 @@ func (sm *SessionManager) InspectSessionTree(ctx context.Context, sessionID stri
 // viewRegistry resolves persisted source/ancestry without calling the mutating
 // Handle path. The runtime performs the full confirmed membership preflight.
 func (sm *SessionManager) viewRegistry(ctx context.Context, id string) (runtime.SessionRuntime, error) {
-	selected, err := sm.sessionStore.GetSession(ctx, id)
+	selected, err := session.ReadSessionMetadata(ctx, sm.sessionStore, id)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ type managerPreparedView struct {
 
 func (p *managerPreparedView) Commit(ctx context.Context) (runtime.CommittedSessionView, error) {
 	result, err := p.PreparedSessionView.Commit(ctx)
-	if err == nil {
+	if err == nil && !result.Metadata.Historical {
 		if result.Info.RootSessionID != result.Info.SessionID {
 			if root, lookupErr := p.registry.SessionByID(result.Info.RootSessionID); lookupErr == nil {
 				p.manager.runtimeSessions.Store(result.Info.RootSessionID, &activeRuntimes{handle: root, registry: p.registry})

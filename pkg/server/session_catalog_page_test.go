@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 )
 
 type boundedCatalogStore struct {
@@ -81,4 +84,38 @@ func TestSessionCatalogBoundedMetadataCursorPages(t *testing.T) {
 		response := sessionRequest(t, srv, http.MethodGet, api.SessionAPIPath+"?"+query, "", "")
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 	}
+}
+
+func TestRemoteSessionCatalogUsesPersistedItemCountAndSessionCost(t *testing.T) {
+	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "catalog.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	root := session.New(session.WithID("remote-root"), session.WithAttributes(map[string]string{sessionAgentAttribute: "root"}), session.WithUserMessage("question"))
+	root.AddMessage(session.SystemMessage("system message is included in remote row count"))
+	root.Cost = 2.5
+	child := session.New(session.WithID("remote-child"), session.WithParentID(root.ID), session.WithAttributes(map[string]string{sessionAgentAttribute: "worker"}), session.WithUserMessage("child question"))
+	require.NoError(t, store.AddSession(t.Context(), root))
+	require.NoError(t, store.AddSubSession(t.Context(), root.ID, child))
+	registry := &httpSessionRegistry{sessions: map[string]*httpSession{}}
+	server := httptest.NewServer(NewWithManager(NewSessionManager(t.Context(), nil, store, 0, nil, WithSessionRuntime(registry)), "").e)
+	defer server.Close()
+	client, err := runtime.NewClient(server.URL, runtime.WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client)
+	require.NoError(t, err)
+	rows, err := transport.ListSessions(t.Context())
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, root.ID, rows[0].SessionID)
+	assert.Equal(t, 2, rows[0].NumMessages, "remote resource catalog preserves raw message-item count, including system rows")
+	assert.Equal(t, 2.5, rows[0].Cost, "remote resource catalog preserves the persisted sessions.cost field")
+	children, err := transport.ListSessionSummaries(t.Context(), runtime.SessionSummaryOptions{IncludeChildren: true})
+	require.NoError(t, err)
+	require.Len(t, children, 2)
+	byID := map[string]runtime.SessionSummaryEntry{}
+	for _, row := range children {
+		byID[row.SessionID] = row
+	}
+	assert.Equal(t, 2, byID[root.ID].NumMessages)
+	assert.Equal(t, 1, byID[child.ID].NumMessages)
 }

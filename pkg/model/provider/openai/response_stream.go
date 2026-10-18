@@ -160,10 +160,13 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 			a.itemCallIDMap[itemID] = callID
 
-			// Try to get the function name from top-level Name field, then Item.Name
-			funcName := cmp.Or(event.Name, event.Item.Name)
-			if funcName != "" && event.Name == "" {
-				slog.Debug("Extracted name from Item.Name field", "name", funcName)
+			// Compatible providers may send a top-level name outside the SDK's modeled item.
+			var top struct {
+				Name string `json:"name"`
+			}
+			funcName := event.Item.Name
+			if err := json.Unmarshal([]byte(event.RawJSON()), &top); err == nil && top.Name != "" {
+				funcName = top.Name
 			}
 
 			// Only emit the tool call with name. Arguments normally arrive in

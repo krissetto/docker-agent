@@ -58,6 +58,10 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 		context += " — content"
 	}
 	switch d := dialog.(type) {
+	case *closeRootWithSubagentsDialog:
+		if d.rememberFocused {
+			context += " / Remember this choice"
+		}
 	case *planBrowserDialog:
 		if d.filtering {
 			context += " / filter"
@@ -135,6 +139,12 @@ func ContextHelp(dialog Dialog) (string, []help.Section) {
 			entries = append(entries, entry)
 		}
 		sections[si].Entries = entries
+	}
+	if d, ok := dialog.(*closeRootWithSubagentsDialog); ok && d.rememberFocused {
+		sections = append(sections, help.Section{ID: "dialog." + family + ".checkbox", Title: "Remember this choice", Entries: []help.Entry{{
+			ID: "dialog." + family + ".checkbox.toggle", Keys: []string{"enter", "space"}, Description: "Toggle Remember this choice",
+			Condition: "Checkbox focus; does not close the tab or save until explicit Yes or No.",
+		}}})
 	}
 	if d, ok := dialog.(*settingsDialog); ok && d.focus == settingsControls {
 		label := "Toggle selected setting"

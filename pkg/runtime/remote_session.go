@@ -658,7 +658,7 @@ type remoteSessionMetadata api.SessionMetadata
 
 func (m remoteSessionMetadata) runtime() SessionMetadata {
 	capabilities := m.Capabilities
-	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
+	return SessionMetadata{SessionID: m.SessionID, AgentName: m.AgentName, Historical: m.Historical, ExecutionAvailable: m.ExecutionAvailable, HistoryReason: m.HistoryReason, Model: m.Model, ThinkingLevels: slices.Clone(m.ThinkingLevels), ThinkingLevel: m.ThinkingLevel, Capabilities: SessionCapabilities{
 		PendingMessageRemoval: capabilities.PendingMessageRemoval,
 		Snapshots:             capabilities.Snapshots,
 		ToolInspection:        capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
@@ -746,7 +746,7 @@ func decodeSessionHTTPError(resp *http.Response) error {
 	kind := SessionErrorInvalid
 	validKind := func(candidate SessionErrorKind) bool {
 		switch candidate {
-		case SessionErrorPersistence, SessionErrorConflict, SessionErrorInterrupted, SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession:
+		case SessionErrorPersistence, SessionErrorConflict, SessionErrorInterrupted, SessionErrorInvalid, SessionErrorNotFound, SessionErrorCapacity, SessionErrorStopped, SessionErrorClosed, SessionErrorStale, SessionErrorUnsupported, SessionErrorWrongSession, SessionErrorHistorical:
 			return true
 		default:
 			return false
@@ -1325,6 +1325,12 @@ func (s *remoteSession) AwaitTurn(ctx context.Context, turnID string) error {
 	return s.runtime.client.sessionWaitJSON(ctx, http.MethodPost, s.endpoint("turns/"+url.PathEscape(turnID)+"/wait"), nil, nil)
 }
 
+func (s *remoteSession) AwaitWorkflow(ctx context.Context) (WorkflowSettlement, error) {
+	var settlement WorkflowSettlement
+	err := s.runtime.client.sessionWaitJSON(ctx, http.MethodPost, s.endpoint("workflow/wait"), nil, &settlement)
+	return settlement, err
+}
+
 // ConfirmedSessionViewInfo reads the server's confirmed identity without
 // reserving, publishing, or starting a session owner.
 func (r *SessionTransport) ConfirmedSessionViewInfo(ctx context.Context, id string) (PreparedSessionViewInfo, error) {
@@ -1345,6 +1351,9 @@ func (r *SessionTransport) ConfirmedSessionViewInfo(ctx context.Context, id stri
 func (r *SessionTransport) validateSessionViewInfo(id string, info PreparedSessionViewInfo) (PreparedSessionViewInfo, error) {
 	if info.SessionID != id || info.Session == nil || info.Session.ID != id || info.Binding.AgentName == "" || info.WorkingDir != info.Session.WorkingDir || info.RootSessionID == "" {
 		return PreparedSessionViewInfo{}, errors.New("invalid prepared session view identity")
+	}
+	if info.RootBinding.AgentName != "" && (info.RootBinding.ParentSessionID != "" || info.RootSessionID == id && (info.RootWorkingDir != info.WorkingDir || info.RootBinding.AgentName != info.Binding.AgentName)) {
+		return PreparedSessionViewInfo{}, errors.New("invalid prepared root owner identity")
 	}
 	if r.source != "" && info.Session.AttributesSnapshot()["docker-agent.actor.source"] != r.source {
 		return PreparedSessionViewInfo{}, &SessionError{Kind: SessionErrorWrongSession, SessionID: id, Operation: "prepare_view", Detail: "session belongs to a different source"}
@@ -1455,4 +1464,18 @@ func (s *remoteSession) SetTodoDescription(ctx context.Context, id, expectedDesc
 		return nil, sessionUnsupported(s.ID(), SessionOperationSetTodoDescription)
 	}
 	return s.editTodo(ctx, id, api.SessionTodoPatch{Description: &description, ExpectedDescription: &expectedDescription})
+}
+
+// RegisterSource asks an authenticated Kit API to admit an accessible workspace
+// YAML file and returns its opaque source identity and immutable revision.
+func (c *Client) RegisterSource(ctx context.Context, path, workingDir string) (api.SourceRegistration, error) {
+	var result api.SourceRegistration
+	err := c.sessionJSON(ctx, http.MethodPost, api.SourceRegistrationPath, api.SourceRegistrationRequest{Path: path, WorkingDir: workingDir}, &result)
+	if err != nil {
+		return api.SourceRegistration{}, err
+	}
+	if result.SourceID == "" || result.Revision == "" {
+		return api.SourceRegistration{}, errors.New("source registration response is incomplete")
+	}
+	return result, nil
 }

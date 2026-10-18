@@ -8,8 +8,7 @@ import (
 )
 
 // QueuedMessage is an input waiting to be injected into the agent loop,
-// either mid-turn (via the steer queue) or at end-of-turn (via the follow-up
-// queue).
+// at the next safe boundary (guidance) or the next turn start (turn FIFO).
 type QueuedMessage struct {
 	InputOrigin   session.InputOrigin
 	SenderID      string
@@ -32,8 +31,6 @@ type QueuedMessage struct {
 	Retry       bool
 	RuntimeNote bool
 	InputMode   string
-	// User STEERING admitted during active work may reside behind a compaction barrier.
-	activeSteering bool
 }
 
 // PendingMessageCanceler is implemented by session handles that can withdraw

@@ -39,14 +39,15 @@ func TestLauncherAttachOnly(t *testing.T) {
 		{"--exec", "--dry-run"},
 		{"--session", "session id"},
 		{"--session=-1"},
-		{"--exec", "--safety", "strict", "--", "--team", "line one\n$(touch INJECTED); *", ""},
+		{"./myagent.yaml", "--exec", "--safety", "strict", "--", "line one\n$(touch INJECTED); *", ""},
+		{"./team with spaces.yaml", "--exec", "--dry-run"},
 	} {
 		cmd := exec.CommandContext(t.Context(), "/bin/sh", append([]string{filepath.Join(home, "launch.sh")}, args...)...)
 		cmd.Dir = workspace
 		cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+home, "ASYNC_AGENT_KIT_STATE_DIR="+home+"/private")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
-		expected := append([]string{workspace, "run", filepath.Join(home, "hackerspace.yaml"), "--managed-api", "--managed-api-attach", "--managed-api-state-dir", home + "/private"}, args...)
+		expected := append([]string{workspace, "run", "--managed-api", "--managed-api-attach", "--managed-api-state-dir", home + "/private"}, args...)
 		assert.Equal(t, expected, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
 		assert.NoFileExists(t, filepath.Join(workspace, "INJECTED"))
 	}
@@ -63,15 +64,15 @@ func TestStartupTeamSelection(t *testing.T) {
 	for _, name := range []string{"team.yaml", "team with spaces.yaml", "team\n$(touch INJECTED);*.yaml"} {
 		require.NoError(t, os.WriteFile(filepath.Join(workspace, name), []byte("agents: {}"), 0600))
 	}
-	for _, tc := range []struct{ team, model, expected string }{
-		{"auto", "", filepath.Join(home, "hackerspace.yaml")},
-		{"team.yaml", "openai/example", filepath.Join(workspace, "team.yaml")},
-		{"team with spaces.yaml", "openai/example", filepath.Join(workspace, "team with spaces.yaml")},
-		{"team\n$(touch INJECTED);*.yaml", "openai/example", filepath.Join(workspace, "team\n$(touch INJECTED);*.yaml")},
-		{filepath.Join(workspace, "team.yaml"), "", filepath.Join(workspace, "team.yaml")},
+	for _, tc := range []struct{ team, model, teamEdit, expected string }{
+		{"auto", "", "off", filepath.Join(home, "hackerspace.yaml")},
+		{"team.yaml", "openai/example", "restricted", filepath.Join(workspace, "team.yaml")},
+		{"team with spaces.yaml", "openai/example", "off", filepath.Join(workspace, "team with spaces.yaml")},
+		{"team\n$(touch INJECTED);*.yaml", "openai/example", "off", filepath.Join(workspace, "team\n$(touch INJECTED);*.yaml")},
+		{filepath.Join(workspace, "team.yaml"), "", "off", filepath.Join(workspace, "team.yaml")},
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(home, "hackerspace.yaml"), []byte("agents: {}"), 0600))
-		cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), tc.team, home+"/private", tc.model)
+		cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), tc.team, home+"/private", tc.model, tc.teamEdit)
 		cmd.Dir = home
 		cmd.Env = append(os.Environ(), "WORKSPACE_DIR="+workspace)
 		out, err := cmd.CombinedOutput()
@@ -80,18 +81,18 @@ func TestStartupTeamSelection(t *testing.T) {
 		if tc.model != "" {
 			expected = append(expected, "--model", tc.model)
 		}
-		expected = append(expected, "--", tc.expected)
+		expected = append(expected, "--team-edit", tc.teamEdit, "--", tc.expected)
 		assert.Equal(t, expected, strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"))
 		assert.NoFileExists(t, filepath.Join(workspace, "INJECTED"))
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "hackerspace.yaml"), []byte("agents: {}"), 0600))
-	cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "auto", home+"/private", "")
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "auto", home+"/private", "", "off")
 	cmd.Dir = workspace
 	cmd.Env = append(os.Environ(), "WORKSPACE_DIR=")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err)
 	assert.Contains(t, string(out), filepath.Join(workspace, "hackerspace.yaml"))
-	cmd = exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "missing.yaml", home+"/private", "")
+	cmd = exec.CommandContext(t.Context(), "/bin/sh", filepath.Join(home, "start.sh"), "missing.yaml", home+"/private", "", "off")
 	cmd.Dir = workspace
 	cmd.Env = append(os.Environ(), "WORKSPACE_DIR=")
 	out, err = cmd.CombinedOutput()
@@ -134,7 +135,7 @@ func TestStartupDeclaredEnvironment(t *testing.T) {
 			continue
 		}
 		hook := capability.Config.Startup[1]
-		values := map[string]string{"WORKSPACE_DIR": workspace, "ASYNC_AGENT_KIT_TEAM": "auto", "ASYNC_AGENT_KIT_MODEL": "openai/fixture", "ASYNC_AGENT_KIT_STATE_DIR": home + "/private", "OPENAI_API_KEY": "fixture-sentinel", "ANTHROPIC_API_KEY": "fixture-sentinel", "GOOGLE_API_KEY": "fixture-sentinel", "GH_TOKEN": "fixture-sentinel"}
+		values := map[string]string{"WORKSPACE_DIR": workspace, "ASYNC_AGENT_KIT_TEAM": "auto", "ASYNC_AGENT_KIT_MODEL": "openai/fixture", "ASYNC_AGENT_KIT_STATE_DIR": home + "/private", "ASYNC_AGENT_KIT_TEAM_EDIT": "restricted", "OPENAI_API_KEY": "fixture-sentinel", "ANTHROPIC_API_KEY": "fixture-sentinel", "GOOGLE_API_KEY": "fixture-sentinel", "GH_TOKEN": "fixture-sentinel"}
 		args := append([]string(nil), hook.Command...)
 		for i, arg := range args {
 			arg = strings.ReplaceAll(arg, "/opt/async-agent", home)

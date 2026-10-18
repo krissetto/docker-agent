@@ -35,6 +35,7 @@ import (
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/teamdef"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -85,6 +86,7 @@ type runExecFlags struct {
 	managedAPI          bool
 	managedAPIAttach    bool
 	managedAPIStateDir  string
+	kitSourcePath       string
 	modelOverrides      []string
 	promptFiles         []string
 	dryRun              bool
@@ -305,6 +307,9 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}
 	}
 
+	if err := validateTeamEditCLIGrant(cmd, &f.runConfig, f.remoteAddress != "" || os.Getenv("ASYNC_AGENT_KIT_CONNECTION") == "1"); err != nil {
+		return err
+	}
 	if err := validateSafetyFlag(f.safety); err != nil {
 		return err
 	}
@@ -381,7 +386,15 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 
 	var discoveredProjectConfig bool
-	args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	kitConnection := os.Getenv("ASYNC_AGENT_KIT_CONNECTION") == "1"
+	if kitConnection {
+		f.kitSourcePath, args = takeKitTeamArgument(args)
+	}
+	if !kitConnection {
+		args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	} else if len(args) == 0 || f.kitSourcePath == "" {
+		args = prependAgentRef("default", args)
+	}
 
 	// Resolve alias / runtime-declared sandbox opt-in before dispatch.
 	// An explicit --sandbox=<bool> on the CLI always wins, so we only
@@ -450,6 +463,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}()
 
 	agentFileName := f.resolveRunAgentFileName(args)
+	if os.Getenv("ASYNC_AGENT_KIT_CONNECTION") == "1" {
+		agentFileName = ""
+	}
 
 	// Load the user config once and fail loudly: falling back to defaults
 	// here would silently drop the user's settings (safety, permissions,
@@ -478,7 +494,11 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	if f.managedAPI {
-		agentFileName, err = f.bootstrapManagedAPI(ctx, agentFileName)
+		bootstrapSource := agentFileName
+		if os.Getenv("ASYNC_AGENT_KIT_CONNECTION") == "1" {
+			bootstrapSource = f.kitSourcePath
+		}
+		agentFileName, err = f.bootstrapManagedAPI(ctx, bootstrapSource)
 		if err != nil {
 			return err
 		}
@@ -621,6 +641,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 
 	var rec *recorder.Recorder
 	tuiOptions := append(f.tuiOpts(args), tui.WithSupervisor(f.sessionViewHost))
+	tuiOptions = append(tuiOptions, tui.WithReviewSessionFactory(f.newReviewSessionFactory(ctx, b, rt, sessions)))
 	if restorer, ok := b.(interface {
 		Restorer(app.Services, runtime.SessionRuntime) tui.SessionRestorer
 	}); ok {
@@ -670,6 +691,21 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		f.cleanupWorktree(context.WithoutCancel(ctx), out, createdWorktree)
 	}
 	return nil
+}
+
+func looksLikeKitTeamPath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".yaml" || ext == ".yml"
+}
+
+func takeKitTeamArgument(args []string) (string, []string) {
+	if len(args) == 0 || !looksLikeKitTeamPath(args[0]) {
+		return "", args
+	}
+	remaining := append([]string(nil), args...)
+	source := remaining[0]
+	remaining[0] = "kit-team"
+	return source, remaining
 }
 
 func (f *runExecFlags) resolveRunAgentFileName(args []string) string {
@@ -954,10 +990,32 @@ func (f *runExecFlags) dispatchWorktreeCreate(ctx context.Context, out *cli.Prin
 	return nil
 }
 
+func validateTeamEditCLIGrant(cmd *cobra.Command, runConfig *config.RuntimeConfig, remote bool) error {
+	if err := runConfig.ValidateTeamEditGrant(); err != nil {
+		return err
+	}
+	requestedMode := strings.TrimSpace(runConfig.TeamEditMode)
+	if requestedMode == "" {
+		requestedMode = "off"
+	}
+	remoteGrant := cmd.Flags().Changed("team-edit") && requestedMode != "off" || cmd.Flags().Changed("team-edit-agent")
+	if remote && remoteGrant {
+		return errors.New("configure team editing on server startup; remote clients cannot grant it")
+	}
+	return nil
+}
+
 func (f *runExecFlags) loadAgentFrom(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
+	return f.loadAgentFromWithPool(ctx, req, nil, "")
+}
+
+func (f *runExecFlags) loadAgentFromWithPool(ctx context.Context, req runtime.LoadTeamRequest, pool *teamloader.ToolsetLeasePool, scope string) (*teamloader.LoadResult, error) {
 	opts := append(loaderdefaults.Opts(), teamloader.WithModelOverrides(req.ModelOverrides))
 	if len(req.PromptFiles) > 0 {
 		opts = append(opts, teamloader.WithPromptFiles(req.PromptFiles))
+	}
+	if pool != nil {
+		opts = append(opts, teamloader.WithToolsetLeasePool(pool, scope))
 	}
 	return teamloader.LoadWithConfig(ctx, req.Source, req.RunConfig, opts...)
 }
@@ -1027,6 +1085,10 @@ func (f *runExecFlags) snapshotRuntimeOpts() ([]runtime.Opt, builtins.SnapshotCo
 }
 
 func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadResult *teamloader.LoadResult, req runtime.CreateSessionRequest, sessStore session.Store) (*runtime.LocalRuntime, *session.Session, error) {
+	return f.createLocalRuntimeAndSessionWithSource(ctx, loadResult, req, sessStore, nil, nil)
+}
+
+func (f *runExecFlags) createLocalRuntimeAndSessionWithSource(ctx context.Context, loadResult *teamloader.LoadResult, req runtime.CreateSessionRequest, sessStore session.Store, source config.Source, pool *teamloader.ToolsetLeasePool) (*runtime.LocalRuntime, *session.Session, error) {
 	t := loadResult.Team
 
 	// Merge user-level global permissions into the team's checker so the
@@ -1046,8 +1108,77 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		return nil, nil, err
 	}
 	runtimeOpts := append(f.runtimeOpts(loadResult, &f.runConfig, sessStore, agentName), rtOpts...)
+	var initialEnvironment *runtime.TeamEnvironment
+	var environmentStore *runtime.TeamEnvironmentStore
+	var editor *teamdef.Editor
+	poolScope := ""
+	if source != nil && f.runConfig.TeamEditGrant().Mode != "off" {
+		poolScope = "local:" + source.Name() + ":" + f.runConfig.WorkingDir
+		if pool == nil {
+			pool, err = teamloader.NewToolsetLeasePool(poolScope)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		sourceIdentity := poolScope
+		if managed, ok := source.(interface{ SourceID() string }); ok {
+			sourceIdentity = managed.SourceID()
+		}
+		writablePath, _ := config.FileSourcePath(source)
+		exportRoot := ""
+		if f.runConfig.WorkingDir != "" {
+			exportRoot = f.runConfig.WorkingDir
+		}
+		editor, err = teamdef.NewEditor(ctx, teamdef.EditableSourceOptions{Source: source, Authority: teamdef.EditAuthorityMode(f.runConfig.TeamEditMode), AllowedAgentIDs: f.runConfig.TeamEditAllowedAgentIDs, WritablePath: writablePath, ExportRoot: exportRoot, BuildValidator: func(ctx context.Context, candidate config.Source) error {
+			_, err := config.Load(ctx, candidate)
+			return err
+		}})
+		if err != nil {
+			if pool != nil {
+				_ = pool.Close(context.WithoutCancel(ctx))
+			}
+			return nil, nil, err
+		}
+		initialEnvironment, err = runtime.TeamEnvironmentFromLoadedWithBaseline(editor.CurrentRevision().ID, sourceIdentity, editor.BaselineRevisionID(), loadResult, &f.runConfig)
+		if err != nil {
+			if pool != nil {
+				_ = pool.Close(context.WithoutCancel(ctx))
+			}
+			return nil, nil, err
+		}
+		environmentStore, err = runtime.NewTeamEnvironmentStore(initialEnvironment)
+		if err != nil {
+			_ = initialEnvironment.Discard(context.WithoutCancel(ctx))
+			if pool != nil {
+				_ = pool.Close(context.WithoutCancel(ctx))
+			}
+			return nil, nil, err
+		}
+
+		loadOpts := []teamloader.Opt{teamloader.WithToolsetLeasePool(pool, poolScope)}
+		candidateBuilder := func(ctx context.Context, candidate config.Source, revision, sourceID, baselineID string, runConfig *config.RuntimeConfig, candidateOpts []teamloader.Opt) (*runtime.TeamEnvironment, error) {
+			loaded, err := f.loadAgentFromWithPool(ctx, runtime.LoadTeamRequest{Source: candidate, RunConfig: runConfig, ModelOverrides: f.modelOverrides, PromptFiles: f.promptFiles}, pool, poolScope)
+			if err != nil {
+				return nil, err
+			}
+			if f.globalPermissions != nil && !f.globalPermissions.IsEmpty() {
+				loaded.Team.SetPermissions(permissions.Merge(loaded.Team.Permissions(), f.globalPermissions))
+			}
+			if ignoreRules := permissions.FromAgentsIgnore(runConfig.WorkingDir); ignoreRules != nil {
+				loaded.Team.SetPermissions(permissions.Merge(loaded.Team.Permissions(), ignoreRules))
+			}
+			return runtime.TeamEnvironmentFromLoadedWithBaseline(revision, sourceID, baselineID, loaded, runConfig)
+		}
+		runtimeOpts = append(runtimeOpts, runtime.WithTeamEditInitialEnvironment(editor, environmentStore, candidateBuilder, f.runConfig.TeamEditGrant(), f.runConfig.Clone(), loadOpts, pool, poolScope, f.globalPermissions, f.runConfig.WorkingDir))
+	}
 	localRt, err := runtime.New(ctx, t, runtimeOpts...)
 	if err != nil {
+		if environmentStore != nil {
+			_ = environmentStore.Close(context.WithoutCancel(ctx))
+		}
+		if pool != nil {
+			_ = pool.Close(context.WithoutCancel(ctx))
+		}
 		return nil, nil, fmt.Errorf("creating runtime: %w", err)
 	}
 	f.snapshotController = ctrl
@@ -1105,6 +1236,13 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		slog.DebugContext(ctx, "Using local runtime", "agent", agentName)
 	}
 
+	if sess != nil && source != nil && sess.AttributesSnapshot()["docker-agent.actor.source"] == "" {
+		if sourceIdentity, ok := source.(interface{ SourceID() string }); ok {
+			sess.SetAttribute("docker-agent.actor.source", sourceIdentity.SourceID())
+		} else {
+			sess.SetAttribute("docker-agent.actor.source", source.Name())
+		}
+	}
 	complete = true
 	return localRt, sess, nil
 }
@@ -1636,13 +1774,14 @@ func (f *runExecFlags) spawnBorrowedSession(ctx context.Context, services app.Se
 // admitted or the runtime is exposed to the control plane. Ownership admission
 // decides when Activate may publish it and when Cleanup may release it.
 type ownedSessionResources struct {
-	services *runtime.LocalRuntime
-	sessions runtime.SessionRuntime
-	team     *team.Team
-	agent    *agent.Agent
-	opts     []app.Opt
-	activate func() error
-	cleanup  func()
+	services    *runtime.LocalRuntime
+	toolsetPool *teamloader.ToolsetLeasePool
+	sessions    runtime.SessionRuntime
+	team        *team.Team
+	agent       *agent.Agent
+	opts        []app.Opt
+	activate    func() error
+	cleanup     func()
 }
 
 // spawnOwnedSession retains the ordinary fresh-session behavior on top of the
@@ -1672,6 +1811,13 @@ func (f *runExecFlags) spawnOwnedSession(ctx context.Context, agentSource config
 }
 
 func (f *runExecFlags) buildOwnedSessionResources(ctx context.Context, agentSource config.Source, store session.Store, workingDir string) (*ownedSessionResources, error) {
+	return f.buildOwnedSessionResourcesForAgent(ctx, agentSource, store, workingDir, f.agentName)
+}
+
+// buildOwnedSessionResourcesForAgent constructs the same fully-owned workspace
+// runtime for an explicit agent selector. Hosts that create focused source tabs
+// use this to avoid mutating shared CLI flags or reparsing a different source.
+func (f *runExecFlags) buildOwnedSessionResourcesForAgent(ctx context.Context, agentSource config.Source, store session.Store, workingDir, agentName string) (*ownedSessionResources, error) {
 	runConfigCopy := f.runConfig.Clone()
 	runConfigCopy.WorkingDir = workingDir
 
@@ -1683,16 +1829,20 @@ func (f *runExecFlags) buildOwnedSessionResources(ctx context.Context, agentSour
 	if err != nil {
 		return nil, err
 	}
-	return f.buildLoadedSessionResources(ctx, loadResult, runConfigCopy, store)
+	return f.buildLoadedSessionResourcesForAgent(ctx, loadResult, runConfigCopy, store, agentName)
 }
 
 // buildLoadedSessionResources binds tools already constructed for this workspace
 // and runtime hooks to the same immutable config, without admitting a session.
 func (f *runExecFlags) buildLoadedSessionResources(ctx context.Context, loadResult *teamloader.LoadResult, runConfigCopy *config.RuntimeConfig, store session.Store) (*ownedSessionResources, error) {
+	return f.buildLoadedSessionResourcesForAgent(ctx, loadResult, runConfigCopy, store, f.agentName)
+}
+
+func (f *runExecFlags) buildLoadedSessionResourcesForAgent(ctx context.Context, loadResult *teamloader.LoadResult, runConfigCopy *config.RuntimeConfig, store session.Store, agentName string) (*ownedSessionResources, error) {
 	workingDir := runConfigCopy.WorkingDir
 	t := loadResult.Team
 
-	agt, err := t.AgentOrDefault(f.agentName)
+	agt, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		stopToolSets(ctx, t)
 		return nil, err

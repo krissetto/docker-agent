@@ -62,9 +62,9 @@ func TestSessionCapacityPressureProtectsObserverPendingSteeringInteractionAndRun
 			d.mu.Unlock()
 			return func() {}
 		}},
-		{"steering", func(d *sessionDriver) func() {
+		{"guidance", func(d *sessionDriver) func() {
 			d.mu.Lock()
-			d.steering = append(d.steering, QueuedMessage{Content: "s"})
+			d.pending = append(d.pending, QueuedMessage{Content: "s", InputMode: "steer"})
 			d.mu.Unlock()
 			return func() {}
 		}},

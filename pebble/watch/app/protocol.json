@@ -1,0 +1,383 @@
+{
+  "version": 1,
+  "limit": {
+    "max_rows": 5,
+    "max_sessions": 5,
+    "max_agents": 4,
+    "max_payload_bytes": 4096,
+    "minimum_supported_inbox_bytes": 1024,
+    "minimum_supported_outbox_bytes": 512,
+    "minimum_guaranteed_inbox_bytes": 124,
+    "minimum_guaranteed_outbox_bytes": 636,
+    "max_row_text_utf8_bytes": 192,
+    "max_row_id_utf8_bytes": 40,
+    "max_owner_utf8_bytes": 24,
+    "max_meta_utf8_bytes": 48,
+    "max_cursor_utf8_bytes": 192,
+    "max_runtime_agent_utf8_bytes": 48,
+    "dictionary_size": "Pebble SDK calculation is 1 byte dictionary header + 7 bytes per tuple + payload; C string payload includes trailing NUL; uint32 and bool payloads are 4 and 1 bytes. PKJS encoder uses this formula and exact negotiated capacity.",
+    "max_runtime_rows": 8,
+    "max_recent_chat_response_bytes": 32768,
+    "max_message_scan_count": 128,
+    "max_server_message_text_bytes": 2048
+  },
+  "commands": {
+    "hello": 1,
+    "select": 3,
+    "open_session": 4,
+    "send": 5,
+    "cancel": 6,
+    "poll": 7,
+    "older": 8,
+    "ack": 9,
+    "start_new": 10
+  },
+  "frames": {
+    "begin": 1,
+    "meta": 2,
+    "row": 3,
+    "end": 4,
+    "error": 6,
+    "ack_command": 9
+  },
+  "keys": [
+    "type",
+    "request_id",
+    "receive_capacity",
+    "runtime_id",
+    "agent_name",
+    "session_id",
+    "source",
+    "before_cursor",
+    "text",
+    "draft_key",
+    "frame",
+    "index",
+    "total",
+    "status",
+    "error",
+    "runtime_name",
+    "session_title",
+    "runtime_status",
+    "state",
+    "root_session_id",
+    "execution_available",
+    "pending",
+    "attention_known",
+    "approval_count",
+    "elicitation_count",
+    "alert",
+    "alert_mode",
+    "disposition",
+    "voice_state",
+    "truncated_before",
+    "row_index",
+    "row_kind",
+    "row_id",
+    "row_role",
+    "row_owner",
+    "row_text",
+    "row_meta",
+    "row_truncated",
+    "session_count",
+    "session_id_0",
+    "session_id_1",
+    "session_id_2",
+    "session_id_3",
+    "session_id_4",
+    "session_title_0",
+    "session_title_1",
+    "session_title_2",
+    "session_title_3",
+    "session_title_4",
+    "agent_count",
+    "agent_name_0",
+    "agent_name_1",
+    "agent_name_2",
+    "agent_name_3",
+    "agent_description_0",
+    "agent_description_1",
+    "agent_description_2",
+    "agent_description_3",
+    "turn_meta_0",
+    "turn_meta_1",
+    "turn_meta_2",
+    "turn_meta_3",
+    "turn_meta_4",
+    "selected_agent",
+    "selected_session"
+  ],
+  "transport": {
+    "one_outstanding": true,
+    "timeout_ms": 10000,
+    "retry_posts_automatically": false,
+    "echo_request_id_on_all_frames": true,
+    "discard_stale_generation": true,
+    "commit_view_only_after_end_frame": true,
+    "max_unacked_frames": 1,
+    "capacity": {
+      "advertise_every_request": "watch sends receive_capacity=min(app_message_inbox_size_maximum(),4096) on hello/reconnect and each subsequent command",
+      "sender_limit": "min(receive_capacity,4096) exact encoded dictionary bytes",
+      "minimum_supported_bytes": 1024,
+      "below_minimum": "return explicit bridge_unsupported error; do not partially render"
+    },
+    "framing": {
+      "physical_indexing": "one monotonically increasing frame index for each physical frame",
+      "begin": {
+        "index": 0,
+        "fields": [
+          "type=2",
+          "frame=1",
+          "request_id",
+          "total",
+          "status (result view type)"
+        ]
+      },
+      "meta": {
+        "index": 1,
+        "fields": [
+          "type=2",
+          "frame=2",
+          "request_id",
+          "index",
+          "total",
+          "scalar result metadata only"
+        ]
+      },
+      "rows": {
+        "indices": "2 through row_count+1",
+        "fields": [
+          "type=2",
+          "frame=3",
+          "request_id",
+          "index",
+          "total",
+          "row_index",
+          "row_kind",
+          "row_id",
+          "row_role",
+          "row_owner",
+          "row_text",
+          "row_meta",
+          "row_truncated"
+        ]
+      },
+      "row_kind_values": {
+        "0": "turn/message",
+        "1": "session",
+        "2": "agent",
+        "3": "runtime"
+      },
+      "row_mappings": {
+        "turn/message": {
+          "row_id": "decimal message int64",
+          "row_role": "user/assistant/tool",
+          "row_owner": "attributed agent or empty for user",
+          "row_text": "bounded visible message text",
+          "row_meta": "bounded terse tool/status text",
+          "row_truncated": "bool"
+        },
+        "session": {
+          "row_id": "canonical session ID string",
+          "row_role": "unknown|queued|running|cancelling|settled",
+          "row_owner": "root agent name",
+          "row_text": "session title",
+          "row_meta": "attention summary or empty",
+          "row_truncated": "bool for title truncation"
+        },
+        "agent": {
+          "row_id": "exact root agent name",
+          "row_role": "root",
+          "row_owner": "empty",
+          "row_text": "agent description",
+          "row_meta": "source/runtime label",
+          "row_truncated": "bool"
+        },
+        "runtime": {
+          "row_id": "configured runtime ID",
+          "row_role": "private_no_auth|bearer|open",
+          "row_owner": "empty",
+          "row_text": "display runtime name",
+          "row_meta": "connection/auth state",
+          "row_truncated": "bool"
+        }
+      },
+      "end": {
+        "index": "row_count+2",
+        "fields": [
+          "type=2",
+          "frame=4",
+          "request_id",
+          "index",
+          "total"
+        ]
+      },
+      "total": "row_count+3 physical frames, includes begin/meta/rows/end; identical on all frames",
+      "meta_keys": "row payload fields are absent in begin/meta/end; one scalar metadata response dictionary fits 1024-byte minimum via bounded values (name/status/title<=48 bytes, cursor<=192, source<=48); runtime IDs and session IDs<=40 bytes or explicit unsupported",
+      "chunks": "none in version 1. Static field limits/cursor<=192 and ID<=40 for session/runtime ensure metadata fits 1024; row too big => explicit frame error/unsupported, abort staging. Never silently truncate identity/cursor.",
+      "row_indices": "physical indices 2..row_count+1, each frame contains logical row_index and row_kind; no chunked field data in v1",
+      "row_limit_by_view": {
+        "runtimes": 8,
+        "agents": 4,
+        "sessions": 5,
+        "chat": 5
+      }
+    },
+    "ack_fields": [
+      "type=9",
+      "request_id=original request",
+      "frame=the original kind (begin/meta/row/end)",
+      "index=physical frame index"
+    ],
+    "ack_rules": "Receiver sends command type 9 and echoes the exact original response frame kind plus request_id/index. Sender accepts ACK only if all three exactly match current outstanding frame; duplicate last accepted frame is re-ACKed but not appended twice; stale request, wrong kind/index, future or out-of-order indices are ignored. Sender retries only current identical frame twice after 1s then 2s; timeout aborts staging.",
+    "command_fields": {
+      "hello": [
+        "type=1",
+        "request_id",
+        "receive_capacity"
+      ],
+      "select_runtime": [
+        "type=3",
+        "request_id",
+        "runtime_id",
+        "receive_capacity"
+      ],
+      "select_agent": [
+        "type=3",
+        "request_id",
+        "source (C uses chosen agent row row_meta)",
+        "agent_name (row id)",
+        "receive_capacity"
+      ],
+      "open_session": [
+        "type=4",
+        "request_id",
+        "session_id",
+        "receive_capacity"
+      ],
+      "send_existing": [
+        "type=5",
+        "request_id",
+        "session_id",
+        "text",
+        "draft_key",
+        "receive_capacity"
+      ],
+      "discard_draft": [
+        "type=6",
+        "request_id",
+        "draft_key"
+      ],
+      "poll": [
+        "type=7",
+        "request_id",
+        "receive_capacity"
+      ],
+      "older": [
+        "type=8",
+        "request_id",
+        "session_id",
+        "before_cursor",
+        "receive_capacity"
+      ],
+      "ack": [
+        "type=9",
+        "request_id",
+        "frame",
+        "index"
+      ],
+      "start_new": [
+        "type=10",
+        "request_id",
+        "agent_name",
+        "source",
+        "text",
+        "draft_key",
+        "receive_capacity"
+      ]
+    },
+    "dictionary_size": "Pebble SDK measured format is 1-byte dictionary header + 7 bytes per tuple + payload bytes; C string payload includes trailing NUL; integer is the encoded integer width. PKJS uses this byte formula and enforces negotiated capacity.",
+    "configmessage": {
+      "list_roots": {
+        "request": "type=list_roots plus validated runtime and temporary bearer in configmessage data only",
+        "reply": "{ok, limited, roots:[{source<=40 exact, root_agent_name<=40 exact, description<=48}]}",
+        "max_roots": 8,
+        "limited": "true if source count exceeds 8; UI filters exact requested source or refuses save if selection was omitted"
+      }
+    }
+  },
+  "semantics": {
+    "pending": "accepted user inputs queued for execution; never means approval or attention",
+    "attention_known": "false means attention state is unknown; never infer zero",
+    "attention": "attention_known must be true before interpreting approval_count/elicitation_count. Baseline/reconnect produces no alert; only increase after baseline alerts. No interaction IDs in bounded API so count-transition dedup; throttle max one/30s/session.",
+    "root_resume": "GET recent-chat must match selected root and execution_available=true; no GET status/snapshot fallback; /status cold path can restore",
+    "root_start": "Only explicit New chat command type 10; watch sends no session ID. Phone creates and keeps a stable generated session ID keyed by (runtime,agent,draft_key,text) before first POST, reuses exact ID/body/request ID on explicit retry, POSTs /api/v2/sessions/start, and only displays/returns selected_session after 202 body confirms matching generated ID and turn_id; content mismatch with same key is error. No silent creation while restoring/retrying an old selected session.",
+    "credentials": "never watch/AppMessage/URL/log/persistent PKJS store; optional experimental token only via supported volatile phone-side config bridge, fail closed; no silent downgrade",
+    "row_id": "turn message int64 is decimal string, not JS number; decoder must preserve it losslessly",
+    "new_chat": "explicit user action only; /api/v2/sessions/start request carries selected source, exact agent_name, caller-generated session_id and stable per-draft request_id; show as session only after response identity matches",
+    "send": "existing session requires recent-chat root_session_id==session_id and execution_available=true immediately before POST messages; never request /status because cold status lookup can attach/restore.",
+    "draft_key": "watch-generated high-entropy stable key once per reviewed draft; retry reuses it until accepted/discarded; start POST request.input.request_id is this stable key; generated session_id is persisted only in volatile phone JS memory for same draft and cleared after acceptance.",
+    "alert_mode": "0=haptic default;1=sound+haptic explicit opt-in;2=silent. C honors quiet_time_is_active and speaker_is_muted; silent/no speaker defaults no sound. Phone persists this nonsecret preference.",
+    "lost_start_response": "Keep bounded last-8 receipt mappings runtime+agent+draft_key+text_hash to generated session_id and prior result across acknowledgement loss; retry exact same request reuses same /start body and request_id. Reject same key for different text or target. Clear receipt only on discard/new key/expiry; do not delete immediately after accepted response.",
+    "config_page": "Upstream Pebble SDK 4.33.1 schema accepts configPage but its standard app PBW task does not bundle referenced HTML. This project embeds the source config.html into PKJS and the build wrapper postprocesses the PBW appinfo plus root config.html entry; the PBW verifier confirms the declared page and entry are present. Phone companion launch of a data-URL page remains untested on signed retail companion.",
+    "state_vs_residency": "state is lifecycle unknown|queued|running|cancelling|settled; runtime_status is residency unknown|resident|offline|historical; never conflate them."
+  },
+  "begin_status_values": [
+    "runtimes",
+    "agents",
+    "sessions",
+    "chat",
+    "sending",
+    "accepted",
+    "queued",
+    "error"
+  ],
+  "command_semantics": {
+    "1 hello": "watch sends one request per open/focus with capacity; phone returns explicit configured runtimes only",
+    "3 select runtime": "requires runtime_id; clears root/session and returns root agents",
+    "3 select agent": "Requires exact root_agent_name in agent_name plus source in source key; C sends selected row row_meta verbatim as source. JS verifies exact configured runtime source or binds this explicit source/root pair before loading root-only session summaries.",
+    "4 open_session": "requires session_id; returns bounded recent-chat only (no status/full snapshot endpoint)",
+    "5 send_existing": "existing selected root; stable draft_key reused on retry; phone freshly checks recent-chat root/executionAvailable before POST messages",
+    "6 cancel": "cancels an unsubmitted local draft only; never claims accepted server turn cancellation",
+    "7 poll": "user/watch requests polling; C issues request_id and receives framed response with identical request_id",
+    "8 older": "requires session_id+before_cursor, fetch bounded recent-chat page and preserves visible selection",
+    "9 ack": "requires request_id+original frame kind+index; C sends only after one exact physical frame received",
+    "10 start_new": "explicit new chat action, selected agent+source, stable draft_key; JS receipt cache chooses one deterministic session ID and POSTs /sessions/start; only response canonical ID confirms selected session"
+  },
+  "row_kind_values": {
+    "0": "turn/message",
+    "1": "session",
+    "2": "agent",
+    "3": "runtime"
+  },
+  "alert_modes": {
+    "0": "haptic(default)",
+    "1": "sound+haptic(explicit opt-in; only if public speaker compiled)",
+    "2": "silent"
+  },
+  "configuration": {
+    "ui": "App-owned config.html is embedded into PKJS by scripts/embed-config.js and PBW bundle postprocessor adds configPage plus CRC-checked HTML. Feature probes Pebble.sendMessage/targets and uses PKJS configmessage; no external scripts/network. The page sends runtime test and bounded root-list requests only via PKJS.",
+    "auth": "Bearer API is disabled until the active Pebble JS XHR is verified to strip/prevent cross-origin redirects BEFORE Authorization can leak. Configmsg RAM staging is not API access. No bearer is stored, sent to URL/log/watch, or silently downgraded.",
+    "alert": "alert_mode is persisted nonsecret phone preference, included in metadata frames; user can set on config page and remains phone-side.",
+    "test": "The config page Test action sends only the entered runtime/token to phone-side PKJS through configmessage, tests GET /api/v2/server session_api_version==2, and confirms only a nonsecret result to page; it never contacts from page JavaScript or stores a bearer token.",
+    "fallback": "If plugin configmessage is unsupported, only explicit trusted private no-sign-in settings can be returned via legacy close URL; no secrets ever. Platform gateway may not open bundled data URL on older retail builds, so companion settings runtime validation remains an open device compatibility gate.",
+    "root_picker": "After test_runtime succeeds, configmessage list_roots returns exact rows {source,root_agent_name,description}; each row source is api.Agent.name (source key), NOT root_agent_name. UI requires explicit selected exact pair; never default or treat source key as root.",
+    "config_url_redirect_auth": "Bearer auth is withheld because JS XHR redirect header stripping safety is not proven for the active Pebble companion release. The experimental phone RAM config entry is not usable for API requests until runtime redirect behavior is confirmed; show a specific disabled Sign-in reason and never downgrade.",
+    "list_roots_handler": "PKJS callback listRootsConfigMessage in src/pkjs/index.js, invoked via type=list_roots; bounded no-full-config GET /api/agents; returns exact `source`+`root_agent_name`; cap eight per request, with limited marker; optional source query restricts a pinned source."
+  },
+  "response_views": [
+    "runtimes",
+    "agents",
+    "sessions",
+    "chat",
+    "sending",
+    "accepted",
+    "queued",
+    "error"
+  ],
+  "errors": {
+    "recent_chat_cursor_stale_http_status": 409,
+    "watch_behavior": "render explicit older history expired action; do not auto-retry indefinitely, silently fall back to /snapshot or lose cursor visibility",
+    "invalid_history_view": "surface unsupported/history-only with explicit phone/desktop guidance"
+  }
+}

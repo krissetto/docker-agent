@@ -33,6 +33,7 @@ import (
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
 )
 
 type httpSession struct {
@@ -413,6 +414,14 @@ func (sessionHTTPProvider) CreateChatCompletionStream(context.Context, []chat.Me
 	return &sessionHTTPStream{}, nil
 }
 
+type sessionHTTPPresentationProvider struct {
+	sessionHTTPProvider
+	config base.Config
+}
+
+func (p sessionHTTPPresentationProvider) ID() modelsdev.ID        { return p.config.ID() }
+func (p sessionHTTPPresentationProvider) BaseConfig() base.Config { return p.config }
+
 type sessionHTTPStream struct{ index int }
 
 func (s *sessionHTTPStream) Recv() (chat.MessageStreamResponse, error) {
@@ -428,6 +437,66 @@ func (s *sessionHTTPStream) Recv() (chat.MessageStreamResponse, error) {
 	}
 }
 func (*sessionHTTPStream) Close() {}
+
+func TestSessionHTTPManagedCreateOpenViewThenFirstSubmit(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	provider := sessionHTTPPresentationProvider{config: base.Config{ModelConfig: latest.ModelConfig{Provider: "openai", Model: "gpt-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}}}}
+	root := agent.New("root", "prompt", agent.WithDescription("Root agent description"), agent.WithWelcomeMessage("Welcome to the managed session"), agent.WithModel(provider), agent.WithToolSets(todotool.New()))
+	srv, owner := newCanonicalLocalServer(t, store, root)
+	httpServer := httptest.NewServer(srv.e)
+	defer httpServer.Close()
+
+	client, err := runtime.NewClient(httpServer.URL, runtime.WithHTTPClient(httpServer.Client()))
+	require.NoError(t, err)
+	transport, err := runtime.NewSessionTransport(client)
+	require.NoError(t, err)
+
+	created, err := transport.CreateSession(t.Context(), session.New(), runtime.SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	require.Equal(t, "root", created.Metadata().AgentName)
+
+	opened, err := runtime.OpenSessionView(t.Context(), transport, created.ID())
+	require.NoError(t, err)
+	require.Equal(t, created.ID(), opened.Info.SessionID)
+	require.Equal(t, created.ID(), opened.Info.RootSessionID)
+	require.Equal(t, "root", opened.Info.RootBinding.AgentName)
+	require.Equal(t, "root", opened.Info.Binding.AgentName)
+
+	observation, err := opened.SessionHandle.Observe(t.Context(), runtime.ObserveOptions{})
+	require.NoError(t, err)
+	defer observation.Cancel()
+	initial := observation.Primary()
+	require.Len(t, initial.Presentation, 2)
+	agentInfo, ok := initial.Presentation[0].(*runtime.AgentInfoEvent)
+	require.True(t, ok)
+	require.Equal(t, "root", initial.Status.AgentName)
+	require.Equal(t, "openai/gpt-5", agentInfo.Model)
+	require.Equal(t, "Root agent description", agentInfo.Description)
+	require.Equal(t, "Welcome to the managed session", agentInfo.WelcomeMessage)
+	teamInfo, ok := initial.Presentation[1].(*runtime.TeamInfoEvent)
+	require.True(t, ok)
+	require.Equal(t, "root", teamInfo.CurrentAgent)
+	require.Len(t, teamInfo.AvailableAgents, 1)
+	require.Equal(t, "Root agent description", teamInfo.AvailableAgents[0].Description)
+	require.Equal(t, "gpt-5", teamInfo.AvailableAgents[0].ModelID)
+	require.Equal(t, "effort", teamInfo.AvailableAgents[0].ThinkingMode)
+	require.Equal(t, "high", teamInfo.AvailableAgents[0].ThinkingLevel)
+	require.True(t, opened.Metadata.Capabilities.Todos)
+	todos, err := opened.SessionHandle.Todos(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, todos)
+
+	submission, err := opened.SessionHandle.Submit(t.Context(), runtime.TurnInput{Content: "first managed prompt", RequestID: "first-managed-prompt"})
+	require.NoError(t, err)
+	require.NoError(t, opened.SessionHandle.AwaitTurn(t.Context(), submission.TurnID))
+	snapshot, err := opened.SessionHandle.Snapshot(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "HTTP integration reply", snapshot.GetLastAssistantMessageContent())
+	require.Equal(t, 2, len(snapshot.GetAllMessages()), "the first turn records one user message and one assistant reply")
+	require.Equal(t, "first managed prompt", snapshot.GetAllMessages()[0].Message.Content)
+	_, err = owner.Runtime().SessionByID(created.ID())
+	require.NoError(t, err)
+}
 
 func TestSessionHTTPLocalRuntimeCreateAttachSubmitSettlement(t *testing.T) {
 	store := session.NewInMemorySessionStore()

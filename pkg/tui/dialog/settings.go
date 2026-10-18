@@ -38,6 +38,7 @@ const (
 	rowTransparentBackground
 	rowDimInactivePanes
 	rowSplitDiff
+	rowGitDiffLayout
 	rowExpandThinking
 	rowHideToolResults
 	rowRenderImages
@@ -63,6 +64,7 @@ const (
 	rowRestoreTabs
 	rowLean
 	rowTabTitleLength
+	rowCloseTabChoice
 	behaviorRowCount
 )
 
@@ -98,6 +100,13 @@ var infoModeLabels = map[messages.SidebarInfoMode]string{
 	messages.InfoModeCompact: "Compact", messages.InfoModeDetailed: "Detailed",
 }
 
+var gitDiffLayouts = []messages.GitDiffLayout{messages.GitDiffUnified, messages.GitDiffSplit}
+
+var gitDiffLayoutLabels = map[messages.GitDiffLayout]string{
+	messages.GitDiffUnified: "Unified",
+	messages.GitDiffSplit:   "Split",
+}
+
 var sendModes = []messages.SendMode{messages.SendModeSteer, messages.SendModeQueue}
 
 var interruptConfirmationModes = []messages.InterruptMode{
@@ -108,6 +117,14 @@ var interruptConfirmationLabels = map[messages.InterruptMode]string{
 	messages.InterruptModeAlways:    "Always (confirm dialog)",
 	messages.InterruptModeDoubleTap: "Double-tap",
 	messages.InterruptModeNone:      "None (immediate)",
+}
+
+var closeTabChoices = []messages.CloseTabChoice{messages.CloseTabAsk, messages.CloseTabYes, messages.CloseTabNo}
+
+var closeTabChoiceLabels = map[messages.CloseTabChoice]string{
+	messages.CloseTabAsk: "Ask every time",
+	messages.CloseTabYes: "Yes (close tab)",
+	messages.CloseTabNo:  "No (keep tab open)",
 }
 
 type settingsFocus int
@@ -199,7 +216,9 @@ func NewSettingsDialog(preferences messages.Preferences, showVisuals bool, trans
 	preferences.Layout.SidebarPosition = messages.ParseSidebarPosition(string(preferences.Layout.SidebarPosition))
 	preferences.Layout.SectionSpacing = messages.ParseSectionSpacing(string(preferences.Layout.SectionSpacing))
 	preferences.Layout.SidebarInfoMode = messages.ParseSidebarInfoMode(string(preferences.Layout.SidebarInfoMode))
+	preferences.GitDiffLayout = messages.ParseGitDiffLayout(string(preferences.GitDiffLayout))
 	preferences.SendMode = messages.ParseSendMode(string(preferences.SendMode))
+	preferences.CloseTabChoice = messages.ParseCloseTabChoice(string(preferences.CloseTabChoice))
 	if preferences.TabTitleMaxLength <= 0 {
 		preferences.TabTitleMaxLength = 20
 	}
@@ -353,7 +372,7 @@ func (d *settingsDialog) rowCount() int {
 }
 
 func (d *settingsDialog) selectable(tab, row int) bool {
-	if tab == tabAppearance && !d.showVisuals && row >= rowPosition && row <= rowTodos {
+	if tab == tabAppearance && !d.showVisuals && row >= rowPosition && row <= rowTodos && row != rowGitDiffLayout {
 		return false
 	}
 	if tab == tabAppearance && row == rowActiveAgents && d.current.Layout.HideAgents {
@@ -462,8 +481,8 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (d *settingsDialog) adjustable(row int) bool {
-	return (d.tab == tabAppearance && row >= rowPosition && row <= rowInfoMode) ||
-		(d.tab == tabBehavior && (row == rowSendMode || row == rowInterruptConfirmation || row == rowTabTitleLength)) ||
+	return (d.tab == tabAppearance && (row >= rowPosition && row <= rowInfoMode || row == rowGitDiffLayout)) ||
+		(d.tab == tabBehavior && (row == rowSendMode || row == rowInterruptConfirmation || row == rowTabTitleLength || row == rowCloseTabChoice)) ||
 		(d.tab == tabNotifications && row == rowSoundThreshold)
 }
 
@@ -506,6 +525,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.DimInactivePanes = !d.current.DimInactivePanes
 		case rowSplitDiff:
 			d.current.SplitDiffView = !d.current.SplitDiffView
+		case rowGitDiffLayout:
+			d.current.GitDiffLayout = cycleValue(gitDiffLayouts, d.current.GitDiffLayout, delta)
 		case rowExpandThinking:
 			d.current.ExpandThinking = !d.current.ExpandThinking
 		case rowHideToolResults:
@@ -541,6 +562,8 @@ func (d *settingsDialog) changeValue(delta int) tea.Cmd {
 			d.current.Lean = !d.current.Lean
 		case rowTabTitleLength:
 			d.current.TabTitleMaxLength = stepValue(d.current.TabTitleMaxLength, delta, 1, 5, 100)
+		case rowCloseTabChoice:
+			d.current.CloseTabChoice = cycleValue(closeTabChoices, d.current.CloseTabChoice, delta)
 		case rowInterruptConfirmation:
 			d.current.InterruptConfirmation = cycleValue(interruptConfirmationModes, d.current.InterruptConfirmation, delta)
 		}
@@ -705,6 +728,7 @@ func (d *settingsDialog) renderAppearanceTab(body *settingsBody) {
 	d.addToggle(body, rowTransparentBackground, "Transparent background", d.current.TransparentBackground)
 	d.addToggle(body, rowDimInactivePanes, "Dim inactive panes", d.current.DimInactivePanes)
 	d.addToggle(body, rowSplitDiff, "Split diff view", d.current.SplitDiffView)
+	d.addControl(body, rowGitDiffLayout, "Git diff layout", gitDiffLayoutLabels[d.current.GitDiffLayout], false, false)
 	d.addToggle(body, rowExpandThinking, "Expand thinking by default", d.current.ExpandThinking)
 	d.addToggle(body, rowHideToolResults, "Hide tool results by default", d.current.HideToolResults)
 	d.addToggle(body, rowRenderImages, "Render images", d.current.RenderImages)
@@ -827,6 +851,8 @@ func (d *settingsDialog) renderBehaviorTab(body *settingsBody) {
 	d.addToggle(body, rowLean, "Lean UI by default", d.current.Lean)
 	d.addControl(body, rowTabTitleLength, "Tab title max length", fmt.Sprintf("%d chars", d.current.TabTitleMaxLength), false, false)
 	body.add(styles.MutedStyle.Render("Restore tabs and lean UI apply on next launch."))
+	d.addControl(body, rowCloseTabChoice, "Close tab choice", closeTabChoiceLabels[d.current.CloseTabChoice], false, false)
+	body.add(styles.MutedStyle.Render("For tabs with subagents. Ask every time resets the remembered choice."))
 }
 
 func (d *settingsDialog) renderNotificationsTab(body *settingsBody) {

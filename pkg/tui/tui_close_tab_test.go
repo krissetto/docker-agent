@@ -17,9 +17,11 @@ import (
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 type closeTabRuntime struct {
@@ -264,4 +266,76 @@ func TestRetainedGrandchildCountsWhenIntermediateViewIsClosed(t *testing.T) {
 	_, cmd := m.handleCloseTab("root")
 	require.NotNil(t, cmd, "live attached descendant still prompts with closed intermediate view")
 	require.NotNil(t, m.supervisor.GetRunner("root"))
+}
+
+func TestCloseTabRememberedChoiceSkipsDialog(t *testing.T) {
+	t.Parallel()
+	for _, choice := range []messages.CloseTabChoice{messages.CloseTabYes, messages.CloseTabNo} {
+		t.Run(string(choice), func(t *testing.T) {
+			m := newCloseTabTestModel(t)
+			m.closeTabChoice = choice
+			addCloseTabTestSession(t, m, "root", newCloseTabRuntime("root", true), nil)
+			addCloseTabTestSession(t, m, "other", newCloseTabRuntime("other", false), nil)
+			require.NotNil(t, m.supervisor.SwitchTo("other"))
+			_, cmd := m.handleCloseTab("root")
+			assert.False(t, hasMsg[dialog.OpenDialogMsg](collectMsgs(cmd)))
+			if choice == messages.CloseTabYes {
+				assert.Nil(t, m.supervisor.GetRunner("root"))
+			} else {
+				assert.NotNil(t, m.supervisor.GetRunner("root"))
+				require.NotNil(t, cmd, "remembered No explains how to reset it")
+			}
+			assert.NotNil(t, m.supervisor.GetRunner("other"))
+		})
+	}
+}
+
+func TestCloseTabRememberedChoiceDoesNotBypassLastTabExit(t *testing.T) {
+	t.Parallel()
+	for _, choice := range []messages.CloseTabChoice{messages.CloseTabYes, messages.CloseTabNo} {
+		m := newCloseTabTestModel(t)
+		m.closeTabChoice = choice
+		addCloseTabTestSession(t, m, "root", newCloseTabRuntime("root", true), nil)
+		_, cmd := m.handleCloseTab("root")
+		open, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+		require.True(t, ok)
+		open.Model.SetSize(100, 30)
+		assert.Contains(t, open.Model.View(), "Exit")
+		assert.NotNil(t, m.supervisor.GetRunner("root"))
+	}
+}
+
+func TestCloseTabConfirmedRememberedChoicePersists(t *testing.T) {
+	setupSettingsConfigTest(t)
+	for _, yes := range []bool{false, true} {
+		m := newCloseTabTestModel(t)
+		addCloseTabTestSession(t, m, "root", newCloseTabRuntime("root", true), nil)
+		addCloseTabTestSession(t, m, "other", newCloseTabRuntime("other", false), nil)
+		require.NotNil(t, m.supervisor.SwitchTo("other"))
+		if yes {
+			m.Update(dialog.CloseRootWithSubagentsConfirmedMsg{SessionID: "root", RememberChoice: true})
+			assert.Nil(t, m.supervisor.GetRunner("root"))
+			assert.Equal(t, messages.CloseTabYes, m.closeTabChoice)
+		} else {
+			m.Update(dialog.RememberCloseTabNoMsg{})
+			assert.NotNil(t, m.supervisor.GetRunner("root"))
+			assert.Equal(t, messages.CloseTabNo, m.closeTabChoice)
+		}
+		assert.Equal(t, m.closeTabChoice, preferencesFromConfig(userconfig.Get()).CloseTabChoice)
+	}
+}
+
+func TestCloseTabRememberedNoCanResetInSettings(t *testing.T) {
+	setupSettingsConfigTest(t)
+	m := newCloseTabTestModel(t)
+	require.Nil(t, m.rememberCloseTabChoice(messages.CloseTabNo))
+	addCloseTabTestSession(t, m, "root", newCloseTabRuntime("root", true), nil)
+	addCloseTabTestSession(t, m, "other", newCloseTabRuntime("other", false), nil)
+	prefs := preferencesFromConfig(userconfig.Get())
+	prefs.CloseTabChoice = messages.CloseTabAsk
+	saveSettingsDraftForTest(t, m, prefs)
+	assert.Equal(t, messages.CloseTabAsk, m.closeTabChoice)
+	assert.Equal(t, messages.CloseTabAsk, preferencesFromConfig(userconfig.Get()).CloseTabChoice)
+	_, cmd := m.handleCloseTab("root")
+	assert.True(t, hasMsg[dialog.OpenDialogMsg](collectMsgs(cmd)), "reset makes closing available again")
 }

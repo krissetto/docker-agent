@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -15,9 +14,22 @@ func normalizedInputOrigin(origin session.InputOrigin) session.InputOrigin {
 	return session.InputOriginUser
 }
 
-func (msg QueuedMessage) trustedSteering() bool {
-	return msg.InputMode == "steer" && (msg.InputOrigin == session.InputOriginAgent || msg.InputOrigin == session.InputOriginRuntime)
+type deliveryClass uint8
+
+const (
+	deliveryTurn deliveryClass = iota
+	deliveryGuidance
+)
+
+// Delivery follows the persisted mode. Origin is provenance only.
+func (msg QueuedMessage) deliveryClass() deliveryClass {
+	if msg.InputMode == "steer" {
+		return deliveryGuidance
+	}
+	return deliveryTurn
 }
+
+func (msg QueuedMessage) guidance() bool { return msg.deliveryClass() == deliveryGuidance }
 
 func inputMode(mode string) string {
 	if mode == "" {
@@ -78,22 +90,4 @@ func projectModelInput(message *session.Message) {
 	case session.InputOriginRuntime:
 		message.Message.Content = systemInfo(message.Message.Content)
 	}
-}
-
-// Trusted steering shares the durable pending mailbox, but is drained at the
-// active turn's next safe boundary rather than behind older user turns.
-func (d *sessionDriver) postTrustedInput(ctx context.Context, msg QueuedMessage) bool {
-	if msg.RequestID == "" {
-		id, err := newSessionRequestID()
-		if err != nil {
-			return false
-		}
-		msg.RequestID = id
-	}
-	_, err := d.admitInput(ctx, msg, SessionOperationPost, true, false)
-	if err != nil {
-		return false
-	}
-	d.WakePending()
-	return true
 }

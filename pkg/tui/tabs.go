@@ -46,6 +46,15 @@ func (m *appModel) persistFreshTab(ctx context.Context, sessionID, workingDir st
 	if err := m.tuiStore.SetActiveTab(ctx, sessionID); err != nil {
 		slog.WarnContext(ctx, "Failed to set active tab", "error", err)
 	}
+	if err := m.tuiStore.SetPaneWorkspaceState(ctx, tuistate.PaneWorkspaceState{
+		Version: 1, ActiveAnchorSessionID: sessionID,
+		Workspaces: []tuistate.PaneWorkspace{{
+			AnchorSessionID: sessionID, FocusSessionID: sessionID,
+			Layout: &tuistate.PaneLayoutNode{SessionID: sessionID},
+		}},
+	}); err != nil {
+		slog.WarnContext(ctx, "Failed to reset pane workspace state", "error", err)
+	}
 }
 
 // restoreTabs restores previously persisted tabs (if enabled) or persists the

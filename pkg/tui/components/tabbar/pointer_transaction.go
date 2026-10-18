@@ -106,3 +106,29 @@ func (t *TabBar) ResumePointerPreview(sessionID string, grabOffset, cursorX int)
 	}
 	return nil
 }
+
+// InsertionAt includes empty strip space, but excludes controls and margins.
+func (t *TabBar) InsertionAt(x, y int) (index, marker int, ok bool) {
+	if y != 0 || t.Height() == 0 || x < 0 || x >= t.width {
+		return 0, 0, false
+	}
+	t.installGeometry()
+	for _, zone := range t.zones {
+		if x >= zone.startX && x < zone.endX && (zone.isPlus || zone.isScrollLeft || zone.isScrollRight) {
+			return 0, 0, false
+		}
+	}
+	layouts := t.computeLayouts()
+	strip := t.localXToStripX(x)
+	viewStart, _, cursor := t.currentTabViewMetrics()
+	for i, layout := range layouts {
+		if strip < (layout.startCol+layout.endCol)/2 {
+			return i, max(0, cursor+layout.startCol-viewStart), true
+		}
+	}
+	marker = x
+	if len(layouts) > 0 {
+		marker = cursor + layouts[len(layouts)-1].endCol - viewStart
+	}
+	return len(layouts), max(0, min(marker, t.width-1)), true
+}

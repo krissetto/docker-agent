@@ -129,7 +129,7 @@ func TestUseSubagentsFiltersDynamicExposure(t *testing.T) {
 	sess.AddMessage(session.UserMessage("user says spawn_subagent"))
 	all := append(subagent.Definitions(), tools.Tool{Name: agenttool.ToolNameRunBackgroundAgent}, tools.Tool{Name: transfertask.ToolNameTransferTask})
 	rt.SetUseSubagents(false)
-	filtered := rt.filterDelegationTools(addAsyncChildTools(sess, all))
+	filtered := rt.filterDelegationTools(a.FilterTools(addListAgentsTool(sess, a, addAsyncChildTools(sess, all))))
 	var names []string
 	for _, tool := range filtered {
 		names = append(names, tool.Name)
@@ -140,6 +140,7 @@ func TestUseSubagentsFiltersDynamicExposure(t *testing.T) {
 	assert.Contains(t, names, subagent.ToolSendMessage)
 	assert.Contains(t, names, subagent.ToolReadSubagent)
 	assert.Contains(t, names, subagent.ToolStopSubagent)
+	assert.Contains(t, names, subagent.ToolListAgents)
 	messages := rt.filterDelegationMessages(a, sess, sess.GetMessages(a))
 	var text strings.Builder
 	for _, msg := range messages {

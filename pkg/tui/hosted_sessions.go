@@ -202,6 +202,7 @@ func (m *appModel) finishHostedLoad(result hostedLoadResult) tea.Cmd {
 		}
 	}
 	m.replacePaneWorkspaceRoute(request.target, id)
+	m.persistPaneWorkspaceState()
 	_, focusCmd := m.handleSwitchTab(id)
 	if request.send != nil {
 		generation, _ := m.supervisor.RouteGeneration(id)

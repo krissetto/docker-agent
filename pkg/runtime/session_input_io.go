@@ -17,12 +17,12 @@ type inputAdmission struct {
 	durable    bool
 }
 
-func (d *sessionDriver) admitInput(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, steer bool) (bool, error) {
-	admission, err := d.admitInputReceipt(ctx, msg, op, wake, steer)
+func (d *sessionDriver) admitInput(ctx context.Context, msg QueuedMessage, op SessionOperation, wake bool) (bool, error) {
+	admission, err := d.admitInputReceipt(ctx, msg, op, wake)
 	return admission.queued, err
 }
 
-func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake, steer bool) (inputAdmission, error) {
+func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage, op SessionOperation, wake bool) (inputAdmission, error) {
 	var admission inputAdmission
 	msg, err := detachQueuedInput(msg)
 	if err != nil {
@@ -46,6 +46,18 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 		if found, existingQueued, existingErr := d.existingInputLocked(msg); found || existingErr != nil {
 			queued = existingQueued
 			admission.idempotent = found
+			if found && d.viewDormant && !d.stopped && msg.RequestID != "" && !msg.Retry {
+				pendingAccepted := false
+				for _, item := range d.sess.MessagesSnapshot() {
+					if item.Message != nil && item.Message.TurnID == msg.RequestID && item.Message.Pending && item.Message.Accepted {
+						pendingAccepted = true
+						break
+					}
+				}
+				if pendingAccepted {
+					d.authorizeViewLocked()
+				}
+			}
 			if found {
 				for _, item := range d.sess.MessagesSnapshot() {
 					if item.Message != nil && item.Message.TurnID == msg.RequestID {
@@ -53,11 +65,9 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 						break
 					}
 				}
-				for _, queue := range [][]QueuedMessage{d.pending, d.steering} {
-					for _, existing := range queue {
-						if existing.RequestID == msg.RequestID {
-							admission.durable = existing.AcceptedPersisted
-						}
+				for _, existing := range d.pending {
+					if existing.RequestID == msg.RequestID {
+						admission.durable = existing.AcceptedPersisted
 					}
 				}
 			}
@@ -70,13 +80,8 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 			err.RequestID = msg.RequestID
 			return sessionIOReservation{}, err
 		}
-		idleCommunication := op == SessionOperationPost && msg.InputOrigin == session.InputOriginAgent && d.phase == sessionIdle
-		msg.activeSteering = steer && (d.running() || (d.starting() && d.activeRequestID != "" && !d.compactReserved))
-		queued = !steer || idleCommunication || d.compactReserved || (len(d.pending) != 0 && (!d.running() || d.activeRequestID == ""))
-		count := len(d.steering)
-		if queued {
-			count = len(d.pending)
-		}
+		queued = d.queuedAtAdmissionLocked(msg)
+		count := len(d.pending)
 		if !limitAllows(count, d.pendingLimit()) {
 			return sessionIOReservation{}, &SessionError{Kind: SessionErrorCapacity, SessionID: d.identityID, RequestID: msg.RequestID, Operation: op, Reason: SessionErrorReasonLimit, Limit: d.pendingLimit()}
 		}
@@ -159,11 +164,7 @@ func (d *sessionDriver) admitInputReceipt(ctx context.Context, msg QueuedMessage
 					}
 				}
 			}
-			if queued {
-				d.pending = append(d.pending, msg)
-			} else {
-				d.steering = append(d.steering, msg)
-			}
+			d.pending = append(d.pending, msg)
 			if normalizedInputOrigin(msg.InputOrigin) == session.InputOriginUser {
 				d.authorizeViewLocked()
 			}
@@ -191,12 +192,10 @@ func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume
 		}
 		var msg QueuedMessage
 		found := false
-		for _, queue := range [][]QueuedMessage{d.pending, d.steering} {
-			for _, value := range queue {
-				if value.RequestID == turnID {
-					msg, found = value, true
-					break
-				}
+		for _, value := range d.pending {
+			if value.RequestID == turnID {
+				msg, found = value, true
+				break
 			}
 		}
 		if !found {
@@ -218,7 +217,7 @@ func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume
 				if !d.sess.PromotePendingUserMessageByTurnID(turnID) {
 					return &SessionError{Kind: SessionErrorStale, Operation: "promote_input"}
 				}
-				if msg.InputMode == "steer" || msg.trustedSteering() {
+				if msg.guidance() {
 					d.consumedSteering = append(d.consumedSteering, turnID)
 				}
 				d.lastFailureKey = ""
@@ -232,15 +231,15 @@ func (d *sessionDriver) promoteInput(ctx context.Context, turnID string, consume
 	})
 }
 
-func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []QueuedMessage {
+func (d *sessionDriver) drainGuidance(ctx context.Context) []QueuedMessage {
 	var batch []QueuedMessage
 	_ = d.ownerCall(ctx, func() error {
-		batch = slices.Clone(d.steering)
-		if !steeringOnly {
-			for _, msg := range d.pending {
-				if boundarySteering(msg) {
-					batch = append(batch, msg)
-				}
+		if d.compactReserved {
+			return nil
+		}
+		for _, msg := range d.pending {
+			if msg.guidance() {
+				batch = append(batch, msg)
 			}
 		}
 		slices.SortStableFunc(batch, func(a, b QueuedMessage) int { return a.AcceptedPosition - b.AcceptedPosition })
@@ -248,11 +247,9 @@ func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []Qu
 	})
 	var drained []QueuedMessage
 	consume := func(msg QueuedMessage) {
-		remove := func(queued QueuedMessage) bool {
+		d.pending = slices.DeleteFunc(d.pending, func(queued QueuedMessage) bool {
 			return queued.RequestID == msg.RequestID && queued.Content == msg.Content && queued.AcceptedPosition == msg.AcceptedPosition
-		}
-		d.steering = slices.DeleteFunc(d.steering, remove)
-		d.pending = slices.DeleteFunc(d.pending, remove)
+		})
 		d.refreshSteeringLocked()
 		d.notifyTurnChangedLocked()
 	}
@@ -262,16 +259,16 @@ func (d *sessionDriver) drainInputs(ctx context.Context, steeringOnly bool) []Qu
 				break
 			}
 			drained = append(drained, msg)
-		} else {
-			completed := make(chan QueuedMessage, 1)
-			if err := d.promoteInput(ctx, msg.RequestID, func(value QueuedMessage) {
-				consume(value)
-				completed <- value
-			}); err != nil {
-				break
-			}
-			drained = append(drained, <-completed)
+			continue
 		}
+		completed := make(chan QueuedMessage, 1)
+		if err := d.promoteInput(ctx, msg.RequestID, func(value QueuedMessage) {
+			consume(value)
+			completed <- value
+		}); err != nil {
+			break
+		}
+		drained = append(drained, <-completed)
 	}
 	return drained
 }

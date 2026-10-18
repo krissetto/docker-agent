@@ -113,11 +113,11 @@ func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
 	for range rt.runExecution(t.Context(), sess) {
 	}
 
-	assert.Equal(t, int32(1), calls.Load(),
-		"user_steering_messages_submit must fire once for the drained batch")
+	assert.Equal(t, int32(2), calls.Load(),
+		"initial guidance and later boundary guidance each run the steering hook")
 	got, _ := seen.Load().([]string)
-	assert.Equal(t, []string{"steer one", "steer two"}, got,
-		"hook must receive the drained messages via Input.SteeringMessages, in order")
+	assert.Equal(t, []string{"steer two"}, got,
+		"the safe-boundary hook receives the later accepted guidance")
 }
 
 // setupUserPromptSubmitCounter wires up a single-turn mock runtime with

@@ -2,6 +2,7 @@ package tabbar
 
 import (
 	"image/color"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -100,8 +101,13 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	}
 	maxTitleLen = max(1, maxTitleLen)
 	titleBudget := maxTitleLen
+	groupLabel := ""
+	if info.PaneCount > 1 {
+		groupLabel = " [" + strconv.Itoa(info.PaneCount) + "]"
+		titleBudget = max(0, titleBudget-lipgloss.Width(groupLabel))
+	}
 	if info.NeedsAttention || info.Activity != messages.TabActivityNone || info.IsRunning {
-		titleBudget--
+		titleBudget = max(0, titleBudget-1)
 	}
 	initial := ""
 	for _, r := range strings.TrimSpace(info.AgentName) {
@@ -204,6 +210,7 @@ func renderTab(info messages.TabInfo, maxTitleLen int, role dragRole, elapsed ti
 	}
 	content += titleSt.Render(title) + pad.Render(strings.Repeat(" ", max(0, titleBudget-lipgloss.Width(title))))
 
+	content += titleSt.Render(groupLabel)
 	mainEnd := lipgloss.Width(content)
 
 	closeBtn := lipgloss.NewStyle().Foreground(closeFg).Background(bgColor).Render(closeButtonText)

@@ -49,6 +49,7 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 		f.sessionViewSource = b.flags.remoteAddress + "\x00" + b.agentFileName
 	}
 	resolve := localViewOwnerResolver(f.sessionViewScope, f.sessionViewSource, services.SessionStore())
+	var resolvePrepared func(context.Context, string) (viewhost.ViewOwnerIdentity, runtime.PreparedSessionView, error)
 	var factory func(context.Context, viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error)
 	if _, local := b.(*localBackend); local {
 		factory = func(factoryCtx context.Context, identity viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error) {
@@ -81,6 +82,22 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 		}
 	} else {
 		resolve = remoteViewOwnerResolver(f.sessionViewScope, f.sessionViewSource, sessions)
+		resolvePrepared = func(ctx context.Context, id string) (viewhost.ViewOwnerIdentity, runtime.PreparedSessionView, error) {
+			preparer, ok := sessions.(runtime.SessionViewPreparer)
+			if !ok {
+				return viewhost.ViewOwnerIdentity{}, nil, runtime.ErrUnsupported
+			}
+			prepared, err := preparer.PrepareSessionView(ctx, id)
+			if err != nil {
+				return viewhost.ViewOwnerIdentity{}, nil, err
+			}
+			identity, err := remoteViewIdentity(ctx, f.sessionViewScope, f.sessionViewSource, sessions, prepared.Info())
+			if err != nil {
+				prepared.Abort()
+				return viewhost.ViewOwnerIdentity{}, nil, err
+			}
+			return identity, prepared, nil
+		}
 		factory = func(_ context.Context, identity viewhost.ViewOwnerIdentity) (viewhost.ViewOwnerResources, error) {
 			if identity.Scope != f.sessionViewScope || identity.Source != f.sessionViewSource {
 				return viewhost.ViewOwnerResources{}, viewOwnerError(identity.RootSessionID, "view_source", "source lifetime does not match this host")
@@ -94,6 +111,7 @@ func (f *runExecFlags) configureSessionViewHost(ctx context.Context, b backend, 
 	}
 	if err := f.sessionViewHost.ConfigureSessionViews(ctx, viewhost.HostViewConfig{
 		Resolve:               resolve,
+		ResolvePrepared:       resolvePrepared,
 		Factory:               factory,
 		MaxRetainedViewOwners: viewhost.DefaultMaxRetainedViewOwners,
 	}); err != nil {
@@ -172,7 +190,7 @@ func localViewOwnerResolver(scope *viewhost.ViewOwnerScope, source string, store
 		if store == nil {
 			return viewhost.ViewOwnerIdentity{}, runtime.ErrUnsupported
 		}
-		selected, err := store.GetSession(ctx, id)
+		selected, err := session.ReadSessionMetadata(ctx, store, id)
 		if err != nil {
 			return viewhost.ViewOwnerIdentity{}, err
 		}
@@ -196,7 +214,7 @@ func localViewOwnerResolver(scope *viewhost.ViewOwnerScope, source string, store
 			if root.ParentID == "" {
 				break
 			}
-			parent, err := store.GetSession(ctx, root.ParentID)
+			parent, err := session.ReadSessionMetadata(ctx, store, root.ParentID)
 			if err != nil {
 				return viewhost.ViewOwnerIdentity{}, err
 			}
@@ -223,13 +241,22 @@ func remoteViewOwnerResolver(scope *viewhost.ViewOwnerScope, source string, sess
 		if err != nil {
 			return viewhost.ViewOwnerIdentity{}, err
 		}
-		root := info
-		if info.RootSessionID != id {
-			root, err = reader.ConfirmedSessionViewInfo(ctx, info.RootSessionID)
-			if err != nil {
-				return viewhost.ViewOwnerIdentity{}, err
-			}
-		}
-		return viewhost.ViewOwnerIdentity{Scope: scope, Source: source, RootSessionID: root.SessionID, RootWorkingDir: root.WorkingDir, RootBinding: root.Binding}, nil
+		return remoteViewIdentity(ctx, scope, source, sessions, info)
 	}
+}
+
+func remoteViewIdentity(ctx context.Context, scope *viewhost.ViewOwnerScope, source string, sessions runtime.SessionRuntime, info runtime.PreparedSessionViewInfo) (viewhost.ViewOwnerIdentity, error) {
+	if info.RootBinding.AgentName != "" {
+		return viewhost.ViewOwnerIdentity{Scope: scope, Source: source, RootSessionID: info.RootSessionID, RootWorkingDir: info.RootWorkingDir, RootBinding: info.RootBinding}, nil
+	}
+	// Older servers do not include the root's metadata in child preparation.
+	root := info
+	if info.RootSessionID != info.SessionID {
+		var err error
+		root, err = sessions.(runtime.SessionViewInfoReader).ConfirmedSessionViewInfo(ctx, info.RootSessionID)
+		if err != nil {
+			return viewhost.ViewOwnerIdentity{}, err
+		}
+	}
+	return viewhost.ViewOwnerIdentity{Scope: scope, Source: source, RootSessionID: root.SessionID, RootWorkingDir: root.WorkingDir, RootBinding: root.Binding}, nil
 }

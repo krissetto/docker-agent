@@ -71,7 +71,11 @@ func TestSQLiteSessionSummariesIncludeAttributesWithoutLoadingMessages(t *testin
 
 	// A full load would fail on this malformed payload. Summaries must obtain
 	// attributes directly from the sessions row without loading item history.
-	_, err := store.db.ExecContext(t.Context(),
+	_, err := store.db.ExecContext(t.Context(), `DROP TRIGGER session_catalog_metrics_validate_update`)
+	require.NoError(t, err)
+	_, err = store.db.ExecContext(t.Context(), `DROP TRIGGER session_catalog_metrics_update`)
+	require.NoError(t, err)
+	_, err = store.db.ExecContext(t.Context(),
 		"UPDATE session_items SET message_json = 'not-json' WHERE session_id = ?", sess.ID)
 	require.NoError(t, err)
 

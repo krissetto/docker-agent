@@ -52,6 +52,37 @@ func Start(ctx context.Context, handle Handle, input runtime.TurnInput) (*Turn, 
 	return &Turn{Submission: submission, handle: handle, observation: observation}, nil
 }
 
+// ConsumeWorkflow extends ownership to the active descendant/report workflow.
+// Handles without this optional capability retain exact-turn compatibility.
+func (t *Turn) ConsumeWorkflow(ctx context.Context, handler func(context.Context, runtime.SessionEvent) (runtimeclient.TurnDecision, error)) runtimeclient.TurnTermination {
+	handle, ok := t.handle.(runtime.SessionHandle)
+	if !ok {
+		return t.Consume(ctx, handler)
+	}
+	if _, ok := handle.(runtime.SessionWorkflow); !ok {
+		return t.Consume(ctx, handler)
+	}
+	termination := runtimeclient.ConsumeWorkflow(ctx, handle, t.observation, t.Submission.TurnID, handler)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	if !termination.Stopped {
+		stopper, ok := handle.(runtime.SessionTreeController)
+		var err error
+		if ok {
+			err = stopper.StopSubtree(cleanupCtx)
+		} else {
+			_, err = handle.Cancel(cleanupCtx, t.Submission.TurnID)
+		}
+		if err != nil {
+			termination.Err = errors.Join(termination.Err, &DrainError{Err: err})
+		}
+	}
+	if err := handle.AwaitTurn(cleanupCtx, t.Submission.TurnID); err != nil {
+		termination.Err = errors.Join(termination.Err, &DrainError{Err: err})
+	}
+	return termination
+}
+
 // Consume retains admission ownership until the exact request settles, including
 // when the caller cancels, a handler exits early, or observation fails.
 func (t *Turn) Consume(ctx context.Context, handler func(context.Context, runtime.SessionEvent) (runtimeclient.TurnDecision, error)) runtimeclient.TurnTermination {

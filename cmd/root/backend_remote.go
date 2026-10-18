@@ -188,11 +188,10 @@ func (b *remoteBackend) restoreInitialSession(ctx context.Context, transport *ru
 		slog.WarnContext(ctx, "Failed to read saved tabs", "error", err)
 		return nil, nil, nil
 	}
-	ids := make([]string, 0, len(tabs))
-	for _, tab := range tabs {
-		if tab.SessionID == active && active != "" {
-			ids = append(ids, active)
-		}
+	ids := make([]string, 0, len(tabs)+1)
+	// Attached child views save the active identity without a persisted tab.
+	if active != "" {
+		ids = append(ids, active)
 	}
 	for _, tab := range tabs {
 		if tab.SessionID != "" && tab.SessionID != active {
@@ -200,12 +199,21 @@ func (b *remoteBackend) restoreInitialSession(ctx context.Context, transport *ru
 		}
 	}
 	for _, id := range ids {
-		committed, err := runtime.RestoreSessionView(ctx, transport, id)
+		prepared, err := transport.PrepareSessionView(ctx, id)
 		if err != nil {
 			var sessionErr *runtime.SessionError
 			if errors.As(err, &sessionErr) && (sessionErr.Kind == runtime.SessionErrorNotFound || sessionErr.Kind == runtime.SessionErrorWrongSession) {
 				continue
 			}
+			return nil, nil, err
+		}
+		info := prepared.Info()
+		if info.Session == nil || info.Session.AttributesSnapshot()[sessionActorSourceAttribute] != b.agentFileName {
+			prepared.Abort()
+			continue
+		}
+		committed, err := prepared.Commit(ctx)
+		if err != nil {
 			return nil, nil, err
 		}
 		return committed.SessionHandle, committed.Info.Session, nil

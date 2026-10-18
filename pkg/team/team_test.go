@@ -186,3 +186,27 @@ func TestAgentConfig(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+func TestResolveIdentityDoesNotChangeNameLookup(t *testing.T) {
+	t.Parallel()
+	root := agent.New("root", "")
+	worker := agent.New("old-worker", "")
+	tm := New(WithAgents(root, worker), WithAgentConfigs(map[string]latest.AgentConfig{
+		"root":       {Name: "root", ID: "team-root"},
+		"old-worker": {Name: "old-worker", ID: "worker-id"},
+	}))
+	resolved, key, ok := tm.ResolveIdentity("worker-id")
+	require.True(t, ok)
+	assert.Same(t, worker, resolved)
+	assert.Equal(t, "old-worker", key)
+	_, _, ok = tm.ResolveIdentity("old-worker")
+	assert.False(t, ok, "explicit IDs take precedence; a name is not an ID")
+	resolved, key, ok = tm.ResolveLegacyName("old-worker")
+	require.True(t, ok)
+	assert.Same(t, worker, resolved)
+	assert.Equal(t, "old-worker", key)
+	_, _, ok = tm.ResolveLegacyName("new-worker")
+	assert.False(t, ok, "legacy names are exact only; no rename guessing")
+	_, err := tm.Agent("worker-id")
+	require.Error(t, err, "execution lookup remains name-only")
+}

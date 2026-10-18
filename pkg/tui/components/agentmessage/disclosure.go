@@ -63,15 +63,24 @@ func (d *Disclosure) Settle() {
 }
 
 func (d *Disclosure) Render(header, body string, width int, selected bool) string {
-	if d.visible <= 0 || body == "" {
+	revealed := d.Reveal(body)
+	if revealed == "" {
 		return header
+	}
+	return surfaceHeader(header, width, selected) + "\n" + revealed
+}
+
+// Reveal returns the portion of a disclosure body visible at the current motion frame.
+func (d *Disclosure) Reveal(body string) string {
+	if d.visible <= 0 || body == "" {
+		return ""
 	}
 	lines := strings.Split(body, "\n")
 	rows := min(len(lines), int(float64(len(lines))*d.visible+0.5))
 	if rows == 0 {
-		return header
+		return ""
 	}
-	return surfaceHeader(header, width, selected) + "\n" + strings.Join(lines[:rows], "\n")
+	return strings.Join(lines[:rows], "\n")
 }
 
 // Keep the compact header's cells in place while joining the revealed USER surface.
@@ -110,8 +119,12 @@ func (d *Disclosure) Header(prefix string, ref lifecycle.InputReference, status 
 }
 
 func CompactHeader(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
-	control := ansi.SetHyperlink(toggleLink) + styles.MutedStyle.Render(chevron) + ansi.ResetHyperlink()
-	return agentidentity.Wrap(prefix, ref, styles.MutedStyle.Render(status+" ")+control, width)
+	return agentidentity.Wrap(prefix, ref, styles.MutedStyle.Render(status+" ")+Control(chevron), width)
+}
+
+// Control renders the shared, hit-testable disclosure affordance.
+func Control(chevron string) string {
+	return ansi.SetHyperlink(toggleLink) + styles.MutedStyle.Render(chevron) + ansi.ResetHyperlink()
 }
 
 func Header(prefix string, ref lifecycle.InputReference, status, chevron string, width int) string {
@@ -137,7 +150,8 @@ func Body(content string, width int, selected bool, actions string) string {
 		style = styles.SelectedUserMessageStyle.Bold(false)
 	}
 	content = strings.ReplaceAll(content, "\t", "    ")
-	return style.PaddingTop(0).Width(width).Render(actions + "\n" + strings.TrimRight(content, "\n\r\t "))
+	style = style.PaddingTop(0).Width(width)
+	return styles.RenderComposite(style, actions+"\n"+strings.TrimRight(content, "\n\r\t "))
 }
 
 func InnerWidth(width int) int {

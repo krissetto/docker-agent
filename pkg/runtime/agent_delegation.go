@@ -223,6 +223,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		attrs = make(map[string]string)
 	}
 	attrs[SessionAgentAttribute] = cfg.AgentName
+	delete(attrs, SessionAgentIDAttribute)
 	opts := []session.Opt{
 		session.WithMaxIterations(childAgent.MaxIterations()),
 		session.WithMaxConsecutiveToolCalls(childAgent.MaxConsecutiveToolCalls()),
@@ -351,11 +352,11 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	// agent: a nested transfer from a pinned background session must
 	// attribute events, hooks, and completion to the pinned agent, no
 	// matter where the concurrent foreground loop points (#3886).
-	callerAgent := r.resolveSessionAgent(parent)
+	callerAgent := r.resolveSessionAgentContext(ctx, parent)
 	if callerAgent == nil {
 		return nil, errors.New("no agent resolved for the parent session")
 	}
-	child, err := r.team.Agent(req.AgentName)
+	child, err := r.teamForContext(ctx, parent).Agent(req.AgentName)
 	if err != nil {
 		return nil, err
 	}
@@ -434,11 +435,11 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	// where the concurrent foreground loop points (#3886). Resolved once
 	// up front so the subagent_stop defer below can't drift to a
 	// different agent if the shared current changes mid-run.
-	callerAgent := r.resolveSessionAgent(parent)
+	callerAgent := r.resolveSessionAgentContext(ctx, parent)
 	if callerAgent == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
 	}
-	child, err := r.team.Agent(cfg.AgentName)
+	child, err := r.teamForContext(ctx, parent).Agent(cfg.AgentName)
 	if err != nil {
 		return &agenttool.RunResult{ErrMsg: fmt.Sprintf("agent %q not found: %s", cfg.AgentName, err)}
 	}
@@ -609,7 +610,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	}
 	// Caller identity must come from the parent session, not the shared
 	// current agent: nested background delegation runs on pinned sessions.
-	caller := r.resolveSessionAgent(params.ParentSession)
+	caller := r.resolveSessionAgentContext(ctx, params.ParentSession)
 	if caller == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
 	}
@@ -651,7 +652,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	// Resolve the caller session-aware: nested transfer_task from a pinned
 	// background session must attribute the call to the pinned agent, not
 	// the shared current agent (#3886).
-	a := r.resolveSessionAgent(sess)
+	a := r.resolveSessionAgentContext(ctx, sess)
 	if a == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -719,7 +720,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	currentAgent := r.resolveSessionAgent(sess)
+	currentAgent := r.resolveSessionAgentContext(ctx, sess)
 	if currentAgent == nil {
 		return nil, errors.New("session agent not found")
 	}
@@ -729,7 +730,7 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 		return errResult, nil
 	}
 
-	next, err := r.team.Agent(params.Agent)
+	next, err := r.teamForContext(ctx, sess).Agent(params.Agent)
 	if err != nil {
 		return nil, err
 	}

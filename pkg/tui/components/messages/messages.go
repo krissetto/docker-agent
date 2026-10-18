@@ -178,6 +178,7 @@ type Model interface {
 	CancelReferenceHover()
 	SetReferencePresentationActive(bool)
 	RenderedContentHeight() int
+	HistoryPending() bool
 }
 
 type visualSelectionKey struct {
@@ -274,6 +275,8 @@ type model struct {
 	lineOffsets        []int                     // Prefix-sum: lineOffsets[i] = starting global line of view i
 	totalHeight        int                       // Total height of all content in lines
 	replay             *sessionReplay
+	historyReplay      *sessionReplay
+	historyStart       int
 	renderDirty        bool // True when rendered content needs rebuild
 
 	themeGeneration    uint64
@@ -1428,7 +1431,7 @@ func (m *model) isAtBottom() bool {
 
 // Message selection methods
 func (m *model) isSelectableMessage(index int) bool {
-	if index < 0 || index >= len(m.messages) {
+	if index < m.historyStart || index >= len(m.messages) {
 		return false
 	}
 	msg := m.messages[index]
@@ -1719,6 +1722,9 @@ func (m *model) ensureAllItemsRendered() {
 	virtualHeight := 0
 
 	for i, view := range m.views {
+		if i < m.historyStart {
+			continue
+		}
 		offsets[i] = virtualHeight
 		item := m.renderItem(i, view)
 		if m.shouldCacheMessage(i) && (!m.focused || i != m.selectedMessageIndex) && i != m.hoveredMessageIndex {
@@ -2242,6 +2248,8 @@ func (m *model) startSessionReplay(sess *session.Session, generatedMedia map[int
 	}
 
 	m.StopAnimations()
+	m.historyReplay = nil
+	m.historyStart = 0
 	m.messages = nil
 	m.views = nil
 	m.renderDirty = true

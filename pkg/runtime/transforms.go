@@ -143,12 +143,12 @@ func (r *LocalRuntime) contextMessageOrigin(ctx context.Context, purpose string)
 	}
 	if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok && identity.driver != nil {
 		sess := identity.driver.session()
-		return r.messageOrigin(sess, r.resolveSessionAgent(sess), purpose)
+		return r.messageOrigin(sess, r.resolveSessionAgentContext(ctx, sess), purpose)
 	}
 	if id := genai.ConversationIDFromContext(ctx); id != "" {
 		if driver, ok := r.sessionDrivers.Lookup(id); ok {
 			sess := driver.session()
-			return r.messageOrigin(sess, r.resolveSessionAgent(sess), purpose)
+			return r.messageOrigin(sess, r.resolveSessionAgentContext(ctx, sess), purpose)
 		}
 	}
 	return outboundOrigin{purpose: purpose}
@@ -224,7 +224,11 @@ func (r *LocalRuntime) prepareMessagesForModel(
 	cfg := model.BaseConfig()
 	caps := modelinfo.ResolveCapsFromModel(catalogModel, cfg.CapsOverride())
 	if catalogModel == nil && cfg.CapsOverride() == nil {
-		caps = providerFallbackCaps(ctx, cfg.ModelConfig, modelID)
+		if aliased, ok := modelinfo.AliasedCatalogCaps(ctx, r.modelsStore, modelID); ok {
+			caps = aliased
+		} else {
+			caps = providerFallbackCaps(ctx, cfg.ModelConfig, modelID)
+		}
 	}
 	projected := r.filterDelegationMessages(a, sess, r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), &caps, msgs))
 	return r.applyMessagePolicies(ctx, sess, a, modelID.String(), &caps, projected)

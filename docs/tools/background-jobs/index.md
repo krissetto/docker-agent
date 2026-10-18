@@ -13,7 +13,7 @@ _Run and manage long-running shell commands._
 
 The `background_jobs` toolset starts shell commands that should keep running while the agent continues with other work, such as local servers, file watchers, long builds, or test suites. It returns a job ID immediately, captures combined stdout/stderr up to 10 MB per job, and terminates all running jobs when the agent session ends.
 
-Use the [`shell`](../shell/index.md) toolset for short synchronous commands. Add both toolsets when an agent needs both synchronous commands and long-running processes.
+The [`shell`](../shell/index.md) toolset automatically retains commands that outlast its foreground window (two seconds by default), using the same job manager and output inspectors. Add `background_jobs` when the agent also needs the explicit `run_background_job` start tool or manually managed parallel jobs.
 
 ## Configuration
 

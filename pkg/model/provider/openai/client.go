@@ -108,11 +108,14 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			// (e.g. "op://..." via the 1Password CLI) and consults extra
 			// sources (Docker Desktop, ...); the SDK's os.Getenv
 			// fallback would send the raw reference as the bearer token.
-			if authToken, _ := env.Get(ctx, "OPENAI_API_KEY"); authToken != "" {
+			authToken, found := env.Get(ctx, "OPENAI_API_KEY")
+			if found {
+				// An explicitly empty credential must also override SDK defaults.
 				clientOptions = append(clientOptions, option.WithAPIKey(authToken))
+			} else if strings.HasPrefix(os.Getenv("OPENAI_API_KEY"), "op://") {
+				clientOptions = append(clientOptions, option.WithAPIKey(""))
 			}
-			// Otherwise let the OpenAI SDK use its default behavior
-			// (OPENAI_API_KEY from the OS env).
+			// Preserve the SDK's literal OS credential fallback when the chain has no value.
 		}
 
 		if cfg.Provider == "azure" {
@@ -482,7 +485,7 @@ func (c *Client) CreateChatCompletionStream(
 	// When NoThinking is set we still need to send an explicit effort so hidden
 	// reasoning tokens don't exhaust the max_completion_tokens budget: "none" on
 	// a genuine OpenAI vendor endpoint whose model has a real off switch
-	// (gpt-5.6+, see [sendsRealNoneEffort]), "low" otherwise — older models
+	// (see [sendsRealNoneEffort]), "low" otherwise — older models
 	// (o3-mini, o1) only accept low/medium/high, and "low" is the closest thing
 	// to off they have.
 	//
@@ -495,23 +498,10 @@ func (c *Client) CreateChatCompletionStream(
 		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
 			c.warnThinkingBudgetIgnored(ctx)
 		}
-	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model):
-		// See modelinfo.OpenAIRejectsToolsWithReasoningEffort: gpt-5.4+
-		// (and every gpt-5.6+/gpt-6+ generation) reject an explicit
-		// reasoning_effort alongside function tools on Chat Completions;
-		// the API's own error points at /v1/responses. Reaching this path
-		// at all means the caller forced Chat Completions for a model
-		// that would otherwise auto-select the Responses API (an explicit
-		// api_type or custom-provider override). Dropping the field lets
-		// gpt-5.4/gpt-5.5 succeed with their implicit default effort;
-		// gpt-5.6+/gpt-6+ still 400 on tools with ANY reasoning_effort
-		// there (OpenAI has no combination that works on Chat Completions
-		// for those), but the request degrades instead of silently
-		// sending a value the caller can't see is the cause. Only warn
-		// when a value was actually about to be sent (NoThinking or an
-		// explicit ThinkingBudget); otherwise there is nothing dropped to
-		// report, and warning anyway would be misleading and would repeat
-		// on every turn of a long tool-using conversation.
+	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model) && !c.chatToolsWithNoneEffort():
+		// Sol/Luna accept tools with explicit "none"; other efforts need Responses.
+		// Omitting effort also lets GPT-5.4/5.5 use their implicit default.
+		// Warn only when a configured effort is actually being dropped.
 		if c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget != nil {
 			slog.WarnContext(ctx, "OpenAI: dropping reasoning_effort for a tools request forced onto Chat Completions; use api_type: openai_responses for tool calling on this model", "model", c.ModelConfig.Model)
 		}
@@ -759,7 +749,7 @@ func (c *Client) CreateResponseStream(
 			// Send an explicit effort so the model spends as few output tokens
 			// as possible on reasoning, leaving room for visible text: "none"
 			// on a genuine OpenAI vendor endpoint whose model has a real off
-			// switch (gpt-5.6+, see [sendsRealNoneEffort]), "low" otherwise —
+			// switch (see [sendsRealNoneEffort]), "low" otherwise —
 			// older models (o3-mini, o1) only accept low/medium/high.
 			reasoningEffort := "low"
 			if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
@@ -1494,6 +1484,15 @@ func sendsRealNoneEffort(cfg *latest.ModelConfig, openAIVendor bool) bool {
 		return false
 	}
 	return modelinfo.IsOpenAIVendor(cfg.Provider, cfg.Model) || openAIVendor
+}
+
+func (c *Client) chatToolsWithNoneEffort() bool {
+	if !modelinfo.OpenAISupportsChatToolsWithNoneEffort(c.ModelConfig.Model) ||
+		!sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+		return false
+	}
+	level, ok := c.ModelConfig.ThinkingBudget.EffortLevel()
+	return c.ModelOptions.NoThinking() || (ok && level == effort.None)
 }
 
 // openAIReasoningEffort validates a ThinkingBudget effort string for the

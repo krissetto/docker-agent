@@ -5,6 +5,10 @@
   "description": "Configuration schema for Docker Agent v16",
   "type": "object",
   "properties": {
+    "id": {
+      "type": "string",
+      "description": "Optional stable identity for this team configuration"
+    },
     "version": {
       "type": "string",
       "description": "Configuration version",
@@ -575,6 +579,10 @@
       "type": "object",
       "description": "Configuration for a single agent",
       "properties": {
+        "id": {
+          "type": "string",
+          "description": "Optional stable identity for this agent across renames"
+        },
         "model": {
           "type": "string",
           "description": "Model to use for this agent (can be just model name or provider/model format)",
@@ -2238,7 +2246,8 @@
             "scheduler",
             "rag",
             "git",
-            "webhook"
+            "webhook",
+            "team_edit"
           ]
         },
         "instruction": {
@@ -2443,6 +2452,11 @@
           "type": "boolean",
           "description": "Opt in to dialling non-public IP addresses (valid for type 'fetch', 'api', 'openapi', 'a2a', and remote MCP toolsets). By default, on the direct path (Docker Desktop unavailable, disabled, or target host is not in the Docker-owned allowlist), protected HTTP clients refuse connections \u2014 after DNS resolution, defeating DNS rebinding \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. When Docker Desktop is running, only Docker-owned hostnames (docker.com, docker.io families) go through its PAC proxy; dial-time enforcement does not apply on that path. Set this to true when an agent legitimately needs to call internal services. For fetch, 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
         },
+        "background_after": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "For the shell toolset, seconds to wait before automatically retaining a still-running command as a background job. Defaults to 2 seconds; 0 disables automatic backgrounding."
+        },
         "sudo_askpass": {
           "type": "boolean",
           "description": "Opt in to a sudo privilege escalation flow for the shell toolset (only valid for type 'shell'). When enabled, sudo commands prompt the user for their password through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt is declined automatically. Only a bare 'sudo ...' invocation in a POSIX shell is handled. No effect on Windows. Default false."
@@ -2575,7 +2589,8 @@
                 "model_picker",
                 "background_agents",
                 "scheduler",
-                "git"
+                "git",
+                "team_edit"
               ]
             }
           }

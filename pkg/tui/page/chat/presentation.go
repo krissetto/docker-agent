@@ -161,6 +161,7 @@ func (p *chatPage) applySplitPresentation() tea.Cmd {
 		p.messages.SetPosition(g.Transcript.X, g.Transcript.Y),
 		p.messages.SetSize(g.Transcript.Width, g.Transcript.Height),
 	}
+	p.layoutOverlay()
 	if p.sidebarInteractive() {
 		mode := sidebar.ModeCollapsed
 		if sl.mode == sidebarVertical {
@@ -273,7 +274,7 @@ func (p *chatPage) SetPresentationVisible(visible bool) tea.Cmd {
 	if p.splitPresentation != nil {
 		layoutCmd = p.applySplitPresentation()
 	}
-	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden))
+	return tea.Batch(resumeCmd, layoutCmd, SetSidebarPresentationActive(p, !p.presentationHidden), p.continueHistoryCmd())
 }
 
 func (p *chatPage) stopHiddenPresentation() {

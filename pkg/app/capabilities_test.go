@@ -117,3 +117,25 @@ func TestParityCapabilityViewPinsHandleBeforeAsyncWork(t *testing.T) {
 	require.Equal(t, 1, original.calls)
 	require.Zero(t, replacement.calls, "queued metadata request cannot retarget on session switch")
 }
+
+func TestBoundCapabilitiesNeverUseGlobalTeamFallback(t *testing.T) {
+	h := &parityHandle{projectionSession: projectionSession{id: "bound"}, caps: runtime.SessionCapabilities{ToolInspection: true, PermissionsInspection: true}}
+	globalDeny := &runtime.PermissionsInfo{Deny: []string{"global-only"}}
+	service := &mockRuntime{tools: []tools.Tool{{Name: "global-only-tool"}}, permissions: globalDeny}
+	a := &App{ctx: func() context.Context { return context.Background() }, currentState: sessionState{session: session.New(session.WithID("bound")), handle: h}, runtime: service}
+	require.NoError(t, a.RefreshCommandMetadata(t.Context()))
+
+	currentTools, err := a.CurrentAgentTools(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []tools.Tool{{Name: "worker-tool"}}, currentTools)
+	permissions := a.PermissionsInfo()
+	require.NotNil(t, permissions)
+	require.Equal(t, []string{"worker-rule"}, permissions.Deny)
+	require.NotContains(t, permissions.Deny, "global-only")
+	require.Contains(t, a.CurrentAgentCommands(t.Context()), "bound")
+
+	h.caps = runtime.SessionCapabilities{}
+	require.Empty(t, a.PermissionsInfo(), "unsupported bound handles must not inherit global team permissions")
+	_, err = a.CurrentAgentTools(t.Context())
+	require.ErrorIs(t, err, runtime.ErrUnsupported)
+}

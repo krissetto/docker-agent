@@ -67,7 +67,8 @@ func TestOwnerExecutionAppendPreservesConcurrentAcceptedInput(t *testing.T) {
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionRunning; d.generation = 1; d.activeRequestID = "turn"; return nil }))
 	_, scratch, err := d.executionContext(t.Context(), 1)
 	require.NoError(t, err)
-	require.NoError(t, r.Steer(t.Context(), QueuedMessage{Content: "concurrent", RequestID: "concurrent"}))
+	_, err = d.admitInput(t.Context(), QueuedMessage{Content: "concurrent", RequestID: "concurrent", InputOrigin: session.InputOriginUser, InputMode: "steer"}, SessionOperationSteer, true)
+	require.NoError(t, err)
 	message := session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "answer"})
 	scratch.AddMessage(message)
 	require.NoError(t, d.commitExecutionEvent(t.Context(), 1, MessageAddedAt(d.identityID, message, "root", 0)))
@@ -103,7 +104,7 @@ func TestOwnerCallJoinsStartedStateTransitionAfterCancellation(t *testing.T) {
 	assert.Equal(t, 1, result)
 }
 
-func TestRuntimeReportDoesNotInterruptProviderAttempt(t *testing.T) {
+func TestRuntimeReportInterruptsProviderAttempt(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.phase = sessionRunning; d.generation = 1; d.activeRequestID = "turn"; return nil }))
@@ -112,18 +113,15 @@ func TestRuntimeReportDoesNotInterruptProviderAttempt(t *testing.T) {
 	require.True(t, d.Post(t.Context(), report, false))
 	select {
 	case <-steeringSignal(attempt):
-		t.Fatal("coordination report interrupted provider output")
 	default:
+		t.Fatal("runtime guidance must interrupt provider output")
 	}
 	batch := d.drainBoundarySteering()
 	require.Len(t, batch, 1)
 	assert.Equal(t, "report", batch[0].RequestID)
-	require.NoError(t, r.Steer(t.Context(), QueuedMessage{Content: "urgent user steer", RequestID: "user"}))
-	select {
-	case <-steeringSignal(attempt):
-	default:
-		t.Fatal("explicit user steering must still interrupt at the provider boundary")
-	}
+	_, err := d.admitInput(t.Context(), QueuedMessage{Content: "urgent user steer", RequestID: "user", InputOrigin: session.InputOriginUser, InputMode: "steer"}, SessionOperationSteer, true)
+	require.NoError(t, err)
+	assert.True(t, d.interruptRequested, "every origin shares the guidance interruption class")
 }
 
 func TestSameSessionInteractionResponsesCannotConsumeOtherRequest(t *testing.T) {
@@ -212,7 +210,8 @@ func TestExecutionRefreshPreservesLegacyBlanketApproval(t *testing.T) {
 func TestExecutionRefreshPromotesAlreadySnapshottedSteering(t *testing.T) {
 	r := newDriverTestRuntime(t)
 	d := r.sessionDrivers.Get(session.New(session.WithID(t.Name())))
-	require.NoError(t, r.Steer(t.Context(), QueuedMessage{Content: "idle guidance", RequestID: "guidance"}))
+	_, err := d.admitInput(t.Context(), QueuedMessage{Content: "idle guidance", RequestID: "guidance", InputMode: "steer"}, SessionOperationSteer, true)
+	require.NoError(t, err)
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.generation = 1; return nil }))
 	ctx, scratch, err := d.executionContext(t.Context(), 1)
 	require.NoError(t, err)

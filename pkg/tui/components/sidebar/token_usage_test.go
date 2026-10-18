@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
@@ -223,19 +224,70 @@ func TestTokenUsageSummary_MultipleSessions_ShowsActiveSessionTokens(t *testing.
 	assert.Contains(t, summary, "(30%)")
 }
 
-// TestTokenUsageSummary_NoUsageYet_ShowsZeroLine verifies the collapsed band
-// carries the usage line from startup (before any message is sent), matching
-// the vertical Token Usage tab (#top-band startup parity).
-func TestTokenUsageSummary_NoUsageYet_ShowsZeroLine(t *testing.T) {
+func TestTokenUsageHiddenUntilUsageAndThenRestoredCostVisible(t *testing.T) {
 	t.Parallel()
 
-	sess := session.New()
+	sess := session.New(session.WithID("fresh"))
 	sessionState := service.NewSessionState(sess)
 	m := New(animation.NewRuntime(), t.Context(), sessionState).(*model)
+	m.SetSize(60, 30)
+	fresh := strings.Join(m.renderSections(60), "\n")
+	assert.Empty(t, m.tokenUsageSummary())
+	assert.NotContains(t, fresh, "Token Usage")
+	assert.Equal(t, -1, m.usageReadingLine)
 
-	summary := ansi.Strip(m.tokenUsageSummary())
-	assert.Contains(t, summary, styles.TokenGlyph+" 0")
-	assert.Contains(t, summary, "$0.00")
+	// A restored subtree with spend but no token counters is still prior usage.
+	child := session.New(session.WithID("child"), session.WithParentID(sess.ID))
+	child.Messages = append(child.Messages, sidebarCostItem("worker", 0.05))
+	sess.Messages = append(sess.Messages, session.Item{SubSession: child})
+	m.LoadFromSession(sess)
+	restored := strings.Join(m.renderSections(60), "\n")
+	assert.Contains(t, restored, "$0.05")
+	assert.NotEqual(t, -1, m.usageReadingLine)
+	freshBand := ansi.Strip(RenderCollapsedView(m.computeCollapsedViewModel(60)))
+	assert.NotContains(t, freshBand, "$0.00")
+}
+
+func TestTokenUsageInsertionMovesLaterSectionsWithoutGap(t *testing.T) {
+	t.Parallel()
+	m := newTestSidebar(t)
+	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Provider: "openai", Model: "gpt-4"}})
+	m.sessionState.SetCurrentAgentName("root")
+	m.SetSize(60, 40)
+	freshLines := m.renderSections(60)
+	freshAgentLine := -1
+	for i, line := range freshLines {
+		if strings.Contains(line, "root") {
+			freshAgentLine = i
+			break
+		}
+	}
+	assert.GreaterOrEqual(t, freshAgentLine, 0)
+	assert.NotContains(t, strings.Join(freshLines, "\n"), "$0.00")
+	freshBand := ansi.Strip(RenderCollapsedView(m.computeCollapsedViewModel(60)))
+	freshBandRows := strings.Split(freshBand, "\n")
+	assert.NotContains(t, freshBand, "$0.00")
+	assert.Equal(t, 2, len(freshBandRows), "existing model/provider rows remain; usage adds no blank line")
+	assert.NotContains(t, freshBand, "\n\n", "collapsed layout reserves no empty usage row")
+
+	m.SetTokenUsage(&runtime.TokenUsageEvent{SessionID: "session-1", AgentContext: runtime.AgentContext{AgentName: "root"}, Usage: &runtime.Usage{InputTokens: 1, ContextLength: 1, ContextLimit: 100, Cost: 0.01}})
+	readyLines := m.renderSections(60)
+	readyAgentLine := -1
+	readyText := strings.Join(readyLines, "\n")
+	usageAt := strings.Index(readyText, "◉")
+	for i, line := range readyLines {
+		if strings.Contains(line, "root") && strings.Index(readyText, line) > usageAt {
+			readyAgentLine = i
+			break
+		}
+	}
+	assert.Contains(t, readyText, "$0.01")
+	readyBand := ansi.Strip(RenderCollapsedView(m.computeCollapsedViewModel(60)))
+	assert.Contains(t, readyBand, "$0.01")
+	assert.Equal(t, len(freshBandRows), len(strings.Split(readyBand, "\n")), "collapsed spend uses its existing row rather than reserving extra height")
+	assert.NotContains(t, readyBand, "\n\n", "collapsed usage joins its existing band without a blank reserved row")
+	assert.Greater(t, readyAgentLine, freshAgentLine, "usage reading is inserted ahead of later sidebar sections")
+	assert.Equal(t, 2, readyAgentLine-freshAgentLine, "the usage reading and preceding breathing row are inserted together")
 }
 
 // TestTokenUsageTab_ShowsTokenGlyph verifies the vertical Token Usage tab line

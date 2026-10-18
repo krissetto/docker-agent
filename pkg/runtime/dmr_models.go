@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -21,12 +22,16 @@ const dmrModelsTTL = 1 * time.Minute
 // every picker open. The mutex only guards the cached fields; the lookup
 // itself runs outside the lock, coalesced by the singleflight group so
 // concurrent callers share one in-flight request.
-type dmrModelsCache struct {
-	mu        sync.Mutex
-	sf        singleflight.Group
+type dmrModelsEntry struct {
 	ids       []string
 	err       error
 	fetchedAt time.Time
+}
+
+type dmrModelsCache struct {
+	mu      sync.Mutex
+	sf      singleflight.Group
+	entries map[string]dmrModelsEntry
 }
 
 // listDMRModels returns the model IDs available to Docker Model Runner, using
@@ -34,48 +39,55 @@ type dmrModelsCache struct {
 // configured (e.g. runtimes built directly in tests), so DMR discovery is
 // opt-in via NewLocalRuntime.
 func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.listDMRModelsForConfig(ctx, config)
+}
+
+func (r *LocalRuntime) listDMRModelsForConfig(ctx context.Context, _ *ModelSwitcherConfig) ([]string, error) {
 	if r.dmrModelLister == nil {
 		slog.DebugContext(ctx, "DMR model discovery skipped; no lister configured")
 		return nil, nil
 	}
-
 	now := time.Now
 	if r.now != nil {
 		now = r.now
 	}
-
+	key := "legacy"
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		key = env.SourceID() + "\x00" + env.RevisionID()
+	}
 	c := &r.dmrModels
-
 	readFresh := func() (ids []string, ok bool, err error) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if !c.fetchedAt.IsZero() && now().Sub(c.fetchedAt) < dmrModelsTTL {
-			return c.ids, true, c.err
+		entry, exists := c.entries[key]
+		if exists && !entry.fetchedAt.IsZero() && now().Sub(entry.fetchedAt) < dmrModelsTTL {
+			return slices.Clone(entry.ids), true, entry.err
 		}
 		return nil, false, nil
 	}
-
 	if ids, ok, err := readFresh(); ok {
 		slog.DebugContext(ctx, "DMR model discovery cache hit", "models", len(ids), "error", err)
 		return ids, err
 	}
-
 	start := time.Now()
-	v, err, _ := c.sf.Do("models", func() (any, error) {
-		// Double-check the cache now that we hold the in-flight slot: a caller
-		// that read a stale cache right before a concurrent singleflight
-		// completed would otherwise trigger a redundant fetch.
+	v, err, _ := c.sf.Do(key, func() (any, error) {
 		if ids, ok, err := readFresh(); ok {
 			return ids, err
 		}
-
 		ids, err := r.dmrModelLister(ctx)
 		if err != nil && ctx.Err() != nil {
 			return ids, err
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.ids, c.err, c.fetchedAt = ids, err, now()
+		if c.entries == nil {
+			c.entries = make(map[string]dmrModelsEntry)
+		}
+		c.entries[key] = dmrModelsEntry{ids: slices.Clone(ids), err: err, fetchedAt: now()}
 		return ids, err
 	})
 	if err != nil {
@@ -84,7 +96,7 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 	}
 	ids := v.([]string)
 	slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "models", len(ids))
-	return ids, nil
+	return slices.Clone(ids), nil
 }
 
 // buildDMRChoices builds ModelChoice entries for the models currently pulled
@@ -93,7 +105,15 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 // the picker shows nothing for a working local Model Runner. When DMR is not
 // installed or unreachable it returns nil.
 func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
-	ids, err := r.listDMRModels(ctx)
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil
+	}
+	return r.buildDMRChoicesForConfig(ctx, config)
+}
+
+func (r *LocalRuntime) buildDMRChoicesForConfig(ctx context.Context, config *ModelSwitcherConfig) []ModelChoice {
+	ids, err := r.listDMRModelsForConfig(ctx, config)
 	if err != nil {
 		slog.DebugContext(ctx, "DMR model discovery failed, skipping DMR picker entries", "error", err)
 		return nil
@@ -102,8 +122,8 @@ func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
 		return nil
 	}
 
-	existingRefs := make(map[string]bool, len(r.modelSwitcherCfg.Models)*2)
-	for name, cfg := range r.modelSwitcherCfg.Models {
+	existingRefs := make(map[string]bool, len(config.Models)*2)
+	for name, cfg := range config.Models {
 		existingRefs[name] = true
 		if cfg.Provider != "" && cfg.Model != "" {
 			existingRefs[cfg.Provider+"/"+cfg.Model] = true
@@ -121,8 +141,8 @@ func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
 		// whose models.dev Family is "text-embedding" is filtered even when
 		// its ID doesn't contain "embed".
 		var meta *modelsdev.Model
-		if r.modelsStore != nil {
-			if m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID("dmr", id)); err == nil {
+		if store := r.modelsStoreForConfig(config); store != nil {
+			if m, err := r.modelsStoreForConfig(config).GetModel(ctx, modelsdev.NewID("dmr", id)); err == nil {
 				meta = m
 			}
 		}

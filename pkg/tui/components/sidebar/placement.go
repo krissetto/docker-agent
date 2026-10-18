@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,6 +102,13 @@ func (m *model) targetRows() []placedRow {
 		case y == m.summaryLine && m.hasTreeContent():
 			row.id = "tree-summary"
 			row.controls = []treeControl{{x: width - 1, whole: true}}
+		case m.gitStart >= 0 && y >= m.gitStart && y < m.gitEnd:
+			line := y - m.gitStart
+			row.id = m.git.rowID(line)
+			if m.git.interactive(line) {
+				row.action = ClickGit
+				row.payload = strconv.Itoa(line)
+			}
 		case y == m.parentLineZone:
 			row.id = "parent:" + m.parentSessionID
 			row.action = ClickSubagentParent
@@ -562,6 +570,13 @@ func (m *model) refreshPlacementHover() {
 		case row.action == ClickAgent:
 			indent := min(2, max(0, width-1))
 			row.text = strings.Repeat(" ", indent) + m.participantLine(row.payload, max(1, width-indent))
+		case row.action == ClickGit:
+			if line, err := strconv.Atoi(row.payload); err == nil {
+				gitLines := m.git.lines(width)
+				if line < len(gitLines) {
+					row.text = gitLines[line]
+				}
+			}
 		case y >= m.usageReadingLine && y < m.usageSectionEnd && m.usageReadingLine >= 0:
 			usage := strings.Split(m.sectionCache["usage"], "\n")
 			index := y - m.usageReadingLine

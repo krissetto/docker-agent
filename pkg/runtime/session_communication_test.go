@@ -24,20 +24,20 @@ func TestCommunicationRetryIdentity(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), child.OwnSnapshot()))
 	d, ok := m.r.sessionDrivers.Lookup(child.ID)
 	require.True(t, ok)
+	require.NoError(t, d.ownerCall(t.Context(), func() error { d.activeRequestID = "active"; return nil }))
 	msg := agentCommunication("do this", "stable-request", parent.ID, "root", subagent.DeliveryGuidance)
 	first, err := d.postCommunication(t.Context(), msg)
 	require.NoError(t, err)
 	assert.True(t, first.Accepted)
 	assert.True(t, first.Durable)
 	assert.False(t, first.Idempotent)
-	assert.False(t, first.Queued, "guidance to active work enters its steering lane")
+	assert.False(t, first.Queued, "active guidance is admitted directly to safe-boundary consumption")
 	retry, err := d.postCommunication(t.Context(), msg)
 	require.NoError(t, err)
 	assert.True(t, retry.Idempotent)
 	assert.True(t, retry.Durable)
-	assert.Equal(t, first.Queued, retry.Queued, "exact retry must preserve the STEERING lane receipt")
-	require.Empty(t, d.pending)
-	require.Len(t, d.steering, 1)
+	assert.Equal(t, first.Queued, retry.Queued, "exact retry must preserve its delivery receipt")
+	require.Len(t, d.pending, 1)
 	stored, err := store.GetSession(t.Context(), child.ID)
 	require.NoError(t, err)
 	require.Len(t, stored.MessagesSnapshot(), 1)
@@ -54,8 +54,7 @@ func TestCommunicationRetryIdentity(t *testing.T) {
 		assert.False(t, rejected.Accepted)
 		assert.Equal(t, "conflict", communicationRejection(rejected, err).Rejection)
 	}
-	require.Empty(t, d.pending)
-	require.Len(t, d.steering, 1)
+	require.Len(t, d.pending, 1)
 }
 
 func TestCommunicationGuidanceAndNewTurn(t *testing.T) {
@@ -84,7 +83,7 @@ func TestCommunicationGuidanceAndNewTurn(t *testing.T) {
 	require.Len(t, d.pending, 2)
 	assert.Equal(t, "user-turn", d.pending[0].RequestID)
 	assert.Equal(t, "followup", d.pending[1].RequestID)
-	assert.False(t, d.hasSteeringLocked())
+	assert.False(t, d.hasGuidanceLocked())
 	// A retry after promotion must not insert guidance into active work again.
 	retry, err := d.postCommunication(t.Context(), agentCommunication("correction", "guidance", parent.ID, "root", subagent.DeliveryGuidance))
 	require.NoError(t, err)

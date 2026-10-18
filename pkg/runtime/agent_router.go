@@ -30,9 +30,20 @@ func (r *agentRouter) Current() *agent.Agent {
 // non-execution helpers may pass an unbound session and use the configured
 // default/current metadata; driver admission pins AgentName before execution.
 func (r *agentRouter) ResolveSession(sess *session.Session) *agent.Agent {
-	if sess != nil && sess.AgentName != "" {
-		if a, err := r.team.Agent(sess.AgentName); err == nil {
-			return a
+	if sess != nil {
+		if sess.AgentID != "" {
+			a, _, ok := r.team.ResolveIdentity(sess.AgentID)
+			if ok {
+				return a
+			}
+			return nil
+		}
+		if sess.AgentName != "" {
+			a, _, ok := r.team.ResolveLegacyName(sess.AgentName)
+			if ok {
+				return a
+			}
+			return nil
 		}
 	}
 	return r.Current()

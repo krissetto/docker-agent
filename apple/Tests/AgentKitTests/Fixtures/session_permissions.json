@@ -1,0 +1,26 @@
+{
+  "policy": "balanced",
+  "tools_approved": false,
+  "source": {
+    "Allow": [
+      "read_file"
+    ],
+    "Ask": [
+      "write_file"
+    ],
+    "Deny": [
+      "shell"
+    ]
+  },
+  "session": {
+    "allow": [
+      "docs/*"
+    ],
+    "ask": [
+      "write_file"
+    ],
+    "deny": [
+      "shell"
+    ]
+  }
+}

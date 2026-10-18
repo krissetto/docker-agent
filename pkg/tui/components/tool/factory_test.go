@@ -164,6 +164,26 @@ func TestNewRendersResultImagesWithinToolWidth(t *testing.T) {
 	assert.LessOrEqual(t, len(strings.Split(rendered, "\n")), 22, "image height must remain bounded")
 }
 
+func TestShellCategoryUsesExpandableShellRenderer(t *testing.T) {
+	withCleanToolRegistry(t)
+	_, ok := resolve("category:shell")
+	assert.True(t, ok, "script toolsets advertise the shell category")
+
+	msg := types.ToolCallMessage("root", tools.ToolCall{ID: "script", Function: tools.FunctionCall{Name: "inline_script", Arguments: `{"prompt":"long script input"}`}}, tools.Tool{Name: "inline_script", Category: "shell"}, types.ToolStatusRunning)
+	msg.Content = "first output\nsecond output"
+	view := New(animation.NewRuntime(), msg, service.StaticSessionState{})
+	view.SetSize(100, 0)
+	collapsed, ok := view.(interface{ CollapsedView() string })
+	assert.True(t, ok)
+	assert.Contains(t, collapsed.CollapsedView(), `"prompt":"long script input"`)
+	assert.NotContains(t, view.View(), "first output")
+	expanded, ok := view.(interface{ SetExpanded(bool) })
+	assert.True(t, ok)
+	expanded.SetExpanded(true)
+	assert.Contains(t, view.View(), "first output")
+	animation.StopView(view)
+}
+
 func TestPlanToolsRouting(t *testing.T) {
 	withCleanToolRegistry(t)
 

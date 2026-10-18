@@ -1,0 +1,147 @@
+[
+  {
+    "name": "pause_toggle",
+    "method": "POST",
+    "path": "/api/v2/sessions/session-demo-001/pause",
+    "bodyless": true,
+    "status": 200,
+    "response": {
+      "paused": true
+    }
+  },
+  {
+    "name": "stop_subtree",
+    "method": "POST",
+    "path": "/api/v2/sessions/session-demo-001/stop-subtree",
+    "bodyless": true,
+    "status": 204
+  },
+  {
+    "name": "wait_exact_turn",
+    "method": "POST",
+    "path": "/api/v2/sessions/session-demo-001/turns/turn-demo-001/wait",
+    "bodyless": true,
+    "status": 204
+  },
+  {
+    "name": "wait_workflow",
+    "method": "POST",
+    "path": "/api/v2/sessions/session-demo-001/workflow/wait",
+    "bodyless": true,
+    "status": 200,
+    "response": {
+      "epoch": "fixture-epoch-001",
+      "cursor": 19
+    }
+  },
+  {
+    "name": "fork_before_user_message",
+    "method": "POST",
+    "path": "/api/v2/sessions/session-demo-fork-source/fork",
+    "status": 200,
+    "request": {
+      "user_message_index": 1
+    },
+    "response": {
+      "id": "session-demo-fork-002",
+      "title": "Fixture conversation (fork 1)",
+      "messages": [
+        {
+          "agent_name": "",
+          "message": {
+            "role": "user",
+            "content": "First question.",
+            "created_at": "2025-01-02T03:04:05Z"
+          }
+        },
+        {
+          "agent_name": "root",
+          "message": {
+            "role": "assistant",
+            "content": "First answer.",
+            "created_at": "2025-01-02T03:04:05Z"
+          }
+        }
+      ],
+      "created_at": "2025-01-02T03:04:05Z",
+      "tools_approved": false,
+      "safety_policy": "balanced",
+      "input_tokens": 120,
+      "output_tokens": 48,
+      "working_dir": "/workspace/demo",
+      "permissions": {
+        "allow": [
+          "read_file"
+        ]
+      }
+    }
+  },
+  {
+    "name": "replace_message",
+    "method": "PATCH",
+    "path": "/api/v2/sessions/session-demo-001/messages/4242",
+    "status": 200,
+    "request": {
+      "message": {
+        "agent_name": "",
+        "message": {
+          "role": "user",
+          "content": "Review the revised sample changes.",
+          "created_at": "2025-01-02T03:04:05Z"
+        },
+        "actor_accepted": true,
+        "actor_turn_id": "turn-demo-edit-001",
+        "actor_input_mode": "submit",
+        "input_origin": "user"
+      }
+    },
+    "response": {
+      "status": "updated"
+    }
+  },
+  {
+    "name": "get_delegation_policy",
+    "method": "GET",
+    "path": "/api/v2/sessions/session-demo-001/delegation-policy",
+    "bodyless": true,
+    "status": 200,
+    "response": {
+      "enabled": true
+    }
+  },
+  {
+    "name": "patch_delegation_policy",
+    "method": "PATCH",
+    "path": "/api/v2/sessions/session-demo-001/delegation-policy",
+    "status": 200,
+    "request": {
+      "enabled": false
+    },
+    "response": {
+      "enabled": false
+    }
+  },
+  {
+    "name": "register_source",
+    "method": "POST",
+    "path": "/api/v2/sources",
+    "status": 200,
+    "request": {
+      "path": "teams/demo.yaml",
+      "working_dir": "/workspace/demo"
+    },
+    "response": {
+      "source_id": "workspace:teams/demo.yaml",
+      "revision": "sha256:fixture-revision-001"
+    }
+  },
+  {
+    "name": "remove_attachment",
+    "method": "DELETE",
+    "path": "/api/v2/sessions/session-demo-001/attachments",
+    "status": 204,
+    "request": {
+      "path": "/workspace/demo/notes.txt"
+    }
+  }
+]

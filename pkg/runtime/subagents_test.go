@@ -80,8 +80,7 @@ func drainDriverMessages(r *LocalRuntime, sess *session.Session) []QueuedMessage
 	var messages []QueuedMessage
 	_ = driver.ownerCall(r.lifetime(), func() error {
 		messages = append(messages, driver.pending...)
-		messages = append(messages, driver.steering...)
-		driver.pending, driver.steering = nil, nil
+		driver.pending = nil
 		driver.refreshSteeringLocked()
 		return nil
 	})

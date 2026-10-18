@@ -27,6 +27,7 @@ const (
 	TargetSidebarUsage
 	TargetSidebarSubagent
 	TargetSidebarParent
+	TargetSidebarGit
 	TargetSidebarContent
 	TargetMessages
 )
@@ -43,7 +44,9 @@ type HitTest struct {
 	QueueTurnID     string
 	SubagentID      string
 	ParentSessionID string
-	OnSubagentName  bool
+	// GitLine is the Git section line when it returns TargetSidebarGit.
+	GitLine        string
+	OnSubagentName bool
 }
 
 // NewHitTest creates a hit tester for the given chat page.
@@ -186,6 +189,9 @@ func (h *HitTest) sidebarClickTarget(x, y int) MouseTarget {
 	case sidebar.ClickSubagentParent:
 		h.ParentSessionID = agentName
 		return TargetSidebarParent
+	case sidebar.ClickGit:
+		h.GitLine = agentName
+		return TargetSidebarGit
 	default:
 		return TargetSidebarContent
 	}

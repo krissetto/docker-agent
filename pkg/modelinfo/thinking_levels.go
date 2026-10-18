@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/effort"
 )
@@ -111,6 +112,9 @@ func anthropicTopEfforts(modelID string) []effort.Level {
 // accepts the xhigh and max effort tiers. The capability matrix it encodes is
 // quoted in [anthropicTopEfforts]'s authoritative reference.
 func anthropicTopTierSupport(m string) (hasXHigh, hasMax bool) {
+	if UsesAdaptiveThinkingByDefault(m) {
+		return true, true
+	}
 	if bare, ok := bedrockClaudeModelName(m); ok {
 		m = bare
 	}
@@ -217,32 +221,39 @@ func openAITopEfforts(modelID string) []effort.Level {
 	}
 }
 
-// OpenAISupportsNoneEffort reports whether an OpenAI model accepts reasoning
-// effort "none" as a real, honored value rather than a config-level "turn
-// thinking off" sentinel. gpt-5.6 (Sol/Terra/Luna) is the first OpenAI
-// family to do so. Exported: the defaults pipeline (pkg/model/provider) and
-// the OpenAI client need the same gate to decide whether "none" survives
-// normalization and is sent on the wire.
-//
-// Deliberately scoped to the gpt-5.x line via [gptFiveMinor] rather than
-// [atLeastGPT]: gpt-6 (verified live against api.openai.com) rejects
-// reasoning.effort "none" with a 400 ("Supported values are: 'low',
-// 'medium', 'high', 'xhigh', and 'max'"), so this predicate must NOT widen
-// to "gpt-5.6 or later" the way [openAIDropsMinimalEffort] and
-// [openAITopEfforts] do — those two effects diverged when gpt-6 shipped.
+// OpenAISupportsNoneEffort reports whether "none" is an API-level effort
+// rather than a local disabled-thinking sentinel. GPT-6 support is variant-specific:
+// Sol and Luna accept it; Astra does not.
+// https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort
 func OpenAISupportsNoneEffort(modelID string) bool {
-	minor, ok := gptFiveMinor(modelID)
-	return ok && minor >= 6
+	if minor, ok := gptFiveMinor(modelID); ok && minor >= 6 {
+		return true
+	}
+	return isGPT6SolOrLuna(modelID)
 }
 
-// openAIDropsMinimalEffort reports whether an OpenAI model rejects reasoning
-// effort "minimal", unlike [OpenAISupportsNoneEffort] this holds for every
-// gpt-5.6-or-later generation including gpt-6. Verified live against
-// api.openai.com (2026-09): gpt-5.6/-sol/-terra AND gpt-6-astra all 400 on
-// reasoning.effort "minimal" ("Supported values are: 'none', 'low',
-// 'medium', 'high', 'xhigh', and 'max'" for the gpt-5.6 line — "none" isn't
-// in gpt-6-astra's list, see [OpenAISupportsNoneEffort]) — only the "none"
-// value itself stops being honored past gpt-5.6.
+func isGPT6SolOrLuna(modelID string) bool {
+	m := normalizeOpenAI(modelID)
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		if m == model {
+			return true
+		}
+		if snapshot, ok := strings.CutPrefix(m, model+"-"); ok {
+			_, err := time.Parse(time.DateOnly, snapshot)
+			return len(snapshot) == len(time.DateOnly) && err == nil
+		}
+	}
+	return false
+}
+
+// OpenAISupportsChatToolsWithNoneEffort reports whether Chat Completions accepts
+// function tools with explicit "none" effort. Other efforts remain unsupported.
+func OpenAISupportsChatToolsWithNoneEffort(modelID string) bool {
+	return isGPT6SolOrLuna(modelID)
+}
+
+// openAIDropsMinimalEffort reports whether an OpenAI model rejects "minimal".
+// Unlike "none", this restriction applies to every GPT generation from 5.6 on.
 func openAIDropsMinimalEffort(modelID string) bool {
 	return atLeastGPT(modelID, 5, 6)
 }
@@ -263,6 +274,9 @@ func openAIDropsMinimalEffort(modelID string) bool {
 //     [atLeastGPT]) reject tools+reasoning on this endpoint outright, even
 //     with the field omitted; only the Responses API supports the
 //     combination for them.
+//
+// [OpenAISupportsChatToolsWithNoneEffort] identifies the Sol/Luna exception for
+// explicit "none". Other tools+effort combinations use the Responses API.
 //
 // The OpenAI client uses this to drop reasoning_effort rather than send a
 // value guaranteed to 400 when a Responses-capable model is forced onto

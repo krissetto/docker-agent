@@ -35,6 +35,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/components/messagebar"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	reviewcomponent "github.com/docker/docker-agent/pkg/tui/components/review"
+	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
@@ -76,6 +78,7 @@ const (
 	PanelEditor     FocusedPanel = "editor"
 	PanelMessageBar FocusedPanel = "messagebar"
 	PanelStatus     FocusedPanel = "status"
+	PanelSidebarGit FocusedPanel = "sidebar-git"
 
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
 	resizeHandleWidth    = 8
@@ -102,6 +105,7 @@ type appModel struct {
 	contextClosed         bool
 	contextBar            *contextbar.Model
 	contextUsage          map[string]map[string]runtime.Usage
+	contextUsageReady     map[string]map[string]bool
 	contextSessionID      string
 	contextAgentName      string
 	ar                    *animation.Runtime
@@ -378,6 +382,26 @@ type appModel struct {
 	panelRevision            uint64
 	panelSelectionOwner      string
 	panelSelectionGeneration uint64
+
+	gitReviews           map[string]*gitReviewWorkspace
+	gitReviewOwner       string
+	gitReviewGeneration  uint64
+	gitReviewToken       uint64
+	gitReviewPending     map[string]gitReviewRequest
+	gitReviewFactory     gitReviewProviderFactory
+	gitDiffSplit         bool
+	gitRefreshToken      uint64
+	gitRefreshScheduled  bool
+	gitRefreshScope      string
+	gitRefreshOwner      string
+	gitRefreshTimer      func(time.Duration, func(time.Time) tea.Msg) tea.Cmd
+	gitReviewSubmit      gitReviewSubmitFunc
+	gitReviewCapture     func(*app.App) app.ReviewSubmitTarget
+	gitReviewResolve     gitReviewResolveFunc
+	gitReviewCatalog     gitReviewCatalogPager
+	gitReviewPicker      *gitReviewTargetChoice
+	gitSidebarMarked     map[string]bool
+	reviewSessionFactory ReviewSessionFactory
 	// layoutSettings is shared by every tab and managed via /settings.
 	layoutSettings            messages.LayoutSettings
 	dimInactivePanes          bool
@@ -402,7 +426,8 @@ type appModel struct {
 	// interruptMode is how Esc interrupts a running stream (confirmation
 	// dialog, double-tap, or immediate). Shared by every tab and managed
 	// via /settings.
-	interruptMode messages.InterruptMode
+	interruptMode  messages.InterruptMode
+	closeTabChoice messages.CloseTabChoice
 
 	// showBanner displays the ASCII-art startup banner on an empty
 	// conversation. Shared by every tab and managed via /settings.
@@ -682,6 +707,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		transparentBackground:         userSettings.GetTransparentBackground(),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
+		closeTabChoice:                messages.ParseCloseTabChoice(userSettings.CloseTabChoice),
+		gitDiffSplit:                  messages.ParseGitDiffLayout(userSettings.GetGitDiffLayout()) == messages.GitDiffSplit,
 		showBanner:                    userSettings.GetShowBanner(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
@@ -728,10 +755,14 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Restore persisted tabs or persist the initial one.
 	m.restoreTabs(ctx, ts, sv, spawner, initialApp, sessID, initialWorkingDir)
+	if ts != nil && userconfig.Get().GetRestoreTabs() {
+		m.restorePaneWorkspaceState(tuiCtx(), ts)
+	}
 
-	// Initialize tab bar with current tabs
+	// Initialize tab bar with current tabs and materialize live members of the
+	// restored active pane workspace before the first frame.
 	tabs, activeIdx := sv.GetTabs()
-	m.initialTabCmd = tea.Batch(tb.SetVisible(!m.leanMode), m.setTabs(tabs, activeIdx))
+	m.initialTabCmd = tea.Batch(tb.SetVisible(!m.leanMode), m.setTabs(tabs, activeIdx), m.ensurePaneWorkspaceComponents())
 
 	return m
 }
@@ -1035,6 +1066,7 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	_, tick := msg.(animation.TickMsg)
+	contextUsageReady := m.activeContextUsageReady()
 	bannerHeight, contentLines := 0, 0
 	hadEditorValue := false
 	if !tick {
@@ -1050,6 +1082,7 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	previousEditor := m.editor
 	model, cmd := m.update(msg)
+	cmd = tea.Batch(cmd, m.syncGitReview())
 	if previousEditor != m.editor || m.dialogMgr.Open() || m.tickPaused {
 		if hover, ok := previousEditor.(editor.BannerHover); ok {
 			if hover.CancelBannerHover() {
@@ -1078,7 +1111,7 @@ func (m *appModel) updateWithLifecycle(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editorShrinkDelayed = true
 		m.manualEditorHeight = 0
 	}
-	if !tick && (editorCleared || bannerHeight != m.editor.BannerHeight() || contentLines != m.editor.ContentLineCount()) {
+	if !tick && (editorCleared || bannerHeight != m.editor.BannerHeight() || contentLines != m.editor.ContentLineCount() || contextUsageReady != m.activeContextUsageReady()) {
 		cmd = tea.Batch(cmd, m.resizeAll())
 	}
 	m.validateMessagesScrollbar()
@@ -1289,6 +1322,22 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.finishPaneCatalog(msg)
 		return m, cmd
 
+	case messages.OpenGitReviewMsg:
+		return m, m.openGitReview(msg.Files)
+	case messages.RevealGitChangesMsg:
+		return m, m.revealGitChanges()
+	case sidebar.GitRequestMsg:
+		return m, m.handleGitSidebarRequest(msg)
+	case sidebar.GitWatchMsg:
+		return m, m.handleGitWatch(msg)
+	case gitAutoRefreshMsg:
+		return m, m.handleGitAutoRefresh(msg)
+	case gitReviewTaskResult:
+		return m, m.applyGitReviewTask(msg)
+	case reviewcomponent.RefreshRequestMsg, reviewcomponent.LoadWorktreeRequestMsg, reviewcomponent.LoadDirectoryRequestMsg, reviewcomponent.OpenDocumentRequestMsg, reviewcomponent.CloseRequestMsg, reviewcomponent.DockToggleRequestMsg, reviewcomponent.FocusRequestMsg, reviewcomponent.CopyRequestMsg, reviewcomponent.SelectionChangedMsg,
+		reviewcomponent.HighlightedMsg, reviewcomponent.AddCommentMsg, reviewcomponent.EditCommentMsg, reviewcomponent.DeleteCommentMsg, reviewcomponent.PreviewDraftMsg, reviewcomponent.SendDraftMsg, reviewcomponent.CancelPreviewMsg, gitReviewSendResult,
+		dialog.ReviewTargetResultMsg, dialog.ReviewTargetMoreMsg, gitReviewCatalogResult, gitReviewResolved, gitReviewAgents:
+		return m, m.handleReviewComponentMessage(msg)
 	case messages.OpenPanesMsg:
 		cmd := m.executePaneArguments(msg.Arguments)
 		return m, cmd
@@ -1320,10 +1369,19 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSpawnSession(msg.WorkingDir)
 
 	case messages.SwitchTabMsg:
+		if msg.Workspace {
+			msg.SessionID = m.workspaceTabFocus(msg.SessionID)
+		}
 		return m.handleSwitchTab(msg.SessionID)
 
 	case messages.CloseTabMsg:
 		return m.handleCloseTab(msg.SessionID)
+
+	case messages.CloseWorkspaceMsg:
+		return m.handleCloseWorkspace(msg.SessionID)
+
+	case workspaceCloseConfirmedMsg:
+		return m.confirmCloseWorkspace(msg.request)
 
 	case messages.StopSubagentSubtreeMsg:
 		return m, m.stopSubagentSubtree(msg.NodeID)
@@ -1349,8 +1407,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.openTreeAttention()
 
 	case messages.ReorderTabMsg:
-		m.handleReorderTab(msg)
-		return m, nil
+		tabCmd := m.handleReorderTab(msg)
+		return m, tabCmd
 
 	case messages.ToggleSidebarMsg:
 		if m.panesEnabled() {
@@ -1486,6 +1544,9 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 
 	case tea.PasteMsg:
+		if m.reviewCapturing() {
+			return m, m.reviewModel().HandlePaste(msg)
+		}
 		if m.dialogMgr.Open() {
 			return m.forwardDialog(msg)
 		}
@@ -1532,7 +1593,16 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, quit
 
 	case dialog.CloseRootWithSubagentsConfirmedMsg:
-		return m.closeTab(msg.SessionID)
+		var rememberCmd tea.Cmd
+		if msg.RememberChoice {
+			rememberCmd = m.rememberCloseTabChoice(messages.CloseTabYes)
+		}
+		model, closeCmd := m.closeTab(msg.SessionID)
+		return model, tea.Batch(rememberCmd, closeCmd)
+
+	case dialog.RememberCloseTabNoMsg:
+		cmd := m.rememberCloseTabChoice(messages.CloseTabNo)
+		return m, cmd
 
 	case messages.InteractionResponseMsg:
 		return m.handleInteractionResponse(msg)
@@ -1818,7 +1888,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planExportResultMsg:
 		return m.handlePlanExportResult(msg)
 
-	case dialog.PlanBrowserDataMsg, dialog.PlanDetailDataMsg:
+	case dialog.PlanBrowserDataMsg, dialog.PlanDetailDataMsg, dialog.SessionBrowserLoadedMsg:
 		return m.forwardDialog(msg)
 
 	case messages.RestartToolsetMsg:
@@ -2239,30 +2309,27 @@ func (m *appModel) handleWorkingStateChanged(_ messages.WorkingStateChangedMsg) 
 	return m, tea.Batch(cmds...)
 }
 
-// handleOpenSessionBrowser opens the session browser dialog.
+// handleOpenSessionBrowser opens the session browser immediately and loads its metadata asynchronously.
 func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
-	var sessions []session.Summary
+	var loader dialog.SessionSummaryLoader
 	if catalog, ok := m.application.SessionRuntime().(runtime.SessionCatalog); ok {
-		rows, err := catalog.ListSessions(m.ctx())
-		if err != nil {
-			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
-		}
-		for _, row := range rows {
-			sessions = append(sessions, session.Summary{ID: row.SessionID, Title: row.Title, CreatedAt: row.CreatedAt, Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir})
+		loader = func(ctx context.Context) ([]session.Summary, error) {
+			rows, err := catalog.ListSessions(ctx)
+			if err != nil {
+				return nil, err
+			}
+			sessions := make([]session.Summary, 0, len(rows))
+			for _, row := range rows {
+				sessions = append(sessions, session.Summary{ID: row.SessionID, Title: row.Title, CreatedAt: row.CreatedAt, Starred: row.Starred, NumMessages: row.NumMessages, Cost: row.Cost, WorkingDir: row.WorkingDir})
+			}
+			return sessions, nil
 		}
 	} else {
 		store := m.application.SessionStore()
 		if store == nil {
 			return m, notification.InfoCmd("No session store configured")
 		}
-		var err error
-		sessions, err = store.GetSessionSummaries(m.ctx())
-		if err != nil {
-			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
-		}
-	}
-	if len(sessions) == 0 {
-		return m, notification.InfoCmd("No previous sessions found")
+		loader = store.GetSessionSummaries
 	}
 
 	// Resolve the active workspace so the browser can group sessions started
@@ -2277,7 +2344,7 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 	}
 
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSessionBrowserDialog(sessions, workspaceDir),
+		Model: dialog.NewLoadingSessionBrowserDialog(m.ctx(), loader, workspaceDir),
 	})
 }
 
@@ -2329,6 +2396,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.persistActiveTab(newSess.ID)
+	m.persistPaneWorkspaceState()
 
 	keyboardCmd := m.reapplyKeyboardEnhancements()
 
@@ -2532,6 +2600,13 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		// parent is itself a subagent). Open an attached tab for it so session
 		// links always work.
 		if active := m.supervisor.ActiveRunner(); active != nil && active.App != nil {
+			// A remote child observes descendants, not necessarily its parent.
+			if attached := active.App.AttachedSubagent(); attached != nil && attached.ParentSessionID != "" && attached.ParentSessionID == sessionID {
+				if tabID := m.findTabByPersistedID(sessionID); tabID != "" {
+					return m.handleSwitchTab(tabID)
+				}
+				return m, m.beginSubagentOpening("", sessionID, "", attached.ParentAgent)
+			}
 			if _, ok := active.App.ResolveSubagentTarget(sessionID); ok {
 				return m.handleOpenSubagent(messages.OpenSubagentMsg{NodeID: sessionID})
 			}
@@ -2604,13 +2679,15 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 
 	keyboardCmd := m.reapplyKeyboardEnhancements()
 	m.persistActiveTab(m.persistedSessionID(sessionID))
+	m.persistPaneWorkspaceState()
+	workspaceTabCmd := m.refreshWorkspaceTabs()
 
 	// Sync editor working state and reset working spinner.
 	m.editor.SetWorking(m.chatPage.IsWorking())
 	m.workingSpinner.Stop()
 	m.workingSpinner = spinner.NewWithStyleProvider(m.ar, spinner.ModeSpinnerOnly, func() lipgloss.Style { return styles.SpinnerDotsHighlightStyle })
 
-	cmds := []tea.Cmd{responseClearCmd, sidebarCmd, keyboardCmd, chat.SetSidebarPresentationActive(m.chatPage, true)}
+	cmds := []tea.Cmd{workspaceTabCmd, responseClearCmd, sidebarCmd, keyboardCmd, m.ensurePaneWorkspaceComponents(), chat.SetSidebarPresentationActive(m.chatPage, true)}
 
 	if !pageExists || !editorExists {
 		if !pageExists {
@@ -2786,19 +2863,44 @@ func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) t
 }
 
 // handleReorderTab moves a tab from one position to another.
-func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) {
-	m.supervisor.ReorderTab(msg.FromIdx, msg.ToIdx)
-
-	if m.tuiStore != nil {
+func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) tea.Cmd {
+	w := &m.paneWorkspaces
+	if msg.FromIdx < 0 || msg.FromIdx >= len(w.order) || msg.ToIdx < 0 || msg.ToIdx >= len(w.order) || msg.FromIdx == msg.ToIdx {
+		return nil
+	}
+	owner := w.order[msg.FromIdx]
+	w.order = slices.Delete(w.order, msg.FromIdx, msg.FromIdx+1)
+	w.order = slices.Insert(w.order, msg.ToIdx, owner)
+	tabCmd := m.refreshWorkspaceTabs()
+	m.viewCacheValid = false
+	// Keep supervisor order grouped too: route guards still use its identities.
+	var routes []string
+	for _, workspace := range w.order {
+		routes = append(routes, w.members(workspace)...)
+	}
+	for to, route := range routes {
 		tabs, _ := m.supervisor.GetTabs()
-		ids := make([]string, len(tabs))
-		for i, tab := range tabs {
-			ids[i] = m.persistedSessionID(tab.SessionID)
+		for from, tab := range tabs {
+			if tab.SessionID == route {
+				m.supervisor.ReorderTab(from, to)
+				break
+			}
+		}
+	}
+	// Keep session restoration ordered while persisting workspace topology.
+	if m.tuiStore != nil {
+		var ids []string
+		for _, workspace := range w.order {
+			for _, route := range w.members(workspace) {
+				ids = append(ids, m.persistedSessionID(route))
+			}
 		}
 		if err := m.tuiStore.ReorderTab(m.ctx(), ids); err != nil {
 			slog.Warn("Failed to persist tab reorder", "error", err)
 		}
+		m.persistPaneWorkspaceState()
 	}
+	return tabCmd
 }
 
 // descendantAttachedTabs follows session ancestry, not shared runtime identity.
@@ -2859,7 +2961,6 @@ func (m *appModel) descendantAttachedTabs(sessionID string) []string {
 	return descendants
 }
 
-// handleCloseTab confirms detaching a tab with running or visible descendants.
 func (m *appModel) requestExitConfirmation() (tea.Model, tea.Cmd) {
 	if m.dialogMgr.Closing() || m.dialogMgr.TopIsExitConfirmation() {
 		return m, nil
@@ -2879,6 +2980,12 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 		return m.requestExitConfirmation()
 	}
 	if m.tabHasRunningSubagents(sessionID) || len(m.descendantAttachedTabs(sessionID)) > 0 {
+		switch m.closeTabChoice {
+		case messages.CloseTabYes:
+			return m.closeTab(sessionID)
+		case messages.CloseTabNo:
+			return m, notification.InfoCmd("Tab kept open. Change Close tab choice in Settings > Behavior to close it.")
+		}
 		return m, core.CmdHandler(dialog.OpenDialogMsg{
 			Model: dialog.NewCloseRootWithSubagentsDialog(sessionID),
 		})
@@ -2905,6 +3012,10 @@ func (m *appModel) tabHasRunningSubagents(sessionID string) bool {
 }
 
 func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
+	return m.closeTabView(sessionID, true)
+}
+
+func (m *appModel) closeTabView(sessionID string, selectNext bool) (tea.Model, tea.Cmd) {
 	if g := m.paneGesture; g == nil || !g.focusedSource || g.reorder || g.layout.Contains(sessionID) {
 		m.cancelPaneGesture()
 	}
@@ -2926,6 +3037,7 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	// Compute persisted session-store ID *before* closing (runner goes away).
 	persistedID := m.persistedSessionID(sessionID)
 	delete(m.contextUsage, persistedID)
+	delete(m.contextUsageReady, persistedID)
 	delete(m.paneOutcomes, persistedID)
 	delete(m.majorEventWater, persistedID)
 	delete(m.paneDimCache, sessionID)
@@ -2934,6 +3046,9 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.paneRenderCache.parts, "title:"+sessionID)
 
 	nextActiveID := m.supervisor.CloseSessionAsync(sessionID)
+	if wasActive && m.paneWorkspaces.active != nil {
+		nextActiveID = m.paneWorkspaces.active.focus
+	}
 
 	// Clean up per-session state
 	m.disposeSessionComponents(sessionID)
@@ -2951,6 +3066,11 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 			slog.ErrorContext(ctx, "Failed to remove tab from store", "error", err)
 			cmds = append(cmds, notification.ErrorCmd(fmt.Sprintf("Failed to remove tab from tui state db: %v", err)))
 		}
+		m.persistPaneWorkspaceState()
+	}
+
+	if !selectNext {
+		return m, tea.Batch(cmds...)
 	}
 
 	// If we closed all tabs, spawn a new one reusing the previous working dir.
@@ -2977,6 +3097,7 @@ func (m *appModel) closeTab(sessionID string) (tea.Model, tea.Cmd) {
 	if wasTiled || m.panesEnabled() {
 		cmds = append(cmds, m.resizeAll())
 	}
+	cmds = append(cmds, m.refreshWorkspaceTabs())
 	return m, tea.Batch(cmds...)
 }
 
@@ -3030,6 +3151,32 @@ func (m *appModel) storeContextUsage(sessionID, agentName string, usage runtime.
 	m.contextUsage[sessionID][agentName] = usage
 }
 
+func (m *appModel) setContextUsageReady(sessionID, agentName string, ready bool) {
+	if m.contextUsageReady == nil {
+		m.contextUsageReady = make(map[string]map[string]bool)
+	}
+	if m.contextUsageReady[sessionID] == nil {
+		m.contextUsageReady[sessionID] = make(map[string]bool)
+	}
+	m.contextUsageReady[sessionID][agentName] = ready
+}
+
+func (m *appModel) activeContextUsageReady() bool {
+	if m.application == nil || m.application.Session() == nil || m.sessionState == nil {
+		return false
+	}
+	sessionID, agentName := m.application.Session().ID, m.sessionState.CurrentAgentName()
+	return m.contextUsageReady[sessionID][agentName]
+}
+
+func sessionHasUsage(sess *session.Session) bool {
+	if sess == nil {
+		return false
+	}
+	input, output, cost := sess.TokensAndCost()
+	return input != 0 || output != 0 || cost != 0 || sess.TotalCost() != 0
+}
+
 func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session) {
 	switch event := event.(type) {
 	case *runtime.TokenUsageEvent:
@@ -3045,6 +3192,9 @@ func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session)
 				usage.ContextLimit = previous.ContextLimit
 			}
 			m.storeContextUsage(event.SessionID, event.AgentName, usage)
+			if event.AgentName != "" {
+				m.setContextUsageReady(event.SessionID, event.AgentName, true)
+			}
 		}
 	case *runtime.AgentInfoEvent:
 		if sess == nil {
@@ -3054,6 +3204,9 @@ func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session)
 		if !known {
 			usage.InputTokens, usage.OutputTokens = sess.Usage()
 			usage.ContextLength = usage.InputTokens + usage.OutputTokens
+		}
+		if sessionHasUsage(sess) {
+			m.setContextUsageReady(sess.ID, event.AgentName, true)
 		}
 		if event.ContextLimit > 0 {
 			usage.ContextLimit = event.ContextLimit
@@ -3066,10 +3219,14 @@ func (m *appModel) trackContextUsage(event runtime.Event, sess *session.Session)
 		}
 		usage := runtime.Usage{ContextLimit: m.contextUsage[sessionID][agentName].ContextLimit}
 		delete(m.contextUsage, sessionID)
+		delete(m.contextUsageReady, sessionID)
 		if restored := event.Snapshot.Session; restored != nil {
 			usage.InputTokens, usage.OutputTokens = restored.Usage()
 			usage.ContextLength = usage.InputTokens + usage.OutputTokens
 			m.storeContextUsage(sessionID, agentName, usage)
+			if sessionHasUsage(restored) {
+				m.setContextUsageReady(sessionID, agentName, true)
+			}
 		}
 		if m.contextBar != nil && sessionID == m.contextSessionID {
 			m.contextBar.Cancel()
@@ -3094,9 +3251,17 @@ func (m *appModel) syncContextBar() tea.Cmd {
 	m.ensureContextBar()
 	sessionID, agentName := m.application.Session().ID, m.sessionState.CurrentAgentName()
 	usage, known := m.contextUsage[sessionID][agentName]
-	if sessionID != m.contextSessionID || agentName != m.contextAgentName {
-		initial := m.contextSessionID == ""
+	changedSession := sessionID != m.contextSessionID || agentName != m.contextAgentName
+	initial := m.contextSessionID == ""
+	if changedSession {
 		m.contextSessionID, m.contextAgentName = sessionID, agentName
+	}
+	if !m.contextUsageReady[sessionID][agentName] {
+		m.contextBar.Cancel()
+		m.contextBar.SetContextUsageDirect(0, 0)
+		return nil
+	}
+	if changedSession {
 		if initial || !known || usage.ContextLimit <= 0 {
 			m.contextBar.Cancel()
 			m.contextBar.SetContextUsageDirect(usage.ContextLength, usage.ContextLimit)
@@ -3161,7 +3326,9 @@ func (m *appModel) resizeAll() tea.Cmd {
 		remaining -= m.separatorHeight
 		m.tabsHeight = min(m.tabBar.Height(), remaining)
 		remaining -= m.tabsHeight
-		m.contextHeight = min(contextbar.Height, remaining)
+		if m.activeContextUsageReady() {
+			m.contextHeight = min(contextbar.Height, remaining)
+		}
 	}
 	chromeHeight := m.separatorHeight + m.tabsHeight + m.contextHeight + m.messageBarHeight()
 	if viewport, ok := m.editor.(editor.ViewportLayout); ok {
@@ -3225,7 +3392,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	m.contentHeight = max(0, height-chromeHeight-editorRenderedHeight)
 	// Both shells host canonical dialogs and completions; lean only omits
 	// tab/tour geometry, not nonvisual command functionality.
-	cmds = append(cmds, m.resizePanes(), m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
+	cmds = append(cmds, m.resizePanes(), m.layoutGitReview(), m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
 
 	if !m.leanMode {
 		m.tour.SetSize(width, height, m.contentHeight)
@@ -3318,6 +3485,12 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	if m.chatPage.IsInlineEditing() || m.chatPage.IsTitleEditing() {
 		return m.forwardChat(msg)
 	}
+	if handled, cmd := m.handleReviewKey(msg); handled {
+		return m, cmd
+	}
+	if handled, cmd := m.handleGitSidebarKey(msg); handled {
+		return m, cmd
+	}
 
 	if handled, cmd := m.panelKey(msg); handled {
 		return m, cmd
@@ -3334,7 +3507,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		case "shift+tab":
 			m.messageBar.SetFocused(false)
 			m.focusedPanel = PanelContent
-			return m, m.chatPage.FocusMessages()
+			return m, m.focusContent()
 		case "left", "right", "enter", "space":
 			return m, m.messageBar.Update(msg)
 		}
@@ -3398,7 +3571,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		case "tab":
 			m.editor.SetContextBarFocused(false)
 			m.focusedPanel = PanelContent
-			return m, m.chatPage.FocusMessages()
+			return m, m.focusContent()
 		default:
 			m.editor.SetContextBarFocused(false)
 			return m, tea.Batch(m.editor.Focus(), m.updateEditorCmd(msg))
@@ -3528,8 +3701,12 @@ func (m *appModel) switchFocus() (tea.Model, tea.Cmd) {
 		}
 		m.focusedPanel = PanelContent
 		m.editor.Blur()
-		return m, m.chatPage.FocusMessages()
+		return m, m.focusContent()
 	case PanelContent:
+		if page, ok := m.gitPage(m.paneFocus()); ok && m.gitSidebarFocusable() {
+			m.focusGitSidebar(page)
+			return m, nil
+		}
 		if m.messageBar != nil && m.messageBar.HasActions() {
 			m.messageBar.SetFocused(true)
 			m.focusedPanel = PanelMessageBar
@@ -3648,6 +3825,11 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		}
 		return m.forwardDialog(msg)
 	}
+	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		cmd := m.reviewHandleMouse(msg)
+		return m, cmd
+	}
+	m.blurReviewForChat(msg)
 
 	if msg.Button == tea.MouseLeft && !m.chatPage.IsSelecting() && m.composerResizeHit(msg.X, msg.Y) {
 		m.isDragging, m.isHoveringHandle = true, true
@@ -3780,6 +3962,11 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 		dialogCmd := m.updateDialogCmd(msg)
 		return m, tea.Batch(hoverCmd, dialogCmd)
 	}
+	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		cmd := m.reviewHandleMouse(msg)
+		return m, cmd
+	}
+	m.blurReviewForChat(msg)
 	var cmds []tea.Cmd
 	batchWith := func(cmd tea.Cmd) tea.Cmd {
 		if cmd != nil {
@@ -3893,6 +4080,11 @@ func (m *appModel) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.C
 	if m.dialogMgr.Open() {
 		return m.forwardDialog(msg)
 	}
+	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		cmd := m.reviewHandleMouse(msg)
+		return m, cmd
+	}
+	m.blurReviewForChat(msg)
 
 	// Finish a text-selection drag in the chat no matter where the button
 	// was released; this is what triggers the selection copy.
@@ -3922,9 +4114,16 @@ func (m *appModel) handleWheelCoalesced(msg messages.WheelCoalescedMsg) (tea.Mod
 	if msg.Delta == 0 {
 		return m, nil
 	}
-
 	if m.dialogMgr.Open() {
 		return m.forwardDialog(msg)
+	}
+	if m.reviewOwnsPointer(msg.X, msg.Y) {
+		button := tea.MouseWheelDown
+		if msg.Delta < 0 {
+			button = tea.MouseWheelUp
+		}
+		cmd := m.reviewHandleMouse(tea.MouseWheelMsg{X: msg.X, Y: msg.Y, Button: button})
+		return m, cmd
 	}
 
 	region := m.hitTestRegion(msg.Y)
@@ -4146,6 +4345,8 @@ func (m *appModel) composeView() tea.View {
 	// Content area (messages + sidebar) -- swaps per tab
 	var contentView string
 	switch {
+	case m.reviewSurface() != nil:
+		contentView = m.reviewContentView()
 	case m.opening != nil:
 		contentView = m.openingContent()
 	case m.panePresentationEnabled():
@@ -4177,7 +4378,7 @@ func (m *appModel) composeView() tea.View {
 			}
 		}
 		if m.notification.Open() {
-			layers = append(layers, m.notification.GetLayer())
+			layers = append(layers, m.notification.GetLayers()...)
 		}
 		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {
 			layers = append(layers, m.completions.GetLayers()...)
@@ -4254,7 +4455,7 @@ func (m *appModel) composeView() tea.View {
 		}
 
 		if m.notification.Open() {
-			allLayers = append(allLayers, m.notification.GetLayer())
+			allLayers = append(allLayers, m.notification.GetLayers()...)
 		}
 
 		if m.completions.Open() && !m.dialogMgr.Open() && m.opening == nil {

@@ -283,7 +283,8 @@ func TestSQLiteContentionSteeringContinuationKeepsIdentity(t *testing.T) {
 		r.sessionDrivers.drivers[sess.ID] = d
 		d.generation, d.activeRequestID = 1, "accepted"
 		d.phase = sessionRunning
-		d.steering = []QueuedMessage{{RequestID: "steer", Content: "guidance"}}
+		d.pending = []QueuedMessage{{RequestID: "steer", Content: "guidance", InputMode: "steer"}}
+		d.refreshSteeringLocked()
 		store := session.NewInMemorySessionStore()
 		require.NoError(t, store.AddSession(t.Context(), sess))
 		p := newPersistenceObserver(store)
@@ -319,8 +320,8 @@ func TestSQLiteContentionSteeringContinuationKeepsIdentity(t *testing.T) {
 		assert.Equal(t, int32(1), writes.Load())
 		d.mu.Lock()
 		assert.Equal(t, "accepted", d.activeRequestID)
-		require.Len(t, d.steering, 1)
-		assert.Equal(t, "steer", d.steering[0].RequestID)
+		require.Len(t, d.pending, 1)
+		assert.Equal(t, "steer", d.pending[0].RequestID)
 		d.mu.Unlock()
 		assert.Empty(t, canonicalSettlements(canonicalReplay(d)))
 	})

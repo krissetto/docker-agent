@@ -127,7 +127,7 @@ func (r *LocalRuntime) ContextBreakdown(ctx context.Context, sess *session.Sessi
 	if sess == nil {
 		return nil, errors.New("no active session")
 	}
-	a := r.resolveSessionAgent(sess)
+	a := r.resolveSessionAgentContext(ctx, sess)
 	if a == nil {
 		return nil, errors.New("no active agent")
 	}

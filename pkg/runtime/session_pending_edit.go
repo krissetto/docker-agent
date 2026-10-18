@@ -39,10 +39,6 @@ func (h *sessionHandle) reservePendingMessageEdit(edit *PendingMessageEdit, snap
 	}
 	queue := &d.pending
 	index := slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == edit.TurnID })
-	if index < 0 {
-		queue = &d.steering
-		index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == edit.TurnID })
-	}
 	if index < 0 || (*queue)[index].Retry || (*queue)[index].InputOrigin != session.InputOriginUser {
 		return sessionIOReservation{}, stale()
 	}

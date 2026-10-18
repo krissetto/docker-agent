@@ -429,6 +429,8 @@ type Session struct {
 	// instead of reading from the shared runtime currentAgent field. This is
 	// required for background agent tasks where multiple sessions may run
 	// concurrently on different agents.
+	// AgentID is the stable identity for the currently active agent; empty is legacy.
+	AgentID   string `json:"-"`
 	AgentName string `json:"-"`
 
 	// ParentID indicates this is a sub-session created by task transfer.

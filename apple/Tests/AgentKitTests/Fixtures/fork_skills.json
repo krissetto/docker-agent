@@ -1,0 +1,22 @@
+[
+  {
+    "Name": "review-plan",
+    "Description": "Produce a review plan",
+    "FilePath": "fixtures/skills/review-plan/SKILL.md",
+    "BaseDir": "fixtures/skills/review-plan",
+    "Files": [
+      "SKILL.md"
+    ],
+    "Local": true,
+    "License": "",
+    "Compatibility": "",
+    "Metadata": null,
+    "AllowedTools": [
+      "read_file"
+    ],
+    "Toolsets": null,
+    "Context": "fork",
+    "Model": "demo/model",
+    "InlineContent": ""
+  }
+]

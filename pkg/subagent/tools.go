@@ -21,6 +21,7 @@ const (
 	ToolSendMessage   = "send_message"
 	ToolReadSubagent  = "read_subagent"
 	ToolStopSubagent  = "stop_subagent"
+	ToolListAgents    = "list_agents"
 )
 
 // AllowedSubagent is a subagent a node may spawn, as seen by the model.
@@ -80,6 +81,12 @@ type ReadArgs struct {
 	Full         bool   `json:"full,omitempty" jsonschema:"Return the subagent's full transcript instead of just its latest assistant response."`
 }
 
+// ListAgentsArgs are the arguments for list_agents.
+type ListAgentsArgs struct {
+	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum number of direct subagents to return (default 10, maximum 50)."`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Continue after this direct subagent node id from the previous page."`
+}
+
 // StopArgs are the arguments for stop_subagent.
 type StopArgs struct {
 	SubagentID string `json:"subagent_id" jsonschema:"The id of one of your own direct children to stop."`
@@ -119,6 +126,13 @@ func Definitions() []tools.Tool {
 			Description: "Permanently stop one of your own direct children you no longer need. Cancels its current work, stops its own subagents, and rejects future messages. Its transcript stays readable.",
 			Parameters:  tools.MustSchemaFor[StopArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Stop Subagent"},
+		},
+		{
+			Name:        ToolListAgents,
+			Category:    "subagent",
+			Description: "List your current agent identity, parent relationship, and a bounded page of your existing direct subagent instances. Results use canonical node ids, names, and state; use the returned next_cursor to continue. This does not list configured agents or spawn choices.",
+			Parameters:  tools.MustSchemaFor[ListAgentsArgs](),
+			Annotations: tools.ToolAnnotations{Title: "List Agents", ReadOnlyHint: true},
 		},
 	}
 }

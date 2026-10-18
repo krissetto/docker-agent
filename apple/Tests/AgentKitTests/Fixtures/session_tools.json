@@ -1,0 +1,35 @@
+{
+  "tools": [
+    {
+      "name": "read_file",
+      "category": "filesystem",
+      "description": "Read a workspace file",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true
+      },
+      "outputSchema": null
+    }
+  ],
+  "statuses": [
+    {
+      "name": "filesystem",
+      "kind": "filesystem",
+      "description": "Workspace files",
+      "state": 2,
+      "restart_count": 0,
+      "restartable": false
+    }
+  ]
+}

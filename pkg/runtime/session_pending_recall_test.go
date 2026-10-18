@@ -52,7 +52,6 @@ func TestPendingRecallPendingAndSteering(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, ok)
 			assert.Empty(t, d.pending)
-			assert.Empty(t, d.steering)
 			assert.False(t, d.interruptRequested)
 			assert.Empty(t, d.sess.MessagesSnapshot())
 			stored, err := d.r.sessionStore.GetSession(t.Context(), h.sessionID)
@@ -106,7 +105,7 @@ func TestPendingRecallFailureLeavesAcceptedInput(t *testing.T) {
 			if kind == "stored_child" {
 				require.NoError(t, err)
 				require.True(t, ok)
-				require.Empty(t, h.driver.steering)
+				require.Empty(t, h.driver.pending)
 				return
 			}
 			require.Error(t, err)
@@ -116,7 +115,7 @@ func TestPendingRecallFailureLeavesAcceptedInput(t *testing.T) {
 				require.ErrorAs(t, err, &sessionErr)
 				assert.Equal(t, SessionErrorUnsupported, sessionErr.Kind)
 			}
-			require.Len(t, h.driver.steering, 1)
+			require.Len(t, h.driver.pending, 1)
 			assert.True(t, h.driver.interruptRequested)
 			items := h.driver.sess.MessagesSnapshot()
 			require.Len(t, items, 1)
@@ -167,9 +166,7 @@ func TestPendingRecallSerializesWithPromotion(t *testing.T) {
 			d := h.driver
 			turn, err := h.Steer(t.Context(), TurnInput{Content: "race"})
 			require.NoError(t, err)
-			if !steering {
-				d.pending, d.steering = d.steering, nil
-			}
+
 			var recalled, promoted bool
 			var recallErr, promotionErr error
 			var wg sync.WaitGroup

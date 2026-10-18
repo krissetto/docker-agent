@@ -195,53 +195,140 @@ type ModelSwitcherConfig struct {
 // one is configured and fall back to the agent's configured models. It is the
 // single resolution rule shared by session creation, lazy initialization and
 // restore, so all three publish identical bindings.
-func (r *LocalRuntime) resolveSessionModelBinding(ctx context.Context, sess *session.Session, modelRef string) (string, []provider.Provider, error) {
-	if modelRef == "" {
-		modelRef = sess.AgentModelOverrides[sess.AgentName]
-	}
-	if modelRef != "" && r.SupportsModelSwitching() {
-		providers, err := r.resolveModelProviders(ctx, sess.AgentName, modelRef)
+// modelSwitcherConfigForContext selects immutable model configuration from the
+// operation's pinned team revision. Revision-enabled runtimes fail closed when
+// a caller did not capture an environment; only legacy runtimes use the global
+// startup config.
+func (r *LocalRuntime) modelSwitcherConfigForContext(ctx context.Context) (*ModelSwitcherConfig, error) {
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		cfg, err := env.ModelSwitcherConfig()
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
-		return modelRef, providers, nil
+		return &cfg, nil
 	}
-	a, err := r.team.Agent(sess.AgentName)
-	if err != nil {
-		return "", nil, err
+	if r.teamEnvironments != nil {
+		return nil, errors.New("operation has no pinned team environment")
 	}
-	return modelRef, a.ConfiguredModels(), nil
-}
-
-func (r *LocalRuntime) resolveModelProviders(ctx context.Context, agentName, modelRef string) ([]provider.Provider, error) {
 	if r.modelSwitcherCfg == nil {
 		return nil, ErrUnsupported
 	}
+	return r.modelSwitcherCfg, nil
+}
+
+func (r *LocalRuntime) resolveModelProviders(ctx context.Context, agentName, modelRef string) ([]provider.Provider, error) {
+	cfg, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		if modelRef == "" && errors.Is(err, ErrUnsupported) {
+			return nil, err
+		}
+		return nil, err
+	}
 	if modelRef == "" {
-		a, err := r.team.Agent(agentName)
+		tm := r.team
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			tm = env.Team()
+		}
+		a, err := tm.Agent(agentName)
 		if err != nil {
 			return nil, err
 		}
 		return a.ConfiguredModels(), nil
 	}
-	if cfg, ok := r.modelSwitcherCfg.Models[modelRef]; ok && isAlloyModelConfig(cfg) {
-		return r.resolveModelRefs(ctx, cfg.Model)
+	return r.resolveModelProvidersForConfig(ctx, agentName, modelRef, cfg)
+}
+
+func (r *LocalRuntime) resolveSessionModelBinding(ctx context.Context, sess *session.Session, modelRef string) (string, []provider.Provider, error) {
+	cfg, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		if errors.Is(err, ErrUnsupported) && modelRef == "" {
+			a, teamErr := r.team.Agent(sess.AgentName)
+			if teamErr != nil {
+				return "", nil, teamErr
+			}
+			return modelRef, a.ConfiguredModels(), nil
+		}
+		return "", nil, err
+	}
+	if modelRef == "" {
+		modelRef = sess.AgentModelOverrides[sess.AgentName]
+	}
+	if modelRef == "" {
+		tm := r.team
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			tm = env.Team()
+		}
+		a, err := tm.Agent(sess.AgentName)
+		if err != nil {
+			return "", nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: "resolve_active_agent"}
+		}
+		return modelRef, a.ConfiguredModels(), nil
+	}
+	providers, err := r.resolveModelProvidersForConfig(ctx, sess.AgentName, modelRef, cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	return modelRef, providers, nil
+}
+
+func (r *LocalRuntime) resolveModelProvidersForConfig(ctx context.Context, agentName, modelRef string, cfg *ModelSwitcherConfig) ([]provider.Provider, error) {
+	if cfg == nil {
+		return nil, ErrUnsupported
+	}
+	if model, ok := cfg.Models[modelRef]; ok && isAlloyModelConfig(model) {
+		return r.resolveModelRefsWithConfig(ctx, model.Model, cfg)
 	}
 	if isInlineAlloySpec(modelRef) {
-		return r.resolveModelRefs(ctx, modelRef)
+		return r.resolveModelRefsWithConfig(ctx, modelRef, cfg)
 	}
-	p, err := r.resolveModelRef(ctx, modelRef)
+	model, ok := cfg.Models[modelRef]
+	if !ok {
+		parsed, err := latest.ParseModelRef(modelRef)
+		if err != nil {
+			return nil, err
+		}
+		model = parsed
+	} else {
+		model.Name = modelRef
+	}
+	created, err := r.createProviderFromConfigWithConfig(ctx, &model, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return []provider.Provider{p}, nil
+	return []provider.Provider{created}, nil
+}
+
+func (r *LocalRuntime) resolveModelRefsWithConfig(ctx context.Context, refs string, cfg *ModelSwitcherConfig) ([]provider.Provider, error) {
+	var out []provider.Provider
+	for ref := range strings.SplitSeq(refs, ",") {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		model, ok := cfg.Models[ref]
+		if !ok {
+			var err error
+			model, err = latest.ParseModelRef(ref)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			model.Name = ref
+		}
+		provider, err := r.createProviderFromConfigWithConfig(ctx, &model, cfg)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, provider)
+	}
+	return out, nil
 }
 
 // SupportsModelSwitching reports whether the runtime was built with a
 // [ModelSwitcherConfig], i.e. whether sessions can list and change
 // models instead of hitting the no-config empty path.
 func (r *LocalRuntime) SupportsModelSwitching() bool {
-	return r.modelSwitcherCfg != nil
+	return r.modelSwitcherCfg != nil || r.teamEnvironments != nil
 }
 
 // RefreshModelsCatalog forces a refetch of the models.dev catalog backing
@@ -258,7 +345,12 @@ func modelStoreCanRefresh(store ModelStore) bool {
 }
 
 func (r *LocalRuntime) RefreshModelsCatalog(ctx context.Context) error {
-	refresher, ok := r.modelsStore.(modelCatalogRefresher)
+	modelConfig, configErr := r.modelSwitcherConfigForContext(ctx)
+	if configErr != nil {
+		return configErr
+	}
+	store := r.modelsStoreForConfig(modelConfig)
+	refresher, ok := store.(modelCatalogRefresher)
 	if !ok {
 		return ErrUnsupported
 	}
@@ -307,11 +399,14 @@ func (r *LocalRuntime) resolveThinkingLevelsForModels(ctx context.Context, model
 // /model change or scoped override and validate against one model while
 // applying to another).
 func (r *LocalRuntime) resolveAgentThinkingLevels(ctx context.Context, agentName string) ([]effort.Level, effort.Level, error) {
-	if r.modelSwitcherCfg == nil {
-		return nil, "", ErrUnsupported
+	if _, err := r.modelSwitcherConfigForContext(ctx); err != nil {
+		return nil, "", err
 	}
-
-	a, err := r.team.Agent(agentName)
+	tm := r.team
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		tm = env.Team()
+	}
+	a, err := tm.Agent(agentName)
 	if err != nil {
 		return nil, "", fmt.Errorf("agent not found: %w", err)
 	}
@@ -353,8 +448,12 @@ func (r *LocalRuntime) modelSupportsThinking(ctx context.Context, cfg *latest.Mo
 	if modelinfo.IsBedrockClaudeID(cfg.Model) || strings.HasPrefix(model, "claude-") {
 		return true
 	}
-	if r.modelsStore != nil {
-		if m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(cfg.Provider, cfg.Model)); err == nil && m != nil {
+	store := r.modelsStore
+	if modelConfig, err := r.modelSwitcherConfigForContext(ctx); err == nil {
+		store = r.modelsStoreForConfig(modelConfig)
+	}
+	if store != nil {
+		if m, err := store.GetModel(ctx, modelsdev.NewID(cfg.Provider, cfg.Model)); err == nil && m != nil {
 			return modelinfo.IsClaudeFamily(m.Family)
 		}
 	}
@@ -382,10 +481,17 @@ func currentThinkingLevel(cfg *latest.ModelConfig) effort.Level {
 // (see WithAgentModel); user-facing model changes are session-scoped and go
 // through the session instead.
 func (r *LocalRuntime) setAgentModelInternal(ctx context.Context, agentName, modelRef string) (agent.ModelOverrideSnapshot, error) {
-	if r.modelSwitcherCfg == nil {
-		return agent.ModelOverrideSnapshot{}, fmt.Errorf("model switching not configured for this runtime: %w", ErrUnsupported)
+	if r.teamEnvironments != nil {
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("runtime-global model overrides are unavailable in revision-bound mode: %w", ErrUnsupported)
 	}
-	a, err := r.team.Agent(agentName)
+	if _, err := r.modelSwitcherConfigForContext(ctx); err != nil {
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("model switching not configured for this operation: %w", err)
+	}
+	tm := r.team
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		tm = env.Team()
+	}
+	a, err := tm.Agent(agentName)
 	if err != nil {
 		return agent.ModelOverrideSnapshot{}, fmt.Errorf("agent not found: %w", err)
 	}
@@ -417,7 +523,16 @@ func (r *LocalRuntime) setAgentModelInternal(ctx context.Context, agentName, mod
 // without nil-checking.
 func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef string) (restore func(), err error) {
 	noop := func() {}
-	a, err := r.team.Agent(agentName)
+	if r.teamEnvironments != nil {
+		return noop, fmt.Errorf("runtime-global model overrides are unavailable in revision-bound mode: %w", ErrUnsupported)
+	}
+	tm := r.team
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		tm = env.Team()
+	} else if r.teamEnvironments != nil {
+		return noop, errors.New("operation has no pinned team environment")
+	}
+	a, err := tm.Agent(agentName)
 	if err != nil {
 		return noop, fmt.Errorf("agent not found: %w", err)
 	}
@@ -433,17 +548,18 @@ func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef s
 // The reference can be a named model from the config or an inline
 // "provider/model" spec (e.g. "openai/gpt-4o-mini").
 func (r *LocalRuntime) resolveModelRef(ctx context.Context, modelRef string) (provider.Provider, error) {
-	if r.modelSwitcherCfg == nil {
-		return nil, errors.New("model switching not configured for this runtime")
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("model switching not configured for this operation: %w", err)
 	}
 
 	// Try named model from config first.
-	if modelCfg, exists := r.modelSwitcherCfg.Models[modelRef]; exists {
+	if modelCfg, exists := config.Models[modelRef]; exists {
 		if isAlloyModelConfig(modelCfg) {
 			return nil, fmt.Errorf("model reference %q is an alloy (multi-model) config and cannot be used as a single model override", modelRef)
 		}
 		modelCfg.Name = modelRef
-		return r.createProviderFromConfig(ctx, &modelCfg)
+		return r.createProviderFromConfigWithConfig(ctx, &modelCfg, config)
 	}
 
 	// Try inline "provider/model" format.
@@ -452,7 +568,7 @@ func (r *LocalRuntime) resolveModelRef(ctx context.Context, modelRef string) (pr
 		return nil, fmt.Errorf("invalid model reference %q: expected a model name from config or 'provider/model' format", modelRef)
 	}
 
-	return r.createProviderFromConfig(ctx, &inlineCfg)
+	return r.createProviderFromConfigWithConfig(ctx, &inlineCfg, config)
 }
 
 // isAlloyModelConfig checks if a model config is an alloy model (multiple models).
@@ -486,6 +602,10 @@ func isInlineAlloySpec(modelRef string) bool {
 // providers. Each reference is first looked up in the config by name; if not
 // found it is parsed as an inline "provider/model" spec.
 func (r *LocalRuntime) resolveModelRefs(ctx context.Context, commaSeparatedRefs string) ([]provider.Provider, error) {
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var providers []provider.Provider
 
 	for ref := range strings.SplitSeq(commaSeparatedRefs, ",") {
@@ -495,9 +615,9 @@ func (r *LocalRuntime) resolveModelRefs(ctx context.Context, commaSeparatedRefs 
 		}
 
 		// Check if this ref exists as a named model in config
-		if modelCfg, exists := r.modelSwitcherCfg.Models[ref]; exists {
+		if modelCfg, exists := config.Models[ref]; exists {
 			modelCfg.Name = ref
-			prov, err := r.createProviderFromConfig(ctx, &modelCfg)
+			prov, err := r.createProviderFromConfigWithConfig(ctx, &modelCfg, config)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create provider for %q: %w", ref, err)
 			}
@@ -511,7 +631,7 @@ func (r *LocalRuntime) resolveModelRefs(ctx context.Context, commaSeparatedRefs 
 			return nil, fmt.Errorf("invalid model reference %q: expected 'provider/model' format or a named model from config", ref)
 		}
 
-		prov, err := r.createProviderFromConfig(ctx, &inlineCfg)
+		prov, err := r.createProviderFromConfigWithConfig(ctx, &inlineCfg, config)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create provider for %q: %w", ref, err)
 		}
@@ -527,22 +647,23 @@ func (r *LocalRuntime) resolveModelRefs(ctx context.Context, commaSeparatedRefs 
 
 func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []ModelChoice {
 	start := time.Now()
-	if r.modelSwitcherCfg == nil {
+	modelConfig, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
 		slog.DebugContext(ctx, "Runtime available models skipped; model switching not configured", "duration", time.Since(start))
 		return nil
 	}
 
 	// Get the current agent's default model reference
 	currentAgentDefault := ""
-	if r.modelSwitcherCfg.AgentDefaultModels != nil {
-		currentAgentDefault = r.modelSwitcherCfg.AgentDefaultModels[agentName]
+	if modelConfig.AgentDefaultModels != nil {
+		currentAgentDefault = modelConfig.AgentDefaultModels[agentName]
 	}
 
 	var choices []ModelChoice
 
 	configuredStart := time.Now()
 	// Add all configured models, marking the current agent's default
-	for name, cfg := range r.modelSwitcherCfg.Models {
+	for name, cfg := range modelConfig.Models {
 		choice := ModelChoice{
 			Name:      name,
 			Ref:       name,
@@ -554,7 +675,7 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 		}
 		// Best-effort lookup of pricing / context information from models.dev.
 		if cfg.Provider != "" && cfg.Model != "" {
-			r.populateCatalogMetadata(ctx, &choice, cfg.Provider, cfg.Model)
+			r.populateCatalogMetadataForStore(r.modelsStoreForConfig(modelConfig), &choice, cfg.Provider, cfg.Model)
 		}
 		// A config-declared price table overrides the catalogue's.
 		if cfg.Cost != nil {
@@ -572,9 +693,9 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 	// gateway, merged with the explicitly configured ones above. When the
 	// gateway doesn't expose /v1/models, fall back to the models.dev
 	// catalog filtered by available credentials.
-	if r.modelSwitcherCfg.ModelsGateway != "" {
+	if modelConfig.ModelsGateway != "" {
 		gatewayStart := time.Now()
-		gatewayChoices, ok := r.buildGatewayChoices(ctx)
+		gatewayChoices, ok := r.buildGatewayChoicesForConfig(ctx, modelConfig)
 		slog.DebugContext(ctx, "Runtime available models gateway discovery completed",
 			"duration", time.Since(gatewayStart),
 			"ok", ok,
@@ -599,7 +720,7 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 	// of the models.dev catalog, so without this a working local Model Runner
 	// would show nothing selectable in the picker.
 	dmrStart := time.Now()
-	dmrChoices := r.buildDMRChoices(ctx)
+	dmrChoices := r.buildDMRChoicesForConfig(ctx, modelConfig)
 	dmrDuration := time.Since(dmrStart)
 	choices = append(choices, dmrChoices...)
 
@@ -607,8 +728,8 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 	// A directly constructed runtime may intentionally omit a catalog store.
 	catalogStart := time.Now()
 	var catalogChoices []ModelChoice
-	if r.modelsStore != nil {
-		catalogChoices = r.buildCatalogChoices(ctx)
+	if r.modelsStoreForConfig(modelConfig) != nil {
+		catalogChoices = r.buildCatalogChoicesForConfig(ctx, modelConfig)
 	}
 	catalogDuration := time.Since(catalogStart)
 	choices = append(choices, catalogChoices...)
@@ -618,7 +739,7 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 		"configured_duration", configuredDuration,
 		"dmr_duration", dmrDuration,
 		"catalog_duration", catalogDuration,
-		"configured_models", len(r.modelSwitcherCfg.Models),
+		"configured_models", len(modelConfig.Models),
 		"dmr_models", len(dmrChoices),
 		"catalog_models", len(catalogChoices),
 		"models", len(choices),
@@ -629,9 +750,24 @@ func (r *LocalRuntime) availableModels(ctx context.Context, agentName string) []
 // buildCatalogChoices builds ModelChoice entries from the models.dev catalog,
 // filtered by supported providers and available credentials.
 func (r *LocalRuntime) buildCatalogChoices(ctx context.Context) []ModelChoice {
+	modelConfig, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil
+	}
+	return r.buildCatalogChoicesForConfig(ctx, modelConfig)
+}
+
+func (r *LocalRuntime) buildCatalogChoicesForConfig(ctx context.Context, modelConfig *ModelSwitcherConfig) []ModelChoice {
+	if modelConfig == nil {
+		return nil
+	}
 	start := time.Now()
+	store := r.modelsStoreForConfig(modelConfig)
+	if store == nil {
+		return nil
+	}
 	dbStart := time.Now()
-	db, err := r.modelsStore.GetDatabase(ctx)
+	db, err := store.GetDatabase(ctx)
 	dbDuration := time.Since(dbStart)
 	if err != nil {
 		slog.DebugContext(ctx, "Failed to get models.dev database for catalog", "duration", time.Since(start), "database_duration", dbDuration, "error", err)
@@ -640,7 +776,7 @@ func (r *LocalRuntime) buildCatalogChoices(ctx context.Context) []ModelChoice {
 
 	// Build set of existing model refs to avoid duplicates
 	existingRefs := make(map[string]bool)
-	for name, cfg := range r.modelSwitcherCfg.Models {
+	for name, cfg := range modelConfig.Models {
 		existingRefs[name] = true
 		if cfg.Provider != "" && cfg.Model != "" {
 			existingRefs[cfg.Provider+"/"+cfg.Model] = true
@@ -649,7 +785,7 @@ func (r *LocalRuntime) buildCatalogChoices(ctx context.Context) []ModelChoice {
 
 	// Check which providers the user has credentials for
 	providerStart := time.Now()
-	availableProviders := r.getAvailableProviders(ctx)
+	availableProviders := r.getAvailableProvidersForConfig(ctx, modelConfig)
 	providerDuration := time.Since(providerStart)
 	if len(availableProviders) == 0 {
 		slog.DebugContext(ctx, "No provider credentials available, skipping catalog",
@@ -740,12 +876,26 @@ func mapModelsDevProvider(providerID string) (string, bool) {
 
 // populateCatalogMetadata copies already cached models.dev metadata for a
 // provider/model pair. It never loads the store or initiates catalog I/O.
-func (r *LocalRuntime) populateCatalogMetadata(_ context.Context, choice *ModelChoice, providerID, modelID string) {
+func (r *LocalRuntime) modelsStoreForConfig(config *ModelSwitcherConfig) ModelStore {
+	if config != nil && config.ModelsStore != nil {
+		return config.ModelsStore
+	}
+	if r.teamEnvironments != nil {
+		return nil
+	}
+	return r.modelsStore
+}
+
+func (r *LocalRuntime) populateCatalogMetadataForStore(store ModelStore, choice *ModelChoice, providerID, modelID string) {
 	choice.ModelID = modelID
 	choice.ModelName = modelID
-	if m, ok := cachedModelDatabase(r.modelsStore).LookupModel(modelsdev.NewID(providerID, modelID)); ok {
+	if m, ok := cachedModelDatabase(store).LookupModel(modelsdev.NewID(providerID, modelID)); ok {
 		applyCatalogMetadata(choice, m)
 	}
+}
+
+func (r *LocalRuntime) populateCatalogMetadata(_ context.Context, choice *ModelChoice, providerID, modelID string) {
+	r.populateCatalogMetadataForStore(r.modelsStore, choice, providerID, modelID)
 }
 
 // applyCatalogMetadata copies pricing/limit/modality information from a
@@ -787,7 +937,18 @@ func isEmbeddingModel(family, name string) bool {
 // the catalog fallback still reflects the providers the user can actually
 // reach directly.
 func (r *LocalRuntime) getAvailableProviders(ctx context.Context) map[string]bool {
-	env := r.modelSwitcherCfg.EnvProvider
+	modelConfig, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil
+	}
+	return r.getAvailableProvidersForConfig(ctx, modelConfig)
+}
+
+func (r *LocalRuntime) getAvailableProvidersForConfig(ctx context.Context, modelConfig *ModelSwitcherConfig) map[string]bool {
+	if modelConfig == nil {
+		return nil
+	}
+	env := modelConfig.EnvProvider
 
 	available := config.DiscoveryAvailableProviders(ctx, env)
 
@@ -798,8 +959,8 @@ func (r *LocalRuntime) getAvailableProviders(ctx context.Context) map[string]boo
 	// (file/env are fine, gcloud/az may take seconds, IMDS endpoints may
 	// hang on non-cloud hosts). A misconfigured source surfaces as a clear
 	// error on the first request via federation.RequestOptions.
-	for _, m := range r.modelSwitcherCfg.Models {
-		if modelHasAnthropicAuth(m, r.modelSwitcherCfg.Providers) {
+	for _, m := range modelConfig.Models {
+		if modelHasAnthropicAuth(m, modelConfig.Providers) {
 			available["anthropic"] = true
 			break
 		}
@@ -824,27 +985,39 @@ func modelHasAnthropicAuth(m latest.ModelConfig, providers map[string]latest.Pro
 
 // createProviderFromConfig creates a provider from a ModelConfig using the runtime's configuration.
 func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest.ModelConfig) (provider.Provider, error) {
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.createProviderFromConfigWithConfig(ctx, cfg, config)
+}
+
+func (r *LocalRuntime) createProviderFromConfigWithConfig(ctx context.Context, cfg *latest.ModelConfig, config *ModelSwitcherConfig) (provider.Provider, error) {
+	if config == nil {
+		return nil, ErrUnsupported
+	}
+	modelsStore := r.modelsStoreForConfig(config)
 	opts := []options.Opt{
-		options.WithGateway(r.modelSwitcherCfg.ModelsGateway),
-		options.WithEncryptedConfig(r.modelSwitcherCfg.EncryptedConfig),
-		options.WithProviders(r.modelSwitcherCfg.Providers),
+		options.WithGateway(config.ModelsGateway),
+		options.WithEncryptedConfig(config.EncryptedConfig),
+		options.WithProviders(config.Providers),
 	}
 
 	// Use max_tokens from config if specified, otherwise look up from models.dev
 	if cfg.MaxTokens != nil {
 		opts = append(opts, options.WithMaxTokens(*cfg.MaxTokens))
-	} else if r.modelsStore != nil {
-		m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(cfg.Provider, cfg.Model))
+	} else if modelsStore != nil {
+		m, err := modelsStore.GetModel(ctx, modelsdev.NewID(cfg.Provider, cfg.Model))
 		if err == nil && m != nil {
 			opts = append(opts, options.WithMaxTokens(m.Limit.Output))
 		}
 	}
 
-	if store, ok := r.modelsStore.(*modelsdev.Store); ok && store != nil {
+	if store, ok := modelsStore.(*modelsdev.Store); ok && store != nil {
 		opts = append(opts, options.WithModelsDevStore(store))
 	}
 
-	registry := r.modelSwitcherCfg.ProviderRegistry
+	registry := config.ProviderRegistry
 	if registry == nil {
 		registry = r.providerRegistry
 	}
@@ -853,8 +1026,8 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 	}
 	return registry.NewWithModels(ctx,
 		cfg,
-		r.modelSwitcherCfg.Models,
-		r.modelSwitcherCfg.EnvProvider,
+		config.Models,
+		config.EnvProvider,
 		opts...,
 	)
 }

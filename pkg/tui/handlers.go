@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -471,7 +472,7 @@ func persistSplitDiffView(enabled bool) {
 func (m *appModel) handleShowCostDialog() (tea.Model, tea.Cmd) {
 	sess := m.application.Session()
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewCostDialog(sess),
+		Model: dialog.NewCostDialog(sess, chat.SubtreeCostProvider(m.chatPage)),
 	})
 }
 
@@ -948,6 +949,7 @@ func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
 		Panel:                 panelSettingsFromConfig(settings.GetPanel()),
 		SendMode:              messages.ParseSendMode(settings.GetBusySendMode()),
 		SplitDiffView:         settings.GetSplitDiffView(),
+		GitDiffLayout:         messages.ParseGitDiffLayout(settings.GetGitDiffLayout()),
 		ExpandThinking:        settings.GetExpandThinking(),
 		HideToolResults:       settings.HideToolResults,
 		RenderImages:          settings.GetRenderImages(),
@@ -964,6 +966,7 @@ func preferencesFromConfig(settings *userconfig.Settings) messages.Preferences {
 		Sound:                 settings.GetSound(),
 		SoundThreshold:        settings.GetSoundThreshold(),
 		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
+		CloseTabChoice:        messages.ParseCloseTabChoice(settings.CloseTabChoice),
 	}
 }
 
@@ -1031,6 +1034,11 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 		s.BusySendMode = ""
 	}
 	s.SplitDiffView = boolPreference(p.SplitDiffView, true)
+	if layout := messages.ParseGitDiffLayout(string(p.GitDiffLayout)); layout == messages.GitDiffUnified {
+		s.GitDiffLayout = ""
+	} else {
+		s.GitDiffLayout = string(layout)
+	}
 	s.ExpandThinking = boolPreference(p.ExpandThinking, false)
 	s.RestoreTabs = boolPreference(p.RestoreTabs, false)
 	s.Snapshot = boolPreference(p.Snapshot, false)
@@ -1045,6 +1053,7 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 	s.Lean = p.Lean
 	s.Sound = p.Sound
 	s.InterruptConfirmation = string(p.InterruptConfirmation)
+	s.CloseTabChoice = string(messages.ParseCloseTabChoice(string(p.CloseTabChoice)))
 	if p.SoundThreshold == userconfig.DefaultSoundThreshold {
 		s.SoundThreshold = 0
 	} else {

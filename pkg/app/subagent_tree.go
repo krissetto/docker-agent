@@ -37,6 +37,9 @@ const (
 // LiveRuntimeTree reports whether topology comes from an in-process tree
 // shared by every view of the runtime, rather than this view's observation.
 func (a *App) LiveRuntimeTree() bool {
+	if handle := a.SessionHandle(); handle != nil && handle.Metadata().Historical {
+		return false
+	}
 	rt, ok := a.runtime.(subagentRuntime)
 	return ok && rt.SubagentTree() != nil
 }
@@ -45,7 +48,7 @@ func (a *App) LiveRuntimeTree() bool {
 // the shared live tree when in-process, otherwise the canonical session tree
 // overlaid with this view's tree observation (remote clients).
 func (a *App) SubagentTreeSnapshot() *subagent.Snapshot {
-	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil {
+	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil && a.LiveRuntimeTree() {
 		snapshot := rt.SubagentTree().Snapshot()
 		return &snapshot
 	}
@@ -118,14 +121,14 @@ func (a *App) SubagentNodeForSession(sessionID string) (subagent.NodeID, bool) {
 
 // SubagentChildCount counts direct children of nodeID in the portable tree.
 func (a *App) SubagentChildCount(nodeID subagent.NodeID) (int, bool) {
-	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil {
+	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil && a.LiveRuntimeTree() {
 		if count, found := rt.SubagentTree().ChildCount(nodeID); found {
 			return count, true
 		}
 	}
 	// An initial live tree may not yet contain a restored session's root.
 	snapshot := a.SubagentTreeSnapshot()
-	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil {
+	if rt, ok := a.runtime.(subagentRuntime); ok && rt.SubagentTree() != nil && a.LiveRuntimeTree() {
 		if sess := a.Session(); sess != nil {
 			snapshot = sess.GetSubagentTree()
 		}
@@ -239,7 +242,7 @@ func findSnapshot(nodes []subagent.NodeSnapshot, id subagent.NodeID) (subagent.N
 }
 
 // treeWatch is the portable descendant projection for views without an
-// in-process tree. It retains only topology, run state and open interactions.
+// in-process tree. It retains topology, own cost, run state and open interactions.
 type treeWatch struct {
 	rootSessionID string
 
@@ -252,6 +255,7 @@ type treeWatch struct {
 
 type watchedSession struct {
 	agent        string
+	ownCost      float64
 	running      bool
 	known        bool
 	seen         bool // events applied before this session's snapshot arrived
@@ -304,6 +308,9 @@ func (w *treeWatch) addLocked(snapshot runtime.SessionSnapshot) {
 	}
 	s := w.session(id)
 	s.known = true
+	if snapshot.Session != nil {
+		s.ownCost = max(s.ownCost, snapshot.Session.OwnCost())
+	}
 	s.agent = snapshot.Status.AgentName
 	if s.agent == "" && snapshot.Session != nil {
 		s.agent = snapshot.Session.AgentName
@@ -328,6 +335,17 @@ func (w *treeWatch) apply(envelope runtime.SessionEvent) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	switch e := envelope.Event.(type) {
+	case *runtime.TokenUsageEvent:
+		// Legacy Cost can contain embedded descendants. Canonical node metrics
+		// and snapshot own costs remain the fallback for older servers.
+		if e.Usage == nil || e.Usage.OwnCost == nil || sessionID == "" {
+			return false
+		}
+		s := w.session(sessionID)
+		cost := max(s.ownCost, *e.Usage.OwnCost)
+		changed := cost != s.ownCost
+		s.ownCost = cost
+		return changed
 	case *runtime.SubagentTreeEvent:
 		if envelope.SessionID != w.rootSessionID {
 			return false
@@ -510,7 +528,16 @@ func insertChild(nodes []subagent.NodeSnapshot, parentSessionID string, child su
 func overlay(nodes []subagent.NodeSnapshot, sessions map[string]*watchedSession) {
 	for i := range nodes {
 		node := &nodes[i].Node
-		if s := sessions[node.SessionID]; s != nil && node.SessionID != "" {
+		sessionID := node.SessionID
+		if sessionID == "" {
+			sessionID = strings.TrimPrefix(string(node.ID), "root:")
+		}
+		if s := sessions[sessionID]; s != nil {
+			node.Cost = max(node.Cost, s.ownCost)
+			if node.SessionID == "" {
+				overlay(nodes[i].Children, sessions)
+				continue
+			}
 			if node.Agent == "" {
 				node.Agent = s.agent
 			}
@@ -550,7 +577,7 @@ func cloneNodes(nodes []subagent.NodeSnapshot) []subagent.NodeSnapshot {
 // observation has no cursor: every (re)connect is a fresh baseline.
 func (a *App) startSubagentTreeWatch(ctx context.Context, handle runtime.SessionHandle, rootSessionID string, epoch uint64) {
 	// In-process handles publish topology through their runtime's live tree.
-	if a.LiveRuntimeTree() || handle == nil || rootSessionID == "" || runtime.IsLocalSessionHandle(handle) {
+	if a.LiveRuntimeTree() || handle == nil || rootSessionID == "" || runtime.IsLocalSessionHandle(handle) || handle.Metadata().Historical {
 		return
 	}
 	watch := newTreeWatch(rootSessionID)

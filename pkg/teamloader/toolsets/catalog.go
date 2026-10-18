@@ -32,6 +32,7 @@ var BuiltinToolsets = []BuiltinToolsetInfo{
 	builtinToolset("session_context", "session_context", "Reference a previous session as context in the current one"),
 	builtinToolset("shell", "shell", "Execute shell commands in the user's environment"),
 	builtinToolset("tasks", "tasks", "Persistent task database with priorities and dependencies"),
+	builtinToolset("team_edit", "team-edit", "Reserved team-edit capability name; external grant required, no calls exposed yet"),
 	builtinToolset("think", "think", "Step-by-step reasoning scratchpad for planning"),
 	builtinToolset("todo", "todo", "Manage a task list for complex multi-step workflows"),
 	builtinToolset("user_prompt", "user-prompt", "Ask the user questions and collect interactive input"),

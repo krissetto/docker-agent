@@ -1,4 +1,4 @@
-# syntax=docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557
+# syntax=docker/sandbox-kit:210ccc3@sha256:8944c950eaaef7e1f33bd4c672e9607c8deb33eedd49d62d8ac58b2d4045de99
 schemaVersion: "3"
 kind: workload
 displayName: krissetto's Docker Agent hack with async subagents
@@ -27,12 +27,18 @@ args:
     default: "/home/agent/.cagent/managed-api"
     env: ASYNC_AGENT_KIT_STATE_DIR
     description: Creation-bound private managed API state base, outside the workspace.
+  teamEdit:
+    default: "off"
+    enum: ["off", "restricted", "full"]
+    env: ASYNC_AGENT_KIT_TEAM_EDIT
+    description: Creation-bound trusted team-edit grant; connections cannot elevate or change it.
   diagnostics:
     default: "off"
     enum: ["off", "on"]
     env: ASYNC_AGENT_KIT_DIAGNOSTICS
     description: Opt in to local install and startup markers; no provider calls.
 capabilities:
+  - type: com.docker.sandbox/sbx@1
   - type: com.docker.sandbox/network-policy@1
     config:
       runtime:
@@ -91,7 +97,6 @@ capabilities:
           - domain: github.com
             header: Authorization
             format: "Bearer %s"
-  - type: com.docker.sandbox/sbx@1
   - type: com.docker.sandbox/agent-sessions@1
     optional: true
     config:
@@ -158,7 +163,7 @@ capabilities:
           user: agent
           env: [ASYNC_AGENT_KIT_DIAGNOSTICS]
           description: Atomically refresh the same startup marker when diagnostics are enabled.
-        - command: ["/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}"]
+        - command: ["/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}", "${{ kit.env.ASYNC_AGENT_KIT_TEAM_EDIT }}"]
           user: agent
           background: true
           env:
@@ -166,6 +171,7 @@ capabilities:
             - ASYNC_AGENT_KIT_TEAM
             - ASYNC_AGENT_KIT_MODEL
             - ASYNC_AGENT_KIT_STATE_DIR
+            - ASYNC_AGENT_KIT_TEAM_EDIT
             - OPENAI_API_KEY
             - ANTHROPIC_API_KEY
             - GOOGLE_API_KEY

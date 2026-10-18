@@ -136,7 +136,7 @@ func validThinkingTokens(tokens, maxTokens int64) (int64, bool) {
 // mutates c.ModelConfig.ThinkingBudget.
 //
 // Two model-specific rewrites happen here, in opposite directions:
-//   - A token budget on a model that rejects token-based thinking (Opus 4.6+)
+//   - A token budget on an adaptive-only model (Opus 4.6+, Haiku 5.5+)
 //     becomes adaptive thinking.
 //   - An effort or adaptive budget on a model that does not support adaptive
 //     thinking (Haiku 4.5, Sonnet 4.5 and earlier, ...) becomes a token budget,
@@ -148,6 +148,14 @@ func validThinkingTokens(tokens, maxTokens int64) (int64, bool) {
 // downstream code keeps treating them as "thinking off".
 func (c *Client) resolveThinkingBudget() *latest.ThinkingBudget {
 	budget := c.ModelConfig.ThinkingBudget
+	if modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+		if c.ModelOptions.NoThinking() {
+			return &latest.ThinkingBudget{Effort: "none"}
+		}
+		if budget == nil {
+			return &latest.ThinkingBudget{Effort: "adaptive/medium"}
+		}
+	}
 	if budget == nil || budget.IsDisabled() {
 		return budget
 	}
@@ -300,6 +308,11 @@ func (c *Client) applyThinkingConfig(params *anthropic.MessageNewParams, maxToke
 	if budget == nil {
 		return false
 	}
+	if budget.IsDisabled() && modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+		disabled := anthropic.NewThinkingConfigDisabledParam()
+		params.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &disabled}
+		return false
+	}
 	display, _ := anthropicThinkingDisplay(c.ModelConfig.ProviderOpts)
 
 	if effortStr, ok := anthropicThinkingEffort(budget); ok {
@@ -330,6 +343,11 @@ func (c *Client) applyThinkingConfig(params *anthropic.MessageNewParams, maxToke
 func (c *Client) applyBetaThinkingConfig(params *anthropic.BetaMessageNewParams, maxTokens int64) {
 	budget := c.resolveThinkingBudget()
 	if budget == nil {
+		return
+	}
+	if budget.IsDisabled() && modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+		disabled := anthropic.NewBetaThinkingConfigDisabledParam()
+		params.Thinking = anthropic.BetaThinkingConfigParamUnion{OfDisabled: &disabled}
 		return
 	}
 	display, _ := anthropicThinkingDisplay(c.ModelConfig.ProviderOpts)

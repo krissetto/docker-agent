@@ -116,7 +116,7 @@ func attachedManagedSessionIDs(ctx context.Context, base, root string) ([]string
 		return nil, errors.New("managed API workspace identity mismatch")
 	}
 	if os.Getenv("WORKSPACE_DIR") != "" && os.Getenv("ASYNC_AGENT_KIT_STATE_DIR") != "" {
-		return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), d.Source, "")
+		return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), "", "")
 	}
-	return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), d.Source, workspace)
+	return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), "", workspace)
 }

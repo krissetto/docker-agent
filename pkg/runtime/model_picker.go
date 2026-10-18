@@ -3,21 +3,24 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 )
 
-// findModelPickerTool returns the Tool from the current agent's
-// toolsets, or nil if the agent has no model_picker configured.
-func (r *LocalRuntime) findModelPickerTool() *modelpicker.ToolSet {
+func (r *LocalRuntime) findModelPickerToolForTeam(tm *team.Team) *modelpicker.ToolSet {
+	if tm == nil {
+		return nil
+	}
 	currentName := r.currentAgentName()
-	a, err := r.team.Agent(currentName)
+	a, err := tm.Agent(currentName)
 	if err != nil {
 		return nil
 	}
@@ -42,7 +45,11 @@ func (r *LocalRuntime) handleChangeModel(ctx context.Context, sess *session.Sess
 	}
 
 	// Validate the requested model against the allowed list
-	mpt := r.findModelPickerTool()
+	tm := r.teamForContext(ctx, sess)
+	if tm == nil {
+		return nil, errors.New("model_picker has no captured team environment")
+	}
+	mpt := r.findModelPickerToolForTeam(tm)
 	if mpt == nil {
 		return tools.ResultError("model_picker is not configured for this agent"), nil
 	}

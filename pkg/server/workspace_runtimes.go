@@ -276,7 +276,22 @@ func (w *workspaceSessionRuntimes) acquireRuntime(ctx context.Context, dir strin
 
 func (w *workspaceSessionRuntimes) buildRuntime(key workspaceKey, call *workspaceBuild) {
 	defer w.buildWG.Done()
-	supervisor, err := w.build(w.ctx, w.source, key.dir)
+	buildSource := config.Source(w.source)
+	if source, ok := w.source.(interface {
+		SourceForGeneration(uint64) (config.Source, error)
+	}); ok {
+		var err error
+		buildSource, err = source.SourceForGeneration(key.generation)
+		if err != nil {
+			w.mu.Lock()
+			delete(w.building, key)
+			call.err = err
+			close(call.done)
+			w.mu.Unlock()
+			return
+		}
+	}
+	supervisor, err := w.build(w.ctx, buildSource, key.dir)
 	if err != nil {
 		err = fmt.Errorf("creating session runtime for %q in %q: %w", w.source.Name(), key.dir, err)
 	}

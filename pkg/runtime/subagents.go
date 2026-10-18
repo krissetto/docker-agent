@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 // subagentManager supervises async subagents above the per-session driver
@@ -374,7 +375,11 @@ func (m *subagentManager) spawnContext(ctx context.Context, parent *session.Sess
 	if err != nil {
 		return "", err
 	}
-	target, err := m.r.team.Agent(ref.Agent)
+	currentTeam := m.r.teamForContext(ctx, parent)
+	if currentTeam == nil {
+		return "", errors.New("parent session has no captured team environment")
+	}
+	target, err := currentTeam.Agent(ref.Agent)
 	if err != nil {
 		return "", err
 	}
@@ -390,7 +395,7 @@ func (m *subagentManager) spawnContext(ctx context.Context, parent *session.Sess
 	input.Pending, input.Accepted, input.TurnID = true, true, turnID
 	input.InputOrigin, input.SenderID, input.SenderName, input.InputMode = session.InputOriginAgent, parent.ID, parentAgent, "turn"
 	child.AddMessage(input)
-	id, err := m.admitChildContext(ctx, parent, parentAgent, child, target, ref, task, true)
+	id, err := m.admitChildContextForTeam(ctx, parent, parentAgent, child, target, ref, task, true, currentTeam)
 	if err != nil {
 		return "", err
 	}
@@ -405,6 +410,22 @@ func (m *subagentManager) admitChild(parent *session.Session, parentAgent string
 }
 
 func (m *subagentManager) admitChildContext(ctx context.Context, parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool) (subagent.NodeID, error) {
+	return m.admitChildContextForTeam(ctx, parent, parentAgent, child, target, ref, task, autonomous, m.r.teamForContext(ctx, parent))
+}
+
+func (m *subagentManager) admitChildContextForTeam(ctx context.Context, parent *session.Session, parentAgent string, child *session.Session, target *agent.Agent, ref subagent.AllowedSubagent, task string, autonomous bool, tm *team.Team) (subagent.NodeID, error) {
+	opCtx, releaseEnvironment, err := m.r.captureEnvironmentForOperation(ctx, parent)
+	if err != nil {
+		return "", err
+	}
+	defer releaseEnvironment()
+	ctx = opCtx
+	if captured := m.r.teamForContext(ctx, parent); captured != nil {
+		tm = captured
+	}
+	if tm == nil {
+		return "", errors.New("parent session has no captured team environment")
+	}
 	ctx, cancel := context.WithTimeout(ctx, defaultSubagentPersistenceTimeout)
 	defer cancel()
 	transition := m.transition(m.rootSessionLockedSafe(parent.ID))
@@ -415,9 +436,17 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 	if autonomous && !m.r.acceptSessionDelegation(parent) {
 		return "", errSubagentsDisabled
 	}
+	grantor := m.r.resolveSessionAgentContext(ctx, parent)
+	if grantor == nil {
+		return "", &SessionError{Kind: SessionErrorNotFound, SessionID: parent.ID, Operation: "resolve_parent_agent"}
+	}
+	parentAgent = grantor.Name()
 	if m.r.sessionStore != nil {
 		if _, err := m.r.sessionStore.GetSession(ctx, parent.ID); errors.Is(err, session.ErrNotFound) {
-			parent.SetAttribute(SessionAgentAttribute, parentAgent)
+			if bound, _ := parent.Attribute(SessionAgentAttribute); bound == "" {
+				parent.SetAttribute(SessionAgentAttribute, parentAgent)
+				parent.SetAttribute(SessionAgentIDAttribute, configuredAgentID(tm, parentAgent))
+			}
 			if err := m.r.sessionStore.AddSession(ctx, parent.OwnSnapshot()); err != nil && !errors.Is(err, session.ErrAlreadyExists) {
 				return "", err
 			}
@@ -426,7 +455,10 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 		}
 	}
 	child.SetAttribute(SessionAgentAttribute, ref.Agent)
+	child.SetAttribute(SessionAgentIDAttribute, configuredAgentID(tm, ref.Agent))
+	child.AgentID = configuredAgentID(tm, ref.Agent)
 	child.SetAttribute(SessionParentAgentAttribute, parentAgent)
+	child.SetAttribute(SessionParentAgentIDAttribute, configuredAgentID(tm, parentAgent))
 	reservation, err := m.r.sessionDrivers.PrepareRestore(ctx, child)
 	if err != nil {
 		return "", err
@@ -473,6 +505,12 @@ func (m *subagentManager) admitChildContext(ctx context.Context, parent *session
 	if err != nil {
 		rec.unwatch()
 		return "", err
+	}
+	if m.r.sessionStore != nil {
+		if err := recordTeamRevision(ctx, m.r.sessionStore, tm, child, ref.Agent); err != nil {
+			rec.unwatch()
+			return "", err
+		}
 	}
 	m.mu.Lock()
 	fenced := !m.parentAcceptsSpawnLocked(parent.ID)
@@ -1098,7 +1136,7 @@ func (m *subagentManager) ensureChildDriver(ctx context.Context, id subagent.Nod
 	loaded.NonInteractive = true
 	loaded.AsyncSubagent = true
 
-	childAgent, err := m.r.team.Agent(loaded.AgentName)
+	childAgent, err := m.r.teamForSession(loaded).Agent(loaded.AgentName)
 	if err != nil {
 		return fail(err)
 	}
@@ -1422,10 +1460,17 @@ func (m *subagentManager) Close() { _ = m.CloseContext(context.Background()) }
 // async subagents, resolving each target's description from the team when the
 // ref does not override it.
 func (r *LocalRuntime) allowedFromAgent(a *agent.Agent) []subagent.AllowedSubagent {
+	return r.allowedFromAgentForTeam(r.team, a)
+}
+
+func (r *LocalRuntime) allowedFromAgentForTeam(tm *team.Team, a *agent.Agent) []subagent.AllowedSubagent {
+	if tm == nil || a == nil {
+		return nil
+	}
 	refs := a.AsyncSubagents()
 	allowed := make([]subagent.AllowedSubagent, 0, len(refs))
 	for _, ref := range refs {
-		target, err := r.team.Agent(ref.Agent)
+		target, err := tm.Agent(ref.Agent)
 		if err != nil || target == nil {
 			slog.WarnContext(r.ctx(), "Ignoring unresolved async subagent reference", "agent", a.Name(), "subagent", ref.Agent, "error", err)
 			continue

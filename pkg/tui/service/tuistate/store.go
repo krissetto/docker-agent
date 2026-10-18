@@ -4,6 +4,7 @@ package tuistate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 
@@ -56,6 +57,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS favorite_dirs (
 			path TEXT PRIMARY KEY,
 			added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS pane_workspace_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			state BLOB NOT NULL
 		);
 	`)
 	if err != nil {
@@ -267,6 +273,69 @@ func (s *Store) ClearTabs(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM active_tab`)
+	return err
+}
+
+// PaneLayoutNode is one leaf or split in a persisted pane tree.
+type PaneLayoutNode struct {
+	SessionID string          `json:"session_id,omitempty"`
+	Axis      uint8           `json:"axis,omitempty"`
+	Ratio     float64         `json:"ratio,omitempty"`
+	First     *PaneLayoutNode `json:"first,omitempty"`
+	Second    *PaneLayoutNode `json:"second,omitempty"`
+}
+
+// PaneWorkspace records one tab group and its presentation-only pane topology.
+type PaneWorkspace struct {
+	AnchorSessionID       string          `json:"anchor_session_id"`
+	FocusSessionID        string          `json:"focus_session_id"`
+	Layout                *PaneLayoutNode `json:"layout,omitempty"`
+	RestoreLayout         *PaneLayoutNode `json:"restore_layout,omitempty"`
+	SidebarCollapsed      bool            `json:"sidebar_collapsed,omitempty"`
+	SidebarPreferredWidth int             `json:"sidebar_preferred_width,omitempty"`
+	HasSidebar            bool            `json:"has_sidebar,omitempty"`
+}
+
+// PaneWorkspaceState stores the workspace order and active workspace separately
+// from the tab store's active session, which represents the focused pane.
+type PaneWorkspaceState struct {
+	Version               int             `json:"version"`
+	ActiveAnchorSessionID string          `json:"active_anchor_session_id,omitempty"`
+	Workspaces            []PaneWorkspace `json:"workspaces"`
+}
+
+// GetPaneWorkspaceState loads persisted pane presentation state. An absent row
+// is the zero state, allowing existing tab databases to migrate transparently.
+func (s *Store) GetPaneWorkspaceState(ctx context.Context) (PaneWorkspaceState, error) {
+	var encoded []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT state FROM pane_workspace_state WHERE id = 1`).Scan(&encoded); err != nil {
+		if err == sql.ErrNoRows {
+			return PaneWorkspaceState{}, nil
+		}
+		return PaneWorkspaceState{}, err
+	}
+	var state PaneWorkspaceState
+	if err := json.Unmarshal(encoded, &state); err != nil {
+		return PaneWorkspaceState{}, fmt.Errorf("decoding pane workspace state: %w", err)
+	}
+	return state, nil
+}
+
+// SetPaneWorkspaceState atomically replaces the single persisted workspace
+// topology. SQLite skips identical writes, which are common during tab updates.
+func (s *Store) SetPaneWorkspaceState(ctx context.Context, state PaneWorkspaceState) error {
+	if state.Version == 0 {
+		state.Version = 1
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encoding pane workspace state: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO pane_workspace_state (id, state) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET state = excluded.state
+		WHERE pane_workspace_state.state != excluded.state
+	`, encoded)
 	return err
 }
 

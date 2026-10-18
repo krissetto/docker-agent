@@ -100,6 +100,14 @@ func (m *appModel) helpDocument() help.Document {
 		doc.Context = "Message actions"
 		add(messageActionHelp())
 	}
+	if m.reviewFocused() {
+		context, sections := m.reviewModel().Help()
+		doc.Context = context
+		for _, section := range sections {
+			add(section)
+		}
+		return doc
+	}
 	search := m.focusedPanel == PanelEditor && m.editor.IsHistorySearchActive()
 	if !m.leanMode && !m.editor.IsHistorySearchActive() {
 		add(m.tabHelp(m.focusedPanel != PanelEditor, false))
@@ -229,16 +237,16 @@ func globalHelp() help.Section {
 
 func (m *appModel) tabHelp(closeEnabled, reference bool) help.Section {
 	k := tabbar.DefaultKeyMap()
-	entries := []help.Entry{bindingHelp("tab.new", k.NewTab, "New session tab")}
+	entries := []help.Entry{bindingHelp("tab.new", k.NewTab, "New session workspace")}
 	if reference || (m.tabBar != nil && m.tabBar.Count() > 1) {
-		entries = append(entries, bindingHelp("tab.next", k.NextTab, "Next tab"), bindingHelp("tab.previous", k.PrevTab, "Previous tab"))
+		entries = append(entries, bindingHelp("tab.next", k.NextTab, "Next workspace"), bindingHelp("tab.previous", k.PrevTab, "Previous workspace"))
 		entries[1].Condition = "More than one tab"
 		entries[2].Condition = "More than one tab"
 	}
 	if closeEnabled {
-		entries = append(entries, help.Entry{ID: "tab.close", Keys: k.CloseTab.Keys(), Description: "Close active tab (sole tab requests exit confirmation)", Condition: "Outside composer, inline/title editing and history search"})
+		entries = append(entries, help.Entry{ID: "tab.close", Keys: k.CloseTab.Keys(), Description: "Close focused session only (last session asks to exit)", Condition: "Outside composer, inline/title editing and history search"})
 	}
-	return helpSection("tabs", "Session tabs", "Non-lean layout; outside history search and local edits; background dialogs allow navigation", entries...)
+	return helpSection("tabs", "Workspaces", "Non-lean layout; outside history search and local edits; background dialogs allow navigation", entries...)
 }
 
 func agentIndexHelp() help.Entry {
@@ -361,12 +369,14 @@ func paneHelp() help.Section {
 	return helpSection("panes", "Session panes", "Full TUI only; no pane gestures behind dialogs",
 		helpEntry("panes.resume", []string{"/resume"}, "Restored · paused: Any queued work or reports will wait until you resume this session. Relatives require their own resume."),
 		helpEntry("panes.actions", []string{"/panes"}, "Open dedicated Panes chooser; /panes left|right|up|down [session], next|prev|remove|single; resize [divider number] previews with arrows, Enter commits, Esc cancels"),
-		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Split or move the canonical session; self-edge fills remainder with next hidden tab; center/sidebar/composer drops cancel"),
+		helpEntry("panes.split", []string{"drag tab upward to transcript edge"}, "Tile the whole workspace at a pane edge; center/sidebar/composer/self drops cancel"),
+		helpEntry("panes.detach", []string{"drag pane title to tab strip"}, "Detach into fullscreen workspace at insertion marker; same running session; drag title to another pane edge to rearrange"),
+		helpEntry("panes.group", []string{"workspace [count]"}, "One tab per group; no group close button. Ctrl+W outside composer closes only focused session"),
 		helpEntry("panes.focus", []string{"click pane"}, "Focus session and its existing draft/attachments; tiled sidebar width/collapse stay layout-wide"),
 		helpEntry("panes.scroll", []string{"wheel over pane"}, "Scroll only that pane without switching composer"),
 		helpEntry("panes.divider", []string{"drag divider"}, "Preview a clamped divider; release commits"),
 		helpEntry("panes.cancel-reference", []string{"esc"}, "Cancel gesture before response interruption; outside release, Blur, resize or dialog opening also cancel"),
-		helpEntry("panes.remove", []string{"/panes → Remove pane", "/panes → Single view"}, "Change layout only; never close/cancel the tab; single view restores focused tab sidebar preference"))
+		helpEntry("panes.remove", []string{"/panes → Remove pane", "/panes → Single view"}, "Hide within this workspace; /panes Focus or next/prev restores hidden panes; no session is closed or detached"))
 }
 
 func leanSessionHelp() help.Section {

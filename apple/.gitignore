@@ -1,0 +1,15 @@
+.build/
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.app/
+*.dSYM/
+*.dSYM.zip
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo

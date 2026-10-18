@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"testing"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -55,12 +56,21 @@ func NewOnePasswordProvider(provider Provider) Provider {
 }
 
 func resolveOnePasswordReference(ctx context.Context, reference string) (string, bool) {
+	// Tests must never unlock or read the developer's real vault.
+	if testing.Testing() {
+		return "", false
+	}
+
 	path, err := lookupBinary("op", OnePasswordNotAvailableError{})
 	if err != nil {
 		slog.WarnContext(ctx, "Cannot resolve 1Password secret reference: op (1Password CLI) is not installed")
 		return "", false
 	}
 
+	return readOnePasswordReference(ctx, path, reference)
+}
+
+func readOnePasswordReference(ctx context.Context, path, reference string) (string, bool) {
 	return runCommand(ctx, "1password", path, "read", reference)
 }
 

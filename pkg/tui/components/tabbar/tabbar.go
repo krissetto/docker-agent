@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -628,7 +628,7 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 				return nil
 			}
 			nextIdx := (t.activeIdx + 1) % len(t.tabs)
-			return core.CmdHandler(messages.SwitchTabMsg{SessionID: t.tabs[nextIdx].SessionID})
+			return core.CmdHandler(messages.SwitchTabMsg{Workspace: true, SessionID: t.tabs[nextIdx].SessionID})
 
 		case key.Matches(msg, t.keyMap.PrevTab):
 			if len(t.tabs) <= 1 {
@@ -638,13 +638,17 @@ func (t *TabBar) Update(msg tea.Msg) (cmd tea.Cmd) {
 			if prevIdx < 0 {
 				prevIdx = len(t.tabs) - 1
 			}
-			return core.CmdHandler(messages.SwitchTabMsg{SessionID: t.tabs[prevIdx].SessionID})
+			return core.CmdHandler(messages.SwitchTabMsg{Workspace: true, SessionID: t.tabs[prevIdx].SessionID})
 
 		case key.Matches(msg, t.keyMap.CloseTab):
-			if len(t.tabs) <= 1 {
+			if len(t.tabs) == 0 {
 				return nil
 			}
-			return core.CmdHandler(messages.CloseTabMsg{SessionID: t.tabs[t.activeIdx].SessionID})
+			id := t.tabs[t.activeIdx].FocusSessionID
+			if id == "" {
+				id = t.tabs[t.activeIdx].SessionID
+			}
+			return core.CmdHandler(messages.CloseTabMsg{SessionID: id})
 		}
 
 	case DragHoldMsg:
@@ -1110,7 +1114,7 @@ func (t *TabBar) handleMiddleClick(x int) tea.Cmd {
 		if x < z.startX || x >= z.endX {
 			continue
 		}
-		if z.tabIdx >= 0 && z.tabIdx < len(t.tabs) {
+		if z.tabIdx >= 0 && z.tabIdx < len(t.tabs) && t.tabs[z.tabIdx].PaneCount <= 1 {
 			return core.CmdHandler(messages.CloseTabMsg{SessionID: t.tabs[z.tabIdx].SessionID})
 		}
 		return nil
@@ -1140,10 +1144,14 @@ func (t *TabBar) handleClick(x int) tea.Cmd {
 		case z.isPlus:
 			return core.CmdHandler(messages.SpawnSessionMsg{})
 		case z.isClose && z.tabIdx >= 0 && z.tabIdx < len(t.tabs):
-			return core.CmdHandler(messages.CloseTabMsg{SessionID: t.tabs[z.tabIdx].SessionID})
+			tab := t.tabs[z.tabIdx]
+			if tab.PaneCount > 1 {
+				return core.CmdHandler(messages.CloseWorkspaceMsg{SessionID: tab.SessionID})
+			}
+			return core.CmdHandler(messages.CloseTabMsg{SessionID: tab.SessionID})
 		case z.tabIdx >= 0 && z.tabIdx < len(t.tabs) && z.tabIdx != t.activeIdx:
 			t.armScrollPending()
-			return core.CmdHandler(messages.SwitchTabMsg{SessionID: t.tabs[z.tabIdx].SessionID})
+			return core.CmdHandler(messages.SwitchTabMsg{Workspace: true, SessionID: t.tabs[z.tabIdx].SessionID})
 		}
 		return nil
 	}

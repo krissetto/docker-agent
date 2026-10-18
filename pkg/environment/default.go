@@ -3,6 +3,7 @@ package environment
 import (
 	"log/slog"
 	"os"
+	"testing"
 
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -42,15 +43,16 @@ func DefaultSources() []Source {
 	// explicit sources so a user-supplied value always wins.
 	sources = append(sources, Source{Name: "chatgpt-login", Provider: NewChatGPTLoginProvider()})
 
-	// Add credential helper provider if configured. A broken user config is
-	// only logged: the rest of the source chain must keep working.
-	if cfg, err := userconfig.Load(); err != nil {
-		slog.Warn("Ignoring unreadable user config for credential helper", "path", userconfig.Path(), "error", err)
-	} else if cfg.CredentialHelper != nil && cfg.CredentialHelper.Command != "" {
-		sources = append(sources, Source{
-			Name:     "credential-helper",
-			Provider: NewCredentialHelperProvider(cfg.CredentialHelper.Command, cfg.CredentialHelper.Args...),
-		})
+	// Tests may construct this chain, but must not run the user's configured helper.
+	if !testing.Testing() {
+		if cfg, err := userconfig.Load(); err != nil {
+			slog.Warn("Ignoring unreadable user config for credential helper", "path", userconfig.Path(), "error", err)
+		} else if cfg.CredentialHelper != nil && cfg.CredentialHelper.Command != "" {
+			sources = append(sources, Source{
+				Name:     "credential-helper",
+				Provider: NewCredentialHelperProvider(cfg.CredentialHelper.Command, cfg.CredentialHelper.Args...),
+			})
+		}
 	}
 
 	// Docker Desktop provider comes after credential helper

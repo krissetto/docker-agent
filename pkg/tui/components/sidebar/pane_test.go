@@ -80,6 +80,11 @@ func TestPaneRegionsSharedHoverCellsAndNoopMotion(t *testing.T) {
 	m := New(animation.NewRuntimeWithScheduler(&immediateScheduler{now: time.Unix(1, 0)}), t.Context(), &service.SessionState{}).(*model)
 	m.sessionState.SetCurrentAgentName("root")
 	m.SetTeamInfo([]runtime.AgentDetails{{Name: "root", Model: "Display", Provider: "provider"}})
+	m.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "session-root",
+		AgentContext: runtime.AgentContext{AgentName: "root"},
+		Usage:        &runtime.Usage{InputTokens: 1, ContextLength: 1, ContextLimit: 100},
+	})
 	m.SetSize(50, 30)
 	m.SetPosition(4, 2)
 	m.View()

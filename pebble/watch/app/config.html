@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>docker-agent settings</title>
+  <style>
+    body{font:16px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;margin:0;padding:16px;color:#181818;background:#f4f4f4}
+    h1{font-size:22px;margin:4px 0 12px}h2{font-size:18px;margin:0 0 4px}
+    label{display:block;margin:14px 0 6px;font-weight:600}
+    input,select,button{font:inherit;box-sizing:border-box;width:100%;min-height:44px;padding:10px;border:1px solid #767676;border-radius:8px;background:#fff;color:#181818}
+    input:focus,select:focus,button:focus{outline:3px solid #0055aa;outline-offset:1px}
+    .check{display:flex;gap:10px;align-items:flex-start;font-weight:400;margin-top:12px}.check input{width:24px;min-height:24px;margin:2px 0 0;flex:none}
+    .runtime{background:#fff;border:1px solid #c8c8c8;border-radius:10px;margin:0 0 14px;padding:14px}
+    .banner{border-radius:8px;padding:10px 12px;margin:0 0 14px;background:#fff;border-left:6px solid #555}
+    .banner.ok{border-left-color:#00aa00}.banner.warn{border-left-color:#ffaa00}.banner.err{border-left-color:#aa0000}
+    .note{font-size:14px;color:#444}.err{color:#aa0000}.ok{color:#006400}
+    .result{font-size:14px;margin:8px 0 0;min-height:20px}
+    button{margin-top:12px;background:#0055aa;color:#fff;border-color:#0055aa;font-weight:700}
+    button.secondary{background:#fff;color:#0055aa}button.danger{background:transparent;color:#aa0000;border-color:transparent;font-weight:600;margin-top:4px}
+    p.note{margin:6px 0 0}
+    button:disabled{background:#d6d6d6;color:#555;border-color:#d6d6d6}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <h1>docker-agent runtimes</h1>
+  <p id="bridge" class="banner" role="status">Checking what this Pebble app supports…</p>
+  <div id="runtimes"></div>
+  <button id="add" type="button" class="secondary" disabled>Add runtime</button>
+  <label for="alerts">Alerts while the watch app is open</label>
+  <select id="alerts" disabled><option value="0">Haptic (default)</option><option value="1">Sound + haptic</option><option value="2">Silent</option></select>
+  <p class="note">Sound is opt-in and respects Quiet Time and watch mute. No alerts arrive while the app is closed.</p>
+  <button id="save" type="button" disabled>Save</button>
+  <p id="message" class="result" role="status" aria-live="polite"></p>
+  <script>
+  (function () {
+    'use strict';
+    var MAX_RUNTIMES = 8;
+    var PROBE_TIMEOUT_MS = 3000;
+    var MODES = {
+      bearer: 'Bearer token (experimental)',
+      private_no_auth: 'No sign-in (trusted private network)'
+    };
+    var state = {mode: 'probing', runtimes: [], selectedID: '', alertMode: 0, loadFailed: false, saving: false};
+    var nextID = 0;
+    var el = {
+      bridge: document.getElementById('bridge'), list: document.getElementById('runtimes'),
+      add: document.getElementById('add'), alerts: document.getElementById('alerts'),
+      save: document.getElementById('save'), message: document.getElementById('message')
+    };
+
+    function isPrivateHost(host) {
+      var value = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+      if (value === 'localhost' || /\.local$/.test(value) || value === '::1') return true;
+      if (value.indexOf(':') >= 0) return /^(fc|fd|fe80):/.test(value);
+      var match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+      if (!match) return false;
+      var o = match.slice(1).map(Number);
+      if (o.some(function (n) { return n > 255; })) return false;
+      return o[0] === 10 || o[0] === 127 || (o[0] === 172 && o[1] >= 16 && o[1] <= 31) ||
+        (o[0] === 192 && o[1] === 168) || (o[0] === 169 && o[1] === 254);
+    }
+
+    function utf8Length(value) { return unescape(encodeURIComponent(value)).length; }
+    function idProblem(value, what) {
+      if (!value) return 'Enter the ' + what + '.';
+      if (utf8Length(value) > 40) return 'The ' + what + ' must be 40 bytes or fewer.';
+      if (/[\u0000-\u001f\u007f]/.test(value)) return 'The ' + what + ' contains a control character.';
+      return '';
+    }
+    function rootsReady(rt) { return !!rt.roots && rt.rootsKey === fingerprint(rt); }
+    function rootIndex(rt) {
+      if (!rootsReady(rt)) return -1;
+      for (var i = 0; i < rt.roots.length; i++) if (rt.roots[i].source === rt.source && rt.roots[i].root_agent_name === rt.root_agent) return i;
+      return -1;
+    }
+    function rootProblem(rt) {
+      if (state.mode === 'ipc') {
+        if (!rootsReady(rt)) return 'test the connection to list its root agents.';
+        if (rootIndex(rt) < 0) return 'choose a root agent.';
+        return '';
+      }
+      return idProblem(rt.source.trim(), 'source') || idProblem(rt.root_agent.trim(), 'root agent');
+    }
+
+    // Mirrors the phone handler's rules so problems show before testing; the phone re-validates.
+    function validate(rt) {
+      if (!rt.name.trim()) return 'Give this runtime a name.';
+      if (!rt.auth_mode) return 'Choose how this runtime signs in.';
+      if (rt.auth_mode === 'bearer' && state.mode !== 'ipc') return 'Bearer sign-in isn\u2019t supported by this Pebble app.';
+      var url;
+      try { url = new URL(rt.base_url.trim()); } catch (_) { return 'Enter the full runtime URL, for example https://agent.example.'; }
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'The runtime URL must start with https://.';
+      if (url.username || url.password || url.search || url.hash) return 'Remove credentials, ? query or # fragment from the URL.';
+      if (rt.auth_mode === 'bearer') {
+        if (url.protocol !== 'https:') return 'Bearer sign-in requires HTTPS.';
+        if (!rt.token) return 'Enter the bearer token.';
+        if (rt.token.length > 4096) return 'The bearer token is too long.';
+      } else {
+        if (!isPrivateHost(url.hostname)) return 'No sign-in is limited to private or local network hosts.';
+        if (!rt.trusted_network) return 'Confirm that you trust this private network.';
+        if (url.protocol === 'http:' && !rt.allow_insecure_local) return 'Use HTTPS, or explicitly allow plain HTTP for this local endpoint.';
+      }
+      return '';
+    }
+
+    function publicRuntime(rt) {
+      var noAuth = rt.auth_mode === 'private_no_auth';
+      return {id: rt.id, name: rt.name.trim(), base_url: rt.base_url.trim(), auth_mode: rt.auth_mode,
+        trusted_network: noAuth && rt.trusted_network, allow_insecure_local: noAuth && rt.allow_insecure_local,
+        source: rt.source.trim(), root_agent: rt.root_agent.trim()};
+    }
+    // Identity of the connection being tested; the root choice is checked against the roots listed for it.
+    function fingerprint(rt) {
+      var noAuth = rt.auth_mode === 'private_no_auth';
+      return JSON.stringify([rt.name.trim(), rt.base_url.trim(), rt.auth_mode, noAuth && rt.trusted_network,
+        noAuth && rt.allow_insecure_local, rt.auth_mode === 'bearer' ? rt.token : '']);
+    }
+    function connectionRuntime(rt) {
+      var copy = publicRuntime(rt); delete copy.source; delete copy.root_agent; return copy;
+    }
+    function isTested(rt) { return rt.testedKey !== null && rt.testedKey === fingerprint(rt); }
+
+    function fromSaved(input) {
+      return {id: String(input.id || newID()), name: String(input.name || ''), base_url: String(input.base_url || ''),
+        auth_mode: MODES[input.auth_mode] ? input.auth_mode : '', trusted_network: input.trusted_network === true,
+        allow_insecure_local: input.allow_insecure_local === true, source: String(input.source || ''),
+        root_agent: String(input.root_agent || ''), token: '', testedKey: null, testing: false, result: '', resultKind: '',
+        roots: null, rootsKey: null, rootsLimited: false, rootNote: '', pinnedSource: String(input.source || '')};
+    }
+    function newID() {
+      var id;
+      do { id = 'runtime-' + Date.now().toString(36) + '-' + (nextID++); }
+      while (state.runtimes.some(function (rt) { return rt.id === id; }));
+      return id;
+    }
+
+    function setText(node, text, kind) { node.textContent = text; node.className = node.className.replace(/\b(ok|err|warn)\b/g, '').trim() + (kind ? ' ' + kind : ''); }
+    function node(tag, text, cls) { var n = document.createElement(tag); if (text) n.textContent = text; if (cls) n.className = cls; return n; }
+    function field(section, id, labelText, input) {
+      var label = node('label', labelText); label.htmlFor = id; input.id = id;
+      section.appendChild(label); section.appendChild(input); return input;
+    }
+    function check(section, id, text, checked) {
+      var label = node('label', null, 'check'), box = document.createElement('input');
+      box.type = 'checkbox'; box.id = id; box.checked = checked; label.htmlFor = id;
+      label.appendChild(box); label.appendChild(node('span', text)); section.appendChild(label);
+      return {label: label, box: box};
+    }
+
+    function renderRuntime(rt, index) {
+      var section = node('section', null, 'runtime'), p = 'rt' + index + '-';
+      section.appendChild(node('h2', rt.name.trim() || ('Runtime ' + (index + 1))));
+      var name = field(section, p + 'name', 'Name', document.createElement('input'));
+      name.type = 'text'; name.value = rt.name; name.setAttribute('maxlength', '30'); name.setAttribute('placeholder', 'Home lab');
+      var url = field(section, p + 'url', 'Runtime URL', document.createElement('input'));
+      url.type = 'url'; url.value = rt.base_url; url.setAttribute('placeholder', 'https://agent.example'); url.setAttribute('autocapitalize', 'off');
+      var mode = field(section, p + 'mode', 'Sign-in', document.createElement('select'));
+      var choose = node('option', 'Choose\u2026'); choose.value = ''; mode.appendChild(choose);
+      Object.keys(MODES).forEach(function (key) {
+        var option = node('option', MODES[key]); option.value = key;
+        if (key === 'bearer' && state.mode !== 'ipc') { option.disabled = true; option.textContent += ' \u2014 not supported here'; }
+        mode.appendChild(option);
+      });
+      mode.value = rt.auth_mode;
+
+      var trusted = check(section, p + 'trusted', 'I trust this private network. Anyone on it can use this agent without signing in.', rt.trusted_network);
+      var insecure = check(section, p + 'http', 'Allow plain HTTP to this local endpoint (development only).', rt.allow_insecure_local);
+      var tokenLabel = node('label', 'Bearer token'); tokenLabel.htmlFor = p + 'token';
+      var token = document.createElement('input');
+      token.id = p + 'token'; token.type = 'password'; token.value = rt.token;
+      token.setAttribute('autocomplete', 'off'); token.setAttribute('autocapitalize', 'off'); token.setAttribute('spellcheck', 'false');
+      var tokenNote = node('p', 'Kept in phone memory only, never saved. You\u2019ll sign in again whenever the watch app stops or reconnects.', 'note');
+      section.appendChild(tokenLabel); section.appendChild(token); section.appendChild(tokenNote);
+
+      var test = node('button', 'Test connection'); test.type = 'button';
+      var result = node('p', '', 'result'); result.setAttribute('role', 'status');
+      section.appendChild(test); section.appendChild(result);
+
+      var rootSelect = null, sourceInput = null, rootInput = null;
+      var rootError = node('p', '', 'note err'), rootNote = node('p', '', 'note');
+      if (state.mode === 'ipc') {
+        rootSelect = field(section, p + 'root', 'Root agent', document.createElement('select'));
+      } else {
+        sourceInput = field(section, p + 'source', 'Source', document.createElement('input'));
+        sourceInput.type = 'text'; sourceInput.value = rt.source; sourceInput.setAttribute('placeholder', 'workspace.yaml'); sourceInput.setAttribute('autocapitalize', 'off');
+        rootInput = field(section, p + 'rootname', 'Root agent', document.createElement('input'));
+        rootInput.type = 'text'; rootInput.value = rt.root_agent; rootInput.setAttribute('placeholder', 'planner'); rootInput.setAttribute('autocapitalize', 'off');
+      }
+      section.appendChild(rootError); section.appendChild(rootNote);
+
+      var remove = node('button', 'Remove runtime', 'danger'); remove.type = 'button';
+      section.appendChild(remove);
+
+      function sync() {
+        var bearer = rt.auth_mode === 'bearer', noAuth = rt.auth_mode === 'private_no_auth';
+        trusted.label.hidden = !noAuth; insecure.label.hidden = !noAuth;
+        tokenLabel.hidden = token.hidden = tokenNote.hidden = !(bearer && state.mode === 'ipc');
+        token.disabled = !(bearer && state.mode === 'ipc');
+        if (state.mode !== 'ipc') {
+          test.hidden = true;
+          setText(result, rt.result || 'Connection test isn\u2019t available in this Pebble app. The watch checks the runtime when you open it.', rt.resultKind || '');
+        } else {
+          test.hidden = false;
+          test.disabled = rt.testing || state.saving;
+          test.textContent = rt.testing ? 'Testing\u2026' : 'Test connection';
+          if (!rt.testing && !isTested(rt) && rt.resultKind === 'ok') { rt.result = 'Changed since the last test. Test again before saving.'; rt.resultKind = ''; }
+          setText(result, rt.result || 'Not tested yet.', rt.resultKind);
+        }
+        if (rootSelect) {
+          rootSelect.textContent = '';
+          var ready = rootsReady(rt), choose = node('option', ready ? 'Choose a root agent\u2026' : 'Test the connection to list root agents');
+          choose.value = ''; rootSelect.appendChild(choose);
+          if (ready) rt.roots.forEach(function (root, i) {
+            var option = node('option', root.root_agent_name + ' \u2014 ' + root.source); option.value = String(i); rootSelect.appendChild(option);
+          });
+          rootSelect.value = ready && rootIndex(rt) >= 0 ? String(rootIndex(rt)) : '';
+          rootSelect.disabled = !ready || state.saving;
+          var notes = [];
+          if (ready && !rt.roots.length) notes.push('This runtime offers no root agents.');
+          if (ready && rt.rootsLimited) notes.push('Only the first 8 root agents are listed. If yours is missing, narrow the runtime\u2019s configuration.');
+          if (!ready && rt.root_agent) notes.push('Saved choice: ' + rt.root_agent + ' \u2014 ' + rt.source + '. Test to confirm it.');
+          var selected = ready && rootIndex(rt) >= 0 ? rt.roots[rootIndex(rt)] : null;
+          if (selected && selected.description) notes.push(selected.description);
+          rootError.textContent = rt.rootNote; rootError.hidden = !rt.rootNote;
+          setText(rootNote, notes.join(' '), '');
+        } else {
+          rootError.hidden = true;
+          setText(rootNote, 'Unchecked here: this Pebble app has no sign-in route to list root agents. The watch checks the source and root agent when you open this runtime.', '');
+        }
+        remove.disabled = state.saving;
+        updateSave();
+      }
+      function onEdit() {
+        rt.name = name.value; rt.base_url = url.value; rt.auth_mode = mode.value;
+        rt.trusted_network = trusted.box.checked; rt.allow_insecure_local = insecure.box.checked;
+        rt.token = rt.auth_mode === 'bearer' && state.mode === 'ipc' ? token.value : '';
+        if (rt.auth_mode !== 'bearer') token.value = '';
+        if (sourceInput) { rt.source = sourceInput.value; rt.root_agent = rootInput.value; }
+        if (rt.resultKind === 'err') { rt.result = ''; rt.resultKind = ''; }
+        if (state.mode !== 'ipc') { rt.result = ''; rt.resultKind = ''; }
+        sync();
+      }
+      [name, url, token, sourceInput, rootInput].forEach(function (input) { if (input) input.addEventListener('input', onEdit); });
+      if (rootSelect) rootSelect.addEventListener('change', function () {
+        var root = rootsReady(rt) && rt.roots[Number(rootSelect.value)];
+        rt.source = root && rootSelect.value !== '' ? root.source : '';
+        rt.root_agent = root && rootSelect.value !== '' ? root.root_agent_name : '';
+        rt.rootNote = '';
+        sync();
+      });
+      [mode, trusted.box, insecure.box].forEach(function (input) { input.addEventListener('change', onEdit); });
+
+      test.addEventListener('click', function () {
+        var problem = validate(rt);
+        if (problem) { rt.result = problem; rt.resultKind = 'err'; return sync(); }
+        var key = fingerprint(rt);
+        rt.testing = true; rt.result = ''; rt.resultKind = ''; sync();
+        var request = {runtime: connectionRuntime(rt), token: rt.auth_mode === 'bearer' ? rt.token : ''}, server;
+        rt.testedKey = null; rt.roots = null; rt.rootsKey = null; rt.rootsLimited = false; rt.rootNote = '';
+        ask({type: 'test_runtime', runtime: request.runtime, token: request.token})
+          .then(function (reply) {
+            if (!reply || reply.ok !== true) throw new Error(reply && reply.error || 'The phone couldn\u2019t test this runtime.');
+            if (reply.session_api_version !== 2) throw new Error('This server doesn\u2019t offer the docker-agent session API v2.');
+            server = reply;
+            var list = {type: 'list_roots', runtime: request.runtime, token: request.token};
+            // A saved source is asked for exactly, so it can be restored even beyond the first 8.
+            if (rt.pinnedSource) list.source = rt.pinnedSource;
+            return ask(list);
+          })
+          .then(function (reply) {
+            if (!reply || reply.ok !== true || !Array.isArray(reply.roots)) {
+              var unsupported = !reply || !reply.error || reply.error === 'invalid';
+              throw new Error(unsupported ? 'Connected, but this phone build can\u2019t list root agents yet.' : 'Connected, but root agents couldn\u2019t be listed: ' + reply.error);
+            }
+            rt.testing = false;
+            if (fingerprint(rt) !== key) { rt.result = 'Changed during the test. Test again.'; rt.resultKind = ''; return sync(); }
+            rt.roots = reply.roots.filter(function (root) {
+              return root && typeof root.source === 'string' && typeof root.root_agent_name === 'string' &&
+                !idProblem(root.source, 'source') && !idProblem(root.root_agent_name, 'root agent');
+            }).slice(0, 8);
+            rt.rootsKey = key; rt.rootsLimited = reply.limited === true || reply.truncated === true;
+            if (rt.root_agent && rootIndex(rt) < 0) {
+              rt.rootNote = 'The saved choice ' + rt.root_agent + ' \u2014 ' + rt.source + ' isn\u2019t offered by this runtime. Choose a root agent.';
+              rt.source = ''; rt.root_agent = ''; rt.pinnedSource = '';
+            }
+            rt.testedKey = key; rt.result = 'Connected' + (server.name ? ' to ' + server.name : '') + ' \u00b7 session API v2'; rt.resultKind = 'ok'; sync();
+          })
+          .catch(function (error) {
+            rt.testing = false; rt.testedKey = null;
+            rt.result = error && error.message || 'The phone couldn\u2019t test this runtime.'; rt.resultKind = 'err'; sync();
+          });
+      });
+      remove.addEventListener('click', function () {
+        state.runtimes.splice(index, 1);
+        if (state.selectedID === rt.id) state.selectedID = '';
+        renderAll();
+      });
+
+      el.list.appendChild(section);
+      sync();
+    }
+
+    function saveProblem() {
+      if (state.mode === 'probing') return 'Checking this Pebble app\u2026';
+      if (state.loadFailed) return 'Saved runtimes couldn\u2019t be loaded, so saving could overwrite them. Close and reopen settings.';
+      if (!state.runtimes.length) return 'Add at least one runtime.';
+      for (var i = 0; i < state.runtimes.length; i++) {
+        var rt = state.runtimes[i], label = rt.name.trim() || ('Runtime ' + (i + 1)), problem = validate(rt);
+        if (problem) return label + ': ' + problem;
+        if (state.mode === 'ipc' && !isTested(rt)) return label + ': test the connection before saving.';
+        problem = rootProblem(rt);
+        if (problem) return label + ': ' + problem.charAt(0).toLowerCase() + problem.slice(1);
+      }
+      return '';
+    }
+    function updateSave() {
+      var problem = saveProblem();
+      el.save.disabled = !!problem || state.saving;
+      el.save.textContent = state.saving ? 'Saving\u2026' : 'Save';
+      el.add.disabled = state.mode === 'probing' || state.loadFailed || state.saving || state.runtimes.length >= MAX_RUNTIMES;
+      el.add.textContent = state.runtimes.length >= MAX_RUNTIMES ? 'Up to ' + MAX_RUNTIMES + ' runtimes' : 'Add runtime';
+      el.alerts.disabled = state.mode === 'probing' || state.loadFailed || state.saving;
+      if (!state.saving && el.message.className.indexOf('ok') < 0) setText(el.message, problem, '');
+    }
+    function renderAll() {
+      el.list.textContent = '';
+      state.runtimes.forEach(renderRuntime);
+      el.alerts.value = String(state.alertMode);
+      updateSave();
+    }
+
+    function save() {
+      var problem = saveProblem();
+      if (problem) { setText(el.message, problem, 'err'); return; }
+      var runtimes = state.runtimes.map(publicRuntime);
+      var selected = runtimes.some(function (rt) { return rt.id === state.selectedID; }) ? state.selectedID : runtimes[0].id;
+      if (state.mode !== 'ipc') {
+        // Legacy close URL: only non-secret, no-sign-in runtimes ever reach it.
+        if (state.runtimes.some(function (rt) { return rt.auth_mode !== 'private_no_auth' || rt.token; })) {
+          setText(el.message, 'Only no-sign-in runtimes can be saved by this Pebble app.', 'err'); return;
+        }
+        var legacy = {version: 1, type: 'runtime_config', runtimes: runtimes, selected_runtime_id: selected, alert_mode: state.alertMode};
+        location.href = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(legacy));
+        return;
+      }
+      var withTokens = state.runtimes.map(function (rt, i) {
+        var copy = runtimes[i];
+        if (rt.auth_mode === 'bearer') copy.token = rt.token;
+        return copy;
+      });
+      state.saving = true; setText(el.message, '', ''); renderAll();
+      ask({type: 'runtime_config', runtimes: withTokens, selected_runtime_id: selected, alert_mode: state.alertMode})
+        .then(function (reply) {
+          if (!reply || reply.ok !== true) throw new Error(reply && reply.error || 'The phone didn\u2019t accept these settings.');
+          state.saving = false; state.selectedID = selected;
+          var signedIn = state.runtimes.some(function (rt) { return rt.auth_mode === 'bearer'; });
+          // The phone now holds the tokens; the page drops its copies, so a later save needs them again.
+          state.runtimes.forEach(function (rt) { if (rt.auth_mode === 'bearer') { rt.token = ''; rt.testedKey = null; rt.result = 'Signed in until the watch app stops. Re-enter the token to change settings.'; rt.resultKind = 'ok'; } });
+          renderAll();
+          setText(el.message, signedIn ? 'Saved. Tokens stay in phone memory only; sign in again after the watch app stops or reconnects.' : 'Saved.', 'ok');
+        })
+        .catch(function (error) {
+          state.saving = false; renderAll();
+          setText(el.message, error && error.message || 'Couldn\u2019t save settings.', 'err');
+        });
+    }
+
+    // A synchronous throw from the bridge becomes a rejection like any other failure.
+    function ask(data) { return new Promise(function (resolve) { resolve(Pebble.sendMessage('pkjs', data)); }); }
+
+    function probe() {
+      if (typeof Pebble === 'undefined' || !Pebble || typeof Pebble.targets !== 'function' || typeof Pebble.sendMessage !== 'function') return Promise.resolve(false);
+      return new Promise(function (resolve) {
+        var timer = setTimeout(function () { resolve(false); }, PROBE_TIMEOUT_MS);
+        Promise.resolve().then(function () { return Pebble.targets(); }).then(function (targets) {
+          clearTimeout(timer);
+          resolve(Array.isArray(targets) && targets.some(function (t) { return t && t.id === 'pkjs'; }));
+        }, function () { clearTimeout(timer); resolve(false); });
+      });
+    }
+
+    el.add.addEventListener('click', function () {
+      if (state.runtimes.length >= MAX_RUNTIMES) return;
+      var rt = fromSaved({id: newID()});
+      if (state.mode !== 'ipc') rt.auth_mode = 'private_no_auth';
+      state.runtimes.push(rt); renderAll();
+    });
+    el.alerts.addEventListener('change', function () {
+      var value = Number(el.alerts.value);
+      if (value === 0 || value === 1 || value === 2) state.alertMode = value;
+      updateSave();
+    });
+    el.save.addEventListener('click', save);
+
+    probe().then(function (available) {
+      if (!available) {
+        state.mode = 'legacy';
+        setText(el.bridge, 'This Pebble app doesn\u2019t support sign-in. You can save runtimes on a trusted private network without sign-in; the watch checks them when you open them. Saving replaces the runtime list.', 'warn');
+        state.runtimes = [fromSaved({id: newID(), auth_mode: 'private_no_auth'})];
+        renderAll();
+        return;
+      }
+      state.mode = 'ipc';
+      setText(el.bridge, 'Sign-in is available (experimental). Tokens stay in phone memory only and are never saved.', 'ok');
+      return ask({type: 'get_config'}).then(function (reply) {
+        if (!reply || reply.ok !== true) throw new Error('get_config');
+        state.runtimes = (Array.isArray(reply.runtimes) ? reply.runtimes : []).slice(0, MAX_RUNTIMES).map(fromSaved);
+        state.selectedID = String(reply.selected_runtime_id || '');
+        var mode = Number(reply.alert_mode);
+        state.alertMode = mode === 1 || mode === 2 ? mode : 0;
+        if (!state.runtimes.length) state.runtimes.push(fromSaved({id: newID()}));
+        renderAll();
+      }).catch(function () {
+        state.loadFailed = true;
+        setText(el.bridge, 'Saved runtimes couldn\u2019t be loaded from the phone. Close and reopen settings to try again.', 'err');
+        renderAll();
+      });
+    });
+  }());
+  </script>
+</body>
+</html>

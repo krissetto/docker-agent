@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 // acquireViewRuntime routes cold IDs by persisted root workspace, never by a
@@ -25,7 +26,7 @@ func (w *workspaceSessionRuntimes) acquireViewRuntime(ctx context.Context, id st
 	if w.store == nil {
 		return nil, workspaceKey{}, nil, runtime.UnsupportedSessionOperation(id, "prepare_view")
 	}
-	selected, err := w.store.GetSession(ctx, id)
+	selected, err := session.ReadSessionMetadata(ctx, w.store, id)
 	if err != nil {
 		return nil, workspaceKey{}, nil, err
 	}
@@ -42,7 +43,7 @@ func (w *workspaceSessionRuntimes) acquireViewRuntime(ctx context.Context, id st
 		if root.ParentID == "" {
 			break
 		}
-		root, err = w.store.GetSession(ctx, root.ParentID)
+		root, err = session.ReadSessionMetadata(ctx, w.store, root.ParentID)
 		if err != nil {
 			return nil, workspaceKey{}, nil, err
 		}

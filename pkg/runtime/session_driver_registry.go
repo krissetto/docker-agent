@@ -49,24 +49,56 @@ func (g *sessionDriverRegistry) GetInitialized(ctx context.Context, sess *sessio
 }
 
 func (g *sessionDriverRegistry) getInitialized(ctx context.Context, sess *session.Session) (*sessionDriver, error) {
-	if g.r == nil || g.r.team == nil {
+	if g.r == nil || g.r.team == nil && g.r.teamEnvironments == nil {
 		return g.publishInitialized(sess, "", nil)
 	}
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "register"}
 	}
-	if sess.AgentName == "" {
-		a, err := g.r.team.DefaultAgent()
+	tm := g.r.team
+	var initialLease *TeamEnvironmentLease
+	if g.r.teamEnvironments != nil {
+		var leaseErr error
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			initialLease, leaseErr = g.r.teamEnvironments.Acquire(env.RevisionID())
+		} else {
+			initialLease, leaseErr = g.r.teamEnvironments.AcquireCurrent()
+		}
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
+		tm = initialLease.Environment().Team()
+	}
+	if initialLease != nil {
+		defer func() {
+			if initialLease != nil {
+				_ = initialLease.Release(context.WithoutCancel(g.r.lifetime()))
+			}
+		}()
+	}
+	if sess.AgentName != "" {
+		if _, _, ok := tm.ResolveLegacyName(sess.AgentName); !ok {
+			return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: "resolve_agent_name"}
+		}
+	} else {
+		a, err := tm.DefaultAgent()
 		if err != nil {
 			return nil, err
 		}
 		sess.AgentName = a.Name()
 	}
-	modelRef, providers, err := g.r.resolveSessionModelBinding(ctx, sess, "")
+	// This path initializes a caller-owned, not yet canonical session. Never trust
+	// an AgentID supplied by the template; derive it from the current config.
+	sess.AgentID = configuredAgentID(tm, sess.AgentName)
+	modelRef, providers, err := g.r.resolveSessionModelBinding(environmentScopedContext(ctx, initialLease), sess, "")
 	if err != nil {
 		return nil, err
 	}
-	return g.publishInitialized(sess, modelRef, providers)
+	driver, err := g.publishInitializedWithBindingAndEnvironment(ctx, sess, modelRef, providers, sess.AgentName, 0, false, false, initialLease)
+	if err == nil {
+		initialLease = nil
+	}
+	return driver, err
 }
 
 // Get returns the driver for test and internal convenience callers. Production
@@ -192,6 +224,10 @@ func (g *sessionDriverRegistry) publishInitialized(sess *session.Session, modelR
 // when this call publishes a new driver. Registry locking keeps concurrent
 // callers from observing or mutating a partially bound shared session.
 func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Session, modelRef string, providers []provider.Provider, agentName string, maxIterations int, stampAgent, bind bool) (*sessionDriver, error) {
+	return g.publishInitializedWithBindingAndEnvironment(context.Background(), sess, modelRef, providers, agentName, maxIterations, stampAgent, bind, nil)
+}
+
+func (g *sessionDriverRegistry) publishInitializedWithBindingAndEnvironment(ctx context.Context, sess *session.Session, modelRef string, providers []provider.Provider, agentName string, maxIterations int, stampAgent, bind bool, pinned *TeamEnvironmentLease) (*sessionDriver, error) {
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "register"}
 	}
@@ -206,12 +242,37 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 		return nil, err
 	}
 	defer g.releaseUnpublishedClaim(sess.ID)
-	if !bind && sess.AgentName == "" && g.r != nil && g.r.team != nil {
-		defaultAgent, err := g.r.team.DefaultAgent()
+	var initialLease *TeamEnvironmentLease
+	if pinned != nil {
+		initialLease = pinned
+	}
+	if g.r != nil && g.r.teamEnvironments != nil && initialLease == nil {
+		var leaseErr error
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			initialLease, leaseErr = g.r.teamEnvironments.Acquire(env.RevisionID())
+		} else {
+			initialLease, leaseErr = g.r.teamEnvironments.AcquireCurrent()
+		}
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
+		defer func() {
+			if initialLease != nil && initialLease != pinned {
+				_ = initialLease.Release(context.WithoutCancel(g.r.lifetime()))
+			}
+		}()
+	}
+	currentTeam := g.r.team
+	if initialLease != nil {
+		currentTeam = initialLease.Environment().Team()
+	}
+	if !bind && sess.AgentName == "" && currentTeam != nil {
+		defaultAgent, err := currentTeam.DefaultAgent()
 		if err != nil {
 			return nil, err
 		}
 		sess.AgentName = defaultAgent.Name()
+		sess.AgentID = configuredAgentID(currentTeam, sess.AgentName)
 	}
 	g.mu.Lock()
 	if g.reservations[sess.ID] != nil {
@@ -280,10 +341,36 @@ func (g *sessionDriverRegistry) publishInitializedWithBinding(sess *session.Sess
 			sess.MaxIterations = maxIterations
 			if stampAgent {
 				sess.SetAttribute(SessionAgentAttribute, agentName)
+				sess.SetAttribute(SessionAgentIDAttribute, configuredAgentID(currentTeam, agentName))
+			}
+			if currentTeam != nil {
+				sess.AgentID = configuredAgentID(currentTeam, sess.AgentName)
 			}
 		}
 		d = newSessionDriver(g.r, sess)
 		g.mu.Unlock()
+		if initialLease != nil || pinned != nil || g.r != nil && g.r.teamEnvironments != nil {
+			lease := pinned
+			if lease == nil {
+				lease = initialLease
+			}
+			if lease == nil {
+				var leaseErr error
+				lease, leaseErr = g.r.teamEnvironments.AcquireCurrent()
+				if leaseErr != nil {
+					d.closeOwner()
+					return nil, leaseErr
+				}
+			}
+			if err := d.ownerCall(context.WithoutCancel(g.r.lifetime()), func() error { d.teamEnvironment = lease; return nil }); err != nil {
+				_ = lease.Release(context.WithoutCancel(g.r.lifetime()))
+				d.closeOwner()
+				return nil, err
+			}
+			if lease == initialLease {
+				initialLease = nil
+			}
+		}
 		d.SetModelBinding(modelRef, providers)
 		g.mu.Lock()
 		if g.closed || g.drivers[sess.ID] != nil && replacing == 0 {
@@ -352,21 +439,53 @@ func (g *sessionDriverRegistry) prepareRestore(ctx context.Context, sess *sessio
 	}
 	var modelRef string
 	var providers []provider.Provider
-	if g.r.team != nil {
-		if sess.AgentName == "" {
-			a, err := g.r.team.DefaultAgent()
+	tm := g.r.team
+	var initialLease *TeamEnvironmentLease
+	if g.r.teamEnvironments != nil {
+		var leaseErr error
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			initialLease, leaseErr = g.r.teamEnvironments.Acquire(env.RevisionID())
+		} else {
+			initialLease, leaseErr = g.r.teamEnvironments.AcquireCurrent()
+		}
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
+		defer func() { _ = initialLease.Release(context.WithoutCancel(g.r.lifetime())) }()
+		tm = initialLease.Environment().Team()
+	}
+	if tm != nil {
+		if sess.AgentID != "" || sess.AgentName != "" {
+			if _, ok := bindExecutionIdentity(tm, sess); !ok {
+				operation := "resolve_agent_name"
+				if sess.AgentID != "" {
+					operation = "resolve_agent_id"
+				}
+				return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: sess.ID, Operation: SessionOperation(operation)}
+			}
+		} else {
+			a, err := tm.DefaultAgent()
 			if err != nil {
 				return nil, err
 			}
 			sess.AgentName = a.Name()
+			sess.AgentID = configuredAgentID(tm, a.Name())
 		}
 		var err error
-		modelRef, providers, err = g.r.resolveSessionModelBinding(ctx, sess, "")
+		modelRef, providers, err = g.r.resolveSessionModelBinding(environmentScopedContext(ctx, initialLease), sess, "")
 		if err != nil {
 			return nil, err
 		}
 	}
 	d := newSessionDriver(g.r, sess)
+	if initialLease != nil {
+		if err := d.ownerCall(ctx, func() error { d.teamEnvironment = initialLease; return nil }); err != nil {
+			_ = initialLease.Release(context.WithoutCancel(g.r.lifetime()))
+			d.closeOwner()
+			return nil, err
+		}
+		initialLease = nil
+	}
 	d.SetModelBinding(modelRef, providers)
 	reservation := &restoreDriverReservation{registry: g, driver: d, id: sess.ID, replaces: replaces}
 	reserved := false

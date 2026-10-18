@@ -538,17 +538,10 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		cache.stable = parts.StablePrefix
 	}
 	header := actionRow(innerWidth, mv.hovered, types.MessageCopyLabel)
-	prefix := ""
-	if !mv.sameAgentAsPrevious(msg) {
-		prefix = mv.senderPrefix(msg.Sender)
-	}
-	headerKey := prefix + header
+	headerKey := header
 	if cache.headerKey != headerKey || widthChanged {
 		cache.headerKey = headerKey
 		cache.headerLines = nil
-		if prefix != "" {
-			cache.headerLines = append(cache.headerLines, strings.Split(strings.TrimSuffix(prefix, "\n"), "\n")...)
-		}
 		cache.headerLines = append(cache.headerLines, styledAssistantLines(messageStyle, width, header)...)
 	}
 	tailLines := cache.tail.render(messageStyle, width, parts.MutableTail)
@@ -765,11 +758,6 @@ func (mv *messageModel) render(width int) string {
 		rendered, codeBlocks = replaceMarkdownImagePlaceholders(rendered, codeBlocks, imagePlaceholders)
 		rendered = appendAssistantMediaLines(rendered, msg.AssistantMedia, innerRenderWidth)
 
-		var prefix string
-		if !mv.sameAgentAsPrevious(msg) {
-			prefix = mv.senderPrefix(msg.Sender)
-		}
-
 		// Always reserve a top row to avoid layout shifts when the copy label
 		// appears on hover. When not hovered, the row is filled with spaces
 		// (invisible). AssistantMessageStyle has PaddingTop=0, so this extra
@@ -777,15 +765,9 @@ func (mv *messageModel) render(width int) string {
 		innerWidth := width - messageStyle.GetHorizontalFrameSize()
 		topRow := actionRow(innerWidth, mv.hovered || mv.selected, types.MessageCopyLabel)
 
-		// Translate the markdown-relative line indices into messageModel View()
-		// coordinates. The rendered markdown is preceded by the sender prefix
-		// (when shown) and the always-present topRow line inside the styled
-		// bubble frame, so the first line of `rendered` lands at this offset.
-		prefixLines := 0
-		if prefix != "" {
-			prefixLines = strings.Count(prefix, "\n")
-		}
-		lineOffset := prefixLines + 1 // +1 for topRow
+		// The rendered markdown follows the always-present action row inside
+		// the styled bubble frame, so its first line lands at offset one.
+		lineOffset := 1
 		if len(codeBlocks) > 0 {
 			mv.codeBlocks = make([]markdown.CodeBlock, len(codeBlocks))
 			for i, cb := range codeBlocks {
@@ -798,7 +780,7 @@ func (mv *messageModel) render(width int) string {
 			mv.codeBlocks = nil
 		}
 
-		return prefix + messageStyle.Width(width).Render(topRow+"\n"+rendered)
+		return messageStyle.Width(width).Render(topRow + "\n" + rendered)
 	case types.MessageTypeRuntimeNotice:
 		return subagenttool.RenderInput(msg, width)
 	case types.MessageTypeShellOutput:
@@ -1028,13 +1010,6 @@ func actionRow(innerWidth int, show bool, labels ...string) string {
 	joined = ansi.Truncate(joined, innerWidth, "")
 	padding := max(innerWidth-ansi.StringWidth(joined), 0)
 	return strings.Repeat(" ", padding) + styles.MutedStyle.Render(joined)
-}
-
-func (mv *messageModel) senderPrefix(sender string) string {
-	if sender == "" {
-		return ""
-	}
-	return styles.AgentBadgeStyleFor(sender).MarginLeft(2).Render(sender) + "\n\n"
 }
 
 // renderAgentReturn renders the delegation-return transition: the returning

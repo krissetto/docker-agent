@@ -1,101 +1,221 @@
 package shell
 
 import (
+	"encoding/json"
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tools"
+	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/agentmessage"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func TestFormatShellOutput(t *testing.T) {
-	t.Parallel()
+func TestFormatShellOutputRetainsFullOutput(t *testing.T) {
+	output := "first\r\n" + strings.Repeat("long line 界 e\u0301\x1b[31m red\x1b[0m\n", 25) + "last\r"
+	got := formatShellOutput(output, 24)
+	plain := ansi.Strip(got)
+	require.Contains(t, plain, "first")
+	require.Contains(t, plain, "last")
+	require.Equal(t, 27, strings.Count(got, "\n")+1)
+	for _, line := range strings.Split(got, "\n") {
+		require.LessOrEqual(t, ansi.StringWidth(line), 22)
+	}
+}
 
-	for _, tc := range []struct {
-		name   string
-		output string
-		want   string
-	}{
-		{"empty", "", ""},
-		{"only newlines", "\r\n\n\r", ""},
-		{"normalize carriage returns", "one\r\ntwo\rthree\n\n", "one\ntwo\nthree"},
-		{"preserve whitespace", "\n  one \t\n \n", "\n  one \t\n "},
-		{"exact limit", strings.Repeat("line\n", 20), strings.TrimSuffix(strings.Repeat("line\n", 20), "\n")},
-		{"overflow", "discard\n" + strings.Repeat("line\n", 20), "…\n" + strings.TrimSuffix(strings.Repeat("line\n", 20), "\n")},
-		{"empty discarded line", "\n" + strings.Repeat("line\n", 20), "…\n" + strings.TrimSuffix(strings.Repeat("line\n", 20), "\n")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, formatShellOutput(tc.output, 80))
+func TestShellDisclosureSummaryDetailsAndGeometry(t *testing.T) {
+	for _, status := range []types.ToolStatus{types.ToolStatusPending, types.ToolStatusRunning, types.ToolStatusCompleted, types.ToolStatusError} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			ar := animation.NewRuntime()
+			t.Cleanup(ar.Stop)
+			msg := types.ToolCallMessage("root", tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: builtinshell.ToolNameShell, Arguments: `{"cmd":"printf 'wide 界 output'; \n echo second"}`}}, tools.Tool{Name: builtinshell.ToolNameShell}, status)
+			msg.Content = "stdout line one\n" + strings.Repeat("long output line\n", 24) + "stderr line"
+			view := New(ar, msg, service.StaticSessionState{}).(*shellModel)
+			for _, width := range []int{100, 36, 20, 6, 3, 2, 1, 0, 100} {
+				view.SetSize(width, 0)
+				compact := view.View()
+				require.NotContains(t, ansi.Strip(compact), "stdout line one")
+				require.NotContains(t, compact, "\n", "summary always occupies a single terminal line")
+				require.LessOrEqual(t, ansi.StringWidth(compact), width)
+				if width >= 2 {
+					for col := range width {
+						require.True(t, view.IsToggleAt(0, col), "whole header row toggles at %d,%d", width, col)
+					}
+				}
+				require.NotContains(t, ansi.Strip(compact), "running")
+				require.NotContains(t, ansi.Strip(compact), "pending")
+				require.NotContains(t, ansi.Strip(compact), "done")
+				require.NotContains(t, ansi.Strip(compact), "failed")
+				require.NotContains(t, ansi.Strip(compact), ">", "no visible disclosure arrow")
+			}
+			if status == types.ToolStatusRunning {
+				msg.StartedAt = timePtr(time.Now().Add(-2 * time.Second))
+			}
+			view.SetSize(100, 0)
+			compact := view.View()
+			require.True(t, strings.HasPrefix(ansi.Strip(compact), "  "), "shell preserves the usual two-column tool gutter")
+			require.Contains(t, ansi.Strip(compact), "shell")
+			if status == types.ToolStatusRunning {
+				elapsed := time.Since(*msg.StartedAt).Truncate(time.Second).String()
+				require.Contains(t, ansi.Strip(compact), "("+elapsed+")")
+			}
+			if status == types.ToolStatusCompleted {
+				require.Contains(t, ansi.Strip(compact), "✓")
+			}
+			if status == types.ToolStatusError {
+				require.Contains(t, ansi.Strip(compact), "✗")
+			}
+			require.Contains(t, ansi.Strip(compact), "printf 'wide 界 output'; … (+1 lines)")
+			require.Contains(t, compact, styles.ToolMessageStyle.Render("printf 'wide 界 output'; … (+1 lines)"), "collapsed preview is muted")
+			view.SetExpanded(true)
+			rendered := view.View()
+			plain := ansi.Strip(rendered)
+			require.Contains(t, plain, "shell")
+			require.NotContains(t, plain, "(+1 lines)", "expanded header omits summary")
+			require.Contains(t, plain, "Command")
+			require.Contains(t, plain, "Output")
+			require.Contains(t, plain, "printf 'wide 界 output';")
+			require.Contains(t, plain, "echo second")
+			require.Equal(t, 1, strings.Count(plain, "printf 'wide 界 output'"), "script is shown once")
+			require.Contains(t, plain, "stdout line one")
+			require.Contains(t, plain, "stderr line")
+			require.Equal(t, 1, strings.Count(plain, "stdout line one"))
+			for row, line := range strings.Split(rendered, "\n") {
+				require.Equal(t, 100, ansi.StringWidth(line), "expanded rows fill the themed card width; row=%d", row)
+			}
+			view.SetExpanded(false)
+			require.NotContains(t, ansi.Strip(view.View()), "stdout line one")
 		})
 	}
 }
 
-func TestFormatShellOutputWrappingEquivalence(t *testing.T) {
-	t.Parallel()
+func TestShellDisclosureUpdatesAndStateSurvivesViewReplacement(t *testing.T) {
+	ar := animation.NewRuntime()
+	t.Cleanup(ar.Stop)
+	msg := types.ToolCallMessage("root", tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: builtinshell.ToolNameShell, Arguments: `{"cmd":"printf one"}`}}, tools.Tool{Name: builtinshell.ToolNameShell}, types.ToolStatusPending)
+	view := New(ar, msg, service.StaticSessionState{}).(*shellModel)
+	msg.ToolCall.Function.Arguments += ` tail` // an incomplete fragment cannot be parsed yet
+	view.View()
+	msg.ToolCall.Function.Arguments = `{"cmd":"printf one two"}`
+	msg.AppendToolOutput("live stdout\n")
+	require.NotContains(t, ansi.Strip(view.View()), "live stdout")
+	view.SetExpanded(true)
+	require.Contains(t, ansi.Strip(view.View()), "live stdout")
 
-	patterns := []string{
-		"",
-		"short",
-		strings.Repeat(" ", 30),
-		"\t  indented\ttext  ",
-		strings.Repeat("abcdefghij", 25),
-		strings.Repeat("word boundary-", 20),
-		strings.Repeat("界日本語", 30),
-		strings.Repeat("e\u0301👩🏽‍💻🏳️‍🌈", 20),
-		strings.Repeat("\x1b[31mred text\x1b[0m ", 20),
-		strings.Repeat("\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\ ", 10),
-		"\x1b[31m" + strings.Repeat("ansi spans lines\n", 25) + "\x1b[0m",
-		"invalid UTF-8: \xff\xfe" + strings.Repeat("界", 20),
-		"\x1b[\n31m\n" + strings.Repeat("broken escape ", 10),
+	nextMessage := types.ToolCallMessage("root", msg.ToolCall, msg.ToolDefinition, types.ToolStatusCompleted)
+	nextMessage.Content = msg.Content
+	next := New(ar, nextMessage, service.StaticSessionState{}).(*shellModel)
+	agentmessage.PreserveExpansion(view, next)
+	require.True(t, next.IsExpanded())
+	require.Contains(t, ansi.Strip(next.View()), "live stdout")
+	animation.StopView(view)
+	animation.StopView(next)
+}
+
+func TestExpandedShellCellsShareTheThemedDisclosureBackground(t *testing.T) {
+	original := styles.CurrentTheme()
+	t.Cleanup(func() { styles.ApplyTheme(original) })
+
+	for _, background := range []string{"#243647", "#354657"} {
+		t.Run(background, func(t *testing.T) {
+			theme := styles.DefaultTheme()
+			theme.Colors.BackgroundAlt = background
+			styles.ApplyTheme(theme)
+
+			ar := animation.NewRuntime()
+			t.Cleanup(ar.Stop)
+			command := "printf first\nprintf second"
+			started := time.Now().Add(-3 * time.Second)
+			msg := types.ToolCallMessage("root", tools.ToolCall{ID: "surface", Function: tools.FunctionCall{Name: builtinshell.ToolNameShell, Arguments: shellArgs(command)}}, tools.Tool{Name: builtinshell.ToolNameShell}, types.ToolStatusRunning)
+			msg.StartedAt = &started
+			msg.Content = "stdout \x1b[38;2;20;180;220mtruecolor\x1b[0m rest\tvalue\nsecond \x1b[48;2;2;3;4moutput\x1b[49m end"
+			view := New(ar, msg, service.StaticSessionState{}).(*shellModel)
+			view.SetSize(64, 0)
+			view.SetExpanded(true)
+			rendered := view.View()
+			require.Contains(t, ansi.Strip(rendered), "Command")
+			require.Contains(t, ansi.Strip(rendered), "Output")
+			require.Contains(t, rendered, "38;2;20;180;220", "output foreground survives nested SGR reset")
+			require.Contains(t, rendered, "48;2;2;3;4", "output background is preserved inside the inherited card surface")
+			wantBG := color.NRGBAModel.Convert(styles.UserMessageStyle.GetBackground())
+			for row, line := range strings.Split(rendered, "\n") {
+				require.Equal(t, 64, ansi.StringWidth(line), "row %d is card-width", row)
+				for col := 1; col < 64; col++ {
+					require.Equal(t, wantBG, color.NRGBAModel.Convert(backgroundAt(line, col)), "disclosure surface is continuous: row=%d col=%d line=%q", row, col, ansi.Strip(line))
+				}
+			}
+			view.SetSize(40, 0)
+			resized := view.View()
+			for row, line := range strings.Split(resized, "\n") {
+				require.Equal(t, 40, ansi.StringWidth(line), "resized row %d remains card-width", row)
+				for col := 1; col < 40; col++ {
+					require.Equal(t, wantBG, color.NRGBAModel.Convert(backgroundAt(line, col)), "resized surface is continuous: row=%d col=%d", row, col)
+				}
+			}
+			animation.StopView(view)
+		})
 	}
-	for pattern, line := range patterns {
-		for _, count := range []int{1, 19, 20, 21, 45} {
-			for _, separator := range []string{"\n", "\r\n", "\r"} {
-				// Include differing final-line widths and trailing line endings.
-				output := strings.Repeat(line+separator, count) + "tail 界 e\u0301" + separator + separator
-				for _, width := range []int{-1, 0, 10, 11, 24, 80, 160} {
-					t.Run(fmt.Sprintf("pattern%d/lines%d/separator%q/width%d", pattern, count, separator, width), func(t *testing.T) {
-						assert.Equal(t, formatShellOutputBefore(output, width), formatShellOutput(output, width))
-					})
+}
+
+func shellArgs(command string) string {
+	encoded, _ := json.Marshal(builtinshell.RunShellArgs{Cmd: command})
+	return string(encoded)
+}
+
+func backgroundAt(line string, col int) color.Color {
+	parser := ansi.GetParser()
+	defer ansi.PutParser(parser)
+	var state byte
+	var bg color.Color
+	for x := 0; line != ""; {
+		sequence, width, consumed, next := ansi.DecodeSequence(line, state, parser)
+		if consumed == 0 {
+			break
+		}
+		if ansi.HasCsiPrefix(sequence) && parser.Command() == 'm' {
+			params := parser.Params()
+			if len(params) == 0 {
+				bg = nil
+			}
+			for i := 0; i < len(params); i++ {
+				switch params[i].Param(0) {
+				case 0, 49:
+					bg = nil
+				case 48:
+					var parsed color.Color
+					read := ansi.ReadStyleColor(params[i:], &parsed)
+					if parsed != nil {
+						bg = parsed
+					}
+					i += max(0, read-1)
 				}
 			}
 		}
-	}
-}
-
-func TestFormatShellOutputMixedLineWidths(t *testing.T) {
-	t.Parallel()
-
-	for _, count := range []int{19, 20, 21, 80} {
-		var output strings.Builder
-		for i := range count {
-			fmt.Fprintf(&output, "line %03d: %s\n", i, strings.Repeat("界 e\u0301 \x1b[31mtext\x1b[0m ", i%7))
+		if width > 0 && x+width > col {
+			if bg == nil {
+				return nil
+			}
+			return color.NRGBAModel.Convert(bg)
 		}
-		for _, width := range []int{10, 24, 80, 160} {
-			t.Run(fmt.Sprintf("lines%d/width%d", count, width), func(t *testing.T) {
-				assert.Equal(t, formatShellOutputBefore(output.String(), width), formatShellOutput(output.String(), width))
-			})
-		}
+		x += width
+		state, line = next, line[consumed:]
 	}
+	return nil
 }
 
-// Preserve the previous formatter as a byte-for-byte oracle, including its
-// rune-boundary wrapping of ANSI sequences and combining characters.
-func formatShellOutputBefore(output string, width int) string {
-	output = strings.ReplaceAll(output, "\r\n", "\n")
-	output = strings.ReplaceAll(output, "\r", "\n")
-	output = strings.TrimRight(output, "\n")
-	if output == "" {
-		return ""
-	}
-
-	availableWidth := max(width-styles.ToolCallResult.GetHorizontalFrameSize(), 10)
-	lines := toolcommon.WrapLines(output, availableWidth)
-	if len(lines) > maxVisibleShellOutputLines {
-		lines = append([]string{"…"}, lines[len(lines)-maxVisibleShellOutputLines:]...)
-	}
-	return strings.Join(lines, "\n")
+func TestShellPreviewUsesFirstUsefulLineAndCountsRemainingLines(t *testing.T) {
+	preview, remaining := shellPreview("#!/bin/sh\n\n  echo one\n\necho two\n")
+	require.Equal(t, "echo one … (+1 lines)", preview)
+	require.Equal(t, 1, remaining)
 }
+
+func timePtr(t time.Time) *time.Time { return &t }

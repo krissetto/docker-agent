@@ -24,6 +24,7 @@ const Version = "16"
 // Config represents the entire configuration file
 type Config struct {
 	Version   string                    `json:"version,omitempty"`
+	ID        string                    `json:"id,omitempty" yaml:"id,omitempty"`
 	Agents    Agents                    `json:"agents,omitempty"`
 	Providers map[string]ProviderConfig `json:"providers,omitempty"`
 	Models    map[string]ModelConfig    `json:"models,omitempty"`
@@ -699,6 +700,7 @@ func (f InstructionFiles) MarshalJSON() ([]byte, error) {
 // AgentConfig represents a single agent configuration
 type AgentConfig struct {
 	Name           string
+	ID             string          `json:"id,omitempty" yaml:"id,omitempty"`
 	Model          string          `json:"model,omitempty"`
 	Fallback       *FallbackConfig `json:"fallback,omitempty"`
 	Description    string          `json:"description,omitempty"`
@@ -1826,6 +1828,10 @@ type Toolset struct {
 	// rejects the request before any network call.
 	// nil means the field was omitted and may inherit from a referenced definition.
 	AllowPrivateIPs *bool `json:"allow_private_ips,omitempty" yaml:"allow_private_ips,omitempty"`
+
+	// For the `shell` toolset — foreground wait in seconds before an active
+	// command is retained as a background job. Defaults to 2 seconds; 0 disables.
+	BackgroundAfter *int `json:"background_after,omitempty" yaml:"background_after,omitempty"`
 
 	// For the `shell` toolset — opt in to a sudo privilege escalation flow.
 	// When enabled, sudo commands prompt the user for their password (masked)

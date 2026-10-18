@@ -43,7 +43,7 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	// a fork skill invoked from a pinned background session must use the
 	// pinned agent's skills, identity, and model override, no matter where
 	// the concurrent foreground loop points (#3886).
-	caller := r.resolveSessionAgent(sess)
+	caller := r.resolveSessionAgentContext(ctx, sess)
 	if caller == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}

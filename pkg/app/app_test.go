@@ -23,14 +23,16 @@ import (
 
 // mockRuntime implements only App's presentation Services surface.
 type mockRuntime struct {
-	store session.Store
+	store       session.Store
+	tools       []tools.Tool
+	permissions *runtime.PermissionsInfo
 }
 
 func (m *mockRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
 	return runtime.CurrentAgentInfo{}
 }
 
-func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return m.tools, nil }
 
 func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
 
@@ -40,7 +42,7 @@ func (m *mockRuntime) EmitAgentInfo(context.Context, runtime.EventSink)         
 func (m *mockRuntime) ResetStartupInfo()                                                    {}
 func (m *mockRuntime) SessionStore() session.Store                                          { return m.store }
 
-func (m *mockRuntime) PermissionsInfo() *runtime.PermissionsInfo { return nil }
+func (m *mockRuntime) PermissionsInfo() *runtime.PermissionsInfo { return m.permissions }
 
 func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet { return nil }
 

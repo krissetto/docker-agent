@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -46,7 +47,11 @@ func (r *LocalRuntime) filterDelegationTools(agentTools []tools.Tool) []tools.To
 }
 
 func (r *LocalRuntime) filterSessionDelegationTools(sess *session.Session, agentTools []tools.Tool) []tools.Tool {
-	if r.sessionDelegationEnabled(sess) {
+	return r.filterSessionDelegationToolsContext(nil, sess, agentTools)
+}
+
+func (r *LocalRuntime) filterSessionDelegationToolsContext(ctx context.Context, sess *session.Session, agentTools []tools.Tool) []tools.Tool {
+	if r.sessionDelegationEnabledContext(ctx, sess) {
 		return agentTools
 	}
 	return filterExcludedTools(agentTools, []string{

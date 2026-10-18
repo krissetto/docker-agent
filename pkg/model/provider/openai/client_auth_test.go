@@ -133,3 +133,33 @@ func TestNewClient_GitHubCopilotFallsBackToGHToken(t *testing.T) {
 
 	assert.Equal(t, "Bearer gh-token", gotAuth)
 }
+
+func TestNewClient_NoTokenKeySuppressesSDKFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		osKey  string
+		values map[string]string
+	}{
+		{name: "explicit empty overrides literal", osKey: "os-env-key", values: map[string]string{"OPENAI_API_KEY": ""}},
+		{name: "explicit empty overrides reference", osKey: "op://vault/item/field", values: map[string]string{"OPENAI_API_KEY": ""}},
+		{name: "absent key does not forward reference", osKey: "op://vault/item/field"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OPENAI_API_KEY", tc.osKey)
+			var gotAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				writeResponsesSSEResponse(w)
+			}))
+			t.Cleanup(server.Close)
+			cfg := &latest.ModelConfig{Provider: "openai", Model: "gpt-5.6", BaseURL: server.URL}
+			client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(tc.values))
+			require.NoError(t, err)
+			stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+			require.NoError(t, err)
+			defer stream.Close()
+			drainReasoningTestStream(t, stream)
+			assert.Empty(t, gotAuth)
+		})
+	}
+}

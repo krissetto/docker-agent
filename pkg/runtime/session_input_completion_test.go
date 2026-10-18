@@ -166,7 +166,7 @@ func TestCanceledInputCompletionResultsAreDetached(t *testing.T) {
 			go func() {
 				switch kind {
 				case "append":
-					admission, err := h.driver.admitInputReceipt(ctx, QueuedMessage{Content: "late input", RequestID: "late"}, "post", true, false)
+					admission, err := h.driver.admitInputReceipt(ctx, QueuedMessage{Content: "late input", RequestID: "late"}, SessionOperationPost, true)
 					assert.Equal(t, inputAdmission{}, admission)
 					result <- err
 				case "recall":
@@ -175,7 +175,7 @@ func TestCanceledInputCompletionResultsAreDetached(t *testing.T) {
 					assert.False(t, withdrawn)
 					result <- err
 				case "guidance":
-					assert.Empty(t, h.driver.drainInputs(ctx, true))
+					assert.Empty(t, h.driver.drainGuidance(ctx))
 					result <- ctx.Err()
 				}
 			}()

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -299,4 +300,38 @@ func TestReasoningCapabilityRequiresModelSwitcher(t *testing.T) {
 	assert.False(t, r.agentDetailsFromTeam(t.Context())[0].ThinkingControl().CanCycle)
 	_, err = h.CycleThinkingLevel(t.Context())
 	require.ErrorIs(t, err, ErrUnsupported)
+}
+
+func TestIdleSessionModelOperationsUsePinnedEnvironmentRevision(t *testing.T) {
+	oldTeam := team.New(team.WithAgents(agent.New("root", "old", agent.WithModel(coordinationReply("old-model")))))
+	oldEnvironment, err := NewTeamEnvironment("r1", "source", "baseline", "team", oldTeam, ModelSwitcherConfig{
+		Models:             map[string]latest.ModelConfig{"old-choice": {Provider: "openai", Model: "gpt-4o"}},
+		AgentDefaultModels: map[string]string{"root": "old-choice"},
+	}, func(context.Context) error { return nil })
+	require.NoError(t, err)
+	environments, err := NewTeamEnvironmentStore(oldEnvironment)
+	require.NoError(t, err)
+	r, err := NewLocalRuntime(t.Context(), oldTeam, WithTeamEnvironmentStore(environments), WithSessionCompaction(false), WithModelStore(emptyCatalogStore{}))
+	require.NoError(t, err)
+	owner := NewSessionRuntimeSupervisor(r)
+	t.Cleanup(func() { require.NoError(t, owner.Shutdown(context.WithoutCancel(t.Context()))) })
+	oldHandle, err := owner.Runtime().CreateSession(t.Context(), session.New(session.WithID("idle-old-env")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	require.Contains(t, modelChoiceRefs(oldHandle.AvailableModels(t.Context())), "old-choice")
+	require.Contains(t, oldHandle.Metadata().Capabilities.AvailableModels, "old-choice")
+
+	newTeam := team.New(team.WithAgents(agent.New("root", "new", agent.WithModel(coordinationReply("new-model")))))
+	newEnvironment, err := NewTeamEnvironment("r2", "source", "baseline", "team", newTeam, ModelSwitcherConfig{
+		Models:             map[string]latest.ModelConfig{"new-choice": {Provider: "openai", Model: "gpt-5"}},
+		AgentDefaultModels: map[string]string{"root": "new-choice"},
+	}, func(context.Context) error { return nil })
+	require.NoError(t, err)
+	require.NoError(t, environments.Publish("source", "r1", newEnvironment))
+
+	require.Contains(t, modelChoiceRefs(oldHandle.AvailableModels(t.Context())), "old-choice", "idle operations stay on the existing driver's pinned revision")
+	require.NotContains(t, modelChoiceRefs(oldHandle.AvailableModels(t.Context())), "new-choice")
+	newHandle, err := owner.Runtime().CreateSession(t.Context(), session.New(session.WithID("idle-new-env")), SessionBinding{AgentName: "root"})
+	require.NoError(t, err)
+	require.Contains(t, modelChoiceRefs(newHandle.AvailableModels(t.Context())), "new-choice", "new sessions see the published revision")
+	require.NotContains(t, modelChoiceRefs(newHandle.AvailableModels(t.Context())), "old-choice")
 }

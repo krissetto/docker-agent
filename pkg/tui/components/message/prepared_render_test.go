@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -70,6 +71,18 @@ func TestPreparedRenderReplacementAndGroupingParity(t *testing.T) {
 			require.Equal(t, fresh.View(), v.View())
 		})
 	}
+}
+
+func TestPreparedAssistantResponseOmitsAgentBadge(t *testing.T) {
+	content := "The answer is 42.\n\n" + strings.Repeat("More details.\n\n", 1200)
+	view := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", content), nil)
+	view.SetSize(80, 0)
+
+	prepared := PrepareRender(view)()
+	require.True(t, ApplyPreparedRender(view, prepared))
+	plain := ansi.Strip(view.View())
+	require.Contains(t, plain, "The answer is 42.")
+	require.NotContains(t, plain, "root")
 }
 
 func TestPreparedRenderMediaAndCodeBlockParity(t *testing.T) {

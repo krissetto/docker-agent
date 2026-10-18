@@ -53,6 +53,13 @@ type fileSource struct {
 	path string
 }
 
+// FileSourcePath reports the trusted path only for the concrete local file
+// source. Wrappers and frozen sources intentionally do not inherit write authority.
+func FileSourcePath(source Source) (string, bool) {
+	file, ok := source.(fileSource)
+	return file.path, ok && file.path != ""
+}
+
 func NewFileSource(path string) Source {
 	return fileSource{
 		path: path,

@@ -7,6 +7,7 @@ type executionSettings struct {
 	TurnOutcomes            map[string]string `json:"turn_outcomes,omitempty"`
 	TurnOutcomeOrder        []string          `json:"turn_outcome_order,omitempty"`
 	AgentName               string            `json:"agent_name,omitempty"`
+	AgentID                 string            `json:"agent_id,omitempty"`
 	AsyncSubagent           bool              `json:"async_subagent,omitempty"`
 	AttachedFiles           []string          `json:"attached_files,omitempty"`
 	DelegationLineage       []string          `json:"delegation_lineage,omitempty"`
@@ -22,7 +23,7 @@ func encodeExecutionSettings(s *Session) (string, error) {
 	settings := executionSettings{
 		TurnOutcomes:     s.TurnOutcomesSnapshot(),
 		TurnOutcomeOrder: s.TurnOutcomeOrderSnapshot(),
-		AgentName:        s.AgentName, AsyncSubagent: s.AsyncSubagent,
+		AgentName:        s.AgentName, AgentID: s.AgentID, AsyncSubagent: s.AsyncSubagent,
 		AttachedFiles: s.AttachedFiles, DelegationLineage: s.DelegationLineage,
 		NonInteractive: s.NonInteractive, HideToolResults: s.HideToolResults,
 		PriorSafetyPolicy:       s.PriorSafetyPolicy,
@@ -43,7 +44,7 @@ func decodeExecutionSettings(s *Session, data string) error {
 	}
 	s.TurnOutcomes = settings.TurnOutcomes
 	s.TurnOutcomeOrder = settings.TurnOutcomeOrder
-	s.AgentName, s.AsyncSubagent = settings.AgentName, settings.AsyncSubagent
+	s.AgentName, s.AgentID, s.AsyncSubagent = settings.AgentName, settings.AgentID, settings.AsyncSubagent
 	s.AttachedFiles, s.DelegationLineage = settings.AttachedFiles, settings.DelegationLineage
 	s.NonInteractive, s.HideToolResults = settings.NonInteractive, settings.HideToolResults
 	s.PriorSafetyPolicy = settings.PriorSafetyPolicy

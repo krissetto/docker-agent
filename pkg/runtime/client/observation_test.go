@@ -791,3 +791,47 @@ func TestAttachmentReportsGapBeforeReconnectBackoff(t *testing.T) {
 	})
 	assert.Empty(t, sink.errors)
 }
+
+func TestObservationIdleBaselineAllowsProlongedOutage(t *testing.T) {
+	clock := time.Now()
+	calls := 0
+	events := make(chan runtime.SessionEvent)
+	close(events)
+	observer := observerFunc(func(_ context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+		calls++
+		if calls == 1 {
+			baseline := obs(7, nil, events)
+			baseline.Initial[0].Session = session.New(session.WithID("s"))
+			baseline.Initial[0].Status = runtime.SessionStatus{SessionID: "s", State: runtime.SessionStateSettled}
+			baseline.Initial[0].Epoch = "owner"
+			return baseline, nil
+		}
+		require.NotNil(t, options.Since)
+		expected := uint64(7)
+		if calls == 15 {
+			expected = 8
+		}
+		assert.Equal(t, expected, *options.Since)
+		assert.Equal(t, "owner", options.SinceEpoch)
+		if calls == 14 {
+			reconnected := obs(8, []runtime.SessionEvent{{Sequence: 8, Epoch: "owner"}}, events)
+			reconnected.Initial[0].Epoch = "owner"
+			return reconnected, nil
+		}
+		if calls == 15 {
+			return runtime.Observation{}, classifiedError(false)
+		}
+		return runtime.Observation{}, errors.New("temporary outage")
+	})
+	sink := &recordingSink{}
+	attachment := &Attachment{done: make(chan struct{})}
+	attachment.runWithRetry(t.Context(), observer, sink, observationRetryPolicy{
+		now:  func() time.Time { return clock },
+		wait: func(context.Context, int) bool { clock = clock.Add(time.Minute); return true },
+	})
+	assert.Equal(t, 15, calls)
+	assert.Equal(t, []uint64{7}, sink.resets)
+	assert.Equal(t, []uint64{8}, sink.applied)
+	require.Len(t, sink.errors, 1)
+	assert.NotContains(t, sink.errors[0].Error(), "startup")
+}

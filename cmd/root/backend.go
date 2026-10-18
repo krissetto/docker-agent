@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -72,7 +73,10 @@ func (f *runExecFlags) selectBackend(agentFileName string) (backend, error) {
 type localBackend struct {
 	flags       *runExecFlags
 	agentSource config.Source
+	toolsetPool *teamloader.ToolsetLeasePool
 
+	poolOnce  sync.Once
+	poolErr   error
 	storeOnce sync.Once
 	storeErr  error
 	store     session.Store
@@ -83,6 +87,16 @@ func (b *localBackend) LoadTeamRequest() runtime.LoadTeamRequest {
 }
 
 func (b *localBackend) LoadTeam(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
+	if req.RunConfig != nil && req.RunConfig.TeamEditGrant().Mode != "off" {
+		b.poolOnce.Do(func() {
+			scope := "local:" + b.agentSource.Name() + ":" + req.RunConfig.WorkingDir
+			b.toolsetPool, b.poolErr = teamloader.NewToolsetLeasePool(scope)
+		})
+		if b.poolErr != nil {
+			return nil, b.poolErr
+		}
+		return b.flags.loadAgentFromWithPool(ctx, req, b.toolsetPool, "local:"+b.agentSource.Name()+":"+req.RunConfig.WorkingDir)
+	}
 	return b.flags.loadAgentFrom(ctx, req)
 }
 
@@ -117,7 +131,7 @@ func (b *localBackend) CreateSession(ctx context.Context, loaded *teamloader.Loa
 		return nil, nil, nil, nil, err
 	}
 
-	rt, sess, err := b.flags.createLocalRuntimeAndSession(ctx, loaded, req, store)
+	rt, sess, err := b.flags.createLocalRuntimeAndSessionWithSource(ctx, loaded, req, store, b.agentSource, b.toolsetPool)
 	if err != nil {
 		stopToolSets(ctx, loaded.Team)
 		return nil, nil, nil, nil, err
@@ -178,10 +192,14 @@ func (b *localBackend) Close() error {
 	// before reading b.store. If sessionStore was never called, the Do
 	// runs an empty closure and b.store stays nil.
 	b.storeOnce.Do(func() {})
-	if b.store == nil {
-		return nil
+	var errs []error
+	if b.store != nil {
+		errs = append(errs, b.store.Close())
 	}
-	return b.store.Close()
+	if b.toolsetPool != nil {
+		errs = append(errs, b.toolsetPool.Close(context.Background()))
+	}
+	return errors.Join(errs...)
 }
 
 // remoteBackend talks to a docker-agent server.

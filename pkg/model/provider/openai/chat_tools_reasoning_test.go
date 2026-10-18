@@ -193,3 +193,68 @@ func TestChatCompletions_DropsReasoningEffortWithTools_OverridesNoThinking(t *te
 	assert.NotContains(t, req, "reasoning_effort", "the tools+reject gate must win over NoThinking(), not just over an explicit ThinkingBudget")
 	assert.Contains(t, buf.String(), "dropping reasoning_effort", "NoThinking() was about to send an effort, so the drop must be reported")
 }
+
+func TestChatCompletions_ToolsWithNoneEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		provider string
+		model    string
+		allowed  bool
+	}{
+		{"openai", "gpt-6-sol", true},
+		{"openai", "gpt-6-luna", true},
+		{"vercel", "openai/gpt-6-sol-2026-09-22", true},
+		{"vercel", "openai/gpt-6-luna-2026-09-22", true},
+		{"openai", "gpt-6-astra", false},
+		{"openai", "gpt-5.6", false},
+		{"openai", "gpt-6-sol-pro", false},
+		{"openai", "gpt-6-luna-2026-02-30", false},
+		{"xai", "gpt-6-sol", false},
+		{"mistral", "gpt-6-luna", false},
+	} {
+		for _, setting := range []struct {
+			effort     string
+			noThinking bool
+		}{
+			{effort: "none"},
+			{effort: "NONE"},
+			{noThinking: true},
+			{effort: "high", noThinking: true},
+			{effort: "high"},
+			{},
+		} {
+			t.Run(tc.provider+"/"+tc.model+"/"+setting.effort, func(t *testing.T) {
+				t.Parallel()
+				server, body := captureRequestBody(t)
+				cfg := &latest.ModelConfig{
+					Provider: tc.provider, Model: tc.model, BaseURL: server.URL, TokenKey: "MY_TOKEN",
+					ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
+				}
+				if setting.effort != "" {
+					cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: setting.effort}
+				}
+				var opts []options.Opt
+				if setting.noThinking {
+					opts = append(opts, options.WithNoThinking())
+				}
+				env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
+				client, err := NewClient(t.Context(), cfg, env, opts...)
+				require.NoError(t, err)
+				stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, toolsForReasoningTest())
+				require.NoError(t, err)
+				defer stream.Close()
+				drainReasoningTestStream(t, stream)
+
+				var req map[string]any
+				require.NoError(t, json.Unmarshal(body(), &req))
+				require.Contains(t, req, "tools")
+				if tc.allowed && (setting.noThinking || setting.effort == "none" || setting.effort == "NONE") {
+					assert.Equal(t, "none", req["reasoning_effort"])
+				} else {
+					assert.NotContains(t, req, "reasoning_effort")
+				}
+			})
+		}
+	}
+}

@@ -207,3 +207,39 @@ func saveSettingsDraftForTest(t *testing.T, root *appModel, prefs messages.Prefe
 	require.True(t, ok)
 	root.handleApplySettings(msg)
 }
+
+func TestSettingsGitDiffLayoutPreviewsRollsBackAndPersists(t *testing.T) {
+	setupSettingsConfigTest(t)
+	root, _, _ := frozenClockRoot(t, 120, 50)
+	root.gitDiffSplit = false
+	d := settingsFromRoot(t, root)
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	collectMsgs(cmd)
+	for range 4 {
+		_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		collectMsgs(cmd)
+	}
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	preview, ok := firstOfType[messages.PreviewSettingsMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	root.handleSettingsPreview(preview)
+	require.True(t, root.gitDiffSplit, "split layout previews at runtime")
+	require.Equal(t, "unified", userconfig.Get().GetGitDiffLayout(), "preview does not persist")
+	settingsCancel(t, root, d)
+	require.False(t, root.gitDiffSplit, "cancel restores the original runtime preference")
+	d = settingsFromRoot(t, root)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	collectMsgs(cmd)
+	for range 4 {
+		_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		collectMsgs(cmd)
+	}
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	preview, ok = firstOfType[messages.PreviewSettingsMsg](collectMsgs(cmd))
+	require.True(t, ok)
+	root.handleSettingsPreview(preview)
+	settingsSave(t, root, d)
+	require.Equal(t, "split", userconfig.Get().GetGitDiffLayout())
+	root, _, _ = frozenClockRoot(t, 120, 50)
+	require.True(t, root.gitDiffSplit, "restart loads split Git review preference")
+}

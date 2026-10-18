@@ -108,6 +108,9 @@ func TestRemoteBackendMissingExplicitIDCreatesAndHydrates(t *testing.T) {
 		switch {
 		case r.URL.Path == api.ServerInfoPath:
 			fmt.Fprint(w, `{"version":1,"session_api_version":2,"instance_id":"test-server","capabilities":["session_explicit_ids"]}`)
+		case r.URL.Path == api.SessionAPIPath+"/chosen" && r.URL.Query().Get("view") == "prepare-info":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not_found","operation":"prepare_view","session_id":"chosen"}`)
 		case strings.HasSuffix(r.URL.Path, "/status"):
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":"not_found"}`)
@@ -327,10 +330,14 @@ func TestRemoteExecUsesCanonicalSession(t *testing.T) {
 						return
 					}
 					fmt.Fprintf(w, "data: {\"version\":2,\"type\":\"event\",\"envelope\":{\"version\":2,\"session_id\":%q,\"turn_id\":\"accepted\",\"epoch\":\"owner\",\"sequence\":1,\"event\":{\"type\":\"stream_stopped\",\"session_id\":%q,\"reason\":\"normal\"}}}\n\n", id, id)
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
 				case strings.HasSuffix(r.URL.Path, "/messages"):
 					assert.Equal(t, api.SessionAPIPath+"/"+id+"/messages", r.URL.Path)
 					close(accepted)
 					fmt.Fprintf(w, `{"session_id":%q,"turn_id":"accepted"}`, id)
+				case strings.HasSuffix(r.URL.Path, "/workflow/wait"):
+					fmt.Fprint(w, `{"epoch":"owner","cursor":1}`)
 				case strings.HasSuffix(r.URL.Path, "/title"), strings.HasSuffix(r.URL.Path, "/turns/accepted/wait"):
 					assert.True(t, strings.HasPrefix(r.URL.Path, api.SessionAPIPath+"/"+id+"/"))
 					w.WriteHeader(http.StatusNoContent)

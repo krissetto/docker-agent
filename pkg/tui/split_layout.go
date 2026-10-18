@@ -1,6 +1,9 @@
 package tui
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // splitRect uses terminal cells, including each pane's title row.
 type splitRect struct{ X, Y, W, H int }
@@ -112,6 +115,37 @@ func (l splitLayout) Insert(source, target string, edge splitEdge) (splitLayout,
 		}
 		node.first = insert(node.first)
 		node.second = insert(node.second)
+		return node
+	}
+	return splitLayout{root: insert(root)}, true
+}
+
+// InsertLayout moves a whole workspace subtree without changing its ratios.
+func (l splitLayout) InsertLayout(source splitLayout, target string, edge splitEdge) (splitLayout, bool) {
+	if source.root == nil || !l.Contains(target) || edge > splitBottom {
+		return l, false
+	}
+	if slices.ContainsFunc(source.Sessions(), l.Contains) {
+		return l, false
+	}
+	root := splitClone(l.root)
+	var insert func(*splitNode) *splitNode
+	insert = func(node *splitNode) *splitNode {
+		if node.first == nil {
+			if node.session != target {
+				return node
+			}
+			axis := splitColumns
+			if edge == splitTop || edge == splitBottom {
+				axis = splitRows
+			}
+			first, second := node, splitClone(source.root)
+			if edge == splitLeft || edge == splitTop {
+				first, second = second, first
+			}
+			return &splitNode{axis: axis, ratio: 0.5, first: first, second: second}
+		}
+		node.first, node.second = insert(node.first), insert(node.second)
 		return node
 	}
 	return splitLayout{root: insert(root)}, true

@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -317,4 +318,56 @@ func TestStaleCancelledStopCannotClearNewRequestProjection(t *testing.T) {
 			assert.Empty(t, a.cancelledRequests)
 		})
 	}
+}
+
+func TestHistoricalResolvedAppIsTranscriptOnlyAndReadOnly(t *testing.T) {
+	const dir = "/historical/workspace"
+	const source = "team.yaml"
+	tm := team.New(team.WithAgents(agent.New("root", "current", agent.WithModel(replyProvider{}), agent.WithAsyncSubagents(latest.SubagentRef{Agent: "root"}))))
+	store := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("removed-root"), session.WithAgentName("root"), session.WithWorkingDir(dir), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "root", "docker-agent.actor.source": source}))
+	child := session.New(session.WithID("removed-child"), session.WithAgentName("removed-worker"), session.WithParentID(root.ID), session.WithWorkingDir(dir), session.WithAttributes(map[string]string{runtime.SessionAgentAttribute: "removed-worker", runtime.SessionParentAgentAttribute: "root", "docker-agent.actor.source": source}), session.WithUserMessage("old question"))
+	child.AddMessage(session.NewAgentMessage("removed-worker", &chat.Message{Role: chat.MessageRoleAssistant, Content: "old answer"}))
+	nodeID := subagent.NodeID("removed-node")
+	record := session.ChildRecord{RootSessionID: root.ID, ParentSessionID: root.ID, Node: subagent.Node{ID: nodeID, Parent: subagent.SessionRootID(root.ID), SessionID: child.ID, Agent: "removed-worker", Name: "old researcher", State: subagent.NodeStopped}}
+	require.NoError(t, store.AddSession(t.Context(), root))
+	require.NoError(t, store.(session.CoordinationStore).AdmitChild(t.Context(), session.ChildAdmission{Child: child, Record: record}))
+	trees := subagent.NewInMemoryStore()
+	rt, err := runtime.NewLocalRuntime(t.Context(), tm, runtime.WithSessionStore(store), runtime.WithSubagentStore(trees), runtime.WithWorkingDir(dir), runtime.WithSessionCompaction(false))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+	tree := subagent.Snapshot{Version: subagent.SnapshotVersion, Root: subagent.SessionRootID(root.ID), Nodes: []subagent.NodeSnapshot{{Node: subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: "root"}, Children: []subagent.NodeSnapshot{{Node: record.Node}}}}}
+	require.NoError(t, trees.SaveTree(t.Context(), root.ID, tree))
+	committed, err := runtime.OpenSessionView(t.Context(), runtime.NewSessionRuntimeSupervisor(rt).Runtime(), child.ID)
+	require.NoError(t, err)
+	require.True(t, committed.Metadata.Historical)
+	require.NotNil(t, committed.Info.Attach)
+	a, err := NewResolved(t.Context(), runtime.NewSessionRuntimeSupervisor(rt).Runtime(), committed, WithRuntimeServices(rt))
+	require.NoError(t, err)
+	require.True(t, a.IsReadOnly())
+	require.Equal(t, child.ID, a.Session().ID)
+	assert.Equal(t, "old answer", a.Session().GetLastAssistantMessageContent())
+	require.NotNil(t, a.AttachedSubagent())
+	snapshot := a.SubagentTreeSnapshot()
+	require.NotNil(t, snapshot)
+	got, found := appHistoricalFindNode(snapshot.Nodes, nodeID)
+	require.True(t, found)
+	assert.Equal(t, nodeID, got.ID)
+	_, err = a.FollowUpMessage(t.Context(), "must not run", nil)
+	require.Error(t, err)
+	var sessionErr *runtime.SessionError
+	require.ErrorAs(t, err, &sessionErr)
+	require.Equal(t, runtime.SessionErrorHistorical, sessionErr.Kind)
+}
+
+func appHistoricalFindNode(nodes []subagent.NodeSnapshot, id subagent.NodeID) (subagent.Node, bool) {
+	for _, node := range nodes {
+		if node.Node.ID == id {
+			return node.Node, true
+		}
+		if found, ok := appHistoricalFindNode(node.Children, id); ok {
+			return found, true
+		}
+	}
+	return subagent.Node{}, false
 }

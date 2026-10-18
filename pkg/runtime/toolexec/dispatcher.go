@@ -256,6 +256,9 @@ type Dispatcher struct {
 	// [tools.ErrRecallNotSupported].
 	Recall func(ctx context.Context, sess *session.Session, a *agent.Agent, message string) error
 
+	// BeginBackgroundWork registers a retained process against its issuing session.
+	BeginBackgroundWork func(context.Context, *session.Session, *agent.Agent, tools.ToolCall) (tools.BackgroundWork, error)
+
 	confirmationMu         *sync.Mutex
 	fallbackConfirmationMu sync.Mutex
 }
@@ -1180,12 +1183,21 @@ func (r callRuntime) gate() *Gate {
 	}
 }
 
+func (r callRuntime) BeginBackgroundWork(ctx context.Context) (tools.BackgroundWork, error) {
+	if r.c.d.BeginBackgroundWork == nil {
+		return nil, tools.ErrBackgroundWorkNotSupported
+	}
+	return r.c.d.BeginBackgroundWork(ctx, r.c.sess, r.c.a, r.c.tc)
+}
+
 func (r callRuntime) Supports(capability tools.Capability) bool {
 	switch capability {
 	case tools.CapabilityOutput:
 		return true
 	case tools.CapabilityRecall:
 		return r.c.d.Recall != nil
+	case tools.CapabilityBackgroundWork:
+		return r.c.d.BeginBackgroundWork != nil
 	}
 	return false
 }

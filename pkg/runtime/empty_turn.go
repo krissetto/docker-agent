@@ -10,7 +10,7 @@ import (
 // to a child. Origin alone is insufficient: unrelated runtime notes and agent
 // task requests still require a reply. Never infer intent from message text.
 func (r *LocalRuntime) quietCoordinationInput(sess *session.Session, msg QueuedMessage) bool {
-	if msg.Retry || msg.SenderID == "" || !msg.trustedSteering() || r.subagents == nil {
+	if msg.Retry || msg.SenderID == "" || !msg.guidance() || r.subagents == nil {
 		return false
 	}
 	r.subagents.mu.Lock()
@@ -45,9 +45,9 @@ func (r *LocalRuntime) initialTurnInput(sess *session.Session) (QueuedMessage, b
 			id := d.activeRequestID
 			d.mu.Unlock()
 			if id != "" {
-				for _, item := range sess.MessagesSnapshot() {
+				for position, item := range sess.MessagesSnapshot() {
 					if msg := item.Message; msg != nil && msg.TurnID == id && msg.Accepted && !msg.Pending {
-						return queuedSessionInput(msg, -1, false), true
+						return queuedSessionInput(msg, position, false), true
 					}
 				}
 				// A retry has an identity but no new transcript input. Do not

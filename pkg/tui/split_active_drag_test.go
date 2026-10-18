@@ -54,7 +54,7 @@ func TestActiveColdRemainderLoadsOnlyCommittedDrop(t *testing.T) {
 		root.handleWindowResize(220, 70)
 		root.handleSwitchTab("profile")
 		root.editor.SetValue("active draft")
-		x, y := paneTabPoint(t, root, "profile")
+		x, y := paneTabPoint(t, root, "cold")
 		r := root.paneGeometry.Panes["profile"]
 		root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 		root.Update(tea.MouseMotionMsg{X: r.X, Y: r.Y, Button: tea.MouseLeft})
@@ -73,8 +73,13 @@ func TestActiveColdRemainderLoadsOnlyCommittedDrop(t *testing.T) {
 			}
 		}
 		require.EqualValues(t, 1, store.reads.Load())
-		require.Equal(t, "profile", root.paneFocus())
-		require.Equal(t, "active draft", root.editor.Value())
+		if cancel {
+			require.Equal(t, "profile", root.paneFocus())
+			require.Equal(t, "active draft", root.editor.Value())
+		} else {
+			require.Equal(t, "cold", root.paneFocus())
+			require.Equal(t, "active draft", root.editors["profile"].Value())
+		}
 		if cancel {
 			require.Same(t, before, root.panes.root)
 			require.Nil(t, root.chatPages["cold"])

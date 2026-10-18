@@ -1,0 +1,9 @@
+{
+  "session_id": "session-demo-001",
+  "agent_name": "root",
+  "state": "running",
+  "pending": 1,
+  "turn_id": "turn-demo-001",
+  "pause_armed": true,
+  "pause_generation": 7
+}

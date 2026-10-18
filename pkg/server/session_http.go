@@ -53,11 +53,13 @@ const (
 func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	s.registerWorkspaceSnapshotRoutes(group)
 	s.registerGeneratedMediaRoutes(group)
+	s.registerGitReviewRoutes(group)
 	group.GET("", s.sessionCatalog)
 	group.POST("", s.createCanonicalSession)
 	group.POST("/start", s.startCanonicalSession)
 	group.GET("/:id", s.getCanonicalSession)
 	group.GET("/:id/status", s.canonicalSessionStatus)
+	group.GET("/:id/recent-chat", s.recentCanonicalChat)
 	group.GET("/:id/snapshot", s.canonicalSessionSnapshot)
 	group.GET("/:id/events", s.sessionEventStream)
 	group.POST("/:id/messages", s.sessionInput)
@@ -68,6 +70,7 @@ func (s *Server) registerCanonicalSessionRoutes(group *echo.Group) {
 	group.GET("/:id/delegation-policy", s.canonicalDelegationPolicy)
 	group.PATCH("/:id/delegation-policy", s.canonicalDelegationPolicy)
 	group.POST("/:id/turns/:turnID/wait", s.awaitSessionTurn)
+	group.POST("/:id/workflow/wait", s.awaitSessionWorkflow)
 	group.PATCH("/:id", s.editCanonicalSession)
 	group.PATCH("/:id/title", s.updateCanonicalSessionTitle)
 	group.GET("/:id/tree", s.sessionTree)
@@ -656,6 +659,22 @@ func (s *Server) awaitSessionTurn(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (s *Server) awaitSessionWorkflow(c echo.Context) error {
+	handle, err := s.sessionByID(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	workflow, ok := handle.(runtime.SessionWorkflow)
+	if !ok {
+		return sessionHTTPError(runtime.UnsupportedSessionOperation(handle.ID(), "await_workflow"))
+	}
+	settlement, err := workflow.AwaitWorkflow(c.Request().Context())
+	if err != nil {
+		return sessionHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, settlement)
+}
+
 func (s *Server) sessionEventStream(c echo.Context) error {
 	tree := c.QueryParam("tree") == "true"
 	if c.QueryParam("tree") != "" && !tree {
@@ -812,7 +831,8 @@ func writeSessionSnapshot(snapshot sessionSnapshotDTO, write func(sessionStreamM
 
 func sessionMetadata(meta runtime.SessionMetadata) sessionMetadataDTO {
 	capabilities := meta.Capabilities
-	return sessionMetadataDTO{SessionID: meta.SessionID, AgentName: meta.AgentName, Model: meta.Model, ThinkingLevels: meta.ThinkingLevels, ThinkingLevel: meta.ThinkingLevel, Capabilities: sessionCapabilitiesDTO{
+	return sessionMetadataDTO{SessionID: meta.SessionID, AgentName: meta.AgentName, Historical: meta.Historical, ExecutionAvailable: meta.ExecutionAvailable, HistoryReason: meta.HistoryReason, Model: meta.Model, ThinkingLevels: meta.ThinkingLevels, ThinkingLevel: meta.ThinkingLevel, Capabilities: sessionCapabilitiesDTO{
+		Historical: capabilities.Historical, ExecutionAvailable: capabilities.ExecutionAvailable,
 		PendingMessageRemoval: capabilities.PendingMessageRemoval,
 		Snapshots:             capabilities.Snapshots,
 		ToolInspection:        capabilities.ToolInspection, ToolsetRestart: capabilities.ToolsetRestart, PermissionsInspection: capabilities.PermissionsInspection, MCPPrompts: capabilities.MCPPrompts, TodoEditing: capabilities.TodoEditing, Branching: capabilities.Branching,
@@ -875,7 +895,7 @@ func sessionRequestError(message string) error {
 
 func publicSessionOperation(operation string) string {
 	switch operation {
-	case "restore_binding", "restore_parent", "restore_tree_membership", "restore_ancestry", "restore_source", "restore_child_tree":
+	case "prepare_view", "restore_binding", "restore_parent", "restore_tree_membership", "restore_ancestry", "restore_source", "restore_child_tree":
 		return "attach"
 	case "create_actor": // durable compatibility operation from older runtimes
 		return "create_session"
@@ -903,6 +923,8 @@ func sessionHTTPError(err error) error {
 			status = http.StatusPreconditionFailed
 		case runtime.SessionErrorUnsupported:
 			status = http.StatusNotImplemented
+		case runtime.SessionErrorHistorical:
+			status = http.StatusConflict
 		case runtime.SessionErrorConflict, runtime.SessionErrorWrongSession, runtime.SessionErrorInterrupted:
 			status = http.StatusConflict
 		}

@@ -15,6 +15,7 @@ func TestSQLiteExecutionSettingsRoundTrip(t *testing.T) {
 		WithAttachedFiles([]string{"/tmp/input.txt"}), WithDelegationLineage([]string{"root", "worker"}),
 		WithMaxConsecutiveToolCalls(8), WithMaxOldToolCallTokens(100), WithMaxToolResultTokens(200),
 		WithAttributes(map[string]string{"binding.agent": "creation-agent"}))
+	sess.AgentID = "active-stable-id"
 	sess.SetSafetyPolicy(SafetyPolicyStrict)
 	sess.ToggleYolo()
 	require.NoError(t, store.AddSession(t.Context(), sess))
@@ -26,6 +27,9 @@ func TestSQLiteExecutionSettingsRoundTrip(t *testing.T) {
 		loaded.ToggleYolo()
 		assert.Equal(t, SafetyPolicyStrict, loaded.GetSafetyPolicy())
 		assert.Equal(t, sess.AgentName, loaded.AgentName)
+		assert.Equal(t, sess.AgentID, loaded.AgentID)
+		assert.Equal(t, loaded.AgentID, loaded.Clone().AgentID)
+		assert.Equal(t, loaded.AgentID, loaded.OwnSnapshot().AgentID)
 		assert.True(t, loaded.AsyncSubagent)
 		assert.True(t, loaded.NonInteractive)
 		assert.Equal(t, sess.AttachedFiles, loaded.AttachedFiles)
@@ -37,6 +41,7 @@ func TestSQLiteExecutionSettingsRoundTrip(t *testing.T) {
 	}
 	check()
 	sess.AgentName = "handoff-agent"
+	sess.AgentID = "handoff-stable-id"
 	require.NoError(t, store.UpdateSession(t.Context(), sess))
 	check()
 	require.NoError(t, store.PersistCompaction(t.Context(), sess, 1, 2, Item{Summary: "summary"}))

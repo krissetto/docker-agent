@@ -19,6 +19,31 @@ func (t *Config) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 func (t *Config) Validate() error {
+	if err := validateStableIdentity("id", t.ID); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	identities := make(map[string]string, len(t.Agents)*2)
+	keys := make(map[string]string, len(t.Agents))
+	for _, agent := range t.Agents {
+		if agent.ID == "" {
+			continue
+		}
+		if err := validateStableIdentity("agents."+agent.Name+".id", agent.ID); err != nil {
+			return err
+		}
+		if previous, exists := identities[agent.ID]; exists {
+			return fmt.Errorf("agents.%s.id duplicates agents.%s.id %q", agent.Name, previous, agent.ID)
+		}
+		identities[agent.ID] = agent.Name
+	}
+	for _, agent := range t.Agents {
+		keys[agent.Name] = agent.Name
+	}
+	for id, owner := range identities {
+		if keyOwner, collision := keys[id]; collision && keyOwner != owner {
+			return fmt.Errorf("agents.%s.id %q collides with agents.%s key", owner, id, keyOwner)
+		}
+	}
 	if err := t.Budget.validate(); err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
@@ -117,6 +142,21 @@ func (t *Config) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+func validateStableIdentity(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value || len(value) > 128 {
+		return fmt.Errorf("%s must be a non-empty identifier of at most 128 bytes without surrounding whitespace", field)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s must not contain control characters", field)
+		}
+	}
 	return nil
 }
 
@@ -328,6 +368,12 @@ func (t *Toolset) validate() error {
 	if t.AllowPrivateIPsEnabled() && t.Type != "fetch" && t.Type != "mcp" && t.Type != "api" && t.Type != "openapi" && t.Type != "a2a" {
 		return errors.New("allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets")
 	}
+	if t.BackgroundAfter != nil && t.Type != "shell" {
+		return errors.New("background_after can only be used with type 'shell'")
+	}
+	if t.BackgroundAfter != nil && *t.BackgroundAfter < 0 {
+		return errors.New("background_after must not be negative")
+	}
 	if t.SudoAskpass != nil && t.Type != "shell" {
 		return errors.New("sudo_askpass can only be used with type 'shell'")
 	}
@@ -401,6 +447,8 @@ func (t *Toolset) validate() error {
 		// no additional validation needed
 	case "background_jobs":
 		// no additional validation needed
+	case "team_edit":
+		// Runtime authority is granted only by trusted startup config/CLI, not YAML.
 	case "memory":
 		// path is optional; defaults to ~/.cagent/memory/<agent-name>/memory.db
 	case "tasks":

@@ -23,11 +23,10 @@ func assertWithinFull(t *testing.T, v *messageModel, width int) {
 	inner := width - style.GetHorizontalFrameSize()
 	body, blocks, err := markdown.NewFastRenderer(inner).RenderWithCodeBlocks(v.message.Content)
 	require.NoError(t, err)
-	prefix := v.senderPrefix("root")
-	want := prefix + style.Width(width).Render(actionRow(inner, v.hovered, types.MessageCopyLabel)+"\n"+body)
+	want := style.Width(width).Render(actionRow(inner, v.hovered, types.MessageCopyLabel) + "\n" + body)
 	require.Equal(t, uv.NewStyledString(want).Lines(ansi.GraphemeWidth), uv.NewStyledString(strings.Join(lines, "\n")).Lines(ansi.GraphemeWidth), "input %q width %d", v.message.Content, width)
 	for i := range blocks {
-		blocks[i].Line += strings.Count(prefix, "\n") + 1
+		blocks[i].Line++
 	}
 	require.Equal(t, blocks, v.CodeBlocks())
 }

@@ -212,3 +212,38 @@ func TestRemoteCanonicalEventsMatchLocalEnvelope(t *testing.T) {
 		assert.Equal(t, local, remote, "typed remote transport must preserve the canonical event and envelope")
 	}
 }
+
+func TestRemoteAwaitWorkflowReturnsOutputFenceAndHonorsCancellation(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		switch r.URL.Path {
+		case api.SessionAPIPath + "/settled/workflow/wait":
+			fmt.Fprint(w, `{"epoch":"owner","cursor":7}`)
+		case api.SessionAPIPath + "/active/workflow/wait":
+			entered <- struct{}{}
+			<-r.Context().Done()
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+	transport, err := NewSessionTransport(client)
+	require.NoError(t, err)
+	handle, err := transport.SessionByID("settled")
+	require.NoError(t, err)
+	settlement, err := handle.(SessionWorkflow).AwaitWorkflow(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, WorkflowSettlement{Epoch: "owner", Cursor: 7}, settlement)
+	handle, err = transport.SessionByID("active")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := handle.(SessionWorkflow).AwaitWorkflow(ctx); done <- err }()
+	<-entered
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}

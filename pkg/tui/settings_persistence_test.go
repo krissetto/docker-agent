@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,7 @@ func saveTestSettings(layout messages.LayoutSettings, mode messages.SendMode) er
 	settings := userconfig.Get()
 	return savePreferences(messages.Preferences{
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
+		GitDiffLayout:  messages.ParseGitDiffLayout(settings.GetGitDiffLayout()),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
 		DimInactivePanes:      settings.GetDimInactivePanes(),
@@ -141,6 +143,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 		},
 		SendMode:           messages.SendModeQueue,
 		SplitDiffView:      false,
+		GitDiffLayout:      messages.GitDiffSplit,
 		ExpandThinking:     true,
 		HideToolResults:    true,
 		ShowBanner:         false,
@@ -160,6 +163,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 	assert.Equal(t, preferences.Layout, layoutSettingsFromConfig(settings.GetLayout()))
 	assert.Equal(t, preferences.SendMode, messages.ParseSendMode(settings.GetBusySendMode()))
 	assert.Equal(t, preferences.SplitDiffView, settings.GetSplitDiffView())
+	assert.Equal(t, preferences.GitDiffLayout, messages.ParseGitDiffLayout(settings.GetGitDiffLayout()))
 	assert.Equal(t, preferences.ExpandThinking, settings.GetExpandThinking())
 	assert.Equal(t, preferences.HideToolResults, settings.HideToolResults)
 	assert.Equal(t, preferences.ShowBanner, settings.GetShowBanner())
@@ -358,4 +362,53 @@ func TestTransparentBackgroundPreferenceRoundTrip(t *testing.T) {
 	require.NoError(t, savePreferences(preferences))
 	require.True(t, userconfig.Get().GetTransparentBackground())
 	require.Nil(t, userconfig.Get().TransparentBackground, "default true is omitted from YAML")
+}
+
+func TestCloseTabChoicePersistenceAndSettingsMerge(t *testing.T) {
+	setupSettingsConfigTest(t)
+	original := preferencesFromConfig(userconfig.Get())
+	assert.Equal(t, messages.CloseTabAsk, original.CloseTabChoice)
+	m := newCloseTabTestModel(t)
+	for _, choice := range []messages.CloseTabChoice{messages.CloseTabNo, messages.CloseTabYes} {
+		require.Nil(t, m.rememberCloseTabChoice(choice))
+		cfg, err := userconfig.Load()
+		require.NoError(t, err)
+		assert.Equal(t, choice, preferencesFromConfig(cfg.GetSettings()).CloseTabChoice)
+		assert.Equal(t, choice, m.closeTabChoice)
+	}
+	// An older Settings draft must not erase a choice remembered after it opened.
+	draft := original
+	draft.Sound = true
+	require.NoError(t, saveChangedPreferences(original, draft))
+	assert.Equal(t, messages.CloseTabYes, preferencesFromConfig(userconfig.Get()).CloseTabChoice)
+	original = preferencesFromConfig(userconfig.Get())
+	draft = original
+	draft.CloseTabChoice = messages.CloseTabAsk
+	require.NoError(t, saveChangedPreferences(original, draft))
+	cfg, err := userconfig.Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Settings.CloseTabChoice, "Ask clears persisted choice")
+	assert.True(t, cfg.Settings.Sound, "changing choice preserves other preferences")
+}
+
+func TestCloseTabChoiceSaveFailureKeepsAsking(t *testing.T) {
+	setupSettingsConfigTest(t)
+	require.NoError(t, os.WriteFile(userconfig.Path(), []byte("settings: [broken"), 0o600))
+	m := newCloseTabTestModel(t)
+	require.NotNil(t, m.rememberCloseTabChoice(messages.CloseTabYes), "persistence failure produces a warning")
+	assert.Equal(t, messages.CloseTabAsk, m.closeTabChoice)
+}
+
+func TestGitDiffLayoutPersistenceDefaultsAndRoundTrip(t *testing.T) {
+	setupSettingsConfigTest(t)
+	assert.Equal(t, messages.GitDiffUnified, messages.ParseGitDiffLayout(userconfig.Get().GetGitDiffLayout()))
+	assert.NoError(t, savePreferences(messages.Preferences{GitDiffLayout: messages.GitDiffSplit}))
+	assert.Equal(t, messages.GitDiffSplit, messages.ParseGitDiffLayout(userconfig.Get().GetGitDiffLayout()))
+	cfg, err := userconfig.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "split", cfg.GetSettings().GitDiffLayout)
+	assert.NoError(t, savePreferences(messages.Preferences{GitDiffLayout: messages.GitDiffUnified}))
+	cfg, err = userconfig.Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GetSettings().GitDiffLayout, "the default is omitted")
 }

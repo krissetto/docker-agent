@@ -131,6 +131,11 @@ func (b *Base) View() string {
 	return rendered
 }
 
+// StatusIcon returns the current status glyph using the tool spinner state.
+func (b *Base) StatusIcon() string {
+	return Icon(b.message, b.spinner)
+}
+
 // ExpandedView returns the regular, full tool renderer.
 func (b *Base) ExpandedView() string {
 	return b.View()

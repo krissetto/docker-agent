@@ -161,7 +161,7 @@ func TestDefinitionsExplainAddressingAndReports(t *testing.T) {
 	t.Parallel()
 
 	for _, definition := range Definitions() {
-		if definition.Name == ToolSpawnSubagent {
+		if definition.Name == ToolSpawnSubagent || definition.Name == ToolListAgents {
 			continue
 		}
 		t.Run(definition.Name, func(t *testing.T) {
@@ -333,4 +333,27 @@ func TestPreviewText(t *testing.T) {
 	preview, truncated = PreviewText("", 50)
 	assert.Empty(t, preview)
 	assert.False(t, truncated)
+}
+
+func TestListAgentsDefinitionIsReadOnlyAndDistinguishesRosterFromSessions(t *testing.T) {
+	t.Parallel()
+
+	var definition tools.Tool
+	for _, candidate := range Definitions() {
+		if candidate.Name == ToolListAgents {
+			definition = candidate
+			break
+		}
+	}
+	require.Equal(t, ToolListAgents, definition.Name)
+	assert.Equal(t, "subagent", definition.Category)
+	assert.True(t, definition.Annotations.ReadOnlyHint)
+	assert.Contains(t, definition.Description, "canonical node ids")
+	assert.Contains(t, definition.Description, "does not list configured agents or spawn choices")
+	schema, err := tools.SchemaToMap(definition.Parameters)
+	require.NoError(t, err)
+	assert.Equal(t, "object", schema["type"])
+	properties := schema["properties"].(map[string]any)
+	assert.Contains(t, properties, "limit")
+	assert.Contains(t, properties, "cursor")
 }

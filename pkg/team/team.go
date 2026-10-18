@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/teamdef"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -34,6 +35,7 @@ type Team struct {
 	// declared toolset allow-lists, limits and flags. Teams built without it
 	// (e.g. the remote runtime) leave it nil and AgentConfig returns false.
 	agentConfigs map[string]latest.AgentConfig
+	definitions  teamdef.DefinitionSnapshot
 }
 
 type Opt func(*Team)
@@ -69,6 +71,11 @@ func WithAgentConfigs(configs map[string]latest.AgentConfig) Opt {
 	return func(t *Team) {
 		t.agentConfigs = configs
 	}
+}
+
+// WithDefinitionSnapshot retains immutable, credential-safe authored history.
+func WithDefinitionSnapshot(snapshot teamdef.DefinitionSnapshot) Opt {
+	return func(t *Team) { t.definitions = teamdef.CloneDefinitionSnapshot(snapshot) }
 }
 
 // WithRuntimeSafety records the config-wide runtime.safety default the
@@ -215,6 +222,37 @@ func (t *Team) StopToolSets(ctx context.Context) error {
 func (t *Team) AgentConfig(name string) (latest.AgentConfig, bool) {
 	cfg, ok := t.agentConfigs[name]
 	return cfg, ok
+}
+
+// ResolveIdentity resolves only an explicit stable ID. It never guesses from a
+// name so a removed/changed ID cannot silently bind to a reused agent key.
+func (t *Team) ResolveIdentity(identity string) (*agent.Agent, string, bool) {
+	if identity == "" {
+		return nil, "", false
+	}
+	for _, a := range t.agents {
+		cfg, has := t.agentConfigs[a.Name()]
+		if has && cfg.ID != "" && cfg.ID == identity {
+			return a, a.Name(), true
+		}
+	}
+	return nil, "", false
+}
+
+// ResolveLegacyName resolves an exact authored config key for records that
+// predate explicit stable IDs. Callers must use it only when the stored ID is
+// empty; execution name lookup remains unchanged.
+func (t *Team) ResolveLegacyName(name string) (*agent.Agent, string, bool) {
+	if a, err := t.Agent(name); err == nil {
+		return a, name, true
+	}
+	return nil, "", false
+}
+
+// DefinitionSnapshot returns an immutable copy of the credential-safe
+// authored definition snapshot retained by this team.
+func (t *Team) DefinitionSnapshot() teamdef.DefinitionSnapshot {
+	return teamdef.CloneDefinitionSnapshot(t.definitions)
 }
 
 // Permissions returns the permission checker for this team.

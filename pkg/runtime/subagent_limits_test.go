@@ -712,9 +712,8 @@ func TestKnownReliableMailboxBound(t *testing.T) {
 
 func TestAsyncChildGetsParentMessageTool(t *testing.T) {
 	s := session.New(session.WithAsyncSubagent(true))
-	childTools := addAsyncChildTools(s, nil)
-	require.Len(t, childTools, 1)
-	assert.Equal(t, subagent.ToolSendMessage, childTools[0].Name)
+	childTools := addListAgentsTool(s, nil, addAsyncChildTools(s, nil))
+	require.ElementsMatch(t, []string{subagent.ToolSendMessage, subagent.ToolListAgents}, toolNames(childTools))
 	root := session.New()
 	assert.Empty(t, addAsyncChildTools(root, nil))
 }

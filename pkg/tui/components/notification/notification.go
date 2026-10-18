@@ -305,15 +305,21 @@ func (n *Manager) View() string {
 	return lipgloss.JoinVertical(lipgloss.Right, views...)
 }
 
-func (n *Manager) GetLayer() *lipgloss.Layer {
-	if len(n.items) == 0 {
-		return nil
+// GetLayers keeps alignment padding out of the opaque notification rectangles.
+func (n *Manager) GetLayers() []*lipgloss.Layer {
+	bounds := n.itemBounds()
+	layers := make([]*lipgloss.Layer, 0, len(bounds))
+	for i, b := range bounds {
+		item := n.items[len(n.items)-1-i]
+		view := item.render(
+			n.maxWidth(),
+			n.closeHoveredID == item.ID,
+			n.hoveredID == item.ID,
+			n.copiedID == item.ID,
+		)
+		layers = append(layers, lipgloss.NewLayer(view).X(b.col).Y(b.row))
 	}
-
-	view := n.View()
-	row, col := n.position()
-
-	return lipgloss.NewLayer(view).X(col).Y(row)
+	return layers
 }
 
 func (n *Manager) position() (row, col int) {

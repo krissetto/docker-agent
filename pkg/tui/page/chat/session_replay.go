@@ -28,6 +28,7 @@ type replayPreparedMsg struct {
 	requests    []generatedMediaRequest
 }
 type replayContinueMsg struct{ generation uint64 }
+type historyContinueMsg struct{ generation uint64 }
 
 type pageReplay struct {
 	metadataApplied bool
@@ -45,7 +46,7 @@ func EnableAsyncReplay(page Page) {
 	}
 }
 
-// Loading reports whether the authoritative transcript is still being installed.
+// Loading reports whether the authoritative recent transcript is still being installed.
 func Loading(page Page) bool { p, ok := page.(*chatPage); return ok && p.replay != nil }
 
 func (p *chatPage) beginReplay(snapshot runtime.SessionSnapshot) tea.Cmd {
@@ -93,10 +94,19 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 	case list.ReplayRenderedMsg:
 		list.ApplyReplayRender(p.messages, msg)
 		if p.replay == nil {
-			return true, nil
+			return true, p.continueHistoryCmd()
 		}
 		generation := p.replay.generation
 		return true, p.replayCommand(func() tea.Msg { return replayContinueMsg{generation: generation} })
+	case historyContinueMsg:
+		if msg.generation != p.replayGeneration || p.replay != nil || p.presentationHidden {
+			return true, nil
+		}
+		cmd := list.ContinueHistory(p.messages)
+		if cmd != nil {
+			return true, p.replayCommand(cmd)
+		}
+		return true, p.continueHistoryCmd()
 	case replayPreparedMsg:
 		if p.replay == nil || p.replay.generation != msg.generation {
 			return true, nil
@@ -141,6 +151,7 @@ func (p *chatPage) updateReplay(msg tea.Msg) (bool, tea.Cmd) {
 			return true, tea.Batch(cmds...)
 		}
 		p.replay = nil
+		cmds = append(cmds, p.continueHistoryCmd())
 		return true, tea.Batch(cmds...)
 	}
 	if p.replay != nil {
@@ -163,4 +174,12 @@ func (p *chatPage) finishReplayProjection(snapshot runtime.SessionSnapshot) tea.
 	// The transcript was already installed in bounded turns. Only projection
 	// metadata is applied here; the reset must not synchronously replay it again.
 	return p.applyProjectionMetadata(snapshot)
+}
+
+func (p *chatPage) continueHistoryCmd() tea.Cmd {
+	if p.presentationHidden || !list.HistoryPending(p.messages) {
+		return nil
+	}
+	generation := p.replayGeneration
+	return p.replayCommand(tea.Tick(16*time.Millisecond, func(time.Time) tea.Msg { return historyContinueMsg{generation: generation} }))
 }

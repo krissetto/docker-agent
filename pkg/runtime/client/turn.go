@@ -205,6 +205,10 @@ func ConsumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 }
 
 func consumeTurn(ctx context.Context, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), cursor *uint64, progress func()) TurnTermination {
+	return consumeWorkflow(ctx, observation, turnID, handler, cursor, progress, nil)
+}
+
+func consumeWorkflow(ctx context.Context, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), cursor *uint64, progress func(), workflow *workflowObservation) TurnTermination {
 	if observation.Cancel != nil {
 		defer observation.Cancel()
 	}
@@ -226,16 +230,16 @@ func consumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 		if cursor != nil && envelope.Sequence != 0 && progress != nil {
 			progress()
 		}
-		if envelope.TurnID != turnID {
+		if workflow == nil && envelope.TurnID != turnID {
 			return true, TurnTermination{}
 		}
 
 		_, stopped := envelope.Event.(*runtime.StreamStoppedEvent)
 		decision, err := handler(ctx, envelope)
 		if err != nil {
-			return false, TurnTermination{Stopped: stopped, Terminated: true, Err: err}
+			return false, TurnTermination{Stopped: stopped && workflow == nil, Terminated: true, Err: err}
 		}
-		if stopped {
+		if stopped && workflow == nil {
 			return false, TurnTermination{Stopped: true}
 		}
 		if decision == TurnTerminate {
@@ -257,13 +261,31 @@ func consumeTurn(ctx context.Context, observation runtime.Observation, turnID st
 		return TurnTermination{ObservationError: true, Err: ErrTurnObservationEnded}
 	}
 	errs := observation.Errors
+	var settled <-chan workflowResult
+	if workflow != nil && workflow.settlement == nil {
+		settled = workflow.result
+	}
 	for {
+		if workflow != nil && workflow.settlement != nil {
+			if workflow.settlement.Epoch != observation.Primary().Epoch {
+				return TurnTermination{ObservationError: true, Err: &ObservationDiscontinuityError{PreviousEpoch: observation.Primary().Epoch, CurrentEpoch: workflow.settlement.Epoch}}
+			}
+			if *cursor >= workflow.settlement.Cursor {
+				return TurnTermination{Stopped: true}
+			}
+		}
 		if ctx.Err() != nil {
 			return TurnTermination{Terminated: true, Err: ctx.Err()}
 		}
 		select {
 		case <-ctx.Done():
 			return TurnTermination{Terminated: true, Err: ctx.Err()}
+		case result := <-settled:
+			if result.err != nil {
+				return TurnTermination{Terminated: true, Err: result.err}
+			}
+			workflow.settlement = &result.settlement
+			settled = nil
 		case err, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -364,10 +386,17 @@ func observeTurnStartup(ctx context.Context, session Observer, policy observatio
 // cancellation resubmits or cancels the server-owned turn. Gaps are explicit:
 // a headless output handler cannot roll back already rendered deltas safely.
 func consumeAcceptedTurn(ctx context.Context, session Observer, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), policy observationRetryPolicy) TurnTermination {
+	return consumeAcceptedWorkflow(ctx, session, observation, turnID, handler, policy, nil)
+}
+
+func consumeAcceptedWorkflow(ctx context.Context, session Observer, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error), policy observationRetryPolicy, workflow *workflowObservation) TurnTermination {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	startup := time.AfterFunc(30*time.Second, cancel)
 	defer startup.Stop()
+	if workflow != nil {
+		startup.Stop()
+	}
 	cursor := observation.Primary().Cursor
 	epoch := observation.Primary().Epoch
 	attempt := 0
@@ -376,7 +405,7 @@ func consumeAcceptedTurn(ctx context.Context, session Observer, observation runt
 		started := policy.now()
 		reconnectable := observation.Errors != nil
 		sustained := time.AfterFunc(5*time.Second, func() { startup.Stop() })
-		termination := consumeTurn(ctx, observation, turnID, handler, &cursor, func() { startup.Stop() })
+		termination := consumeWorkflow(ctx, observation, turnID, handler, &cursor, func() { startup.Stop() }, workflow)
 		sustained.Stop()
 		if !termination.ObservationError || !reconnectable || ctx.Err() != nil {
 			return termination
@@ -424,4 +453,38 @@ func ObserveTurnStartup(ctx context.Context, session Observer) (runtime.Observat
 // accepted turn. It never submits or cancels execution; settlement is host-owned.
 func ConsumeAcceptedTurn(ctx context.Context, session Observer, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error)) TurnTermination {
 	return consumeAcceptedTurn(ctx, session, observation, turnID, handler, observationRetryPolicy{wait: waitRetry, now: time.Now})
+}
+
+type workflowResult struct {
+	settlement runtime.WorkflowSettlement
+	err        error
+}
+
+type workflowObservation struct {
+	result     <-chan workflowResult
+	settlement *runtime.WorkflowSettlement
+}
+
+// ConsumeWorkflow retains every root turn's output through stable workflow
+// quiescence. The settlement cursor also fences a slower remote event stream.
+func ConsumeWorkflow(ctx context.Context, session runtime.SessionHandle, observation runtime.Observation, turnID string, handler func(context.Context, runtime.SessionEvent) (TurnDecision, error)) TurnTermination {
+	workflow, ok := session.(runtime.SessionWorkflow)
+	if !ok {
+		return ConsumeAcceptedTurn(ctx, session, observation, turnID, handler)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan workflowResult, 1)
+	waitDone := make(chan struct{})
+	defer func() { cancel(); <-waitDone }()
+	go func() {
+		defer close(waitDone)
+		if err := session.AwaitTurn(ctx, turnID); err != nil {
+			result <- workflowResult{err: err}
+			return
+		}
+		settlement, err := workflow.AwaitWorkflow(ctx)
+		result <- workflowResult{settlement: settlement, err: err}
+	}()
+	return consumeAcceptedWorkflow(ctx, session, observation, turnID, handler, observationRetryPolicy{wait: waitRetry, now: time.Now}, &workflowObservation{result: result})
 }

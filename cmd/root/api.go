@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/snapshot"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/host"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/profiling"
@@ -96,6 +97,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"api"}, args...), commandErr)
 	}()
 
+	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
+		return err
+	}
 	if !f.managedAPI && (f.managedAPIStateDir != "" || len(f.modelOverrides) != 0) {
 		return errors.New("API --model and --managed-api-state-dir require --managed-api")
 	}
@@ -210,7 +214,11 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 
 	var agentSources config.Sources
 	if f.manifest != nil {
-		agentSources = config.Sources{f.manifest.Startup().SourceKey: f.manifest.FrozenSource()}
+		digest, digestErr := f.manifest.Digest()
+		if digestErr != nil {
+			return digestErr
+		}
+		agentSources = config.Sources{f.manifest.Startup().SourceKey: managedFrozenSource{Source: f.manifest.FrozenSource(), manifest: f.manifest, revision: digest}}
 	} else {
 		agentSources, err = sources.ResolveSources(agentsPath, f.runConfig.EnvProvider())
 	}
@@ -223,7 +231,7 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	// down with it. Nothing is loaded before the first session needs it.
 	loaderOptions := loaderdefaults.Opts()
 	if f.manifest != nil {
-		loaderOptions = append(loaderOptions, teamloader.WithSourceResolver(f.manifest.SourceResolver), teamloader.WithModelOverrides(f.manifest.Startup().ModelOverrides))
+		loaderOptions = append(loaderOptions, teamloader.WithModelOverrides(f.manifest.Startup().ModelOverrides))
 	}
 	sessionService := runtime.NewSessionService()
 	defer func() {
@@ -238,7 +246,25 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 	serverOpts := []server.SessionManagerOpt{
 		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot),
 		server.WithSessionRuntimeFactory(func(ctx context.Context, source config.Source, workingDir string) (runtime.SessionRuntimeSupervisor, error) {
-			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{Snapshots: snapshotsEnabled, SessionService: sessionService, LoaderOptions: loaderOptions, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName)})
+			opts := append([]teamloader.Opt(nil), loaderOptions...)
+			opts = append(opts, teamloader.WithSourceResolver(func(ref string, env environment.Provider) (config.Source, error) {
+				if graph, ok := source.(interface {
+					ResolveSource(string, environment.Provider) (config.Source, error)
+				}); ok {
+					return graph.ResolveSource(ref, env)
+				}
+				if f.manifest != nil {
+					return f.manifest.SourceResolver(ref, env)
+				}
+				return sources.Resolve(ref, env)
+			}))
+			var persistence *runtime.TeamEditPersistence
+			if managed, ok := source.(interface {
+				TeamEditPersistence() *runtime.TeamEditPersistence
+			}); ok {
+				persistence = managed.TeamEditPersistence()
+			}
+			return host.NewSessionRuntime(ctx, source, &f.runConfig, sessionStore, host.RuntimeOptions{Snapshots: snapshotsEnabled, SessionService: sessionService, LoaderOptions: opts, WorkingDir: workingDir, ManagedOAuth: false, UnmanagedOAuthRedirectURI: f.runConfig.MCPOAuthRedirectURI, Tracer: otel.Tracer(AppName), TeamEditPersistence: persistence})
 		}),
 	}
 
@@ -247,7 +273,19 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		return err
 	}
 	sm := server.NewSessionManager(ctx, agentSources, sessionStore, time.Duration(f.pullIntervalMins)*time.Minute, &f.runConfig, serverOpts...)
-	s := server.NewWithManager(sm, f.authToken, server.WithCORSOrigin(f.corsOrigin), server.WithMaxRequestBytes(f.maxRequestSize), server.WithServerInfo(identity))
+	if f.managedAPI && f.manifest != nil {
+		if err := f.initializeManagedStartupSource(ctx, sm); err != nil {
+			return err
+		}
+		if err := f.restoreManagedSources(ctx, f.managedState, f.manifest.Startup().Workspace, sm); err != nil {
+			return err
+		}
+	}
+	var registerSource server.SourceRegistrar
+	if f.managedAPI && f.manifest != nil {
+		registerSource = f.managedSourceRegistrar(f.managedState, f.manifest.Startup().Workspace, sm)
+	}
+	s := server.NewWithManager(sm, f.authToken, server.WithCORSOrigin(f.corsOrigin), server.WithMaxRequestBytes(f.maxRequestSize), server.WithServerInfo(identity), server.WithSourceRegistrar(registerSource))
 	return f.serveManaged(ctx, s, ln, identity)
 }
 

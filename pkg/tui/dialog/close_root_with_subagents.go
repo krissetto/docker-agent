@@ -13,8 +13,12 @@ import (
 // CloseRootWithSubagentsConfirmedMsg closes the requested tab without stopping
 // its subagents or closing their open tabs.
 type CloseRootWithSubagentsConfirmedMsg struct {
-	SessionID string
+	SessionID      string
+	RememberChoice bool
 }
+
+// RememberCloseTabNoMsg remembers an explicitly chosen No without closing a tab.
+type RememberCloseTabNoMsg struct{}
 
 type closeRootWithSubagentsKeyMap struct {
 	Yes key.Binding
@@ -42,8 +46,13 @@ func defaultCloseRootWithSubagentsKeyMap() closeRootWithSubagentsKeyMap {
 type closeRootWithSubagentsDialog struct {
 	BaseDialog
 
-	sessionID string
-	keyMap    closeRootWithSubagentsKeyMap
+	sessionID       string
+	keyMap          closeRootWithSubagentsKeyMap
+	rememberChoice  bool
+	rememberFocused bool
+	rememberLine    int
+	rememberWidth   int
+	rememberHeight  int
 }
 
 // NewCloseRootWithSubagentsDialog confirms closing a tab while its subagents
@@ -57,11 +66,49 @@ func NewCloseRootWithSubagentsDialog(sessionID string) Dialog {
 
 // Init initializes the dialog.
 func (d *closeRootWithSubagentsDialog) Init() tea.Cmd {
+	d.prepareLayout()
 	return nil
+}
+
+func (d *closeRootWithSubagentsDialog) CancelDialogCmd() tea.Cmd {
+	if !d.claimResponse() {
+		return nil
+	}
+	return d.BaseDialog.CancelDialogCmd()
+}
+
+func (d *closeRootWithSubagentsDialog) choose(yes bool) tea.Cmd {
+	if !d.claimResponse() {
+		return nil
+	}
+	if yes {
+		return ConfirmAndClose(core.CmdHandler(CloseRootWithSubagentsConfirmedMsg{SessionID: d.sessionID, RememberChoice: d.rememberChoice}))
+	}
+	if d.rememberChoice {
+		return ConfirmAndClose(core.CmdHandler(RememberCloseTabNoMsg{}))
+	}
+	return d.BaseDialog.CancelDialogCmd()
+}
+
+func (d *closeRootWithSubagentsDialog) focusRemember() {
+	d.BlurActions()
+	d.rememberFocused = true
+	d.EnsureBodyLineVisible(d.rememberLine)
+	d.MarkVisualDirty()
+}
+
+func (d *closeRootWithSubagentsDialog) rememberAt(x, y int) bool {
+	left, top, width, height := d.BodyScrollBounds()
+	line := y - top + d.BodyScrollOffset()
+	return x >= left && x < left+min(width-2, d.rememberWidth) && y >= top && y < top+height &&
+		line >= d.rememberLine && line < d.rememberLine+d.rememberHeight
 }
 
 // Update handles messages for the dialog.
 func (d *closeRootWithSubagentsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if d.responseSent {
+		return d, nil
+	}
 	switch msg.(type) {
 	case tea.KeyPressMsg, tea.MouseClickMsg:
 		defer d.prepareLayout()
@@ -84,13 +131,55 @@ func (d *closeRootWithSubagentsDialog) Update(msg tea.Msg) (layout.Model, tea.Cm
 				cmd := d.CancelDialogCmd()
 				return d, cmd
 			}
+			if d.rememberAt(msg.X, msg.Y) {
+				d.focusRemember()
+				d.rememberChoice = !d.rememberChoice
+				return d, nil
+			}
 			if action, ok := d.ActionKeyAt(msg.X, msg.Y, dl); ok {
 				d.BlurActions()
+				d.rememberFocused = false
 				return d.Update(action)
 			}
 		}
 
 	case tea.KeyPressMsg:
+		if msg.Code == tea.KeyTab {
+			backward := msg.Mod&tea.ModShift != 0
+			switch {
+			case d.rememberFocused:
+				d.rememberFocused = false
+				d.FocusActions(backward)
+			case d.ActionsFocused():
+				if (!backward && d.focusedAction == len(d.actions)-1) || (backward && d.focusedAction == 0) {
+					d.focusRemember()
+				} else {
+					d.FocusActions(!backward)
+				}
+			case backward:
+				d.FocusActions(true)
+			default:
+				d.focusRemember()
+			}
+			d.MarkVisualDirty()
+			return d, nil
+		}
+		if d.rememberFocused {
+			switch msg.Code {
+			case tea.KeySpace, tea.KeyEnter:
+				d.rememberChoice = !d.rememberChoice
+				d.MarkVisualDirty()
+				return d, nil
+			case tea.KeyDown, tea.KeyRight:
+				d.rememberFocused = false
+				d.FocusActions(false)
+				return d, nil
+			case tea.KeyUp, tea.KeyLeft:
+				d.rememberFocused = false
+				d.FocusActions(true)
+				return d, nil
+			}
+		}
 		if !d.ActionsFocused() {
 			switch msg.Code {
 			case tea.KeyLeft, tea.KeyRight, tea.KeyUp, tea.KeyDown:
@@ -109,9 +198,14 @@ func (d *closeRootWithSubagentsDialog) Update(msg tea.Msg) (layout.Model, tea.Cm
 		}
 		switch d.HandleConfirmKey(msg, ConfirmKeyMap{Yes: d.keyMap.Yes, No: d.keyMap.No}) {
 		case ConfirmKeyConfirmed:
-			return d, ConfirmAndClose(core.CmdHandler(CloseRootWithSubagentsConfirmedMsg{SessionID: d.sessionID}))
+			cmd := d.choose(true)
+			return d, cmd
 		case ConfirmKeyCancelled:
-			cmd := d.CancelDialogCmd()
+			if msg.Code == tea.KeyEscape {
+				cmd := d.CancelDialogCmd()
+				return d, cmd
+			}
+			cmd := d.choose(false)
 			return d, cmd
 		case ConfirmKeyFocusToggled:
 			return d, nil
@@ -134,7 +228,23 @@ func (d *closeRootWithSubagentsDialog) content() (style lipgloss.Style, width in
 
 	header = RenderDialogHeader("Close tab", contentWidth, styles.DialogTitleStyle)
 	body = styles.DialogQuestionStyle.Width(bodyWidth).Render("Close this tab? Subagents keep running and their open tabs stay open.")
-	footer = d.RenderConfirmButtons(contentWidth)
+	checkbox := "[ ] Remember this choice"
+	if d.rememberChoice {
+		checkbox = "[x] Remember this choice"
+	}
+	checkboxStyle := styles.BaseStyle.Foreground(styles.TextPrimary)
+	if d.rememberFocused {
+		checkboxStyle = checkboxStyle.Foreground(styles.SelectedFg).Background(styles.Selected)
+	}
+	d.rememberLine = lipgloss.Height(body) + 1
+	d.rememberWidth = lipgloss.Width(checkbox)
+	d.rememberHeight = lipgloss.Height(checkboxStyle.Width(bodyWidth).Render(checkbox))
+	body += "\n\n" + checkboxStyle.Width(bodyWidth).Render(checkbox)
+	body += "\n" + styles.MutedStyle.Width(bodyWidth).Render("Tab to focus · Space to toggle")
+	footer = d.RenderActions(contentWidth,
+		Action{Label: "No", Key: tea.KeyPressMsg{Code: 'n', Text: "n"}, Default: !d.rememberFocused, HideShortcut: true},
+		Action{Label: "Yes", Key: tea.KeyPressMsg{Code: 'y', Text: "y"}},
+	)
 	return styles.DialogStyle.Padding(1, 2), dialogWidth, header, body, footer
 }
 

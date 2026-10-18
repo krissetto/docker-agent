@@ -121,7 +121,7 @@ func (h *sessionHandle) AwaitTurn(ctx context.Context, turnID string) error {
 		active := d.activeRequestID == turnID && (d.running() || d.starting() || d.settling())
 		consumed := slices.Contains(d.consumedSteering, turnID)
 		pending := active
-		for _, msg := range append(slices.Clone(d.pending), d.steering...) {
+		for _, msg := range slices.Clone(d.pending) {
 			pending = pending || msg.RequestID == turnID
 		}
 		completed := slices.Contains(d.completedTurns, turnID) || consumed

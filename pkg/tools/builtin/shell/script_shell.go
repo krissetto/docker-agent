@@ -239,6 +239,7 @@ func (t *ScriptToolSet) execute(ctx context.Context, rt tools.Runtime, toolConfi
 
 	cmd := exec.CommandContext(ctx, shell, append(argsPrefix, toolConfig.Cmd)...)
 	cmd.Dir = workingDir
+	cmd.SysProcAttr = platformSpecificSysProcAttr()
 	// Per-call clone: appending onto t.env would mutate the shared
 	// backing array under concurrent calls. Expand nil to os.Environ()
 	// so a nil t.env still inherits the parent env (a non-nil empty

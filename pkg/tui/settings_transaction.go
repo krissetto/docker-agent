@@ -92,6 +92,15 @@ func (m *appModel) handleSettingsPreview(msg messages.PreviewSettingsMsg) (tea.M
 
 func (m *appModel) previewSettings(before, p messages.Preferences) tea.Cmd {
 	var cmds []tea.Cmd
+	if before.GitDiffLayout != p.GitDiffLayout {
+		m.gitDiffSplit = messages.ParseGitDiffLayout(string(p.GitDiffLayout)) == messages.GitDiffSplit
+		for _, ws := range m.gitReviews {
+			ws.splitPref = m.gitDiffSplit
+			for _, model := range ws.models {
+				model.SetSplitPreference(m.gitDiffSplit)
+			}
+		}
+	}
 	if before.Layout != p.Layout {
 		_, cmd := m.applyLayoutSettings(p.Layout)
 		cmds = append(cmds, cmd)
@@ -163,6 +172,9 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.settingsTransaction = nil
 	tx.editor.Finish()
 	p := msg.Preferences
+	if p.CloseTabChoice != tx.original.CloseTabChoice {
+		m.closeTabChoice = messages.ParseCloseTabChoice(string(p.CloseTabChoice))
+	}
 	if p.SendMode != tx.original.SendMode || m.sendMode != p.SendMode {
 		m.sendMode = p.SendMode
 		for _, page := range m.chatPages {

@@ -437,3 +437,88 @@ func TestSetupWorkingDirectory_EmptyIsNoop(t *testing.T) {
 	require.NoError(t, setupWorkingDirectory(runConfig))
 	assert.Empty(t, runConfig.WorkingDir)
 }
+
+func TestValidateTeamEditCLIGrantRemoteBoundary(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{Use: "run"}
+	var runConfig config.RuntimeConfig
+	cmd.Flags().StringVar(&runConfig.TeamEditMode, "team-edit", "off", "grant")
+	cmd.Flags().StringArrayVar(&runConfig.TeamEditAllowedAgentIDs, "team-edit-agent", nil, "allowlist")
+
+	require.NoError(t, cmd.Flags().Parse(nil))
+	require.NoError(t, validateTeamEditCLIGrant(cmd, &runConfig, true), "unset client flags preserve server startup grants")
+
+	cmd = &cobra.Command{Use: "run"}
+	runConfig = config.RuntimeConfig{}
+	cmd.Flags().StringVar(&runConfig.TeamEditMode, "team-edit", "off", "grant")
+	cmd.Flags().StringArrayVar(&runConfig.TeamEditAllowedAgentIDs, "team-edit-agent", nil, "allowlist")
+	require.NoError(t, cmd.Flags().Parse([]string{"--team-edit=full"}))
+	require.ErrorContains(t, validateTeamEditCLIGrant(cmd, &runConfig, true), "clients cannot grant it")
+
+	cmd = &cobra.Command{Use: "run"}
+	runConfig = config.RuntimeConfig{}
+	cmd.Flags().StringVar(&runConfig.TeamEditMode, "team-edit", "off", "grant")
+	cmd.Flags().StringArrayVar(&runConfig.TeamEditAllowedAgentIDs, "team-edit-agent", nil, "allowlist")
+	require.NoError(t, cmd.Flags().Parse([]string{"--team-edit-agent=root"}))
+	require.ErrorContains(t, validateTeamEditCLIGrant(cmd, &runConfig, true), "requires --team-edit")
+}
+
+func TestRunTeamEditFlagsAreTrustedStartupInputs(t *testing.T) {
+	t.Parallel()
+	cmd := newRunCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--team-edit=restricted", "--team-edit-agent=root", "--team-edit-agent=reviewer"}))
+	mode, err := cmd.Flags().GetString("team-edit")
+	require.NoError(t, err)
+	assert.Equal(t, "restricted", mode)
+	ids, err := cmd.Flags().GetStringArray("team-edit-agent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"root", "reviewer"}, ids)
+}
+
+func TestRunTeamEditFlagsParseModeAndStableAllowlist(t *testing.T) {
+	t.Parallel()
+	cmd := newRunCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--team-edit=full", "--team-edit-agent=root", "--team-edit-agent=reviewer"}))
+	mode, err := cmd.Flags().GetString("team-edit")
+	require.NoError(t, err)
+	assert.Equal(t, "full", mode)
+	ids, err := cmd.Flags().GetStringArray("team-edit-agent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"root", "reviewer"}, ids)
+}
+
+func TestRunTeamEditRemoteClientGrantRejectedButUnsetUsesServer(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{Use: "run"}
+	var runConfig config.RuntimeConfig
+	cmd.Flags().StringVar(&runConfig.TeamEditMode, "team-edit", "", "grant")
+	cmd.Flags().StringArrayVar(&runConfig.TeamEditAllowedAgentIDs, "team-edit-agent", nil, "allowlist")
+	require.NoError(t, cmd.Flags().Parse(nil))
+	require.NoError(t, validateTeamEditCLIGrant(cmd, &runConfig, true), "an unset client grant must not suppress server startup authority")
+
+	cmd = &cobra.Command{Use: "run"}
+	runConfig = config.RuntimeConfig{}
+	cmd.Flags().StringVar(&runConfig.TeamEditMode, "team-edit", "", "grant")
+	cmd.Flags().StringArrayVar(&runConfig.TeamEditAllowedAgentIDs, "team-edit-agent", nil, "allowlist")
+	require.NoError(t, cmd.Flags().Parse([]string{"--team-edit=restricted"}))
+	require.ErrorContains(t, validateTeamEditCLIGrant(cmd, &runConfig, true), "server startup")
+}
+
+func TestRuntimeConfigFlagsTeamEditDefaultOffAndRestrictedFull(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{Use: "startup"}
+	var runConfig config.RuntimeConfig
+	addRuntimeConfigFlags(cmd, &runConfig)
+	require.NoError(t, cmd.ParseFlags(nil))
+	require.NoError(t, runConfig.ValidateTeamEditGrant())
+	require.Equal(t, "off", runConfig.TeamEditGrant().Mode)
+	for _, mode := range []string{"restricted", "full"} {
+		cmd := &cobra.Command{Use: "startup"}
+		var cfg config.RuntimeConfig
+		addRuntimeConfigFlags(cmd, &cfg)
+		require.NoError(t, cmd.ParseFlags([]string{"--team-edit=" + mode, "--team-edit-agent=root"}))
+		require.NoError(t, cfg.ValidateTeamEditGrant())
+		require.Equal(t, mode, cfg.TeamEditGrant().Mode)
+		require.Equal(t, []string{"root"}, cfg.TeamEditGrant().AllowedAgentIDs)
+	}
+}

@@ -12,7 +12,7 @@ import (
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 )
 
-func (r *LocalRuntime) handleBackgroundRun(_ context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleBackgroundRun(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args agenttool.RunBackgroundAgentArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -20,7 +20,7 @@ func (r *LocalRuntime) handleBackgroundRun(_ context.Context, sess *session.Sess
 	if strings.TrimSpace(args.Task) == "" {
 		return tools.ResultError("task must not be empty"), nil
 	}
-	caller := r.resolveSessionAgent(sess)
+	caller := r.resolveSessionAgentContext(ctx, sess)
 	if caller == nil {
 		return tools.ResultError("no agent resolved for the calling session"), nil
 	}

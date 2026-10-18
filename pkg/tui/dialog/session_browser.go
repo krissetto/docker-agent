@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	goruntime "runtime"
@@ -28,6 +29,7 @@ import (
 
 // sessionBrowserKeyMap defines key bindings for the session browser
 type sessionBrowserKeyMap struct {
+	Retry           key.Binding
 	Up              key.Binding
 	Down            key.Binding
 	Enter           key.Binding
@@ -146,6 +148,18 @@ func workspaceDisplayDir(dir string) string {
 	return dir
 }
 
+// SessionSummaryLoader retrieves browser metadata without loading session transcripts.
+type SessionSummaryLoader func(context.Context) ([]session.Summary, error)
+
+type SessionBrowserLoadedMsg struct {
+	Browser  Dialog
+	Request  uint64
+	Sessions []session.Summary
+	Err      error
+}
+
+func (SessionBrowserLoadedMsg) BroadcastToDialogs() {}
+
 type sessionBrowserDialog struct {
 	BaseDialog
 
@@ -170,12 +184,32 @@ type sessionBrowserDialog struct {
 	// Double-click detection
 	lastClickTime  time.Time
 	lastClickIndex int
+
+	loader      SessionSummaryLoader
+	ctx         context.Context
+	loading     bool
+	loadErr     error
+	loadCancel  context.CancelFunc
+	loadRequest uint64
 }
 
 // NewSessionBrowserDialog creates a new session browser dialog.
 // workspaceDir is the directory of the active session; sessions started
 // there are grouped first and can be filtered with the workspace filter.
 func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Dialog {
+	return newSessionBrowserDialog(sessions, workspaceDir, nil)
+}
+
+// NewLoadingSessionBrowserDialog opens the browser immediately and retrieves
+// metadata through loader after the dialog is mounted.
+func NewLoadingSessionBrowserDialog(ctx context.Context, loader SessionSummaryLoader, workspaceDir string) Dialog {
+	d := newSessionBrowserDialog(nil, workspaceDir, loader)
+	d.ctx = ctx
+	d.loading = true
+	return d
+}
+
+func newSessionBrowserDialog(sessions []session.Summary, workspaceDir string, loader SessionSummaryLoader) *sessionBrowserDialog {
 	ti := textinput.New()
 	ti.Placeholder = "Type to search sessions…"
 	ti.Focus()
@@ -201,6 +235,7 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 		workspace:    newWorkspaceMatcher(workspaceDir),
 		workspaceDir: workspaceDisplayDir(workspaceDir),
 		keyMap: sessionBrowserKeyMap{
+			Retry:           key.NewBinding(key.WithKeys("r")),
 			Up:              key.NewBinding(key.WithKeys("up", "ctrl+k")),
 			Down:            key.NewBinding(key.WithKeys("down", "ctrl+j")),
 			Enter:           key.NewBinding(key.WithKeys("enter")),
@@ -212,17 +247,86 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 			Delete:          key.NewBinding(key.WithKeys("ctrl+d")),
 		},
 		openedAt: time.Now(),
+		loader:   loader,
 	}
-	// Initialize filtered list
+	// Initialize filtered list.
 	d.filterSessions()
 	return d
 }
 
 func (d *sessionBrowserDialog) Init() tea.Cmd {
+	if d.loader != nil {
+		return tea.Batch(textinput.Blink, d.startLoad())
+	}
 	return textinput.Blink
 }
 
+func (d *sessionBrowserDialog) startLoad() tea.Cmd {
+	if d.loader == nil {
+		return nil
+	}
+	if d.loadCancel != nil {
+		d.loadCancel()
+	}
+	parent := d.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	d.loadCancel = cancel
+	d.loadRequest++
+	request := d.loadRequest
+	d.loading = true
+	d.loadErr = nil
+	return func() tea.Msg {
+		sessions, err := d.loader(ctx)
+		return SessionBrowserLoadedMsg{Browser: d, Request: request, Sessions: sessions, Err: err}
+	}
+}
+
+func (d *sessionBrowserDialog) CancelDialogCmd() tea.Cmd {
+	d.cancelLoad()
+	return core.CmdHandler(CloseDialogMsg{})
+}
+
+func (d *sessionBrowserDialog) cancelLoad() {
+	d.loadRequest++
+	if d.loadCancel != nil {
+		d.loadCancel()
+		d.loadCancel = nil
+	}
+}
+
+func (d *sessionBrowserDialog) Cleanup() { d.cancelLoad() }
+
+func (d *sessionBrowserDialog) updateLoadResult(msg SessionBrowserLoadedMsg) {
+	if msg.Browser != d || msg.Request != d.loadRequest || !d.loading {
+		return
+	}
+	d.loadCancel()
+	d.loadCancel = nil
+	d.loading = false
+	d.loadErr = msg.Err
+	if msg.Err == nil {
+		d.setSessions(msg.Sessions)
+	}
+}
+
+func (d *sessionBrowserDialog) setSessions(sessions []session.Summary) {
+	d.sessions = d.sessions[:0]
+	for _, sess := range sessions {
+		if sess.Title != "" {
+			d.sessions = append(d.sessions, sess)
+		}
+	}
+	d.filterSessions()
+}
+
 func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if loaded, ok := msg.(SessionBrowserLoadedMsg); ok {
+		d.updateLoadResult(loaded)
+		return d, nil
+	}
 	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft {
 		d.BlurActions()
 	}
@@ -277,12 +381,21 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
-			return d, cmd
+			return d, d.CancelDialogCmd()
 		}
 
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
-			return d, core.CmdHandler(CloseDialogMsg{})
+			return d, d.CancelDialogCmd()
+
+		case key.Matches(msg, d.keyMap.Retry):
+			if d.loadErr != nil {
+				return d, d.startLoad()
+			}
+			var cmd tea.Cmd
+			d.textInput, cmd = d.textInput.Update(msg)
+			d.filterSessions()
+			return d, cmd
 
 		case key.Matches(msg, d.keyMap.Up):
 			if d.selected > 0 {
@@ -520,7 +633,11 @@ func (d *sessionBrowserDialog) renderBody(prepare bool) string {
 	if prepare {
 		d.textInput = input
 	}
-	header := RenderTitle(fmt.Sprintf("Sessions (%d)", len(d.filtered)), inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + RenderSeparator(inner)
+	count := fmt.Sprintf("%d", len(d.filtered))
+	if d.loading {
+		count = "…"
+	}
+	header := RenderTitle(fmt.Sprintf("Sessions (%s)", count), inner, styles.DialogTitleStyle) + "\n" + input.View() + "\n" + RenderSeparator(inner)
 	lines := make([]string, 0, len(d.rows))
 	for _, row := range d.rows {
 		if row.header != "" {
@@ -532,12 +649,19 @@ func (d *sessionBrowserDialog) renderBody(prepare bool) string {
 	for i := range lines {
 		lines[i] = ansi.Truncate(lines[i], inner, "")
 	}
-	if len(lines) == 0 {
+	if d.loading {
+		lines = []string{"Loading sessions…"}
+	} else if d.loadErr != nil {
+		lines = []string{"Failed to load sessions: " + d.loadErr.Error(), "Press r to retry or Esc to close"}
+	} else if len(lines) == 0 {
 		lines = []string{"No sessions found"}
 	}
 	bindings := []string{"ctrl+s", "Star", "ctrl+f", "Filter stars", "ctrl+y", "Copy ID", "ctrl+d", "Delete", "enter", "Load"}
 	if d.workspace.enabled() {
 		bindings = append(bindings, "ctrl+g", "Workspace")
+	}
+	if d.loadErr != nil {
+		bindings = append(bindings, "r", "Retry")
 	}
 	actions := actionsForKeys(bindings...)
 	for i := range actions {

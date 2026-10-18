@@ -92,6 +92,21 @@ func ParseSidebarInfoMode(raw string) SidebarInfoMode {
 	return InfoModeCompact
 }
 
+// GitDiffLayout selects the default layout for Git review diffs.
+type GitDiffLayout string
+
+const (
+	GitDiffUnified GitDiffLayout = "unified"
+	GitDiffSplit   GitDiffLayout = "split"
+)
+
+func ParseGitDiffLayout(raw string) GitDiffLayout {
+	if GitDiffLayout(raw) == GitDiffSplit {
+		return GitDiffSplit
+	}
+	return GitDiffUnified
+}
+
 // LayoutSettings describes the user-customizable TUI layout: where the
 // sidebar sits, which of its optional sections are rendered, how much
 // space separates them, and how the Agents section renders each agent.
@@ -158,6 +173,25 @@ func ParseInterruptMode(raw string) InterruptMode {
 	}
 }
 
+// CloseTabChoice is the remembered answer when closing a tab with subagents.
+type CloseTabChoice string
+
+const (
+	CloseTabAsk CloseTabChoice = ""
+	CloseTabYes CloseTabChoice = "yes"
+	CloseTabNo  CloseTabChoice = "no"
+)
+
+// ParseCloseTabChoice defaults invalid preferences to asking for confirmation.
+func ParseCloseTabChoice(raw string) CloseTabChoice {
+	switch CloseTabChoice(raw) {
+	case CloseTabYes, CloseTabNo:
+		return CloseTabChoice(raw)
+	default:
+		return CloseTabAsk
+	}
+}
+
 // PanelElement identifies an independently configurable bottom-panel element.
 type PanelElement string
 
@@ -218,6 +252,7 @@ type Preferences struct {
 	Panel                 PanelSettings
 	SendMode              SendMode
 	SplitDiffView         bool
+	GitDiffLayout         GitDiffLayout
 	ExpandThinking        bool
 	HideToolResults       bool
 	RenderImages          bool
@@ -234,6 +269,7 @@ type Preferences struct {
 	Sound                 bool
 	SoundThreshold        int
 	InterruptConfirmation InterruptMode
+	CloseTabChoice        CloseTabChoice
 }
 
 // Settings dialog messages.

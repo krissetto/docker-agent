@@ -119,9 +119,9 @@ func TestPendingEditFailureNoMutationOrEvent(t *testing.T) {
 			case "active":
 				h.driver.activeRequestID = turn.TurnID
 			case "nonhuman":
-				h.driver.steering[0].InputOrigin = session.InputOriginAgent
+				h.driver.pending[0].InputOrigin = session.InputOriginAgent
 			case "retry":
-				h.driver.steering[0].Retry = true
+				h.driver.pending[0].Retry = true
 			case "consumed_prefix":
 				msg := session.UserMessage("consumed")
 				msg.TurnID, msg.Accepted, msg.InputOrigin = turn.TurnID, true, session.InputOriginUser
@@ -144,7 +144,7 @@ func TestPendingEditFailureNoMutationOrEvent(t *testing.T) {
 				assert.Equal(t, SessionOperation("edit_pending_message"), typed.Operation)
 			}
 			assert.Equal(t, before, h.driver.sess.MessagesSnapshot())
-			assert.Equal(t, "old", h.driver.steering[0].Content)
+			assert.Equal(t, "old", h.driver.pending[0].Content)
 			assert.Len(t, h.driver.events.replay[h.ID()], 1)
 		})
 	}
@@ -203,7 +203,6 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 			require.NoError(t, err)
 			if transition == "start" {
 				require.NoError(t, h.driver.ownerCall(t.Context(), func() error {
-					h.driver.pending, h.driver.steering = h.driver.steering, nil
 					h.driver.leave(sessionRunning)
 					h.driver.activeRequestID = ""
 					return nil
@@ -245,7 +244,6 @@ func TestPendingEditLinearizesDrainAndCancel(t *testing.T) {
 			require.ErrorAs(t, err, &typed)
 			assert.Equal(t, SessionErrorStale, typed.Kind)
 			assert.Empty(t, h.driver.pending)
-			assert.Empty(t, h.driver.steering)
 		})
 	}
 }
@@ -265,7 +263,7 @@ func TestPendingEditConcurrentLastWriterWins(t *testing.T) {
 	close(barrier.release)
 	require.NoError(t, <-first)
 	require.NoError(t, <-second)
-	assert.Equal(t, "second", h.driver.steering[0].Content)
+	assert.Equal(t, "second", h.driver.pending[0].Content)
 	stored, err := store.GetSession(t.Context(), h.ID())
 	require.NoError(t, err)
 	assert.Equal(t, "second", stored.MessagesSnapshot()[0].Message.Message.Content)
@@ -291,7 +289,7 @@ func TestPendingEditConcurrentStaleDraftRejected(t *testing.T) {
 	var typed *SessionError
 	require.ErrorAs(t, <-second, &typed)
 	assert.Equal(t, SessionErrorStale, typed.Kind)
-	assert.Equal(t, "first", h.driver.steering[0].Content)
+	assert.Equal(t, "first", h.driver.pending[0].Content)
 	assert.Equal(t, "first", h.driver.sess.MessagesSnapshot()[0].Message.Message.Content)
 	stored, err := store.GetSession(t.Context(), h.ID())
 	require.NoError(t, err)
@@ -336,7 +334,7 @@ func TestPendingEditSameContentAndTextCAS(t *testing.T) {
 		_, err = h.Edit(t.Context(), pendingEdit(turn.TurnID, change[1], change[0]))
 		require.NoError(t, err)
 	}
-	assert.Equal(t, "C", h.driver.steering[0].Content)
+	assert.Equal(t, "C", h.driver.pending[0].Content)
 	assert.Len(t, h.driver.events.replay[h.ID()], 5, "same-content saves retain successful edit event semantics")
 }
 

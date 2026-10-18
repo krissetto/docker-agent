@@ -24,12 +24,11 @@ func TestStreamCheckpointSegmentsMatchUncachedRender(t *testing.T) {
 			segments, ok := view.RenderedSegments(width)
 			require.True(t, ok)
 			lines := append(append(append([]string{}, segments.Header...), segments.Stable...), segments.Tail...)
-			fresh := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", input[:i+1]), nil)
 			rendered, blocks, err := markdown.NewFastRenderer(width - styles.AssistantMessageStyle.GetHorizontalFrameSize()).RenderWithCodeBlocks(input[:i+1])
 			require.NoError(t, err)
-			expected := fresh.senderPrefix("root") + styles.AssistantMessageStyle.Width(width).Render(actionRow(width-styles.AssistantMessageStyle.GetHorizontalFrameSize(), false, types.MessageCopyLabel)+"\n"+rendered)
+			expected := styles.AssistantMessageStyle.Width(width).Render(actionRow(width-styles.AssistantMessageStyle.GetHorizontalFrameSize(), false, types.MessageCopyLabel) + "\n" + rendered)
 			for j := range blocks {
-				blocks[j].Line += strings.Count(fresh.senderPrefix("root"), "\n") + 1
+				blocks[j].Line++
 			}
 			require.Equal(t, blocks, view.CodeBlocks())
 			require.Equal(t, input[:i+1], view.message.Content)

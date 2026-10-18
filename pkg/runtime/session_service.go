@@ -183,7 +183,7 @@ func (s *SessionService) runtimeForSession(ctx context.Context, id string) (*Loc
 		if r.sessionStore == nil {
 			continue
 		}
-		stored, err := r.sessionStore.GetSession(ctx, id)
+		stored, err := session.ReadSessionMetadata(ctx, r.sessionStore, id)
 		if errors.Is(err, session.ErrNotFound) {
 			continue
 		}
@@ -194,7 +194,19 @@ func (s *SessionService) runtimeForSession(ctx context.Context, id string) (*Loc
 		if bound == "" {
 			continue
 		}
-		if _, err := r.team.Agent(bound); err != nil {
+		tm := r.team
+		if r.teamEnvironments != nil {
+			lease, leaseErr := r.teamEnvironments.AcquireCurrent()
+			if leaseErr != nil {
+				continue
+			}
+			tm = lease.Environment().Team()
+			_, _, agentOK := identityForBinding(tm, stored, SessionAgentAttribute, SessionAgentIDAttribute)
+			_ = lease.Release(context.WithoutCancel(ctx))
+			if !agentOK {
+				continue
+			}
+		} else if _, err := tm.Agent(bound); err != nil {
 			continue
 		}
 		if stored.WorkingDir != "" && !sameWorkspace(stored.WorkingDir, r.workingDir) {
@@ -247,7 +259,16 @@ func (v *serviceSessionRuntime) CreateSession(ctx context.Context, sess *session
 	var selected *LocalRuntime
 	for _, r := range s.runtimes {
 		if binding.AgentName != "" {
-			if _, err := r.team.Agent(binding.AgentName); err != nil {
+			tm := r.team
+			if r.teamEnvironments != nil {
+				lease, leaseErr := r.teamEnvironments.AcquireCurrent()
+				if leaseErr != nil {
+					continue
+				}
+				tm = lease.Environment().Team()
+				_ = lease.Release(context.WithoutCancel(ctx))
+			}
+			if _, err := tm.Agent(binding.AgentName); err != nil {
 				continue
 			}
 		}

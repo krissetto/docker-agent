@@ -22,7 +22,7 @@ import (
 func (m *appModel) paneCommandCategory() commands.Category {
 	return commands.Category{Name: "Panes", Commands: []commands.Item{{
 		ID: "layout.panes", Label: "Panes", SlashCommand: "/panes", Category: "Panes", Immediate: true,
-		Description:         "Split sessions left/right/up/down, focus or remove a pane, resize dividers, or return to single view (does not close tabs)",
+		Description:         "Split sessions left/right/up/down, focus or remove a pane, resize dividers, or show one pane (does not close sessions)",
 		Execute:             func(arg string) tea.Cmd { return core.CmdHandler(messages.OpenPanesMsg{Arguments: arg}) },
 		CompleteArgument:    m.paneArgumentCandidates,
 		CompleteArgumentFor: m.paneArgumentCandidatesFor,
@@ -71,14 +71,18 @@ func (m *appModel) openPanes() tea.Cmd {
 	for _, edge := range []string{"left", "right", "up", "down"} {
 		items = append(items, paneAction("Split "+edge, "Choose an accessible session to show beside this pane", messages.PaneActionMsg{Action: "sources", Target: focus, Edge: edge}))
 	}
-	for _, id := range m.paneLayout().Sessions() {
+	ids := m.paneLayout().Sessions()
+	if owner := m.paneWorkspaces.active; owner != nil {
+		ids = m.paneWorkspaces.members(owner)
+	}
+	for _, id := range ids {
 		label := m.paneChoiceLabel(id)
 		items = append(items, paneAction("Focus "+label, "Shared composer, draft, attachments and sidebar follow this session", messages.PaneActionMsg{Action: "focus", Source: id}))
 		if m.panesEnabled() {
-			items = append(items, paneAction("Remove pane: "+label, "Hide this pane only; keep the session tab and its work running", messages.PaneActionMsg{Action: "remove", Source: id}))
+			items = append(items, paneAction("Remove pane: "+label, "Hide within this workspace; Focus restores hidden panes", messages.PaneActionMsg{Action: "remove", Source: id}))
 		}
 	}
-	items = append(items, paneAction("Single view", "Show only the focused pane; keep all session tabs and work", messages.PaneActionMsg{Action: "single", Source: focus}))
+	items = append(items, paneAction("Single view", "Show only focused pane; Focus restores hidden panes", messages.PaneActionMsg{Action: "single", Source: focus}))
 	for i, d := range m.paneGeometry.Dividers {
 		items = append(items, paneAction(fmt.Sprintf("Resize divider %d", i+1), "Arrow keys preview; Enter commits; Esc cancels", messages.PaneActionMsg{Action: "resize", DividerID: d.ID}))
 	}
@@ -109,7 +113,7 @@ func (m *appModel) handlePaneAction(msg messages.PaneActionMsg) tea.Cmd {
 		}
 		return m.splitPane(msg.Source, msg.Target, edge)
 	case "focus":
-		if !m.paneLayout().Contains(msg.Source) {
+		if owner := m.paneWorkspaces.active; owner == nil || m.paneWorkspaces.byRoute[msg.Source] != owner {
 			return nil
 		}
 		_, cmd := m.handleSwitchTab(msg.Source)
@@ -234,6 +238,9 @@ func (m *appModel) executePaneArguments(arguments string) tea.Cmd {
 			return m.singlePane()
 		}
 		ids := m.paneLayout().Sessions()
+		if owner := m.paneWorkspaces.active; owner != nil {
+			ids = m.paneWorkspaces.members(owner)
+		}
 		for i, id := range ids {
 			if id == m.paneFocus() {
 				offset := 1

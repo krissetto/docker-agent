@@ -32,6 +32,9 @@ func TestSessionViewPreservesActiveAgentSeparateFromBinding(t *testing.T) {
 		require.NoError(t, err)
 		row.AgentName = "active"
 		require.NoError(t, store.UpdateSession(t.Context(), row))
+		persisted, err := store.GetSession(t.Context(), id)
+		require.NoError(t, err)
+		require.Equal(t, "active", persisted.AgentName, "active name survives execution-settings persistence")
 	}
 	restored := makeRuntime()
 	for _, tc := range []struct{ id, binding string }{{root.ID(), "root"}, {child.ID(), "worker"}} {

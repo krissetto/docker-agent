@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -17,7 +18,9 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	todotool "github.com/docker/docker-agent/pkg/tools/builtin/todo"
 )
 
 type SessionToolsInfo = api.SessionToolsInfo
@@ -26,6 +29,65 @@ type SessionToolsetStatus = api.SessionToolsetStatus
 type SessionToolInspector interface {
 	InspectTools(context.Context) (SessionToolsInfo, error)
 }
+
+// SessionExecutableToolProvider returns executable tools from a local
+// session's pinned Team revision. Handlers reacquire that exact revision when
+// invoked; callers cannot retarget them to the runtime's constructor Team.
+type SessionExecutableToolProvider interface {
+	SessionExecutableTools(context.Context) ([]tools.Tool, error)
+}
+
+func (h *sessionHandle) SessionExecutableTools(ctx context.Context) ([]tools.Tool, error) {
+	binding := h.driver.activeBinding()
+	if err := h.driver.validateBinding(ctx, binding); err != nil {
+		return nil, err
+	}
+	opCtx, release, err := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	tm := h.runtime.teamForContext(opCtx, h.driver.session())
+	if tm == nil {
+		return nil, errors.New("session has no pinned team environment")
+	}
+	a, err := tm.Agent(binding.agentName)
+	if err != nil {
+		return nil, err
+	}
+	toolsForAgent, err := a.Tools(todotool.WithBindings(opCtx, h.runtime.todoBindingsForTeam(tm)))
+	if err != nil {
+		return nil, err
+	}
+	toolsForAgent = append(toolsForAgent, h.runtime.teamEditDefinitions(opCtx, h.driver.session(), a)...)
+	toolsForAgent = filterExcludedTools(toolsForAgent, h.driver.session().ExcludedTools)
+	for index := range toolsForAgent {
+		underlying := toolsForAgent[index].Handler
+		if underlying == nil {
+			continue
+		}
+		toolsForAgent[index].Handler = func(callCtx context.Context, call tools.ToolCall, toolRuntime tools.Runtime) (*tools.ToolCallResult, error) {
+			runCtx, releaseRun, err := h.runtime.captureEnvironmentForOperation(callCtx, h.driver.session())
+			if err != nil {
+				return nil, err
+			}
+			defer releaseRun()
+			currentBinding := h.driver.activeBinding()
+			if currentBinding.version != binding.version || currentBinding.agentName != binding.agentName {
+				return nil, &SessionError{Kind: SessionErrorStale, SessionID: h.sessionID, Operation: "active_binding"}
+			}
+			if current := h.runtime.teamForContext(runCtx, h.driver.session()); current != tm {
+				return nil, &SessionError{Kind: SessionErrorStale, SessionID: h.sessionID, Operation: "active_environment"}
+			}
+			return underlying(runCtx, call, toolRuntime)
+		}
+	}
+	if err := h.driver.validateBinding(ctx, binding); err != nil {
+		return nil, err
+	}
+	return toolsForAgent, nil
+}
+
 type SessionToolsetController interface {
 	RestartToolset(context.Context, string) error
 }
@@ -64,16 +126,25 @@ func SnapshotProof(sess *session.Session) string {
 
 func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, error) {
 	binding := h.driver.activeBinding()
-	available, err := h.runtime.AgentTools(ctx, binding.agentName)
+	tm := h.runtime.teamForSession(h.driver.session())
+	available, err := h.runtime.AgentToolsForTeam(ctx, tm, binding.agentName)
 	if err != nil {
 		return SessionToolsInfo{}, err
 	}
+	// Runtime-provided team-edit tools participate in the same inspected
+	// permission surface as the tools offered on an active turn.
+	operationCtx, releaseEnvironment, captureErr := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())
+	if captureErr != nil {
+		return SessionToolsInfo{}, captureErr
+	}
+	available = append(available, h.runtime.teamEditDefinitions(operationCtx, h.driver.session(), mustTeamAgent(tm, binding.agentName))...)
+	releaseEnvironment()
 	// Descriptors must never grant execution authority to callers.
 	available = slices.Clone(available)
 	for i := range available {
 		available[i].Handler = nil
 	}
-	statuses := h.runtime.AgentToolsetStatuses(binding.agentName)
+	statuses := h.runtime.AgentToolsetStatusesForTeam(tm, binding.agentName)
 	out := SessionToolsInfo{Tools: available, Statuses: make([]SessionToolsetStatus, 0, len(statuses))}
 	for _, status := range statuses {
 		safeError := ""
@@ -89,7 +160,7 @@ func (h *sessionHandle) InspectTools(ctx context.Context) (SessionToolsInfo, err
 }
 func (h *sessionHandle) RestartToolset(ctx context.Context, name string) error {
 	binding := h.driver.activeBinding()
-	a, err := h.runtime.team.Agent(binding.agentName)
+	a, err := h.runtime.teamForSession(h.driver.session()).Agent(binding.agentName)
 	if err != nil {
 		return err
 	}
@@ -117,7 +188,7 @@ func (h *sessionHandle) EffectivePermissions(ctx context.Context) (SessionPermis
 	if policy == "" && approved {
 		policy = session.SafetyPolicyAutonomous
 	}
-	return SessionPermissionsInfo{Policy: policy, ToolsApproved: approved, Source: h.runtime.PermissionsInfo(), Session: rules}, nil
+	return SessionPermissionsInfo{Policy: policy, ToolsApproved: approved, Source: h.runtime.PermissionsInfoForTeam(h.runtime.teamForSession(h.driver.session())), Session: rules}, nil
 }
 
 type boundPrompt struct {
@@ -128,7 +199,7 @@ type boundPrompt struct {
 
 func (h *sessionHandle) boundPrompts(ctx context.Context) (map[string]boundPrompt, error) {
 	binding := h.driver.activeBinding()
-	a, err := h.runtime.team.Agent(binding.agentName)
+	a, err := h.runtime.teamForSession(h.driver.session()).Agent(binding.agentName)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +352,7 @@ func (h *sessionHandle) SessionAgentInfo(ctx context.Context) (SessionAgentInfo,
 		return SessionAgentInfo{}, err
 	}
 	binding := h.driver.activeBinding()
-	a, err := h.runtime.team.Agent(binding.agentName)
+	a, err := h.runtime.teamForSession(h.driver.session()).Agent(binding.agentName)
 	if err != nil {
 		return SessionAgentInfo{}, err
 	}
@@ -306,4 +377,12 @@ func (h *sessionHandle) SessionAgentInfo(ctx context.Context) (SessionAgentInfo,
 // must negotiate this optional capability before issuing a create mutation.
 type SessionIDCreator interface {
 	CreateSessionWithID(context.Context, *session.Session, SessionBinding, string) (SessionHandle, error)
+}
+
+func mustTeamAgent(tm *team.Team, name string) *agent.Agent {
+	if tm == nil {
+		return nil
+	}
+	a, _ := tm.Agent(name)
+	return a
 }

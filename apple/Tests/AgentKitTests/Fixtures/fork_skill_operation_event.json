@@ -1,0 +1,9 @@
+{
+  "agent_name": "planner",
+  "timestamp": "2025-01-02T03:04:05Z",
+  "type": "skill_operation",
+  "session_id": "session-demo-001",
+  "operation_id": "skill-op-demo-001",
+  "skill": "review-plan",
+  "status": "accepted"
+}

@@ -83,7 +83,10 @@ func (a *Attachment) runWithRetry(ctx context.Context, session Observer, sink Si
 			}
 			started := policy.now()
 			sustained := time.AfterFunc(5*time.Second, func() { startup.Stop() })
-			result := projectObservationWithEpoch(ctx, sink, observation, cursor, epoch, func() { startup.Stop() })
+			result := projectObservationWithEpoch(ctx, sink, observation, cursor, epoch, func() {
+				healthy = true
+				startup.Stop()
+			})
 			sustained.Stop()
 			if observation.Cancel != nil {
 				observation.Cancel()
@@ -266,6 +269,10 @@ func projectObservationWithEpoch(ctx context.Context, sink Sink, observation run
 		// Reconnect replay extends the existing projection; the newer snapshot
 		// includes commits but omits the uncommitted streaming tail.
 		cursor = *since
+	}
+	// An authoritative idle baseline establishes attachment without live events.
+	if primary.Session != nil || primary.Status.SessionID != "" {
+		onProgress()
 	}
 	apply := func(envelope runtime.SessionEvent) bool {
 		apply, err := advanceObservation(envelope, primary.Epoch, &cursor)

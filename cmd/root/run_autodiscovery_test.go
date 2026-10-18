@@ -121,3 +121,19 @@ func TestDiscoverRunAgentArgs(t *testing.T) {
 		assert.Equal(t, "docker-agent.yaml", got)
 	})
 }
+
+func TestKitTeamArgumentPreservesDefaultAndTrailingArguments(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		path string
+		want []string
+	}{
+		{args: []string{"--exec", "prompt"}, want: []string{"--exec", "prompt"}},
+		{args: []string{"./my agent.yaml", "--exec", "--dry-run"}, path: "./my agent.yaml", want: []string{"kit-team", "--exec", "--dry-run"}},
+		{args: []string{"team.yml", "prompt with spaces"}, path: "team.yml", want: []string{"kit-team", "prompt with spaces"}},
+	} {
+		path, got := takeKitTeamArgument(tc.args)
+		assert.Equal(t, tc.path, path)
+		assert.Equal(t, tc.want, got)
+	}
+}

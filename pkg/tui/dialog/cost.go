@@ -30,9 +30,10 @@ import (
 type costDialog struct {
 	BaseDialog
 
-	session    *session.Session
-	keyMap     costDialogKeyMap
-	scrollview *scrollview.Model
+	subtreeCost func() float64
+	session     *session.Session
+	keyMap      costDialogKeyMap
+	scrollview  *scrollview.Model
 
 	// cachedLines holds the rendered content for cacheKey. Rebuilding it
 	// walks the whole session and restyles every line — far too slow to
@@ -52,13 +53,18 @@ type costCacheKey struct {
 	itemCount                 int
 	inputTokens, outputTokens int64
 	totalCost                 float64
+	subtreeCost               float64
 }
 
 type costDialogKeyMap struct {
 	Close, Copy key.Binding
 }
 
-func NewCostDialog(sess *session.Session) Dialog {
+func NewCostDialog(sess *session.Session, subtreeCost ...func() float64) Dialog {
+	var total func() float64
+	if len(subtreeCost) > 0 {
+		total = subtreeCost[0]
+	}
 	base := BaseDialog{}
 	scrollviewView := base.newScrollview(
 		scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
@@ -67,9 +73,10 @@ func NewCostDialog(sess *session.Session) Dialog {
 	base.bodyScroll = scrollviewView
 	base.bodyFillHeight = true
 	return &costDialog{
-		BaseDialog: base,
-		session:    sess,
-		scrollview: scrollviewView,
+		BaseDialog:  base,
+		session:     sess,
+		subtreeCost: total,
+		scrollview:  scrollviewView,
 		keyMap: costDialogKeyMap{
 			Close: key.NewBinding(key.WithKeys("esc", "enter", "q")),
 			Copy:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy")),
@@ -401,13 +408,15 @@ func (d *costDialog) renderContent(contentWidth, maxHeight int) string {
 // live sub-session or a compaction item.
 func (d *costDialog) cacheKey(contentWidth int) costCacheKey {
 	input, output := d.session.Usage()
+	total := d.session.TotalCost()
 	return costCacheKey{
 		width:           contentWidth,
 		themeGeneration: styles.ThemeGeneration(),
 		itemCount:       d.session.ItemCount(),
 		inputTokens:     input,
 		outputTokens:    output,
-		totalCost:       d.session.TotalCost(),
+		totalCost:       total,
+		subtreeCost:     d.displayCost(total),
 	}
 }
 
@@ -424,8 +433,12 @@ func (d *costDialog) buildLines(contentWidth int) []string {
 		header,
 		RenderSeparator(contentWidth),
 		"",
-		sectionStyle().Render("Total") + "  " + accentStyle().Render(formatCost(data.total.cost)),
+		sectionStyle().Render(d.totalLabel()) + "  " + accentStyle().Render(formatCost(d.displayCost(data.total.cost))),
 		"",
+	}
+	if d.subtreeCost != nil {
+		lines = append(lines, styles.MutedStyle.Render("Attached-session transcript breakdown"),
+			styles.MutedStyle.Render("Transcript total  "+formatCost(data.total.cost)), "")
 	}
 	totalStats := append([]stat{
 		{label: "tokens:", value: formatTokenCount(data.total.totalTokens())},
@@ -587,10 +600,12 @@ func (d *costDialog) renderPlainText() string {
 			formatTokenCount(data.total.CacheWriteTokens))
 	}
 
-	lines = append(lines, "Session Cost Details", "", "Total  "+formatCost(data.total.cost), "",
-		"tokens: "+formatTokenCount(data.total.totalTokens()),
+	lines = append(lines, "Session Cost Details", "", d.totalLabel()+"  "+formatCost(d.displayCost(data.total.cost)), "")
+	if d.subtreeCost != nil {
+		lines = append(lines, "Attached-session transcript breakdown", "Transcript total  "+formatCost(data.total.cost), "")
+	}
+	lines = append(lines, "tokens: "+formatTokenCount(data.total.totalTokens()),
 		inputLine, "out: "+formatTokenCount(data.total.OutputTokens))
-
 	for _, s := range data.totalStats() {
 		lines = append(lines, s.label+" "+s.value)
 	}
@@ -750,4 +765,18 @@ func (d *costDialog) SetSize(width, height int) tea.Cmd {
 	cmd := d.BaseDialog.SetSize(width, height)
 	d.renderBody(true)
 	return cmd
+}
+
+func (d *costDialog) totalLabel() string {
+	if d.subtreeCost != nil {
+		return "Total (subtree)"
+	}
+	return "Total"
+}
+
+func (d *costDialog) displayCost(transcriptCost float64) float64 {
+	if d.subtreeCost != nil {
+		return d.subtreeCost()
+	}
+	return transcriptCost
 }

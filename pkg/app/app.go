@@ -219,7 +219,15 @@ func NewResolved(ctx context.Context, sessions runtime.SessionRuntime, committed
 	if handle == nil || info.Session == nil || info.SessionID == "" || handle.ID() != info.SessionID || info.Session.ID != info.SessionID || info.Binding.AgentName == "" || handle.AgentName() != activeAgent || info.WorkingDir != info.Session.WorkingDir {
 		return nil, &runtime.SessionError{Kind: runtime.SessionErrorInvalid, SessionID: info.SessionID, Operation: "resolved_view"}
 	}
-	return newApp(ctx, sessions, sessionState{session: info.Session, handle: handle, binding: info.Binding}, true, opts...), nil
+	if info.Attach != nil {
+		attach := *info.Attach
+		if attach.Session != nil {
+			attach.Session = attach.Session.Clone()
+		}
+		opts = append(opts, WithSubagentAttach(attach))
+	}
+	app := newApp(ctx, sessions, sessionState{session: info.Session, handle: handle, binding: info.Binding}, true, opts...)
+	return app, nil
 }
 
 // NewResolvedFromTemplate carries only same-owner immutable presentation
@@ -265,6 +273,9 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		opt(app)
 	}
 	state := app.state()
+	if state.handle != nil && state.handle.Metadata().Historical {
+		app.readOnly = true
+	}
 	switch {
 	case resolved:
 		state = initial
@@ -286,6 +297,9 @@ func newApp(ctx context.Context, sessions runtime.SessionRuntime, initial sessio
 		state.err = &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, SessionID: sess.ID, Operation: "create_session"}
 	}
 	app.replaceSessionState(state)
+	if state.handle != nil && state.handle.Metadata().Historical {
+		app.readOnly = true
+	}
 
 	app.cancelledRequests = make(map[string]struct{})
 
@@ -399,6 +413,10 @@ func (a *App) Start(ctx context.Context) {
 			startupEvents := make(chan runtime.Event, 10)
 			go func() {
 				defer close(startupEvents)
+				if handle := a.SessionHandle(); handle != nil && handle.Metadata().Historical {
+					handle.EmitPinnedAgentInfo(ctx, runtime.NewChannelSink(startupEvents))
+					return
+				}
 				a.runtime.EmitStartupInfo(ctx, sess, runtime.NewChannelSink(startupEvents))
 			}()
 			for event := range startupEvents {
@@ -483,11 +501,11 @@ func (a *App) InitialEventCommands() []EventCommand {
 // CurrentAgentTools returns the tools available to the current agent.
 func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	if h := a.SessionHandle(); h != nil && runtime.IsLocalSessionHandle(h) {
-		if provider, ok := a.runtime.(interface {
-			AgentTools(context.Context, string) ([]tools.Tool, error)
-		}); ok {
-			return provider.AgentTools(ctx, h.AgentName())
+		provider, ok := h.(runtime.SessionExecutableToolProvider)
+		if !ok {
+			return nil, runtime.UnsupportedSessionOperation(h.ID(), "executable_tools")
 		}
+		return provider.SessionExecutableTools(ctx)
 	}
 	info, err := a.InspectTools(ctx)
 	return info.Tools, err
@@ -1448,15 +1466,17 @@ func (a *App) NewSession() {
 // reEmitStartupInfo resets and re-emits startup info (agent, team, tools)
 // through the events channel so the sidebar updates.
 func (a *App) reEmitStartupInfo(ctx context.Context) {
+	state := a.state()
+	if state.handle != nil && state.handle.Metadata().Historical {
+		a.pumpToEvents(ctx, func(sink runtime.EventSink) { state.handle.EmitPinnedAgentInfo(ctx, sink) })
+		return
+	}
 	if a.runtime == nil {
 		return
 	}
 	a.runtime.ResetStartupInfo()
-	state := a.state()
 	sess := state.session
-	a.pumpToEvents(ctx, func(sink runtime.EventSink) {
-		a.runtime.EmitStartupInfo(ctx, sess, sink)
-	})
+	a.pumpToEvents(ctx, func(sink runtime.EventSink) { a.runtime.EmitStartupInfo(ctx, sess, sink) })
 }
 
 // pumpToEvents runs emit (which produces events into the supplied sink) in a
@@ -1700,27 +1720,27 @@ func (a *App) Binding() runtime.SessionBinding { return a.state().binding }
 // Returns nil if no permissions are configured at either level.
 func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 	state := a.state()
-	// Get team-level permissions from runtime
+	if state.handle != nil {
+		inspector, ok := state.handle.(runtime.SessionPermissionsInspector)
+		if !ok || !state.handle.Metadata().Capabilities.PermissionsInspection {
+			return nil
+		}
+		info, err := inspector.EffectivePermissions(a.ctx())
+		if err != nil || a.SessionHandle() != state.handle {
+			return nil
+		}
+		return CombinedPermissions(info)
+	}
 	teamPerms := a.runtime.PermissionsInfo()
-
-	// Get session-level permissions
 	var sessionPerms *runtime.PermissionsInfo
 	if state.session != nil && state.session.Permissions != nil {
 		if len(state.session.Permissions.Allow) > 0 || len(state.session.Permissions.Ask) > 0 || len(state.session.Permissions.Deny) > 0 {
-			sessionPerms = &runtime.PermissionsInfo{
-				Allow: state.session.Permissions.Allow,
-				Ask:   state.session.Permissions.Ask,
-				Deny:  state.session.Permissions.Deny,
-			}
+			sessionPerms = &runtime.PermissionsInfo{Allow: state.session.Permissions.Allow, Ask: state.session.Permissions.Ask, Deny: state.session.Permissions.Deny}
 		}
 	}
-
-	// Return nil if no permissions configured at any level
 	if teamPerms == nil && sessionPerms == nil {
 		return nil
 	}
-
-	// Merge permissions, with session taking priority (listed first)
 	result := &runtime.PermissionsInfo{}
 	if sessionPerms != nil {
 		result.Allow = append(result.Allow, sessionPerms.Allow...)
@@ -1732,7 +1752,6 @@ func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 		result.Ask = append(result.Ask, teamPerms.Ask...)
 		result.Deny = append(result.Deny, teamPerms.Deny...)
 	}
-
 	return result
 }
 

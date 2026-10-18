@@ -1,0 +1,47 @@
+{
+  "export_format": "json",
+  "session_count": 1,
+  "sessions": [
+    {
+      "created_at": "2025-01-02T03:04:05Z",
+      "id": "session-demo-001",
+      "input_tokens": 120,
+      "messages": [
+        {
+          "agent_name": "",
+          "message": {
+            "role": "user",
+            "content": "Review the sample changes.",
+            "created_at": "2025-01-02T03:04:05Z"
+          }
+        },
+        {
+          "agent_name": "root",
+          "message": {
+            "role": "assistant",
+            "content": "I found one issue.",
+            "reasoning_content": "Check the boundary condition.",
+            "presentation": [
+              {
+                "type": "reasoning",
+                "text": "Check the boundary condition."
+              },
+              {
+                "type": "content",
+                "text": "I found one issue."
+              }
+            ],
+            "created_at": "2025-01-02T03:04:05Z",
+            "model": "demo/model",
+            "cost": 0.0125
+          }
+        }
+      ],
+      "output_tokens": 48,
+      "title": "Fixture conversation",
+      "tools_approved": false,
+      "working_dir": "/workspace/demo"
+    }
+  ],
+  "timestamp": "2025-01-02T03:04:05Z"
+}

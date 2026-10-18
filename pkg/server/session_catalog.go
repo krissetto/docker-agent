@@ -351,6 +351,8 @@ func (sm *SessionManager) createHTTPSession(ctx context.Context, registry runtim
 }
 
 func (sm *SessionManager) sessionRegistryForCreate(source string) (runtime.SessionRuntime, string, error) {
+	sm.sourceMu.RLock()
+	defer sm.sourceMu.RUnlock()
 	if len(sm.sessionRegistries) == 0 {
 		if sm.sessionRegistry == nil {
 			return nil, "", &runtime.SessionError{Kind: runtime.SessionErrorUnsupported, Operation: "create_session"}
@@ -388,8 +390,8 @@ func (sm *SessionManager) Handle(ctx context.Context, id string) (runtime.Sessio
 	if handle := sm.loadedSession(id); handle != nil {
 		return handle, nil
 	}
-	if _, err := sm.sessionStore.GetSession(ctx, id); err != nil {
-		if len(sm.sessionRegistries) == 0 && sm.sessionRegistry != nil {
+	if _, err := session.ReadSessionMetadata(ctx, sm.sessionStore, id); err != nil {
+		if sm.sourceRegistryCount() == 0 && sm.sessionRegistry != nil {
 			if handle, lookupErr := sm.sessionRegistry.SessionByID(id); lookupErr == nil {
 				return handle, nil
 			}
@@ -421,7 +423,7 @@ func (sm *SessionManager) sessionRestoreRoot(ctx context.Context, sess *session.
 	seen := map[string]struct{}{root.ID: {}}
 	source := root.AttributesSnapshot()[sessionSourceAttribute]
 	for root.ParentID != "" {
-		parent, err := sm.sessionStore.GetSession(ctx, root.ParentID)
+		parent, err := session.ReadSessionMetadata(ctx, sm.sessionStore, root.ParentID)
 		if err != nil {
 			return nil, &runtime.SessionError{Kind: runtime.SessionErrorNotFound, SessionID: root.ID, Operation: "restore_parent"}
 		}

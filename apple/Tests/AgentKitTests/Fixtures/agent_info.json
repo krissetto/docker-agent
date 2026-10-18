@@ -1,0 +1,48 @@
+{
+  "agent": {
+    "timestamp": "2025-01-02T03:04:05Z",
+    "type": "agent_info",
+    "agent_name": "planner",
+    "model": "demo/model",
+    "description": "Planning agent",
+    "welcome_message": "Ready"
+  },
+  "team": {
+    "agent_name": "planner",
+    "timestamp": "2025-01-02T03:04:05Z",
+    "type": "team_info",
+    "available_agents": [
+      {
+        "name": "planner",
+        "description": "Planning agent",
+        "provider": "",
+        "model": "demo/model",
+        "model_id": "demo/model",
+        "model_name": "Demo Model",
+        "thinking_mode": "effort",
+        "thinking_level": "medium",
+        "thinking_levels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "can_cycle_thinking": true
+      },
+      {
+        "name": "worker",
+        "description": "Implementation agent",
+        "provider": "",
+        "model": "demo/worker",
+        "model_id": "demo/worker",
+        "model_name": "Demo Worker"
+      }
+    ],
+    "current_agent": "planner"
+  },
+  "commands": {
+    "review": {
+      "description": "Review changes",
+      "instruction": "Inspect the provided changes."
+    }
+  }
+}

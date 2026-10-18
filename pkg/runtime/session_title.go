@@ -18,6 +18,10 @@ type SessionTitleGenerator interface {
 }
 
 func (h *sessionHandle) GenerateSessionTitle(ctx context.Context, generator *sessiontitle.Generator, messages []string, replace bool) error {
+	opCtx, releaseEnv, envErr := h.runtime.captureEnvironmentForOperation(ctx, h.driver.session())
+	if envErr != nil {
+		return envErr
+	}
 	d := h.driver
 	var operation uint64
 	var workerCtx context.Context
@@ -38,7 +42,7 @@ func (h *sessionHandle) GenerateSessionTitle(ctx context.Context, generator *ses
 		models = append([]provider.Provider(nil), d.modelProviders...)
 		d.titleGeneration++
 		operation = d.titleGeneration
-		workerCtx, cancel = context.WithTimeout(d.r.lifetime(), 30*time.Second) //nolint:fatcontext // owner reserves independently rooted auxiliary work; joined worker owns cancellation
+		workerCtx, cancel = context.WithTimeout(context.WithoutCancel(opCtx), 30*time.Second) //nolint:fatcontext // owner reserves independently rooted auxiliary work; joined worker owns cancellation
 		d.titleCancel = cancel
 		d.titleStatus = "started"
 		d.wg.Add(1)
@@ -46,16 +50,36 @@ func (h *sessionHandle) GenerateSessionTitle(ctx context.Context, generator *ses
 		return nil
 	})
 	if err != nil || operation == 0 {
+		releaseEnv()
 		return err
+	}
+	// The first capture resolves session ownership before reservation. Recapture
+	// using the owner snapshot taken inside ownerCall so the worker pins exactly
+	// the same session metadata revision it is about to use.
+	releaseEnv()
+	opCtx, releaseEnv, envErr = h.runtime.captureEnvironmentForOperation(context.WithoutCancel(ctx), snapshot)
+	if envErr != nil {
+		_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+			if operation == d.titleGeneration && d.titleStatus == "started" {
+				d.titleStatus = "failed"
+				d.titleCancel = nil
+				d.publishTitleStatusLocked("failed", "")
+			}
+			return nil
+		})
+		cancel()
+		d.wg.Done()
+		return envErr
 	}
 	go func() {
 		defer d.wg.Done()
 		defer cancel()
-		a, agentErr := h.runtime.team.Agent(snapshot.AgentName)
+		defer releaseEnv()
+		a, agentErr := h.runtime.teamForContext(opCtx, snapshot).Agent(snapshot.AgentName)
 		var title string
 		err := agentErr
 		if err == nil {
-			scoped := agent.WithContextModels(workerCtx, snapshot.AgentName, models)
+			scoped := agent.WithContextModels(opCtx, snapshot.AgentName, models)
 			if generator == nil {
 				generator = sessiontitle.New(a.TitleModels(scoped)...)
 			}

@@ -13,7 +13,6 @@ import (
 	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
-	"github.com/alecthomas/chroma/v2/lexers"
 	xansi "github.com/charmbracelet/x/ansi"
 	runewidth "github.com/mattn/go-runewidth"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/lrucache"
 	"github.com/docker/docker-agent/pkg/tui/components/latex"
 	"github.com/docker/docker-agent/pkg/tui/components/mermaid"
+	"github.com/docker/docker-agent/pkg/tui/components/syntax"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -2636,8 +2636,6 @@ type syntaxCacheKey struct {
 }
 
 var (
-	lexerCache concurrent.Map[string, chroma.Lexer]
-
 	// Cache for chroma token type to ansiStyle conversion (with code bg)
 	chromaStyleCache concurrent.Map[chroma.TokenType, ansiStyle]
 
@@ -2699,12 +2697,11 @@ func (p *parser) doSyntaxHighlight(code, lang string) []token {
 		return []token{{text: string([]rune(code)), style: p.getCodeStyle(chroma.Text)}}
 	}
 
-	iterator, err := lexer.Tokenise(nil, code)
+	chromaTokens, err := syntax.Tokens(lexer, code)
 	if err != nil {
 		return []token{{text: code, style: p.getCodeStyle(chroma.None)}}
 	}
 
-	chromaTokens := iterator.Tokens()
 	tokens := make([]token, 0, len(chromaTokens))
 	for _, tok := range chromaTokens {
 		if tok.Value == "" {
@@ -2718,27 +2715,9 @@ func (p *parser) doSyntaxHighlight(code, lang string) []token {
 	return tokens
 }
 
-// getLexer returns a cached chroma lexer for the given language, or nil if unknown.
+// getLexer returns the shared cached lexer for the given language, or nil if unknown.
 func (p *parser) getLexer(lang string) chroma.Lexer {
-	if lang == "" {
-		return nil
-	}
-
-	if lexer, ok := lexerCache.Load(lang); ok {
-		return lexer
-	}
-
-	lexer := lexers.Get(lang)
-	if lexer == nil {
-		lexer = lexers.Match("file." + lang)
-	}
-	if lexer == nil {
-		return nil
-	}
-
-	lexer = chroma.Coalesce(lexer)
-	lexerCache.Store(lang, lexer)
-	return lexer
+	return syntax.Lexer(lang)
 }
 
 func (p *parser) getCodeStyle(tokenType chroma.TokenType) ansiStyle {

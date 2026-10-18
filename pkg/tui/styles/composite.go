@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 )
@@ -76,11 +77,49 @@ func RenderComposite(style lipgloss.Style, content string) string {
 	// Get the cached style sequence
 	styleSeq := getStyleSeq(style)
 
-	// Replace reset sequences with reset + styleSeq
-	// Handle both \x1b[0m and \x1b[m forms without regex
+	// Replace full resets with the parent's foreground/background, and restore
+	// the card background after nested output background changes and resets.
 	modifiedContent := strings.ReplaceAll(content, resetFull, resetFull+styleSeq)
 	modifiedContent = strings.ReplaceAll(modifiedContent, resetShort, resetFull+styleSeq)
-
-	// Render the modified content with the original style (to keep padding/layout)
+	modifiedContent = restoreCompositeBackground(style, modifiedContent)
 	return style.Render(modifiedContent)
+}
+
+func restoreCompositeBackground(style lipgloss.Style, content string) string {
+	background := style.GetBackground()
+	if background == nil {
+		return content
+	}
+	backgroundStyle := lipgloss.NewStyle().Background(background)
+	backgroundSequence := backgroundStyle.Render("")
+	backgroundSequence = strings.TrimSuffix(strings.TrimSuffix(backgroundSequence, resetFull), resetShort)
+	if backgroundSequence == "" {
+		return content
+	}
+
+	parser := ansi.GetParser()
+	defer ansi.PutParser(parser)
+	var output strings.Builder
+	var state byte
+	for rest := content; rest != ""; {
+		sequence, _, consumed, next := ansi.DecodeSequence(rest, state, parser)
+		if consumed == 0 {
+			break
+		}
+		output.WriteString(rest[:consumed])
+		if ansi.HasCsiPrefix(sequence) && parser.Command() == 'm' && sgrSetsBackground(parser.Params()) {
+			output.WriteString(backgroundSequence)
+		}
+		state, rest = next, rest[consumed:]
+	}
+	return output.String()
+}
+
+func sgrSetsBackground(params []ansi.Param) bool {
+	for _, param := range params {
+		if code := param.Param(0); code == 48 || code == 49 {
+			return true
+		}
+	}
+	return false
 }

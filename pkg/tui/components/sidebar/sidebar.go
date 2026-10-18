@@ -79,6 +79,7 @@ type Model interface {
 	layout.Sizeable
 	layout.Positionable
 
+	SubtreeCost() float64
 	SetTokenUsage(event *runtime.TokenUsageEvent)
 	SetTodos(result *tools.ToolCallResult) error
 	SetMode(mode Mode)
@@ -333,14 +334,18 @@ func transferTimer(d time.Duration, gen int64, kind transferTimerKind) TransferT
 
 // model implements Model
 type model struct {
-	ar           *animation.Runtime
-	width        int
-	height       int
-	xPos         int          // absolute x position on screen
-	yPos         int          // absolute y position on screen
-	layoutCfg    LayoutConfig // layout configuration for spacing
-	usageOwners  map[string]string
-	sessionUsage map[string]*runtime.Usage // sessionID -> latest usage snapshot
+	ar             *animation.Runtime
+	width          int
+	height         int
+	xPos           int          // absolute x position on screen
+	yPos           int          // absolute y position on screen
+	layoutCfg      LayoutConfig // layout configuration for spacing
+	usageOwners    map[string]string
+	sessionUsage   map[string]*runtime.Usage // sessionID -> latest usage snapshot
+	usageReady     bool
+	sessionOwnCost map[string]float64
+	costParents    map[string]string
+	embeddedCosts  map[string]float64
 	// budgetUsage is the newest run-budget snapshot, or nil on an
 	// unbudgeted run. It is a single value rather than a per-session map
 	// because one budget covers the whole run, sub-sessions included.
@@ -478,6 +483,8 @@ type model struct {
 	preparingRows        map[int]preparedTreeRow
 	treeControls         map[int][]treeControl
 	treeSectionStart     int
+	git                  gitSection
+	gitStart, gitEnd     int
 	summaryLine          int
 	hoveredTreeRow       int
 	hoveredRegion        ClickResult
@@ -522,6 +529,9 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		layoutCfg:          DefaultLayoutConfig(),
 		height:             24,
 		sessionUsage:       make(map[string]*runtime.Usage),
+		sessionOwnCost:     make(map[string]float64),
+		costParents:        make(map[string]string),
+		embeddedCosts:      make(map[string]float64),
 		todoComp:           todotool.NewSidebarComponent(),
 		transferAnimation:  ar.Subscribe(),
 		hoverAnimation:     ar.Subscribe(),
@@ -542,6 +552,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		sectionGap:       defaultSectionGap,
 		titleInput:       ti,
 		cacheDirty:       true, // Initial render needed
+		git:              gitSection{hovered: -1},
 		layoutDirty:      true, // First render must probe scrollbar visibility
 		usageReadingLine: -1,   // No usage zone recorded until the first render
 	}
@@ -616,6 +627,18 @@ func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
 	// Store/replace by session ID (each event has cumulative totals for that session)
 	usage := *event.Usage
 	m.sessionUsage[event.SessionID] = &usage
+	m.usageReady = true
+	for i, id := range m.sessionStack {
+		if id == event.SessionID && i > 0 {
+			m.costParents[id] = m.sessionStack[i-1]
+		}
+	}
+	if usage.OwnCost != nil {
+		m.sessionOwnCost[event.SessionID] = max(m.sessionOwnCost[event.SessionID], *usage.OwnCost)
+	} else if embedded, restored := m.embeddedCosts[event.SessionID]; restored {
+		// This baseline covers the exact embedded history in legacy Usage.Cost.
+		m.sessionOwnCost[event.SessionID] = max(m.sessionOwnCost[event.SessionID], usage.Cost-embedded)
+	}
 	if m.usageOwners == nil {
 		m.usageOwners = make(map[string]string)
 	}
@@ -971,11 +994,27 @@ func (m *model) SetSubagentContext(root subagent.NodeID, parentAgent, parentSess
 // SetSubagentTree replaces the rendered subagent swarm. Each level is ordered
 // most-recently-spawned first (subtree structure preserved). Returns a command
 // to start the shared row spinner when any subagent is running.
+func subagentTreeHasCost(root subagent.NodeSnapshot) bool {
+	if root.Node.Cost > 0 {
+		return true
+	}
+	for _, child := range root.Children {
+		if subagentTreeHasCost(child) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) SetSubagentTree(snapshot subagent.Snapshot) tea.Cmd {
 	if m.subagentRootNode == "" && (m.parentAgent != "" || m.parentSessionID != "") {
 		return m.syncSubagentSpinner()
 	}
 	root, found := subagentview.Root(snapshot, m.rootSessionID, m.subagentRootNode)
+	if found && !m.usageReady && subagentTreeHasCost(root) {
+		m.usageReady = true
+		m.invalidateCache()
+	}
 	// Missing roots are not authoritative over restored session topology.
 	if !found && (len(m.subagentNodes) > 0 || m.delegationRoot != nil) {
 		return m.syncSubagentSpinner()
@@ -1137,6 +1176,7 @@ const (
 	ClickThinkingLevel       // Click on supported active reasoning level
 	ClickModel               // Click on the active model/provider region
 	ClickSubagentParent      // Click on the "parent: <agent>" line of an attached tab (payload: parent session id)
+	ClickGit                 // Click in the Git changes section (payload: section line)
 )
 
 // HandleClick checks if click is on the star or title and returns true if it was
@@ -1259,6 +1299,14 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 		return ClickSubagent, string(id)
 	}
 
+	if m.gitStart >= 0 && contentY >= m.gitStart && contentY < m.gitEnd {
+		line := contentY - m.gitStart
+		if m.git.interactive(line) {
+			return ClickGit, strconv.Itoa(line)
+		}
+		return ClickNone, ""
+	}
+
 	return ClickNone, ""
 }
 
@@ -1290,6 +1338,11 @@ func (m *model) LoadFromSession(sess *session.Session) {
 	// switches cannot leave stale or doubled totals behind.
 	clear(m.sessionUsage)
 	clear(m.usageOwners)
+	clear(m.sessionOwnCost)
+	clear(m.costParents)
+	clear(m.embeddedCosts)
+	m.usageReady = false
+	m.seedSessionCosts(sess, "")
 	m.queuedMessages = nil
 	m.CancelPresentation()
 	m.placement = nil
@@ -1302,6 +1355,8 @@ func (m *model) LoadFromSession(sess *session.Session) {
 	// Use TotalCost to include sub-session costs (handles older sessions
 	// where the parent's Cost field did not include sub-session costs).
 	totalCost := sess.TotalCost()
+	inputTokens, outputTokens, legacyCost := sess.TokensAndCost()
+	m.usageReady = inputTokens > 0 || outputTokens > 0 || legacyCost > 0 || totalCost > 0
 
 	// Load token usage from session
 	if sess.InputTokens > 0 || sess.OutputTokens > 0 || totalCost > 0 {
@@ -1726,6 +1781,8 @@ func (m *model) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// usage is shown while they run, then popped when they stop.
 		if len(m.sessionStack) == 0 {
 			m.rootSessionID = msg.SessionID
+		} else {
+			m.costParents[msg.SessionID] = m.sessionStack[len(m.sessionStack)-1]
 		}
 		m.sessionStack = append(m.sessionStack, msg.SessionID)
 		m.invalidateCache()
@@ -2005,7 +2062,7 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 		InfoLine:         m.collapsedInfoLine(contentWidth),
 		ContentWidth:     contentWidth,
 	}
-	if !m.sectionVisibility.HideUsage {
+	if !m.sectionVisibility.HideUsage && m.usageReady {
 		vm.UsageSummary = m.tokenUsageSummary()
 	}
 
@@ -2261,10 +2318,13 @@ func (m *model) renderSections(contentWidth int) []string {
 	// Track the Token Usage reading line and budget lines while excluding the title.
 	m.usageReadingLine, m.usageSectionEnd = -1, -1
 	if !m.sectionVisibility.HideUsage {
-		markBlock()
-		sectionStart := appendSection(cached("usage", false, m.tokenUsage))
-		m.usageReadingLine = sectionStart
-		m.usageSectionEnd = len(lines)
+		usageSection := cached("usage", false, m.tokenUsage)
+		if usageSection != "" {
+			markBlock()
+			sectionStart := appendSection(usageSection)
+			m.usageReadingLine = sectionStart
+			m.usageSectionEnd = len(lines)
+		}
 	}
 	// Keep canonical identity directly above the model and provider/reasoning,
 	// below the complete context/cost block. It is not an agent-switch target.
@@ -2304,6 +2364,15 @@ func (m *model) renderSections(contentWidth int) []string {
 	}
 	for row, agent := range m.transferAgentLines {
 		m.agentClickZones[subagentSectionStart+row] = agent
+	}
+
+	m.gitStart, m.gitEnd = -1, -1
+	if gitLines := m.git.lines(contentWidth); len(gitLines) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		m.gitStart = appendSection(strings.Join(gitLines, "\n"))
+		m.gitEnd = len(lines)
 	}
 
 	m.todoSummaryLine, m.todoEnd = -1, -1
@@ -2406,10 +2475,8 @@ type usageStats struct {
 
 func (m *model) computeUsageStats() usageStats {
 	var s usageStats
-	for _, usage := range m.sessionUsage {
-		s.totalCost += usage.Cost
-		s.sessionCount++
-	}
+	s.totalCost = m.SubtreeCost()
+	s.sessionCount = len(m.sessionUsage)
 	s.tokens, _ = m.activeSessionTokens()
 	s.contextPct = m.contextPercent()
 	if usage, ok := m.activeSessionUsage(); ok {
@@ -2419,6 +2486,9 @@ func (m *model) computeUsageStats() usageStats {
 }
 
 func (m *model) tokenUsage(contentWidth int) string {
+	if !m.usageReady {
+		return ""
+	}
 	body := m.tokenUsageLine()
 	if b := m.budgetLine(contentWidth); b != "" {
 		body += "\n" + b
@@ -2458,11 +2528,12 @@ func (m *model) tokenUsageLine() string {
 	return line
 }
 
-// tokenUsageSummary returns the usage line for the collapsed band. It
-// renders even before any usage has been recorded ("◉ 0 $0.00"), matching
-// the vertical Token Usage tab so the band carries the context/cost reading
-// from startup.
+// tokenUsageSummary returns the usage line for the collapsed band after a
+// session has reported or restored usage.
 func (m *model) tokenUsageSummary() string {
+	if !m.usageReady {
+		return ""
+	}
 	return m.tokenUsageLine()
 }
 

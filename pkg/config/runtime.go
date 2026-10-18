@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +68,15 @@ type Config struct {
 	MCPToolName  string
 	MCPKeepAlive time.Duration
 
+	// TeamEditMode is externally granted run/server authority, not team YAML.
+	// It is omitted for default-off startup identity and is never in a remote
+	// client LoadTeamRequest; managed snapshots persist the server grant.
+	TeamEditMode string `json:"team_edit_mode,omitempty"`
+	// TeamEditAllowedAgentIDs is a stable-agent allowlist. The separate set
+	// bit preserves nil/source-wide versus explicitly empty/deny-all semantics.
+	TeamEditAllowedAgentIDs    []string `json:"team_edit_allowed_agent_ids,omitempty"`
+	TeamEditAllowedAgentIDsSet bool     `json:"team_edit_allowed_agent_ids_set,omitempty"`
+
 	// MCPOAuthRedirectURI is an opaque public HTTPS URL the runtime advertises
 	// as the OAuth `redirect_uri` when running an MCP server OAuth flow in
 	// unmanaged mode (see WithManagedOAuth(false)). When set, docker-agent
@@ -101,6 +112,9 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 		modelsDevStoreErr:      storeErr,
 		ProviderRegistry:       runConfig.ProviderRegistry,
 	}
+	clone.TeamEditMode = runConfig.TeamEditMode
+	clone.TeamEditAllowedAgentIDs = slices.Clone(runConfig.TeamEditAllowedAgentIDs)
+	clone.TeamEditAllowedAgentIDsSet = runConfig.TeamEditAllowedAgentIDsSet
 	clone.envProviderOnce.Do(func() {})    // mark as resolved
 	clone.modelsDevStoreOnce.Do(func() {}) // mark as resolved
 	clone.EnvFiles = slices.Clone(runConfig.EnvFiles)
@@ -115,6 +129,73 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	clone.HookOnUserInput = slices.Clone(runConfig.HookOnUserInput)
 	clone.HookStop = slices.Clone(runConfig.HookStop)
 	return clone
+}
+
+// ValidateTeamEditGrant validates runtime/CLI authority; edited team YAML has
+// no corresponding mode field and therefore cannot raise this grant.
+func (runConfig *RuntimeConfig) ValidateTeamEditGrant() error {
+	if runConfig == nil {
+		return nil
+	}
+	mode := strings.TrimSpace(runConfig.TeamEditMode)
+	if mode == "" {
+		mode = "off"
+	}
+	allowlistSet := runConfig.TeamEditAllowedAgentIDsSet || runConfig.TeamEditAllowedAgentIDs != nil
+	if mode != "off" && mode != "restricted" && mode != "full" {
+		return errors.New("--team-edit: expected off, restricted, or full")
+	}
+	if mode == "off" && allowlistSet {
+		return errors.New("--team-edit-agent requires --team-edit=restricted or --team-edit=full")
+	}
+	seen := make(map[string]bool, len(runConfig.TeamEditAllowedAgentIDs))
+	for _, id := range runConfig.TeamEditAllowedAgentIDs {
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(id) != id {
+			return errors.New("--team-edit-agent IDs must be non-empty and trimmed")
+		}
+		if seen[id] {
+			return errors.New("--team-edit-agent IDs must be unique")
+		}
+		seen[id] = true
+	}
+	// Canonicalize off to the zero value so snapshots created by default
+	// startup retain their pre-feature digest.
+	if mode == "off" {
+		runConfig.TeamEditMode = ""
+	} else {
+		runConfig.TeamEditMode = mode
+	}
+	runConfig.TeamEditAllowedAgentIDsSet = allowlistSet
+	return nil
+}
+
+// TeamEditGrant is the externally granted authority to request controlled edits.
+// The set bit distinguishes source-wide nil from explicitly empty deny-all.
+type TeamEditGrant struct {
+	Mode               string   `json:"mode,omitempty"`
+	AllowedAgentIDs    []string `json:"allowed_agent_ids,omitempty"`
+	AllowedAgentIDsSet bool     `json:"allowed_agent_ids_set,omitempty"`
+}
+
+func (cfg Config) TeamEditGrant() TeamEditGrant {
+	mode := cfg.TeamEditMode
+	if mode == "" {
+		mode = "off"
+	}
+	set := cfg.TeamEditAllowedAgentIDsSet || cfg.TeamEditAllowedAgentIDs != nil
+	ids := slices.Clone(cfg.TeamEditAllowedAgentIDs)
+	if set && ids == nil {
+		ids = []string{}
+	}
+	return TeamEditGrant{Mode: mode, AllowedAgentIDs: ids, AllowedAgentIDsSet: set}
+}
+
+// TeamEditGrant returns a defensive copy of the trusted external grant.
+func (runConfig *RuntimeConfig) TeamEditGrant() TeamEditGrant {
+	if runConfig == nil {
+		return TeamEditGrant{Mode: "off"}
+	}
+	return runConfig.Config.TeamEditGrant()
 }
 
 // ModelsDevStore returns the lazily-initialized models.dev store.

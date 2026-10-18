@@ -31,12 +31,12 @@ func TestTeam(t *testing.T) {
 		readFile  bool
 	}{
 		{"root", "openai", "gpt-6-astra", "gpt-6-astra-high", "high", []string{"dev-team", "engineer", "designer", "review-team"}, []string{"shell", "todo"}, false},
-		{"dev-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"greppy", "planner", "engineer", "designer", "review-team"}, []string{"shell"}, false},
+		{"dev-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"greppy", "planner", "engineer", "designer", "technical-reviewer"}, []string{"shell"}, false},
 		{"greppy", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", nil, []string{"shell", "todo"}, false},
 		{"planner", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "medium", nil, []string{"shell", "todo"}, false},
 		{"engineer", "openai", "gpt-6.1-luna", "gpt-6.1-luna-xhigh", "xhigh", []string{"designer"}, []string{"shell", "todo"}, false},
 		{"designer", "anthropic", "claude-opus-5-5", "opus-5.5-high", "adaptive/high", nil, []string{"shell", "filesystem", "todo"}, true},
-		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer"}, []string{"shell"}, false},
+		{"review-team", "openai", "gpt-6-astra", "gpt-6-astra-xhigh", "xhigh", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}, []string{"shell"}, false},
 		{"technical-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
 		{"security-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-xhigh", "adaptive/xhigh", nil, []string{"shell"}, false},
 		{"edge-case-reviewer", "anthropic", "claude-haiku-5-5", "haiku-5.5-high", "adaptive/high", nil, []string{"shell"}, false},
@@ -88,6 +88,34 @@ func TestTeam(t *testing.T) {
 	}
 }
 
+func TestTeamReviewRouting(t *testing.T) {
+	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
+	require.NoError(t, err)
+	for _, expected := range []struct {
+		name      string
+		reviewers []string
+	}{
+		{"root", []string{"review-team"}},
+		{"dev-team", []string{"technical-reviewer"}},
+		{"review-team", []string{"technical-reviewer", "security-reviewer", "edge-case-reviewer", "designer"}},
+		{"technical-reviewer", nil},
+		{"security-reviewer", nil},
+		{"edge-case-reviewer", nil},
+	} {
+		t.Run(expected.name, func(t *testing.T) {
+			a, ok := cfg.Agents.Lookup(expected.name)
+			require.True(t, ok)
+			var reviewers []string
+			for _, name := range a.Subagents.AgentNames() {
+				if name == "review-team" || strings.HasSuffix(name, "-reviewer") || (expected.name == "review-team" && name == "designer") {
+					reviewers = append(reviewers, name)
+				}
+			}
+			assert.ElementsMatch(t, expected.reviewers, reviewers)
+		})
+	}
+}
+
 func TestTeamModelPoolsResolve(t *testing.T) {
 	cfg, err := config.Load(t.Context(), config.NewFileSource(kitPath(t, "hackerspace.yaml")))
 	require.NoError(t, err)
@@ -111,12 +139,12 @@ func TestTeamGuidance(t *testing.T) {
 		guidance []string
 	}{
 		{"root", []string{"use engineer more often than designer", "only when the maker explicitly asks", "`dev-team`, led by development lead", "separate, dedicated review team"}},
-		{"dev-team", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "only when the user explicitly asks", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
+		{"dev-team", []string{"use engineer more often than designer", "don't micromanage", "poll for progress", "duplicate their work", "one optional reviewer", "only for quick checks of larger tasks", "never for routine small-task review", "as a required gate", "shelly keeps explicit user-requested independent reviews with the separate review team", "don't delegate review to another lead", "not to implement", "delegate substantial investigation, edits, tests, and integration", "use the shell only for brief orientation and spot-checking returned evidence", "don't finish the investigation before assigning it", "send corrections back to the owner", "leave delegated tasks in progress and end your turn", "reports arrive automatically"}},
 		{"planner", []string{"engineer handles most implementation", "targeted ux advice", "not as a mandatory ui stage", "not a step-by-step execution script"}},
 		{"engineer", []string{"default doer", "most implementation, debugging, and general tasks", "frontend changes that realize clear ux/design direction", "work autonomously", "directly recruit the declared designer subagent", "not routine ui delegation", "engineer retains implementation and integration ownership", "define file boundaries before assigning designer coding work", "other recruitment and material scope changes go through the assigning lead"}},
-		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change"}},
-		{"review-team", []string{"only when the user explicitly asks", "never as a routine gate", "smallest useful review team", "not duplicate full reviews", "one consolidated verdict", "don't modify project or reviewed artifacts"}},
-		{"technical-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "integration assumptions"}},
+		{"designer", []string{"less frequent specialist than engineer", "ux advice or develops web frontend code", "react", "advice-only", "without editing code", "not own or join every ui change", "review lead assigns designer to an explicitly requested review", "use a read-only posture", "assess the assigned ux, interface architecture", "without editing project or reviewed artifacts", "does not change designer's implementation role elsewhere"}},
+		{"review-team", []string{"only when the user explicitly asks", "never as a routine gate", "smallest useful review team", "not duplicate full reviews", "one consolidated verdict", "don't modify project or reviewed artifacts", "explicitly requested review includes interface, ux, architecture, or design concerns", "bounded, read-only review of relevant interface architecture", "do not add designer when"}},
+		{"technical-reviewer", []string{"review lead for a user-requested review", "development lead for an optional quick check of a larger task", "never start a routine gate", "routine small-task review", "don't modify project or reviewed artifacts", "integration assumptions", "assigning lead rather than widening the assignment", "don't recruit other reviewers"}},
 		{"security-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "trust boundaries", "don't expose secrets"}},
 		{"edge-case-reviewer", []string{"user-requested review", "never start a routine gate", "don't modify project or reviewed artifacts", "partial failures", "recovery"}},
 	} {
@@ -185,7 +213,7 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "${{ kit.args.kitVersion }}", kit.Version)
 	assert.Equal(t, []string{"async-agent-kit@${{ kit.args.kitVersion }}"}, kit.Provides)
 	assert.Equal(t, "./async-agent.dockerfile", kit.Dockerfile)
-	require.Len(t, kit.Args, 5)
+	require.Len(t, kit.Args, 6)
 	assert.Equal(t, "0.1.0", kit.Args["kitVersion"]["default"])
 	assert.Equal(t, `^[0-9]+\.[0-9]+\.[0-9]+$`, kit.Args["kitVersion"]["pattern"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_VERSION", kit.Args["kitVersion"]["buildArg"])
@@ -195,10 +223,13 @@ func TestNativeKit(t *testing.T) {
 	assert.Equal(t, "ASYNC_AGENT_KIT_MODEL", kit.Args["model"]["env"])
 	assert.Equal(t, "/home/agent/.cagent/managed-api", kit.Args["stateDir"]["default"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_STATE_DIR", kit.Args["stateDir"]["env"])
+	assert.Equal(t, "off", kit.Args["teamEdit"]["default"])
+	assert.Equal(t, []any{"off", "restricted", "full"}, kit.Args["teamEdit"]["enum"])
+	assert.Equal(t, "ASYNC_AGENT_KIT_TEAM_EDIT", kit.Args["teamEdit"]["env"])
 	assert.Equal(t, "off", kit.Args["diagnostics"]["default"])
 	assert.Equal(t, []any{"off", "on"}, kit.Args["diagnostics"]["enum"])
 	assert.Equal(t, "ASYNC_AGENT_KIT_DIAGNOSTICS", kit.Args["diagnostics"]["env"])
-	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557\n"))
+	assert.True(t, strings.HasPrefix(string(descriptor), "# syntax=docker/sandbox-kit:210ccc3@sha256:8944c950eaaef7e1f33bd4c672e9607c8deb33eedd49d62d8ac58b2d4045de99\n"))
 	byType := make(map[string][]int)
 	for i, capability := range kit.Capabilities {
 		byType[capability.Type] = append(byType[capability.Type], i)
@@ -301,11 +332,12 @@ func TestKitDiagnostics(t *testing.T) {
 	require.Len(t, startup, 2)
 	assert.True(t, startup[1].Background)
 	assert.Equal(t, "agent", startup[1].User)
-	assert.Equal(t, []string{"/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}"}, startup[1].Command)
+	assert.Equal(t, []string{"/opt/async-agent/start.sh", "${{ kit.env.ASYNC_AGENT_KIT_TEAM }}", "${{ kit.env.ASYNC_AGENT_KIT_STATE_DIR }}", "${{ kit.env.ASYNC_AGENT_KIT_MODEL }}", "${{ kit.env.ASYNC_AGENT_KIT_TEAM_EDIT }}"}, startup[1].Command)
 	assert.Contains(t, startup[1].Env, "OPENAI_API_KEY")
 	assert.Contains(t, startup[1].Env, "ANTHROPIC_API_KEY")
 	assert.Contains(t, startup[1].Env, "GOOGLE_API_KEY")
 	assert.Contains(t, startup[1].Env, "GH_TOKEN")
+	assert.Contains(t, startup[1].Env, "ASYNC_AGENT_KIT_TEAM_EDIT")
 	assert.NotContains(t, startup[1].Env, "CAGENT_PPROF_ADDR")
 	home := t.TempDir()
 	directory := filepath.Join(home, ".local/state/async-agent-kit/probe")

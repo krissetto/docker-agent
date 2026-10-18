@@ -58,6 +58,7 @@ var builders = map[string]Builder{
 	filesystem.ToolNameDirectoryTree:      directorytree.New,
 	filesystem.ToolNameSearchFilesContent: searchfilescontent.New,
 	shelltool.ToolNameShell:               shell.New,
+	"category:shell":                      shell.New,
 	userpromptool.ToolNameUserPrompt:      userprompt.New,
 	fetch.ToolNameFetch:                   api.New,
 	"category:api":                        api.New,

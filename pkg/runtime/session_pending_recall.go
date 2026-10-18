@@ -33,7 +33,7 @@ func (e *PendingUserMessageCanceledEvent) GetSessionID() string { return e.Sessi
 
 var _ PendingMessageCanceler = (*sessionHandle)(nil)
 
-// CancelPendingMessage linearizes withdrawal with both FIFO and steering
+// CancelPendingMessage linearizes withdrawal with the shared pending mailbox
 // promotion. A failed durable deletion leaves the mailbox and transcript intact.
 // Cancel remains the separate active-turn-only operation.
 func (h *sessionHandle) CancelPendingMessage(ctx context.Context, turnID string) (bool, error) {
@@ -51,10 +51,6 @@ func (d *sessionDriver) cancelPendingMessage(ctx context.Context, turnID string)
 		}
 		queue := &d.pending
 		index := slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
-		if index < 0 {
-			queue = &d.steering
-			index = slices.IndexFunc(*queue, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
-		}
 		if index < 0 {
 			return sessionIOReservation{}, nil
 		}
@@ -121,11 +117,13 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 	outcome := CancelNotActive
 	var noPendingMatch bool
 	var cancel context.CancelFunc
+	var cancelWorkGeneration uint64
 	err := d.ownerCall(ctx, func() error {
 		if d.switchReserved {
-			noPendingMatch = !slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool { return msg.RequestID == turnID }) && !slices.ContainsFunc(d.steering, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
+			noPendingMatch = !slices.ContainsFunc(d.pending, func(msg QueuedMessage) bool { return msg.RequestID == turnID })
 		}
 		if turnID != "" && d.activeRequestID == turnID && d.starting() {
+			cancelWorkGeneration = d.generation
 			if d.startCanceled {
 				outcome = CancelAlreadyCancelling
 			} else {
@@ -137,6 +135,7 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 			return nil
 		}
 		if turnID != "" && d.activeRequestID == turnID && d.running() && d.cancel != nil {
+			cancelWorkGeneration = d.generation
 			if d.cancelling() {
 				outcome = CancelAlreadyCancelling
 				return nil
@@ -152,6 +151,9 @@ func (d *sessionDriver) cancelTurn(ctx context.Context, turnID string) (CancelOu
 		return CancelNotActive, err
 	}
 	if outcome != CancelNotActive {
+		if cancelWorkGeneration != 0 {
+			d.cancelBackgroundWorks(cancelWorkGeneration)
+		}
 		if cancel != nil {
 			cancel()
 			d.refreshAttention()

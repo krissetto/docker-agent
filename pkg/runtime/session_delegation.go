@@ -93,6 +93,17 @@ func (r *LocalRuntime) sessionDelegationEnabled(sess *session.Session) bool {
 	return r.sessionDelegationEnabledState(delegationState(sess))
 }
 
+func (r *LocalRuntime) sessionDelegationEnabledContext(ctx context.Context, sess *session.Session) bool {
+	state := delegationState(sess)
+	if !state.present {
+		return r.UseSubagents()
+	}
+	if root, err := r.delegationRoot(state); err == nil {
+		return r.delegationEnabled(root)
+	}
+	return false
+}
+
 func (r *LocalRuntime) sessionDelegationEnabledState(state delegationPolicyState) bool {
 	if !state.present {
 		return r.UseSubagents()

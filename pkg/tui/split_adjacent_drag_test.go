@@ -21,7 +21,7 @@ func edgePoint(r splitRect, edge splitEdge) (int, int) {
 		return r.X + r.W/2, r.Y + r.H - 1
 	}
 }
-func TestFocusedTabDragChoosesAdjacentSourceTab(t *testing.T) {
+func TestFocusedWorkspaceSelfDropNeverBorrowsAdjacentSession(t *testing.T) {
 	for _, reordered := range []bool{false, true} {
 		for _, source := range []string{"profile", "second", "third"} {
 			for _, edge := range []splitEdge{splitLeft, splitRight, splitTop, splitBottom} {
@@ -34,29 +34,15 @@ func TestFocusedTabDragChoosesAdjacentSourceTab(t *testing.T) {
 				root.handleSwitchTab(source)
 				root.editor.SetValue("dragged exact draft")
 				order := root.paneOrder()
-				index := 0
-				for i, id := range order {
-					if id == source {
-						index = i
-					}
-				}
-				neighbor := index + 1
-				if neighbor == len(order) {
-					neighbor = index - 1
-				}
 				x, y := paneTabPoint(t, root, source)
 				root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 				require.Equal(t, order, root.paneGesture.order)
 				r := root.paneGesture.geometry.Panes[source]
 				dx, dy := edgePoint(r, edge)
 				root.Update(tea.MouseMotionMsg{X: dx, Y: dy, Button: tea.MouseLeft})
-				require.NotNil(t, root.paneGestureLayer())
+				require.Nil(t, root.paneGestureLayer())
 				root.Update(tea.MouseReleaseMsg{X: dx, Y: dy, Button: tea.MouseLeft})
-				want := []string{order[neighbor], source}
-				if edge == splitLeft || edge == splitTop {
-					want = []string{source, order[neighbor]}
-				}
-				require.Equal(t, want, root.panes.Sessions(), "order=%v source=%s edge=%v", order, source, edge)
+				require.Equal(t, []string{source}, root.panes.Sessions(), "self-edge is not a workspace merge")
 				require.Equal(t, source, root.paneFocus())
 				require.Equal(t, "dragged exact draft", root.editor.Value())
 				require.Equal(t, order, root.paneOrder())
@@ -64,19 +50,19 @@ func TestFocusedTabDragChoosesAdjacentSourceTab(t *testing.T) {
 		}
 	}
 }
-func TestFocusedTabDragSkipsClosedNeighborUsingCapturedOrder(t *testing.T) {
+func TestFocusedWorkspaceSelfDropStaysInvalidAfterNeighborClose(t *testing.T) {
 	for _, source := range []string{"profile", "second", "third"} {
 		root := splitTestRoot(t)
 		root.handleSwitchTab(source)
 		x, y := paneTabPoint(t, root, source)
 		root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 		captured := append([]string(nil), root.paneGesture.order...)
-		closed, want := "second", "third"
+		closed := "second"
 		if source == "second" {
-			closed, want = "third", "profile"
+			closed = "third"
 		}
 		if source == "third" {
-			closed, want = "second", "profile"
+			closed = "second"
 		}
 		root.closeTab(closed)
 		tabs, active := root.supervisor.GetTabs()
@@ -87,7 +73,7 @@ func TestFocusedTabDragSkipsClosedNeighborUsingCapturedOrder(t *testing.T) {
 		dx, dy := edgePoint(r, splitRight)
 		root.Update(tea.MouseMotionMsg{X: dx, Y: dy, Button: tea.MouseLeft})
 		root.Update(tea.MouseReleaseMsg{X: dx, Y: dy, Button: tea.MouseLeft})
-		require.Equal(t, []string{want, source}, root.panes.Sessions())
+		require.Equal(t, []string{source}, root.panes.Sessions())
 		require.Equal(t, source, root.paneFocus())
 	}
 }
@@ -125,7 +111,7 @@ func TestSelfSplitSkipsTabsAssignedToUnrelatedMultiPaneWorkspace(t *testing.T) {
 	require.Same(t, before, root.panes.root)
 }
 
-func TestFocusedTabDragUsesOffscreenLeftNeighbor(t *testing.T) {
+func TestFocusedWorkspaceSelfDropDoesNotUseOffscreenNeighbor(t *testing.T) {
 	root := splitTestRoot(t)
 	root.handleSwitchTab("third")
 	root.handleWindowResize(60, 40)
@@ -137,6 +123,6 @@ func TestFocusedTabDragUsesOffscreenLeftNeighbor(t *testing.T) {
 	dx, dy := edgePoint(r, splitBottom)
 	root.Update(tea.MouseMotionMsg{X: dx, Y: dy, Button: tea.MouseLeft})
 	root.Update(tea.MouseReleaseMsg{X: dx, Y: dy, Button: tea.MouseLeft})
-	require.Equal(t, []string{"second", "third"}, root.panes.Sessions())
+	require.Equal(t, []string{"third"}, root.panes.Sessions())
 	require.Equal(t, "third", root.paneFocus())
 }

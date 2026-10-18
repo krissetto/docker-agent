@@ -1,0 +1,18 @@
+{
+  "0/review_summary": {
+    "name": "review_summary",
+    "description": "Summarize a code review",
+    "arguments": [
+      {
+        "name": "diff",
+        "description": "Patch or diff text",
+        "required": true
+      },
+      {
+        "name": "focus",
+        "description": "Optional review focus",
+        "required": false
+      }
+    ]
+  }
+}

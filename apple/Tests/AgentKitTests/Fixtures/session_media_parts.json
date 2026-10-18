@@ -1,0 +1,29 @@
+{
+  "mode": "submit",
+  "content": "Please inspect the attached notes and chart.",
+  "multi_content": [
+    {
+      "type": "document",
+      "document": {
+        "name": "notes.txt",
+        "mime_type": "text/plain",
+        "size": 17,
+        "source": {
+          "inline_text": "sample attachment\n"
+        }
+      }
+    },
+    {
+      "type": "document",
+      "document": {
+        "name": "chart.png",
+        "mime_type": "image/png",
+        "size": 3,
+        "source": {
+          "inline_data": "iVBO"
+        }
+      }
+    }
+  ],
+  "request_id": "fixture-attachment-request"
+}

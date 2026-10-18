@@ -52,13 +52,28 @@ metadata: do not publish that image with `docker push` as a Kit. Use a repositor
 ending in **`kagent`**, not `docker-agent`: v3 registration uses the final repository
 component and otherwise collides with built-in `docker-agent`.
 
-The descriptor pins the published development frontend for specification commit
-[`a1d110de252bcc3cb2fa6d47fe37137a1a328b97`](https://github.com/docker/sandbox-kit-spec/commit/a1d110de252bcc3cb2fa6d47fe37137a1a328b97):
-`docker/sandbox-kit:a1d110d@sha256:7b5be06981e0a3b808b8043ad3f2d5edc5df3645ce628c9bae1bca0fc4334557`.
-GitHub remote HEAD was rechecked on 2026-10-09; the commit is dated 2026-10-08.
-Anonymous registry HTTP metadata confirmed the immutable Linux amd64/arm64 index
-digest. Build provenance was not separately inspected. Main commits publish
-short-SHA frontend tags rather than moving floating `:3`.
+The descriptor pins the latest inspected development frontend for specification
+commit [`210ccc3aa393fc67295cc4058ba3d65c6f98be92`](https://github.com/docker/sandbox-kit-spec/commit/210ccc3aa393fc67295cc4058ba3d65c6f98be92):
+`docker/sandbox-kit:210ccc3@sha256:8944c950eaaef7e1f33bd4c672e9607c8deb33eedd49d62d8ac58b2d4045de99`.
+Anonymous Docker Registry metadata verified this immutable multi-platform
+manifest index on 2026-10-18; amd64 and arm64 are present. Both the old and new
+frontends use Kit schema v3. The frontend tag is a commit identifier, not a Kit
+schema-version tag. The commit is dated 2026-10-16. Build provenance was not
+separately inspected. Main commits publish short-SHA frontend tags rather than
+moving floating `:3`.
+
+The Kit keeps host-agent Git signing optional and bounded inline rather than
+composing the official [`git-signing@1.0.0` mixin](https://github.com/docker/sandbox-kit-spec/blob/210ccc3aa393fc67295cc4058ba3d65c6f98be92/examples/git-signing/git-signing.yaml)
+by default. That mixin requires `ssh-agent@1` and enables missing Git signing
+defaults, changing this Kit's default authority and behavior. The published [`sbx/git-ssh-sign-kit:latest`](https://hub.docker.com/r/sbx/git-ssh-sign-kit)
+artifact is schema v2 (manifest `sha256:003e6d1d9e4381f058cc1a3336cf1c8d539af02ddb9ebb0edb0405631a2f4ece`),
+not a v3 mixin. SBX runtime
+support for `ssh-agent@1` was added at source commit
+[`466c6d4`](https://github.com/docker/sandboxes/commit/466c6d48107179a10cd65bdf3c8d2dc6cf06748b);
+the installed `v0.21.0-6505` (`aed956f`) predates it. Use an updated SBX consumer
+with v3 `ssh-agent@1` support; the old source-load path is not evidence that the
+installed CLI rejects published v3 descriptors. No release number is inferred
+from either source commit.
 
 This frontend emits the expanded descriptor, schema-version and capabilities
 annotations on both platform manifests and the top-level index. `task kit`
@@ -74,6 +89,42 @@ The descriptor retains `network-policy@1` and the context's omitted `directory`,
 which preserves workspace-sibling discovery. It does not request host sharing or
 alternate context placement. Do not strip derived package metadata for an older
 consumer or silently widen optional permissions.
+
+For a deliberate creation-time opt-in, the official
+[`git-signing`](https://github.com/docker/sandbox-kit-spec/blob/210ccc3aa393fc67295cc4058ba3d65c6f98be92/examples/git-signing/git-signing.yaml)
+and [`github-ssh`](https://github.com/docker/sandbox-kit-spec/blob/210ccc3aa393fc67295cc4058ba3d65c6f98be92/examples/github-ssh/github-ssh.yaml)
+source mixins can be added to this published workload using a consumer that
+supports repeated `--kit` source refs. The references pin source to the inspected
+spec commit. To keep both signing and GitHub SSH access for the last example,
+include both mixins as shown; use the published
+`$KIT_REF` workload, not `sbx run kit/` (this repository's Dockerfile needs the
+repository root as build context):
+
+```sh
+SPEC_SHA=210ccc3aa393fc67295cc4058ba3d65c6f98be92
+sbx create --name async-agent-signing \
+  --kit "git+https://github.com/docker/sandbox-kit-spec.git#ref=$SPEC_SHA&dir=examples/git-signing" \
+  "$KIT_REF" "$workspace"
+
+# Broader opt-in: also permit GitHub's SSH login, on port 22, with pinned host keys.
+sbx create --name async-agent-github-ssh \
+  --kit "git+https://github.com/docker/sandbox-kit-spec.git#ref=$SPEC_SHA&dir=examples/git-signing" \
+  --kit "git+https://github.com/docker/sandbox-kit-spec.git#ref=$SPEC_SHA&dir=examples/github-ssh" \
+  "$KIT_REF" "$workspace"
+```
+
+The `git-signing` mixin makes Git signing required and fills missing Git
+signing defaults. `github-ssh` also includes signing defaults and additionally
+requests authentication only as `git@github.com`, permits `github.com:22`, and
+installs GitHub host keys; it is not general SSH access. Using both repeats the
+signing bounds, which the v3 merger unions and marks required. Host approval and
+SSH-agent availability remain required. These `--kit` source refs are optional
+additions: neither is in this Kit's published workload unless explicitly added.
+The CLI resolves/builds each pinned Git source through its Kit frontend/BuildKit
+path, distinct from the published workload's root-context Buildx build. A v3
+`kind: set` can pin only published registry refs (with digests when published),
+not Git source refs; publish a set first if the composition needs a reusable
+immutable registry reference. See [v3 set reference rules](https://github.com/docker/sandbox-kit-spec/blob/210ccc3aa393fc67295cc4058ba3d65c6f98be92/docs/spec/SPEC-v3.md#34-kit-set).
 
 ## Run
 
@@ -94,9 +145,31 @@ sbx run --name async-agent-trial-1
 ### Creation-bound server configuration
 
 The Kit deliberately differs from standalone `docker-agent run`: workspace,
-team, model override and private state belong to **sandbox creation**, not each
-connection. Startup uses SBX's `WORKSPACE_DIR` when supplied, otherwise the
-startup process working directory. `/workspace` is the image default, not a
+model override and private state belong to **sandbox creation**. The team normally
+comes from the creation-bound `team` argument, but Kit connections can select a
+workspace YAML with the first argument after `--`, for example:
+
+```sh
+sbx run ourkit:latest -- ./myagent.yaml
+sbx run ourkit:latest --exec --dry-run -- "./teams/my agent.yaml"
+```
+
+SBX forwards arguments after `--` to the Kit entrypoint. A leading `.yaml` or
+`.yml` argument is treated as the team path (relative to SBX's requested guest
+working directory, which must be inside the workspace); remaining arguments
+retain their usual prompt/flag meaning. The path must resolve to a readable
+regular file inside the mounted workspace. Symlinks are resolved and rejected
+if they escape the workspace. Host files are not uploaded automatically. Missing,
+unreadable, invalid or out-of-workspace YAML fails before a session is created;
+it never falls back to the bundled team. Each successful registration snapshots
+that file and its configuration dependencies in private managed state. Existing
+running sessions keep their current runtime owner; subsequent cold resumes and
+new sessions use the latest registered revision for that same workspace-relative
+path. Different paths remain separate session sources. Creation-time `team`
+selection remains the default when no team path is passed.
+
+Startup uses SBX's `WORKSPACE_DIR` when supplied, otherwise the startup process
+working directory. `/workspace` is the image default, not a
 forced mount location. The connection preserves SBX's requested working
 directory; `--working-dir` can select a session directory inside that workspace
 without changing the lifecycle-owned API's workspace identity.
@@ -107,15 +180,18 @@ Create arguments are:
 | --- | --- | --- |
 | `team` | `auto` | Workspace `hackerspace.yaml`, otherwise bundled team; or a readable guest file path relative to the startup workspace or absolute. |
 | `model` | empty | Team-wide model override, e.g. `openai/ACCESSIBLE_MODEL`; comma-separated targeted overrides follow the CLI's normal model syntax. Empty keeps team models. |
+| `teamEdit` | `off` | Creation-bound trusted team-edit grant: `off`, `restricted`, or `full`. This is authority, not team YAML; only grant it when the sandbox harness permits it. |
 | `stateDir` | `/home/agent/.cagent/managed-api` | Absolute private guest state base outside the mounted workspace. |
 | `diagnostics` | `off` | Local install/boot markers; no provider calls. |
 
-For a consumer supporting SBX's `--kit-arg` creation interface:
+For a consumer supporting SBX's `--kit-arg` creation interface, configure the
+team at sandbox creation (this also selects the API's default team):
 
 ```sh
 sbx create --name async-agent-trial-1 \
   --kit-arg model=openai/ACCESSIBLE_MODEL \
-  --kit-arg 'team=./my team.yaml' "$KIT_REF" /path/project
+  --kit-arg 'team=./my team.yaml' \
+  --kit-arg teamEdit=restricted "$KIT_REF" /path/project
 sbx run --name async-agent-trial-1
 # Initialization without a model turn:
 sbx run --name async-agent-trial-1 -- --exec --dry-run
@@ -125,11 +201,14 @@ sbx run --name async-agent-trial-1 -- --session=-1
 
 Use only a model your account can access. Both required provider credential
 bindings remain required with a single-provider override. `team=auto` and no
-`model` argument retain the bundled/workspace defaults. Paths are guest paths,
-not arbitrary host files. Missing, unreadable and non-file team paths fail.
+`model` argument retain the bundled/workspace defaults. Creation paths are guest
+paths, not arbitrary host files. Missing, unreadable and non-file team paths fail.
 
-Connection-time `--team` and `--model` are rejected: recreate with `team` and
-`model` respectively. `--managed-api-state-dir` cannot change the creation-bound
+Connection-time `--team`, `--model`, and non-default `--team-edit` are rejected;
+recreate with `team`, `model`, and `teamEdit` respectively. A client cannot grant
+or elevate team-edit access on an existing API. The Kit exposes only the global
+mode (no per-agent allowlist); use `off` unless your trusted harness specifically
+allows a source-wide restricted/full grant. `--managed-api-state-dir` cannot change the creation-bound
 base: recreate with `stateDir`. `--working-dir` selects the session directory,
 not a different API; the server rejects paths outside the creation workspace.
 Server-changing flags (`--env-from-file`, `--flavor`, `--models-gateway`,
@@ -170,7 +249,7 @@ killing existing work, including after restart. Retain original team inputs or
 create a separate sandbox/state base deliberately. Context/skills, if configured
 by the team, remain live discovery inputs, not frozen file contents.
 
-The spec's [creation-time environment expansion](https://github.com/docker/sandbox-kit-spec/blob/a1d110de252bcc3cb2fa6d47fe37137a1a328b97/docs/spec/SPEC-v3.md#61-final-container-environment)
+The spec's [creation-time environment expansion](https://github.com/docker/sandbox-kit-spec/blob/210ccc3aa393fc67295cc4058ba3d65c6f98be92/docs/spec/SPEC-v3.md#61-final-container-environment)
 persists team/model/state argv for restart. Hook inheritance is deny-by-default:
 the descriptor lists credential sentinels, proxy/CA settings, approved SSH socket,
 config/tool paths and sandbox detection names explicitly; shell baseline is
@@ -229,6 +308,24 @@ or opening a second local database.
 
 ## Credentials and network
 
+The descriptor requests capabilities when the sandbox is created; the host decides
+whether to approve them and is responsible for enforcing its policy. Optional
+capabilities may be omitted by a host. Changing a Kit request requires recreating
+the sandbox with a reviewed Kit descriptor.
+
+| Capability | Status | Enables | Does not enable |
+| --- | --- | --- | --- |
+| Network policy and OpenAI/Anthropic credentials | Required | Proxy-managed model API requests to the exact hosts below | Guest-visible provider keys or other egress |
+| Google/GitHub credentials | Optional (requested) | Proxy-managed requests to the exact hosts below | Other providers, GitHub Enterprise, or wildcard injection |
+| Headless and interactive agent sessions | Optional (requested) | Resume, continue, prompt, and list through the managed API | Starting a second local server or database |
+| Context and skills | Optional (requested) | Workspace context discovery and readonly skills mount | Filesystem isolation or trusted skill execution |
+| Git identity | Optional (requested) | Git author attribution | Authentication or signing configuration |
+| Git commit signing via host SSH agent | Optional (requested) | Restricted Git object signing | SSH login, SSH remotes, or exporting private keys |
+| Lifecycle and long-running process | Required | Start the managed API and keep the sandbox alive while it runs | Process supervision or recovery of interrupted work |
+| Team edit | Creation argument (`off`) | Trusted team YAML edits when creation-time authority is granted | Per-agent grants or elevation after creation |
+| ACP protocol integration | Not requested | — | The app does not provide ACP support |
+| Volume mounts and GitHub SSH authentication | Not requested | — | No host filesystem mounts or SSH remote authentication |
+
 | Service | Requirement | Guest sentinel | Exact injection hosts |
 | --- | --- | --- | --- |
 | OpenAI | Required | `OPENAI_API_KEY` | `api.openai.com` |
@@ -264,11 +361,17 @@ The base includes `gh` and `git`. Use credential-free HTTPS Git remotes; the pro
 adapts GitHub authentication. Leave `GH_HOST` unset or `github.com`, not
 `api.github.com`. Never run guest login, token export, debug credential output or
 credential-helper setup. Public API reachability is not authentication proof;
-check intended restricted reads with a least-privilege host token.
+check intended restricted reads with a least-privilege host token. The optional
+SSH agent request is for Git commit signing only; see the separate signing opt-in
+below.
 
-SSH remotes, GitHub Enterprise/CDN/redirect hosts, Copilot, OAuth, Azure/custom
-endpoints, Bedrock, Vertex and local DMR/Ollama are not granted. Review additional
-routes separately; never wildcard credential injection.
+This Kit does not request SSH authentication or SSH remotes. GitHub SSH access
+(`authenticate: [git@github.com]`), GitHub Enterprise/CDN/redirect hosts, Copilot,
+OAuth, Azure/custom endpoints, Bedrock, Vertex and local DMR/Ollama are not
+requested. The separate official `github-ssh` source kit demonstrates GitHub
+SSH authentication and network access; that is distinct from this Kit’s Git
+commit-signing request. Review additional routes separately; never wildcard
+credential injection.
 
 ## Optional integrations and defaults
 
@@ -283,10 +386,41 @@ provide filesystem isolation.
   Engineer and Designer. Other roles retain restricted tools. Review skills as
   untrusted executable input; readonly does not prevent execution. A custom team
   replaces, not inherits, context/skills loaders.
-- **Identity/signing:** Git attribution is separate from optional runtime-only
-  SSH-agent signing (`unrestricted: false`, `sign: [git]`, no authentication).
-  Configure an approved public signing key separately; never import private keys
-  or host Git config.
+- **Git identity:** The optional Git identity capability supplies commit author
+  attribution; it does not authenticate, authorize signing, or configure a
+  signing key.
+- **Git commit signing via host SSH agent:** Optional, runtime-only, and
+  restricted to Git signing (`ssh-agent@1`, `unrestricted: false`, `sign: [git]`).
+  This is not SSH login or SSH remote access. The host keeps the private key; the
+  guest requests signatures through the approved signing socket. The capability
+  is requested by the Kit, but the host must approve it and enforce the policy.
+  To opt in, load the key into the host agent and approve the capability. In the
+  target repository, set an author principal and signing locally (replace the
+  path with the approved public-key file available in the guest):
+
+  ```sh
+  git config --local user.email 'your-signing-principal@example.com'
+  git config --local gpg.format ssh
+  git config --local user.signingkey /path/to/approved-signing-key.pub
+  git config --local commit.gpgsign true
+  ```
+
+  SSH signature verification requires an allowed-signers file. Create one from
+  the public key and configure verification locally before checking a signed
+  commit:
+
+  ```sh
+  gitdir=$(git rev-parse --absolute-git-dir)
+  principal=$(git config --local --get user.email)
+  printf '%s %s\n' "$principal" "$(cat /path/to/approved-signing-key.pub)" > "$gitdir/allowed_signers"
+  git config --local gpg.ssh.allowedSignersFile "$gitdir/allowed_signers"
+  git log --show-signature -1
+  ```
+
+  Signing is never enabled automatically by this Kit. If Git signing is enabled
+  but the approved agent is absent, the commit should fail rather than silently
+  become unsigned. Never import private keys, copy host `~/.ssh` or Git
+  configuration, or load private key files into the guest.
 - **State:** managed sessions/data use
   `/home/agent/.cagent/managed-api/<canonical-workspace-sha256>/` on the sandbox's
   own disk, not a host mount, workspace directory or separate volume. The image

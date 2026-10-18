@@ -26,29 +26,36 @@ import (
 	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 )
 
 const ToolNameShell = "shell"
 
 // ToolSet provides synchronous shell command execution.
 type ToolSet struct {
-	handler *shellHandler
+	handler             *shellHandler
+	jobs                *backgroundjobs.ToolSet
+	exposeJobInspectors bool
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*ToolSet)(nil)
-	_ tools.Startable    = (*ToolSet)(nil)
-	_ tools.Instructable = (*ToolSet)(nil)
-	_ tools.Elicitable   = (*ToolSet)(nil)
+	_ tools.ToolSet              = (*ToolSet)(nil)
+	_ tools.Startable            = (*ToolSet)(nil)
+	_ tools.Instructable         = (*ToolSet)(nil)
+	_ tools.Elicitable           = (*ToolSet)(nil)
+	_ tools.ResourceOwnerStopper = (*ToolSet)(nil)
 )
 
 type shellHandler struct {
-	shell           string
-	shellArgsPrefix []string
-	env             []string
-	timeout         time.Duration
-	workingDir      string
+	shell               string
+	shellArgsPrefix     []string
+	env                 []string
+	timeout             time.Duration
+	workingDir          string
+	backgroundAfter     time.Duration
+	jobs                *backgroundjobs.ToolSet
+	exposeJobInspectors bool
 
 	// sudoAskpass opts this toolset into the one-time sudo privilege
 	// escalation flow (SUDO_ASKPASS bridged to the elicitation handler).
@@ -182,12 +189,37 @@ func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs, rt too
 const waitDelayAfterShellExit = 500 * time.Millisecond
 
 func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tools.Runtime, command, cwd string, timeout time.Duration) *tools.ToolCallResult {
-	// Cancellation is handled manually below (timeoutCtx + Process.Kill +
-	// process group + WaitDelay), so we use exec.Command rather than
-	// exec.CommandContext to keep that flow in one place.
+	if h.jobs != nil && h.jobs.SupportsShellBackground() && h.backgroundAfter > 0 && !commandInvokesSudo(command) {
+		owner := tools.ResourceOwnerFromContext(ctx)
+		var work tools.BackgroundWork
+		if bgRuntime, ok := rt.(tools.BackgroundWorkRuntime); ok && owner != nil {
+			var err error
+			work, err = bgRuntime.BeginBackgroundWork(ctx)
+			if err != nil {
+				return tools.ResultError(fmt.Sprintf("Error registering background shell command: %s", err))
+			}
+		}
+		if work == nil {
+			return h.runForegroundCommand(timeoutCtx, ctx, rt, command, cwd, timeout)
+		}
+		result := h.jobs.RunShellCommand(ctx, owner, h.shell, h.shellArgsPrefix, command, cwd, h.env, timeout, h.backgroundAfter, rt, work)
+		if result.JobID != "" {
+			return tools.ResultSuccess(fmt.Sprintf("Background job started with ID: %s\nCommand: %s\nWorking directory: %s\nInspect output with view_background_job.", result.JobID, command, cwd))
+		}
+		if result.TimedOut {
+			return tools.ResultSuccess(formatCommandOutput(timeoutCtx, ctx, result.Err, result.Output, h.shell, timeout))
+		}
+		if ctx.Err() != nil {
+			return tools.ResultSuccess(formatCommandOutput(timeoutCtx, ctx, result.Err, result.Output, h.shell, timeout))
+		}
+		return tools.ResultSuccess(formatCommandOutput(timeoutCtx, ctx, result.Err, result.Output, h.shell, timeout))
+	}
+	return h.runForegroundCommand(timeoutCtx, ctx, rt, command, cwd, timeout)
+}
+
+func (h *shellHandler) runForegroundCommand(timeoutCtx, ctx context.Context, rt tools.Runtime, command, cwd string, timeout time.Duration) *tools.ToolCallResult {
 	var cmdEnv []string
 	if scope, scoped := tools.HandlerScopeFrom(ctx); scoped && h.sudoAskpass && askpassSupported() && commandInvokesSudo(command) {
-		// A helper carries its command's owner; it must never survive into another call.
 		srv, err := startAskpassServer(ctx, func() tools.ElicitationHandler { return scope.Elicitation })
 		if err != nil {
 			return tools.ResultError(fmt.Sprintf("Error starting sudo askpass helper: %s", err))
@@ -197,40 +229,25 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tool
 	} else {
 		command, cmdEnv = h.applyAskpass(ctx, command)
 	}
-	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...) //nolint:noctx // see comment above
-	cmd.Env = cmdEnv
-	cmd.Dir = cwd
-	cmd.SysProcAttr = platformSpecificSysProcAttr()
-	cmd.WaitDelay = waitDelayAfterShellExit
-
+	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...)
+	cmd.Env, cmd.Dir = cmdEnv, cwd
+	cmd.SysProcAttr, cmd.WaitDelay = platformSpecificSysProcAttr(), waitDelayAfterShellExit
 	output := newCommandOutput(ctx, rt)
-	cmd.Stdout = output
-	cmd.Stderr = output
-
+	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Start(); err != nil {
 		return tools.ResultError(fmt.Sprintf("Error starting command: %s", err))
 	}
-
 	pg, err := createProcessGroup(cmd.Process)
 	if err != nil {
-		// Successfully started the child but couldn't install it in its own
-		// process group: clean it up before bailing out.
 		reapSpawnedChild(cmd, pg)
 		return tools.ResultError(fmt.Sprintf("Error creating process group: %s", err))
 	}
-
 	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
+	go func() { done <- cmd.Wait() }()
 	var cmdErr error
 	select {
 	case <-timeoutCtx.Done():
 		_ = kill(cmd.Process, pg)
-		// Wait for cmd.Wait() to complete so that the internal pipe-copy
-		// goroutines finish writing to output before we read it.
-		// Use a grace period: if SIGTERM is ignored, escalate to SIGKILL.
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
@@ -239,9 +256,7 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tool
 		}
 	case cmdErr = <-done:
 	}
-
-	formattedOutput := formatCommandOutput(timeoutCtx, ctx, cmdErr, output.String(), h.shell, timeout)
-	return tools.ResultSuccess(formattedOutput)
+	return tools.ResultSuccess(formatCommandOutput(timeoutCtx, ctx, cmdErr, output.String(), h.shell, timeout))
 }
 
 // reapSpawnedChild terminates a child that we've started but decided not
@@ -275,6 +290,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	}
 
 	ts := New(env, runConfig)
+	if toolset.BackgroundAfter != nil {
+		ts.handler.backgroundAfter = time.Duration(*toolset.BackgroundAfter) * time.Second
+	}
 	if toolset.SudoAskpass != nil && *toolset.SudoAskpass {
 		ts.handler.sudoAskpass = true
 	}
@@ -303,6 +321,7 @@ func New(env []string, runConfig *config.RuntimeConfig) *ToolSet {
 		env:             env,
 		timeout:         30 * time.Second,
 		workingDir:      runConfig.WorkingDir,
+		backgroundAfter: 2 * time.Second,
 	}
 
 	return &ToolSet{handler: handler}
@@ -353,7 +372,7 @@ func (h *shellHandler) resolveWorkDir(cwd string) string {
 // macOS grep or docker logs from a Windows container.
 func formatCommandOutput(timeoutCtx, ctx context.Context, err error, rawOutput, shellPath string, timeout time.Duration) string {
 	var output string
-	if timeoutCtx.Err() != nil {
+	if timeoutCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 		if ctx.Err() != nil {
 			output = "Command cancelled"
 		} else {
@@ -412,25 +431,45 @@ func (t *ToolSet) Instructions() string {
 - Commands are executed by %s on %s — write them in that shell's syntax
 - Each call runs in a fresh shell session — no state persists between calls
 - Default timeout: 30s. Set "timeout" for longer operations (builds, tests)
+%s
 - Use "cwd" parameter instead of cd within commands
 - Combine operations with pipes, redirections, and heredocs
 - Non-zero exit codes return error info with output; timed-out commands are terminated`,
-		shellpath.ShellBaseName(t.handler.shell), displayOS())
+		shellpath.ShellBaseName(t.handler.shell), displayOS(), t.handler.backgroundInstructions())
 }
 
-func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
-	return []tools.Tool{
+func (h *shellHandler) backgroundInstructions() string {
+	if h.jobs == nil || !h.jobs.SupportsShellBackground() || h.backgroundAfter <= 0 {
+		return "Automatic shell backgrounding is unavailable in this host or disabled."
+	}
+	return fmt.Sprintf("Commands still running after %s continue as background jobs; inspect with view_background_job.", h.backgroundAfter)
+}
+
+func (t *ToolSet) AttachBackgroundJobs(jobs *backgroundjobs.ToolSet, exposeInspectors bool) {
+	t.jobs, t.handler.jobs, t.exposeJobInspectors = jobs, jobs, exposeInspectors
+}
+
+func (t *ToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
+	result := []tools.Tool{
 		{
 			Name:                    ToolNameShell,
 			Category:                "shell",
-			Description:             shellToolDescription(t.handler.shell),
+			Description:             fmt.Sprintf("%s %s", shellToolDescription(t.handler.shell), t.handler.backgroundInstructions()),
 			Parameters:              tools.MustSchemaFor[RunShellArgs](),
 			OutputSchema:            tools.MustSchemaFor[string](),
 			Handler:                 tools.NewRuntimeHandler(t.handler.RunShell),
 			Annotations:             tools.ToolAnnotations{Title: "Shell"},
 			AddDescriptionParameter: true,
 		},
-	}, nil
+	}
+	if t.jobs != nil && t.exposeJobInspectors {
+		inspectors, err := t.jobs.ShellInspectionTools()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, inspectors...)
+	}
+	return result, nil
 }
 
 // SetElicitationHandler wires the runtime's elicitation handler into the shell
@@ -448,6 +487,13 @@ func (t *ToolSet) Start(context.Context) error {
 func (t *ToolSet) Stop(context.Context) error {
 	t.handler.stopAskpass()
 	return nil
+}
+
+func (t *ToolSet) StopResourceOwner(ctx context.Context) error {
+	if t.jobs == nil {
+		return nil
+	}
+	return t.jobs.StopResourceOwner(ctx)
 }
 
 // shellToolDescription names the interpreter that will run the command.

@@ -7,8 +7,8 @@ func rootMouseHelp() []help.Section {
 	return []help.Section{
 		{ID: "mouse.tabs", Title: "Session tabs \u2014 mouse", Entries: []help.Entry{
 			{ID: "nd.tabs.mouse.tab.switch.tab", Keys: []string{"left click"}, Description: "Switch tab", Condition: "tab hit target visible"},
-			{ID: "nd.tabs.mouse.tab.close.close.tab", Keys: []string{"left click"}, Description: "Close tab", Condition: "tab close \u00d7 hit target visible"},
-			{ID: "nd.tabs.mouse.tab.close.tab.middle.click", Keys: []string{"middle click"}, Description: "Close tab middle click", Condition: "tab hit target visible"},
+			{ID: "nd.tabs.mouse.tab.close.close.tab", Keys: []string{"left click"}, Description: "Close session, or confirm closing all workspace panes", Condition: "tab close \u00d7 hit target visible"},
+			{ID: "nd.tabs.mouse.tab.close.tab.middle.click", Keys: []string{"middle click"}, Description: "Close fullscreen session", Condition: "single-session tab hit target visible"},
 			{ID: "nd.tabs.mouse.plus.new.tab", Keys: []string{"left click"}, Description: "New tab", Condition: "plus hit target visible"},
 			{ID: "nd.tabs.mouse.overflow.arrows.scroll.tab.strip", Keys: []string{"left click"}, Description: "Scroll tab strip", Condition: "overflow arrows hit target visible"},
 			{ID: "nd.tabs.mouse.tab.strip.scroll.tab.strip.wheel", Keys: []string{"wheel"}, Description: "Scroll tab strip wheel", Condition: "tab strip hit target visible"},

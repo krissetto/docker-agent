@@ -28,9 +28,13 @@ func TestScopedSessionSummariesIncludeChildrenWithoutChangingRootCatalog(t *test
 			require.NoError(t, store.AddSession(t.Context(), parent))
 			require.NoError(t, store.AddSession(t.Context(), child))
 			if sqlStore, ok := store.(*SQLiteSessionStore); ok {
-				// Full hydration would fail, proving scope selection and metadata
-				// extraction never parse transcript payloads for any included row.
-				_, err := sqlStore.db.ExecContext(t.Context(), "UPDATE session_items SET message_json = 'not-json'")
+				// Deliberately simulate out-of-band database corruption; normal writes
+				// are rejected before summary metrics can become unknowable.
+				_, err := sqlStore.db.ExecContext(t.Context(), `DROP TRIGGER session_catalog_metrics_validate_update`)
+				require.NoError(t, err)
+				_, err = sqlStore.db.ExecContext(t.Context(), `DROP TRIGGER session_catalog_metrics_update`)
+				require.NoError(t, err)
+				_, err = sqlStore.db.ExecContext(t.Context(), "UPDATE session_items SET message_json = 'not-json'")
 				require.NoError(t, err)
 			}
 			roots, err := store.GetSessionSummaries(t.Context())

@@ -22,17 +22,18 @@ func (h *sessionHandle) SessionAgentConfig(ctx context.Context, name string) (Se
 	if err := ctx.Err(); err != nil {
 		return SessionAgentConfig{}, err
 	}
-	if _, err := h.runtime.team.Agent(name); err != nil {
+	tm := h.runtime.teamForSession(h.driver.session())
+	if _, err := tm.Agent(name); err != nil {
 		return SessionAgentConfig{}, &SessionError{Kind: SessionErrorNotFound, SessionID: h.ID(), Operation: "agent_config"}
 	}
 	snapshot, err := h.Snapshot(ctx)
 	if err != nil {
 		return SessionAgentConfig{}, err
 	}
-	info := h.runtime.AgentConfigInfo(ctx, name)
+	info := h.runtime.AgentConfigInfoForTeam(ctx, tm, name)
 	info.IsCurrent = name == h.AgentName()
 	// Unnamed MCP descriptors contain private server hosts or executable names.
-	cfg, hasCfg := h.runtime.team.AgentConfig(name)
+	cfg, hasCfg := tm.AgentConfig(name)
 	for i := range info.Toolsets {
 		ts := &info.Toolsets[i]
 		if strings.Contains(strings.ToLower(ts.Kind), "mcp") {

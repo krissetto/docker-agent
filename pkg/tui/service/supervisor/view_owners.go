@@ -41,7 +41,9 @@ type ViewOwnerResources struct {
 }
 
 type HostViewConfig struct {
-	Resolve               func(context.Context, string) (ViewOwnerIdentity, error)
+	Resolve func(context.Context, string) (ViewOwnerIdentity, error)
+	// ResolvePrepared may share one confirmed remote read with acquisition.
+	ResolvePrepared       func(context.Context, string) (ViewOwnerIdentity, runtime.PreparedSessionView, error)
 	Factory               func(context.Context, ViewOwnerIdentity) (ViewOwnerResources, error)
 	MaxRetainedViewOwners int
 }
@@ -500,27 +502,42 @@ func (s *Supervisor) ConfirmedSessionViewInfo(ctx context.Context, id string) (r
 }
 
 func (s *Supervisor) AcquireSessionView(ctx context.Context, id string) (PreparedHostedView, error) {
-	owner, err := s.acquireOwner(ctx, id, true)
-	if err != nil {
-		return nil, err
-	}
 	if err := s.beginOwnerOperation(); err != nil {
-		s.releaseOwner(owner)
 		return nil, err
 	}
 	defer s.ownerOperations.Done()
-	if err := ctx.Err(); err != nil {
-		s.releaseOwner(owner)
-		return nil, err
-	}
-	preparer, ok := owner.resources.Sessions.(runtime.SessionViewPreparer)
-	if !ok {
-		s.releaseOwner(owner)
-		return nil, ownerError(id, runtime.SessionErrorUnsupported, "owner cannot prepare session views")
-	}
 	opCtx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(s.viewContext(), cancel)
-	prepared, err := preparer.PrepareSessionView(opCtx, id)
+	var owner *viewOwner
+	var prepared runtime.PreparedSessionView
+	var err error
+	if s.viewConfig.ResolvePrepared != nil {
+		var identity ViewOwnerIdentity
+		identity, prepared, err = s.viewConfig.ResolvePrepared(opCtx, id)
+		if err == nil {
+			owner, err = s.acquireOwnerIdentity(opCtx, id, identity, true)
+		}
+	} else {
+		owner, err = s.acquireOwner(opCtx, id, true)
+	}
+	if err != nil {
+		if prepared != nil {
+			prepared.Abort()
+		}
+		stop()
+		cancel()
+		return nil, err
+	}
+	if prepared == nil {
+		preparer, ok := owner.resources.Sessions.(runtime.SessionViewPreparer)
+		if !ok {
+			stop()
+			cancel()
+			s.releaseOwner(owner)
+			return nil, ownerError(id, runtime.SessionErrorUnsupported, "owner cannot prepare session views")
+		}
+		prepared, err = preparer.PrepareSessionView(opCtx, id)
+	}
 	if err != nil {
 		stop()
 		cancel()

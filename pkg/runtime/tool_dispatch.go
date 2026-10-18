@@ -52,7 +52,7 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 		RequireResponseIdentity: true,
 		ApprovalEffect:          r.commitApproval,
 		AgentFor:                r.resolveSessionAgent,
-		Permissions:             r.permissionCheckers,
+		Permissions:             func(sess *session.Session) []toolexec.NamedChecker { return r.permissionCheckersForContext(ctx, sess) },
 		Handlers:                handlers,
 		Recall: func(ctx context.Context, sess *session.Session, _ *agent.Agent, message string) error {
 			resident, ok := r.sessionDrivers.Lookup(sess.ID)
@@ -63,8 +63,14 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 			if err != nil {
 				return err
 			}
-			_, err = origin.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputMode: "steer"})
+			_, err = origin.postSteer(ctx, QueuedMessage{Content: message, RequestID: id, InputOrigin: session.InputOriginRuntime, InputMode: "steer"})
 			return err
+		},
+		BeginBackgroundWork: func(ctx context.Context, sess *session.Session, _ *agent.Agent, _ tools.ToolCall) (tools.BackgroundWork, error) {
+			if !hasOrigin || origin == nil {
+				return nil, ErrSessionClosed
+			}
+			return r.beginSessionBackgroundWork(ctx, sess, origin)
 		},
 	}
 	return d.Process(ctx, sess, calls, agentTools, &sinkEmitter{runtime: r, events: events, sessionID: sess.ID})
@@ -75,6 +81,10 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 // session ask rules beat every safety mode, team ask rules yield to
 // Balanced/Restricted/Autonomous — see [toolexec.Decide].
 func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.NamedChecker {
+	return r.permissionCheckersForContext(nil, sess)
+}
+
+func (r *LocalRuntime) permissionCheckersForContext(ctx context.Context, sess *session.Session) []toolexec.NamedChecker {
 	var checkers []toolexec.NamedChecker
 	if perms := sess.ClonePermissions(); perms != nil {
 		checkers = append(checkers, toolexec.NamedChecker{
@@ -87,7 +97,7 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 			Tier:   toolexec.TierSession,
 		})
 	}
-	if tc := r.team.Permissions(); tc != nil {
+	if tc := r.teamForContext(ctx, sess).Permissions(); tc != nil {
 		checkers = append(checkers, toolexec.NamedChecker{
 			Checker: tc,
 			Source:  "permissions configuration",

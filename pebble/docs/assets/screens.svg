@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="270" viewBox="0 0 880 270" font-family="Arial Narrow, Helvetica Neue, Arial, sans-serif">
+  <!-- Approximate mockups at native 200x228. Fonts stand in for Gothic 14/18/24 and glyphs stand in for icon resources; verify on hardware. -->
+  <rect width="880" height="270" fill="#E8E8E8"/>
+  <style>
+    .b{font-size:15px;fill:#000}.bb{font-size:15px;font-weight:bold}.m{font-size:12px;fill:#555}
+    .h{font-size:20px}.cap{font-size:11px;fill:#333}
+  </style>
+
+  <!-- 1 Chat, working + attention -->
+  <g transform="translate(10,10)">
+    <rect width="200" height="228" fill="#FFF"/>
+    <rect width="200" height="20" fill="#0055AA"/>
+    <text x="6" y="15" class="bb" fill="#FFF">● Working · shell · 1m</text>
+    <text x="194" y="15" class="bb" fill="#FFF" text-anchor="end">14:02</text>
+    <text x="6" y="34" class="m">planner · Home lab</text>
+    <rect y="40" width="200" height="34" fill="#FFAA00"/>
+    <text x="6" y="54" class="bb">! Needs approval: shell</text>
+    <text x="6" y="69" class="m" style="fill:#000">Answer on phone or desktop</text>
+    <rect x="0" y="78" width="200" height="38" fill="#AAAAAA"/>
+    <text x="6" y="92" class="m" style="fill:#000">You</text>
+    <text x="6" y="109" class="b">ship the release notes</text>
+    <rect x="0" y="120" width="3" height="68" fill="#55AAFF"/>
+    <text x="8" y="133" class="m">planner</text>
+    <text x="8" y="150" class="b">Drafted notes for 1.4. Two</text>
+    <text x="8" y="167" class="b">items need a version…</text>
+    <text x="8" y="183" class="m">⚙ shell · ok · 4s  ↳ via coder</text>
+    <rect y="196" width="200" height="32" fill="#0055FF"/>
+    <text x="6" y="210" class="bb" fill="#FFF">◉ Reply…</text>
+    <text x="6" y="224" class="m" style="fill:#FFF">Queues after current turn</text>
+    <text x="0" y="252" class="cap">Chat: working, attention pinned, Reply</text>
+  </g>
+
+  <!-- 2 Compose, voice unavailable -->
+  <g transform="translate(230,10)">
+    <rect width="200" height="228" fill="#FFF"/>
+    <rect width="200" height="20" fill="#000"/>
+    <text x="6" y="15" class="bb" fill="#FFF">Reply to planner</text>
+    <rect y="28" width="200" height="44" fill="#0055FF"/>
+    <rect x="9" y="35" width="7" height="11" rx="3.5" fill="#FFF"/><rect x="12" y="46" width="1.5" height="4" fill="#FFF"/>
+    <text x="22" y="47" class="bb" fill="#FFF">Voice · unavailable</text>
+    <text x="22" y="64" class="m" style="fill:#FFF">Select for details</text>
+    <rect x="8" y="84" width="12" height="9" rx="2" fill="#000"/><path d="M11 93 L11 97 L15 93 Z" fill="#000"/>
+    <text x="26" y="95" class="bb">Canned replies</text>
+    <line x1="0" y1="112" x2="200" y2="112" stroke="#AAA"/>
+    <rect y="124" width="200" height="20" fill="#AA0000"/>
+    <text x="6" y="139" class="bb" fill="#FFF">× Voice unavailable</text>
+    <text x="6" y="160" class="b">Voice isn't set up or is off</text>
+    <text x="6" y="177" class="b">in the Pebble app.</text>
+    <text x="6" y="200" class="m">Use canned reply · Try voice again</text>
+    <text x="0" y="252" class="cap">Compose list + Voice unavailable card</text>
+  </g>
+
+  <!-- 3 Review -->
+  <g transform="translate(450,10)">
+    <rect width="200" height="228" fill="#FFF"/>
+    <rect width="200" height="20" fill="#0055FF"/>
+    <text x="6" y="15" class="bb" fill="#FFF">Review · to planner</text>
+    <text x="6" y="36" class="m">Home lab · Release prep</text>
+    <text x="6" y="66" class="h">Ship it once the</text>
+    <text x="6" y="90" class="h">version table</text>
+    <text x="6" y="114" class="h">matches 1.4.</text>
+    <rect x="30" y="190" width="140" height="26" rx="13" fill="#000"/>
+    <text x="100" y="208" class="bb" fill="#FFF" text-anchor="middle">◉ Send options</text>
+    <text x="0" y="252" class="cap">Review (voice or canned), 2-press send</text>
+  </g>
+
+  <!-- 4 Offline / paused chat -->
+  <g transform="translate(670,10)">
+    <rect width="200" height="228" fill="#FFF"/>
+    <rect width="200" height="20" fill="#000"/>
+    <text x="6" y="15" class="bb" fill="#FFF">⌁ Phone disconnected</text>
+    <text x="6" y="34" class="m">planner · Home lab · as of 14:01</text>
+    <rect x="0" y="42" width="3" height="68" fill="#55AAFF"/>
+    <text x="8" y="56" class="m">planner</text>
+    <text x="8" y="73" class="b">Drafted notes for 1.4. Two</text>
+    <text x="8" y="90" class="b">items need a version…</text>
+    <text x="8" y="106" class="m">✓ Done</text>
+    <rect y="196" width="200" height="32" fill="#555555"/>
+    <text x="6" y="217" class="bb" fill="#FFF">Can't send · phone offline</text>
+    <text x="0" y="252" class="cap">Offline: cached, aged, no compose</text>
+  </g>
+</svg>

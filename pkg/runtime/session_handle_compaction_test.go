@@ -109,8 +109,7 @@ func TestCompactorRunningRejectsExistingPendingAndSteering(t *testing.T) {
 	d := handle.(*sessionHandle).driver
 	d.mu.Lock()
 	d.phase = sessionRunning
-	d.pending = []QueuedMessage{{Content: "later", RequestID: "pending"}}
-	d.steering = []QueuedMessage{{Content: "guide", RequestID: "steer"}}
+	d.pending = []QueuedMessage{{Content: "later", RequestID: "pending"}, {Content: "guide", RequestID: "steer", InputMode: "steer"}}
 	d.mu.Unlock()
 
 	err = handle.Compact(t.Context(), "", nil)
@@ -120,12 +119,11 @@ func TestCompactorRunningRejectsExistingPendingAndSteering(t *testing.T) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	assert.False(t, d.compactReserved)
-	assert.Len(t, d.pending, 1)
-	assert.Len(t, d.steering, 1)
+	assert.Len(t, d.pending, 2)
 	d.leave(sessionRunning)
 }
 
-func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) {
+func TestCompactorReservationKeepsGuidanceInPendingUntilRelease(t *testing.T) {
 	turnStarted := make(chan struct{})
 	releaseTurn := make(chan struct{})
 	compactStarted := make(chan struct{})
@@ -169,7 +167,7 @@ func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) 
 	d.mu.Lock()
 	require.Len(t, d.pending, 2)
 	assert.Equal(t, []string{"later", "guide"}, []string{d.pending[0].Content, d.pending[1].Content})
-	assert.Empty(t, d.steering, "reserved steer must not cross the compaction barrier")
+	assert.True(t, d.interruptRequested, "reservation does not change guidance class")
 	d.mu.Unlock()
 
 	close(releaseTurn)
@@ -209,7 +207,7 @@ func TestCompactorReservationAcceptsSubmitAndSteerIntoPendingFIFO(t *testing.T) 
 	assert.True(t, sawGuide)
 }
 
-func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
+func TestSteerAfterCompactionReleaseRetainsGuidanceClass(t *testing.T) {
 	rt := newLiveSessionsRuntime(t, &stepProvider{id: "test/mock-model"}, mockModelStoreWithLimit{limit: 100_000})
 	sess := newWorkerSession("session-post-compact-boundary")
 	handle, err := rt.CreateSession(t.Context(), sess, SessionBinding{AgentName: "worker"})
@@ -221,7 +219,7 @@ func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
 	first := QueuedMessage{Content: "accepted during compact", RequestID: "first"}
 	local.driver.compactReserved = false // reservation just released at the loop boundary
 	local.driver.mu.Unlock()
-	_, err = local.driver.admitInput(t.Context(), first, SessionOperationPost, true, false)
+	_, err = local.driver.admitInput(t.Context(), first, SessionOperationPost, true)
 	require.NoError(t, err)
 
 	submission, err := handle.Steer(t.Context(), TurnInput{Content: "newer steer"})
@@ -230,7 +228,6 @@ func TestSteerAfterCompactionReleaseStaysBehindPendingFIFO(t *testing.T) {
 	local.driver.mu.Lock()
 	require.Len(t, local.driver.pending, 2)
 	assert.Equal(t, []string{"accepted during compact", "newer steer"}, []string{local.driver.pending[0].Content, local.driver.pending[1].Content})
-	assert.Empty(t, local.driver.steering)
 	local.driver.mu.Unlock()
 
 	local.driver.mu.Lock()
@@ -275,7 +272,6 @@ func TestCompactorStandaloneQueuesCrossModeFIFOAndWakesPending(t *testing.T) {
 	local.driver.mu.Lock()
 	require.Len(t, local.driver.pending, 2)
 	assert.Equal(t, []string{"first", "second"}, []string{local.driver.pending[0].Content, local.driver.pending[1].Content})
-	assert.Empty(t, local.driver.steering)
 	local.driver.mu.Unlock()
 
 	close(releaseCompact)
@@ -382,7 +378,7 @@ func TestCompactorIdleHistoryRetainsDurablePendingFIFO(t *testing.T) {
 				{Content: "old child report", RequestID: "second", InputOrigin: session.InputOriginAgent, SenderID: "child", SenderName: "worker", ReportOutcome: session.ReportOutcomeFinished},
 			}
 			for _, input := range inputs {
-				_, err := d.admitInput(t.Context(), input, SessionOperationPost, true, false)
+				_, err := d.admitInput(t.Context(), input, SessionOperationPost, true)
 				require.NoError(t, err)
 			}
 			require.NoError(t, handle.Compact(t.Context(), "", nil))
@@ -394,7 +390,6 @@ func TestCompactorIdleHistoryRetainsDurablePendingFIFO(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, d.ownerCall(t.Context(), func() error {
 				assert.Equal(t, []string{"first", "second", submit.TurnID, steer.TurnID}, pendingRequestIDs(d.pending))
-				assert.Empty(t, d.steering)
 				assert.True(t, d.compactReserved)
 				return nil
 			}))
@@ -425,7 +420,7 @@ func TestCompactorIdleHistoryRetainsDurablePendingFIFO(t *testing.T) {
 					promoted = append(promoted, input.TurnID)
 				}
 			}
-			assert.Equal(t, []string{"first", "second", submit.TurnID, steer.TurnID}, promoted)
+			assert.Equal(t, []string{"first", steer.TurnID, "second", submit.TurnID}, promoted)
 			prov.mu.Lock()
 			defer prov.mu.Unlock()
 			for _, text := range []string{"old queued user", "old child report", "new queued user", "new queued steer"} {
@@ -453,7 +448,9 @@ func TestCompactorDormantHistoryRetainsPendingWithoutWake(t *testing.T) {
 	d := handle.(*sessionHandle).driver
 	require.NoError(t, d.ownerCall(t.Context(), func() error { d.viewDormant = true; return nil }))
 	input := QueuedMessage{Content: "pending child delivery", RequestID: "delivery", InputOrigin: session.InputOriginAgent, SenderID: "child", SenderName: "worker", InputMode: "steer"}
-	require.True(t, d.postTrustedInput(t.Context(), input))
+	queued, err := d.post(t.Context(), input, true)
+	require.NoError(t, err)
+	require.True(t, queued)
 	require.NoError(t, handle.Compact(t.Context(), "", nil))
 	waitClosed(t, started, "dormant history compaction")
 	close(release)
@@ -515,7 +512,9 @@ func TestCompactorIdleRootRetainsReportFromRunningChild(t *testing.T) {
 	submitted, err := child.Submit(t.Context(), TurnInput{Content: "child task"})
 	require.NoError(t, err)
 	waitClosed(t, childStarted, "running descendant")
-	require.True(t, d.postTrustedInput(t.Context(), QueuedMessage{Content: "older child guidance", RequestID: "older", InputOrigin: session.InputOriginAgent, SenderID: child.ID(), SenderName: "worker", InputMode: "steer"}))
+	queued, err := d.post(t.Context(), QueuedMessage{Content: "older child guidance", RequestID: "older", InputOrigin: session.InputOriginAgent, SenderID: child.ID(), SenderName: "worker", InputMode: "steer"}, true)
+	require.NoError(t, err)
+	require.True(t, queued)
 	require.NoError(t, root.Compact(t.Context(), "", nil))
 	waitClosed(t, compactStarted, "root history compaction")
 	childStatus, err := child.Status(t.Context())

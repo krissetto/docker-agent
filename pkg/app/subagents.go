@@ -236,6 +236,9 @@ func (a *App) filterBridgedEvent(requestID string, e runtime.Event) runtime.Even
 // startSubagentTreeBridge mirrors live swarm snapshots onto the App bus so the
 // sidebar can render a running-subagent tree.
 func (a *App) startSubagentTreeBridge(ctx context.Context) {
+	if handle := a.SessionHandle(); handle != nil && handle.Metadata().Historical {
+		return
+	}
 	rt, ok := a.runtime.(subagentRuntime)
 	if !ok {
 		return
@@ -284,6 +287,9 @@ func forwardToBus[T any](ctx context.Context, a *App, seed []T, ch <-chan T, can
 // covers the active session. An empty or foreign snapshot is not emitted — it
 // would wipe a restored view that the live tree knows nothing about.
 func (a *App) emitLiveSubagentTree(ctx context.Context) {
+	if handle := a.SessionHandle(); handle != nil && handle.Metadata().Historical {
+		return
+	}
 	rt, ok := a.runtime.(subagentRuntime)
 	sess := a.Session()
 	if !ok || sess == nil {

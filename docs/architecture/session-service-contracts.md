@@ -187,9 +187,22 @@ boundary or drain during teardown, rather than using an independent mailbox.
 `send_message` addresses only the sender's parent or direct children. Typed
 `DeliveryReceipt` fields distinguish acceptance, idempotent retry, durable
 admission, queued state, delivery disposition and rejection. Acceptance is an
-**inbox commit**, not proof of waking or model consumption. `guidance` joins a
-busy recipient at a safe boundary; `new_turn` stays in its ordinary FIFO. Stable
-explicit request IDs, or IDs derived from sender session plus tool-call ID,
+**inbox commit**, not proof of waking or model consumption. The persisted
+`input_mode` alone selects one of two delivery classes: `steer` is guidance for
+all origins; blank, `turn`, `followup`, `legacy_followup` and unknown modes are
+turn FIFO work. The `legacy_run` mode remains a control marker, not queued model
+input. Origin remains provenance for attribution, authorization,
+coordination suppression and user-only edits, never a scheduling exception.
+Guidance interrupts model requests and retry waits, not tool execution, then
+promotes as an accepted-order batch at the next safe boundary. It wakes an idle
+session; user guidance uses the steering-submit hook. Turns never interrupt or
+jump the FIFO head. Accepted pending inputs retain FIFO order as run starters,
+so guidance does not leap ahead of an older turn when an idle run starts. A
+compaction reservation fences promotion without changing class; pending rows
+stay out of the summary and become eligible after release. Restore uses the
+same persisted mode mapping, including historical pending `steer` rows. Guidance
+left pending after a failed/canceled generation attaches to the next eligible
+run; it does not retroactively settle with the prior turn. Stable explicit request IDs, or IDs derived from sender session plus tool-call ID,
 allow exact retries; changed payload/mode under the same identity conflicts.
 An unavailable live inbox rejects delivery, including internal lifecycle notes;
 there is no unknown-session buffer. Durable child completion reports use the

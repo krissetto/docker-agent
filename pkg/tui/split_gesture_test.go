@@ -122,7 +122,7 @@ func TestSplitReleaseRehitTestsInvalidCenterSelfAndComposer(t *testing.T) {
 	root.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	root.Update(tea.MouseMotionMsg{X: bounds.X, Y: bounds.Y, Button: tea.MouseLeft})
 	root.Update(tea.MouseReleaseMsg{X: bounds.X, Y: bounds.Y, Button: tea.MouseLeft})
-	require.Equal(t, []string{"profile", "second"}, root.panes.Sessions(), "active self-edge uses next hidden tab")
+	require.Equal(t, []string{"profile"}, root.panes.Sessions(), "workspace self-drop is invalid; never borrows an unrelated tab")
 }
 
 func TestSplitDividerTransactionalKeyboardMouseAndNoMarkdownPreview(t *testing.T) {

@@ -3,6 +3,8 @@ package teamloader
 import (
 	"testing"
 
+	"github.com/docker/docker-agent/pkg/environment"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -34,7 +36,7 @@ func TestGetToolsForAgent_SubagentsInjectsAsyncTools(t *testing.T) {
 	for _, tool := range toolDefs {
 		names = append(names, tool.Name)
 	}
-	assert.ElementsMatch(t, []string{subagent.ToolSpawnSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent, subagent.ToolStopSubagent}, names)
+	assert.ElementsMatch(t, []string{subagent.ToolSpawnSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent, subagent.ToolStopSubagent, subagent.ToolListAgents}, names)
 	assert.Empty(t, toolspkg.GetInstructions(toolSets[0]), "subagent harness prompt is injected as core system prompt, not toolset instructions")
 }
 
@@ -95,4 +97,93 @@ func TestLoadWithConfig_SubagentsAreAvailableOnAgent(t *testing.T) {
 	worker, err := result.Team.Agent("worker")
 	require.NoError(t, err)
 	assert.Empty(t, worker.AsyncHarnessPrompt())
+}
+
+func TestLoadRetainsCredentialSafeAuthoredDefinitionSnapshot(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "should-not-be-captured")
+	t.Setenv("MODEL_NAME", "gpt-4o")
+	t.Setenv("INSTRUCTION_SUFFIX", "private-expanded-instruction")
+	data := []byte(`id: research-team
+models:
+  primary:
+    provider: openai
+    model: ${env.MODEL_NAME}
+    base_url: https://user:secret@example.invalid/v1?token=secret
+agents:
+  root:
+    id: coordinator
+    model: primary
+    description: Coordinates
+    instruction: "Keep the original authored instructions: ${env.INSTRUCTION_SUFFIX}"
+    toolsets:
+      - type: mcp
+        name: private-server
+        command: secret-command
+        env: {TOKEN: literal-secret}
+        instruction: Search the repository
+  worker:
+    id: worker-id
+    model: openai/gpt-4o
+    description: Researches
+`)
+	result, err := LoadWithConfig(t.Context(), config.NewBytesSource("team.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	require.NoError(t, err)
+	snapshot := result.Definitions
+	assert.Equal(t, "research-team", snapshot.TeamID)
+	entry, ok := snapshot.AgentDefinition("root")
+	require.True(t, ok)
+	assert.Equal(t, "agent", entry.Kind)
+	text := string(entry.Payload)
+	assert.Contains(t, text, "Keep the original authored instructions: ${env.INSTRUCTION_SUFFIX}")
+	assert.Contains(t, text, "Search the repository")
+	assert.NotContains(t, text, "secret-command")
+	assert.NotContains(t, text, "literal-secret")
+	assert.NotContains(t, text, "user:secret")
+	assert.NotContains(t, text, "token=secret")
+	assert.NotContains(t, text, "should-not-be-captured")
+	assert.NotContains(t, text, "private-expanded-instruction")
+	assert.NotContains(t, text, "${env.MODEL_NAME}")
+	teamEntry := snapshot.TeamDefinitionEntry()
+	assert.Equal(t, snapshot.TeamDigest, teamEntry.Digest)
+	assert.NotContains(t, string(teamEntry.Payload), "Keep the original")
+	assert.NotContains(t, string(teamEntry.Payload), "secret-command")
+	assert.Equal(t, snapshot.TeamDigest, result.Team.DefinitionSnapshot().TeamDigest)
+	mutated := entry.Payload
+	mutated[0] = 'X'
+	again, ok := snapshot.AgentDefinition("root")
+	require.True(t, ok)
+	assert.NotEqual(t, mutated[0], again.Payload[0], "definition snapshots return independent bytes")
+}
+
+func TestDefinitionSnapshotIncludesExternalAgentWithSanitizedReference(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "not-captured")
+	root := []byte(`
+id: integration-team
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: coordinator instructions
+    sub_agents:
+      - "reviewer:https://user:secret@example.invalid/review.yaml?access_token=credential"
+`)
+	external := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    description: External reviewer
+    instruction: Review the requested changes.
+`)
+	result, err := LoadWithConfig(t.Context(), config.NewBytesSource("root.yaml", root), &config.RuntimeConfig{}, withTestProviderRegistry(WithSourceResolver(func(ref string, _ environment.Provider) (config.Source, error) {
+		assert.Equal(t, "https://user:secret@example.invalid/review.yaml?access_token=credential", ref)
+		return config.NewBytesSource(ref, external), nil
+	}))...)
+	require.NoError(t, err)
+	entry, ok := result.Definitions.AgentDefinition("reviewer")
+	require.True(t, ok, "loaded external default must have an immutable definition row")
+	text := string(entry.Payload)
+	assert.Contains(t, text, "External reviewer")
+	assert.Contains(t, text, "Review the requested changes.")
+	assert.NotContains(t, text, "user:secret")
+	assert.NotContains(t, text, "access_token=credential")
+	assert.NotContains(t, text, "not-captured")
+	assert.NotEmpty(t, entry.Digest)
 }

@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "sources": [
+    {
+      "name": "demo-team",
+      "can_create": true
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": "session-demo-001",
+      "source": "demo-team",
+      "agent_name": "root",
+      "title": "Fixture conversation",
+      "num_messages": 2,
+      "cost": 0.0125,
+      "created_at": "2025-01-02T03:04:05Z",
+      "tools_approved": false,
+      "safety_policy": "balanced",
+      "input_tokens": 120,
+      "output_tokens": 48,
+      "working_dir": "/workspace/demo",
+      "starred": true,
+      "state_known": true,
+      "state": "running",
+      "activity": "assistant",
+      "updated_at": "2025-01-02T03:04:05Z",
+      "pending": 1,
+      "interactions": 1,
+      "loaded": true,
+      "attachable": true,
+      "loadable": true
+    }
+  ]
+}

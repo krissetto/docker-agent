@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,8 +33,11 @@ import (
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/subagent"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/teamdef"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
@@ -56,6 +60,8 @@ type loadOptions struct {
 	modelOpts        []options.Opt
 	strict           bool
 	features         []config.Feature
+	toolsetPool      *ToolsetLeasePool
+	toolsetPoolScope string
 }
 
 type Opt func(*loadOptions) error
@@ -85,6 +91,68 @@ func WithPromptFiles(files []string) Opt {
 		return nil
 	}
 }
+
+// WithToolsetLeasePool opts a single source/runtime owner into conservative
+// sharing of selected raw background_jobs owners across derived environments.
+func WithToolsetLeasePool(pool *ToolsetLeasePool, sourceRuntimeScope string) Opt {
+	return func(opts *loadOptions) error {
+		if pool == nil || sourceRuntimeScope == "" {
+			return errors.New("toolset lease pool requires pool and source/runtime scope")
+		}
+		opts.toolsetPool, opts.toolsetPoolScope = pool, sourceRuntimeScope
+		return nil
+	}
+}
+
+func createToolset(ctx context.Context, registry ToolsetRegistry, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string, opts *loadOptions) (tools.ToolSet, error) {
+	if toolset.Type == "shell_background_jobs" && opts.toolsetPool == nil {
+		effectiveEnv, err := backgroundjobs.ResolveEnvironment(ctx, latest.Toolset{Type: "background_jobs"}, runConfig)
+		if err != nil {
+			return nil, err
+		}
+		return backgroundjobs.CreateToolSetWithEnvironment(latest.Toolset{Type: "background_jobs"}, runConfig, effectiveEnv), nil
+	}
+	if opts.toolsetPool == nil || toolset.Type != "background_jobs" && toolset.Type != "shell_background_jobs" {
+		return registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
+	}
+	poolToolset := toolset
+	if toolset.Type == "shell_background_jobs" {
+		poolToolset = latest.Toolset{Type: "background_jobs"}
+	}
+	effectiveEnv, err := backgroundjobs.ResolveEnvironment(ctx, poolToolset, runConfig)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(poolToolset)
+	if err != nil {
+		return nil, err
+	}
+	material, err := makeToolsetPoolKey(configName, parentDir, opts.toolsetPoolScope, runConfig.WorkingDir, string(encoded), effectiveEnv)
+	if err != nil {
+		return nil, err
+	}
+	lease, leaseCloser, err := opts.toolsetPool.acquire(ctx, material, func() (tools.ToolSet, error) {
+		return backgroundjobs.CreateToolSetWithEnvironment(poolToolset, runConfig, effectiveEnv), nil
+	}, func(ctx context.Context, raw tools.ToolSet) error {
+		owner, ok := tools.As[*backgroundjobs.ToolSet](raw)
+		if !ok {
+			return errors.New("pooled background_jobs owner has unexpected type")
+		}
+		return owner.CloseAll(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &pooledLeaseRegistration{ToolSet: lease, leaseCloser: leaseCloser}, nil
+}
+
+type pooledLeaseRegistration struct {
+	tools.ToolSet
+	leaseCloser io.Closer
+}
+
+func (p *pooledLeaseRegistration) Unwrap() tools.ToolSet { return p.ToolSet }
+func (p *pooledLeaseRegistration) Close() error          { return p.leaseCloser.Close() }
 
 // WithToolsetRegistry allows using a custom toolset registry instead of the default.
 func WithToolsetRegistry(registry ToolsetRegistry) Opt {
@@ -194,9 +262,10 @@ func WithStrict(features ...config.Feature) Opt {
 // LoadResult contains the result of loading an agent team, including
 // the team and configuration needed for runtime model switching.
 type LoadResult struct {
-	Team      *team.Team
-	Models    map[string]latest.ModelConfig
-	Providers map[string]latest.ProviderConfig
+	Team        *team.Team
+	Definitions teamdef.DefinitionSnapshot
+	Models      map[string]latest.ModelConfig
+	Providers   map[string]latest.ProviderConfig
 	// ProviderRegistry is the registry used to instantiate model providers for this load.
 	ProviderRegistry *provider.Registry
 	// AgentDefaultModels maps agent names to their configured default model references
@@ -217,6 +286,21 @@ type LoadResult struct {
 	// from the X-Cagent-Encrypted-Config response header when the agent YAML
 	// was fetched from a trusted Docker URL. Empty when neither applies.
 	EncryptedConfig string
+}
+
+func cloneAuthoredConfig(cfg *latest.Config) *latest.Config {
+	if cfg == nil {
+		return nil
+	}
+	var out latest.Config
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return &out
 }
 
 // Load loads an agent team from the given source
@@ -279,10 +363,15 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		runConfig.WorkingDir = loadOpts.workingDir
 	}
 
-	// Load the agent's configuration
+	// Load the authored configuration before model/env resolution. Definition
+	// history intentionally keeps only an allow-listed display projection.
 	cfg, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...))
 	if err != nil {
 		return nil, err
+	}
+	authoredConfig := cloneAuthoredConfig(cfg)
+	if authoredConfig == nil {
+		return nil, errors.New("failed to snapshot authored configuration")
 	}
 
 	// When the agent YAML was fetched from a trusted Docker URL that returned
@@ -585,13 +674,14 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// external agent twice. This is kept separate from agentsByName to
 	// prevent external agents from shadowing locally-defined agents.
 	externalAgents := make(map[string]*agent.Agent)
+	externalDefinitions := make(map[string]teamdef.AgentDefinition)
 	for _, agentConfig := range cfg.Agents {
 		a, exists := agentsByName[agentConfig.Name]
 		if !exists {
 			continue
 		}
 
-		subAgents, err := resolveAgentRefs(ctx, agentConfig.SubAgents, agentsByName, externalAgents, &agents, runConfig, &loadOpts)
+		subAgents, err := resolveAgentRefs(ctx, agentConfig.SubAgents, agentsByName, externalAgents, externalDefinitions, &agents, runConfig, &loadOpts)
 		if err != nil {
 			return nil, fmt.Errorf("agent '%s': resolving sub-agents: %w", agentConfig.Name, err)
 		}
@@ -599,7 +689,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithSubAgents(subAgents...)(a)
 		}
 
-		handoffs, err := resolveAgentRefs(ctx, agentConfig.Handoffs, agentsByName, externalAgents, &agents, runConfig, &loadOpts)
+		handoffs, err := resolveAgentRefs(ctx, agentConfig.Handoffs, agentsByName, externalAgents, externalDefinitions, &agents, runConfig, &loadOpts)
 		if err != nil {
 			return nil, fmt.Errorf("agent '%s': resolving handoffs: %w", agentConfig.Name, err)
 		}
@@ -608,7 +698,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 
 		if agentConfig.ForceHandoff != "" {
-			targets, err := resolveAgentRefs(ctx, []string{agentConfig.ForceHandoff}, agentsByName, externalAgents, &agents, runConfig, &loadOpts)
+			targets, err := resolveAgentRefs(ctx, []string{agentConfig.ForceHandoff}, agentsByName, externalAgents, externalDefinitions, &agents, runConfig, &loadOpts)
 			if err != nil {
 				return nil, fmt.Errorf("agent '%s': resolving force_handoff: %w", agentConfig.Name, err)
 			}
@@ -617,6 +707,17 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			}
 			agent.WithForceHandoff(targets[0])(a)
 		}
+	}
+
+	authoredExternal := make([]teamdef.AgentDefinition, 0, len(externalDefinitions))
+	for _, definition := range externalDefinitions {
+		authoredExternal = append(authoredExternal, definition)
+	}
+	// Capture before model overrides, user providers, first_available resolution,
+	// environment expansion, and external-link projection mutate the working cfg.
+	authoredDefinitions, err := authoredDefinitionSnapshot(authoredConfig, agentSource.Name(), authoredExternal)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create permissions checker from config
@@ -661,6 +762,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			team.WithOwnedToolSets(ownedToolSets...),
 			team.WithPermissions(permChecker),
 			team.WithAgentConfigs(agentConfigs),
+			team.WithDefinitionSnapshot(authoredDefinitions),
 			team.WithRuntimeSafety(runtimeSafety),
 		),
 		Models:             cfg.Models,
@@ -670,6 +772,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		Budget:             cfg.Budget,
 		Budgets:            cfg.Budgets,
 		AgentBudgets:       agentBudgets,
+		Definitions:        authoredDefinitions,
 		EncryptedConfig:    runConfig.EncryptedConfig,
 	}, nil
 }
@@ -971,16 +1074,33 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	registry := loadOpts.toolsetRegistry
 
 	var deferredToolset DeferredToolSet
+	var jobManager *backgroundjobs.ToolSet
+	var shellToolsets []*builtinshell.ToolSet
+	var firstShell *builtinshell.ToolSet
 
 	for i := range a.Toolsets {
 		toolset := a.Toolsets[i]
 
-		tool, err := registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
+		tool, err := createToolset(ctx, registry, toolset, parentDir, runConfig, configName, loadOpts)
 		if err != nil {
 			// Collect error but continue loading other toolsets
 			slog.WarnContext(ctx, "Toolset configuration failed; skipping", "type", toolset.Type, "ref", toolset.Ref, "command", toolset.Command, "error", err)
 			warnings = append(warnings, fmt.Sprintf("toolset %s failed: %v", toolset.Type, err))
 			continue
+		}
+
+		if toolset.Type == "background_jobs" {
+			if jobManager == nil {
+				jobManager, _ = tools.As[*backgroundjobs.ToolSet](tool)
+			}
+		}
+		if toolset.Type == "shell" {
+			if shellTool, ok := tools.As[*builtinshell.ToolSet](tool); ok {
+				shellToolsets = append(shellToolsets, shellTool)
+				if firstShell == nil {
+					firstShell = shellTool
+				}
+			}
 		}
 
 		if closer, ok := tools.As[io.Closer](tool); ok && loadOpts.ownedResources != nil {
@@ -1027,6 +1147,27 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 		}
 
 		toolSets = append(toolSets, wrapped)
+	}
+
+	if firstShell != nil {
+		declaresBackgroundJobs := jobManager != nil
+		if jobManager == nil {
+			synthetic := latest.Toolset{Type: "shell_background_jobs"}
+			generated, err := createToolset(ctx, registry, synthetic, parentDir, runConfig, configName, loadOpts)
+			if err != nil {
+				return nil, warnings, fmt.Errorf("creating shell background-job manager: %w", err)
+			}
+			jobManager, _ = tools.As[*backgroundjobs.ToolSet](generated)
+			if jobManager == nil {
+				return nil, warnings, errors.New("shell background-job manager has unexpected type")
+			}
+			if closer, ok := tools.As[io.Closer](generated); ok && loadOpts.ownedResources != nil {
+				*loadOpts.ownedResources = append(*loadOpts.ownedResources, closer)
+			}
+		}
+		for i, shellTool := range shellToolsets {
+			shellTool.AttachBackgroundJobs(jobManager, i == 0 && !declaresBackgroundJobs)
+		}
 	}
 
 	// A single mergeable toolset is used as-is; several sharing a key are
@@ -1151,7 +1292,7 @@ func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 				warnings = append(warnings, fmt.Sprintf("skill %s references unknown toolset %s", skill.Name, ref))
 				continue
 			}
-			tool, err := registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
+			tool, err := createToolset(ctx, registry, toolset, parentDir, runConfig, configName, loadOpts)
 			if err != nil {
 				slog.WarnContext(ctx, "Skill toolset configuration failed; skipping", "skill", skill.Name, "toolset", ref, "error", err)
 				warnings = append(warnings, fmt.Sprintf("skill %s toolset %s failed: %v", skill.Name, ref, err))
@@ -1279,6 +1420,7 @@ func resolveAgentRefs(
 	refs []string,
 	agentsByName map[string]*agent.Agent,
 	externalAgents map[string]*agent.Agent,
+	externalDefinitions map[string]teamdef.AgentDefinition,
 	agents *[]*agent.Agent,
 	runConfig *config.RuntimeConfig,
 	loadOpts *loadOptions,
@@ -1308,9 +1450,22 @@ func resolveAgentRefs(
 			return nil, fmt.Errorf("external agent %q resolves to name %q which conflicts with agent %q", ref, agentName, existing.Name())
 		}
 
-		a, err := loadExternalAgent(ctx, externalRef, runConfig, loadOpts)
+		loaded, err := loadExternalAgent(ctx, externalRef, runConfig, loadOpts)
 		if err != nil {
 			return nil, fmt.Errorf("loading %q: %w", externalRef, err)
+		}
+		a, err := loaded.Team.DefaultAgent()
+		if err != nil {
+			return nil, err
+		}
+		if entry, ok := loaded.Definitions.AgentDefinition(a.Name()); ok {
+			var definition teamdef.AgentDefinition
+			if err := json.Unmarshal(entry.Payload, &definition); err != nil {
+				return nil, err
+			}
+			definition.AgentKey, definition.Name = agentName, agentName
+			definition.AgentID = loaded.Definitions.TeamID + ":" + definition.AgentID
+			externalDefinitions[agentName] = definition
 		}
 
 		// Rename the external agent so it doesn't collide with locally-defined
@@ -1334,7 +1489,7 @@ const maxExternalDepth = 10
 
 // loadExternalAgent loads an agent from an external reference (OCI or URL).
 // It resolves the reference, loads its config, and returns the default agent.
-func loadExternalAgent(ctx context.Context, ref string, runConfig *config.RuntimeConfig, loadOpts *loadOptions) (*agent.Agent, error) {
+func loadExternalAgent(ctx context.Context, ref string, runConfig *config.RuntimeConfig, loadOpts *loadOptions) (*LoadResult, error) {
 	depth := externalDepthFromContext(ctx)
 	if depth >= maxExternalDepth {
 		return nil, fmt.Errorf("maximum external agent nesting depth (%d) exceeded — check for circular references", maxExternalDepth)
@@ -1356,12 +1511,7 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 		return nil, err
 	}
 
-	result, err := Load(contextWithExternalDepth(ctx, depth+1), source, runConfig, inheritOptions(loadOpts))
-	if err != nil {
-		return nil, err
-	}
-
-	return result.DefaultAgent()
+	return LoadWithConfig(contextWithExternalDepth(ctx, depth+1), source, runConfig, inheritOptions(loadOpts))
 }
 
 // inheritOptions carries a parent load's capability options (registries,
@@ -1383,6 +1533,7 @@ func inheritOptions(parent *loadOptions) Opt {
 		opts.modelOpts = parent.modelOpts
 		opts.strict = parent.strict
 		opts.features = parent.features
+		opts.toolsetPool, opts.toolsetPoolScope = parent.toolsetPool, parent.toolsetPoolScope
 		return nil
 	}
 }

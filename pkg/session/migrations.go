@@ -607,6 +607,100 @@ func getAllMigrations() []Migration {
    INSERT INTO session_append_receipts(session_id, write_id, item_id, content_hash)
     SELECT session_id, write_id, id, write_hash FROM session_items WHERE write_id != '';
   `, DownSQL: `DROP TABLE session_append_receipts;`},
+		{
+			ID:          40,
+			Name:        "040_session_catalog_metrics",
+			Description: "Maintain transcript counts and costs independently of message bodies for session catalogs",
+			UpSQL: `
+				ALTER TABLE sessions ADD COLUMN catalog_num_messages INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE sessions ADD COLUMN catalog_cost REAL NOT NULL DEFAULT 0;
+				ALTER TABLE sessions ADD COLUMN catalog_item_messages INTEGER NOT NULL DEFAULT 0;
+				CREATE TRIGGER session_catalog_metrics_validate_insert BEFORE INSERT ON session_items
+				WHEN NEW.item_type = 'message' AND CASE
+					WHEN NEW.message_json IS NULL OR NOT json_valid(NEW.message_json) THEN 1
+					WHEN json_type(NEW.message_json) NOT IN ('object', 'null') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.role'), 'missing') NOT IN ('missing', 'null', 'text') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.cost'), 'missing') NOT IN ('missing', 'null', 'integer', 'real') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.cost') IN ('integer', 'real') AND abs(json_extract(NEW.message_json, '$.cost')) > 1.7976931348623157e308, 0) THEN 1
+					ELSE 0 END
+				BEGIN SELECT RAISE(ABORT, 'invalid message JSON for session catalog metrics'); END;
+				CREATE TRIGGER session_catalog_metrics_validate_update BEFORE UPDATE OF session_id, item_type, cost, message_json ON session_items
+				WHEN NEW.item_type = 'message' AND CASE
+					WHEN NEW.message_json IS NULL OR NOT json_valid(NEW.message_json) THEN 1
+					WHEN json_type(NEW.message_json) NOT IN ('object', 'null') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.role'), 'missing') NOT IN ('missing', 'null', 'text') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.cost'), 'missing') NOT IN ('missing', 'null', 'integer', 'real') THEN 1
+					WHEN COALESCE(json_type(NEW.message_json, '$.cost') IN ('integer', 'real') AND abs(json_extract(NEW.message_json, '$.cost')) > 1.7976931348623157e308, 0) THEN 1
+					ELSE 0 END
+				BEGIN SELECT RAISE(ABORT, 'invalid message JSON for session catalog metrics'); END;
+				CREATE TRIGGER session_catalog_metrics_insert AFTER INSERT ON session_items BEGIN
+					UPDATE sessions SET
+						catalog_num_messages = catalog_num_messages + CASE WHEN NEW.item_type = 'message' AND COALESCE(json_extract(NEW.message_json, '$.role'), '') != 'system' THEN 1 ELSE 0 END,
+						catalog_cost = catalog_cost + CASE WHEN NEW.item_type = 'message' THEN COALESCE(json_extract(NEW.message_json, '$.cost'), 0) WHEN NEW.item_type = 'summary' THEN COALESCE(NEW.cost, 0) ELSE 0 END,
+						catalog_item_messages = catalog_item_messages + CASE WHEN NEW.item_type = 'message' THEN 1 ELSE 0 END
+					WHERE id = NEW.session_id;
+				END;
+				CREATE TRIGGER session_catalog_metrics_delete AFTER DELETE ON session_items BEGIN
+					UPDATE sessions SET
+						catalog_num_messages = catalog_num_messages - CASE WHEN OLD.item_type = 'message' AND COALESCE(json_extract(OLD.message_json, '$.role'), '') != 'system' THEN 1 ELSE 0 END,
+						catalog_cost = catalog_cost - CASE WHEN OLD.item_type = 'message' THEN COALESCE(json_extract(OLD.message_json, '$.cost'), 0) WHEN OLD.item_type = 'summary' THEN COALESCE(OLD.cost, 0) ELSE 0 END,
+						catalog_item_messages = catalog_item_messages - CASE WHEN OLD.item_type = 'message' THEN 1 ELSE 0 END
+					WHERE id = OLD.session_id;
+				END;
+				CREATE TRIGGER session_catalog_metrics_update AFTER UPDATE OF session_id, item_type, cost, message_json ON session_items BEGIN
+					UPDATE sessions SET
+						catalog_num_messages = catalog_num_messages - CASE WHEN OLD.item_type = 'message' AND COALESCE(json_extract(OLD.message_json, '$.role'), '') != 'system' THEN 1 ELSE 0 END,
+						catalog_cost = catalog_cost - CASE WHEN OLD.item_type = 'message' THEN COALESCE(json_extract(OLD.message_json, '$.cost'), 0) WHEN OLD.item_type = 'summary' THEN COALESCE(OLD.cost, 0) ELSE 0 END,
+						catalog_item_messages = catalog_item_messages - CASE WHEN OLD.item_type = 'message' THEN 1 ELSE 0 END
+					WHERE id = OLD.session_id;
+					UPDATE sessions SET
+						catalog_num_messages = catalog_num_messages + CASE WHEN NEW.item_type = 'message' AND COALESCE(json_extract(NEW.message_json, '$.role'), '') != 'system' THEN 1 ELSE 0 END,
+						catalog_cost = catalog_cost + CASE WHEN NEW.item_type = 'message' THEN COALESCE(json_extract(NEW.message_json, '$.cost'), 0) WHEN NEW.item_type = 'summary' THEN COALESCE(NEW.cost, 0) ELSE 0 END,
+						catalog_item_messages = catalog_item_messages + CASE WHEN NEW.item_type = 'message' THEN 1 ELSE 0 END
+					WHERE id = NEW.session_id;
+				END;
+			`,
+			UpTxFunc: backfillSessionCatalogMetrics,
+			DownSQL: `DROP TRIGGER IF EXISTS session_catalog_metrics_update;
+				DROP TRIGGER IF EXISTS session_catalog_metrics_delete;
+				DROP TRIGGER IF EXISTS session_catalog_metrics_insert;
+				DROP TRIGGER IF EXISTS session_catalog_metrics_validate_update;
+				DROP TRIGGER IF EXISTS session_catalog_metrics_validate_insert;
+				ALTER TABLE sessions DROP COLUMN catalog_item_messages;
+				ALTER TABLE sessions DROP COLUMN catalog_cost;
+				ALTER TABLE sessions DROP COLUMN catalog_num_messages;`,
+		},
+		{
+			ID:          41,
+			Name:        "041_team_definitions_and_session_revisions",
+			Description: "Persist immutable safe team definition entries and session revision bindings",
+			UpSQL: `
+				CREATE TABLE team_definition_entries (
+					digest TEXT PRIMARY KEY,
+					kind TEXT NOT NULL CHECK(kind IN ('team','agent')),
+					payload BLOB NOT NULL
+				);
+				CREATE TABLE session_team_revisions (
+					session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+					sequence INTEGER NOT NULL CHECK(sequence > 0),
+					team_id TEXT NOT NULL,
+					team_digest TEXT NOT NULL REFERENCES team_definition_entries(digest),
+					agent_digest TEXT NOT NULL REFERENCES team_definition_entries(digest),
+					agent_key TEXT NOT NULL,
+					agent_id TEXT NOT NULL,
+					agent_name TEXT NOT NULL,
+					origin TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					PRIMARY KEY(session_id, sequence)
+				);
+				CREATE INDEX session_team_revisions_agent_digest ON session_team_revisions(agent_digest);
+				CREATE INDEX session_team_revisions_team_digest ON session_team_revisions(team_digest);
+			`,
+			DownSQL: `DROP INDEX IF EXISTS session_team_revisions_team_digest;
+				DROP INDEX IF EXISTS session_team_revisions_agent_digest;
+				DROP TABLE IF EXISTS session_team_revisions;
+				DROP TABLE IF EXISTS team_definition_entries;`,
+		},
 	}
 }
 
@@ -773,4 +867,25 @@ func migrateItem(ctx context.Context, tx *sql.Tx, sessionID string, position int
 	}
 
 	return nil
+}
+
+func backfillSessionCatalogMetrics(ctx context.Context, tx *sql.Tx) error {
+	const invalidMessage = `SELECT id FROM session_items WHERE item_type = 'message' AND CASE
+		WHEN message_json IS NULL OR NOT json_valid(message_json) THEN 1
+		WHEN json_type(message_json) NOT IN ('object', 'null') THEN 1
+		WHEN COALESCE(json_type(message_json, '$.role'), 'missing') NOT IN ('missing', 'null', 'text') THEN 1
+		WHEN COALESCE(json_type(message_json, '$.cost'), 'missing') NOT IN ('missing', 'null', 'integer', 'real') THEN 1
+		WHEN COALESCE(json_type(message_json, '$.cost') IN ('integer', 'real') AND abs(json_extract(message_json, '$.cost')) > 1.7976931348623157e308, 0) THEN 1
+		ELSE 0 END LIMIT 1`
+	var invalidID int64
+	if err := tx.QueryRowContext(ctx, invalidMessage).Scan(&invalidID); err == nil {
+		return fmt.Errorf("cannot backfill session catalog metrics: invalid message JSON in session item %d", invalidID)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE sessions SET
+		catalog_num_messages = COALESCE((SELECT SUM(CASE WHEN si.item_type = 'message' AND COALESCE(json_extract(si.message_json, '$.role'), '') != 'system' THEN 1 ELSE 0 END) FROM session_items si WHERE si.session_id = sessions.id), 0),
+		catalog_cost = COALESCE((SELECT SUM(CASE WHEN si.item_type = 'message' THEN COALESCE(json_extract(si.message_json, '$.cost'), 0) WHEN si.item_type = 'summary' THEN COALESCE(si.cost, 0) ELSE 0 END) FROM session_items si WHERE si.session_id = sessions.id), 0),
+		catalog_item_messages = COALESCE((SELECT COUNT(*) FROM session_items si WHERE si.session_id = sessions.id AND si.item_type = 'message'), 0)`)
+	return err
 }

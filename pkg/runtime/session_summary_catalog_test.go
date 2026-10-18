@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -36,6 +37,11 @@ func (s *metadataOnlyCatalogStore) GetSession(ctx context.Context, id string) (*
 func (s *metadataOnlyCatalogStore) GetSessionSummariesWithScope(ctx context.Context, scope session.SummaryScope) ([]session.Summary, error) {
 	s.reads.Add(1)
 	return s.ScopedSummaryStore.GetSessionSummariesWithScope(ctx, scope)
+}
+
+func (s *metadataOnlyCatalogStore) GetSessionCatalogSummaries(ctx context.Context) ([]session.Summary, error) {
+	s.reads.Add(1)
+	return s.Store.(session.SessionCatalogSummaryStore).GetSessionCatalogSummaries(ctx)
 }
 
 func TestSessionSummaryCatalogMetadataOnlyScopeAndDeferredChild(t *testing.T) {
@@ -144,4 +150,31 @@ func TestSessionSummaryCatalogLargeCatalogOneRead(t *testing.T) {
 	assert.Equal(t, "root-0999", rows[0].SessionID)
 	assert.Equal(t, "root-0000", rows[len(rows)-1].SessionID)
 	assert.EqualValues(t, 1, store.reads.Load())
+}
+
+func TestLocalSessionCatalogUsesMetadataAndAggregatesChildCounts(t *testing.T) {
+	base := session.NewInMemorySessionStore()
+	root := session.New(session.WithID("root"), session.WithAttributes(map[string]string{SessionAgentAttribute: "root"}), session.WithUserMessage("root"))
+	root.CreatedAt = time.Unix(200, 0).UTC()
+	child := session.New(session.WithID("child"), session.WithParentID(root.ID), session.WithAttributes(map[string]string{SessionAgentAttribute: "worker"}))
+	child.CreatedAt = time.Unix(100, 0).UTC()
+	for i := range 3 {
+		child.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleUser, Content: fmt.Sprintf("child message %d", i), Cost: 1}))
+	}
+	grandchild := session.New(session.WithID("grandchild"), session.WithParentID(child.ID), session.WithAttributes(map[string]string{SessionAgentAttribute: "worker"}))
+	grandchild.AddMessage(session.NewAgentMessage("worker", &chat.Message{Role: chat.MessageRoleAssistant, Content: "grandchild", Cost: 2}))
+	require.NoError(t, base.AddSession(t.Context(), root))
+	require.NoError(t, base.AddSession(t.Context(), child))
+	require.NoError(t, base.AddSession(t.Context(), grandchild))
+	store := &metadataOnlyCatalogStore{Store: base, ScopedSummaryStore: base.(session.ScopedSummaryStore)}
+	_, owner := coordinationRuntime(t, store, coordinationReply("root"), coordinationReply("worker"))
+	rows, err := owner.Runtime().(SessionCatalog).ListSessions(t.Context())
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "root", rows[0].SessionID)
+	assert.Equal(t, "root", rows[0].AgentName)
+	assert.True(t, rows[0].Loadable)
+	assert.Equal(t, 5, rows[0].NumMessages, "count includes root, child, and grandchild message rows")
+	assert.InDelta(t, 5, rows[0].Cost, 1e-9, "cost includes direct message costs across the tree")
+	assert.EqualValues(t, 1, store.reads.Load(), "one summary query, with no session or history lookup")
 }

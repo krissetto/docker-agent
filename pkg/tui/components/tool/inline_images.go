@@ -103,6 +103,11 @@ func (m *inlineImagesModel) SetExpanded(expanded bool) {
 	}
 }
 
+func (m *inlineImagesModel) PreserveExpansionOnParentCollapse() bool {
+	view, ok := m.model.(interface{ PreserveExpansionOnParentCollapse() bool })
+	return ok && view.PreserveExpansionOnParentCollapse()
+}
+
 func (m *inlineImagesModel) IsToggleLine(line int) bool {
 	view, ok := m.model.(interface{ IsToggleLine(line int) bool })
 	return ok && view.IsToggleLine(line)

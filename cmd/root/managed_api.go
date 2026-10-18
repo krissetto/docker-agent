@@ -245,9 +245,25 @@ func (f *runExecFlags) bootstrapManagedAPI(ctx context.Context, agentFileName st
 	f.remoteAddress = d.Address
 	f.remoteAuthTokenFile = filepath.Join(dir, "token")
 	f.remoteWorkingDir = workingDir
+	selectedSource := d.Source
+	if f.kitSourcePath != "" {
+		client, clientErr := newRemoteClient(d.Address, f.remoteAuthTokenFile)
+		if clientErr != nil {
+			return "", clientErr
+		}
+		connectionDir, relErr := filepath.Rel(workspace, workingDir)
+		if relErr != nil || !filepath.IsLocal(connectionDir) {
+			return "", errors.New("connection working directory is outside the sandbox workspace")
+		}
+		registration, registerErr := client.RegisterSource(ctx, f.kitSourcePath, connectionDir)
+		if registerErr != nil {
+			return "", fmt.Errorf("register Kit team: %w", registerErr)
+		}
+		selectedSource = registration.SourceID
+	}
 	// Only clear after the daemon has authenticated its exact immutable inputs.
 	f.modelOverrides = nil
-	return d.Source, nil
+	return selectedSource, nil
 }
 
 func (f *runExecFlags) managedSnapshot(ctx context.Context, sourceKey, workspace string) (*snapshot.Manifest, error) {

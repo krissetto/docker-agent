@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 // Restoring a persisted subagent swarm: normalize the stored snapshot,
@@ -82,6 +83,13 @@ type restoredNode struct {
 // preflightRestore validates the complete persisted graph and resolves stored
 // sessions without publishing drivers, tree nodes, or manager records.
 func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *session.Session, snapshot subagent.Snapshot) ([]*restoredNode, error) {
+	return m.preflightRestoreForTeam(ctx, rootSess, snapshot, m.r.teamForSession(rootSess))
+}
+
+func (m *subagentManager) preflightRestoreForTeam(ctx context.Context, rootSess *session.Session, snapshot subagent.Snapshot, tm *team.Team) ([]*restoredNode, error) {
+	if tm == nil {
+		return nil, errors.New("restored session has no pinned team environment")
+	}
 	expectedRoot := subagent.SessionRootID(rootSess.ID)
 	if snapshot.Root != expectedRoot || len(snapshot.Nodes) != 1 || snapshot.Nodes[0].Node.ID != expectedRoot {
 		return nil, fmt.Errorf("invalid restored topology: expected exactly root %q", expectedRoot)
@@ -95,7 +103,7 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 		expectedAgent = rootSess.AgentName
 	}
 	if expectedAgent == "" {
-		defaultAgent, err := m.r.team.DefaultAgent()
+		defaultAgent, err := tm.DefaultAgent()
 		if err != nil {
 			return nil, fmt.Errorf("invalid restored topology: resolve root agent: %w", err)
 		}
@@ -104,9 +112,9 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 	if root.Agent != expectedAgent {
 		return nil, fmt.Errorf("invalid restored topology: root agent binding %q does not match %q", root.Agent, expectedAgent)
 	}
-	rootAgent, err := m.r.team.Agent(root.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("invalid restored topology: root agent %q: %w", root.Agent, err)
+	rootAgent, _, rootIdentityOK := identityForBinding(tm, rootSess, SessionAgentAttribute, SessionAgentIDAttribute)
+	if !rootIdentityOK {
+		return nil, fmt.Errorf("invalid restored topology: root agent identity %q cannot be resolved", root.Agent)
 	}
 
 	// Validate the persisted graph independently of the current team config.
@@ -153,7 +161,6 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 	var prepared []*restoredNode
 	var walk func([]subagent.NodeSnapshot, string, *session.Session, *agent.Agent, bool) error
 	walk = func(nodes []subagent.NodeSnapshot, parentSessionID string, parentSess *session.Session, parentAgent *agent.Agent, ancestorStopped bool) error {
-		var allowed []subagent.AllowedSubagent
 		for _, snap := range nodes {
 			node := snap.Node
 			var childSess *session.Session
@@ -164,15 +171,16 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 					if loaded.ParentID != parentSessionID {
 						return fmt.Errorf("invalid restored topology: session %q parent %q does not match enclosing session", node.SessionID, loaded.ParentID)
 					}
-					if binding := loaded.AttributesSnapshot()[SessionAgentAttribute]; binding != "" && binding != node.Agent {
+					binding := loaded.AttributesSnapshot()[SessionAgentAttribute]
+					creationID := loaded.AttributesSnapshot()[SessionAgentIDAttribute]
+					if binding != "" && binding != node.Agent {
 						return fmt.Errorf("invalid restored topology: session %q session binding %q does not match node agent %q", node.SessionID, binding, node.Agent)
 					}
 					loaded = loaded.Clone()
-					if loaded.AgentName == "" {
+					if binding == "" && creationID == "" && loaded.AgentName == "" {
 						loaded.AgentName = node.Agent
 					}
-					loaded.NonInteractive = true
-					loaded.AsyncSubagent = true
+					loaded.NonInteractive, loaded.AsyncSubagent = true, true
 					childSess = loaded
 				case loadErr != nil && !errors.Is(loadErr, session.ErrNotFound):
 					return fmt.Errorf("load restored child session %q: %w", node.SessionID, loadErr)
@@ -181,40 +189,50 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 
 			grant := parentAgent
 			if childSess != nil {
-				if provenance := childSess.AttributesSnapshot()[SessionParentAgentAttribute]; provenance != "" {
-					grant, _ = m.r.team.Agent(provenance)
+				if provenanceID := childSess.AttributesSnapshot()[SessionParentAgentIDAttribute]; provenanceID != "" {
+					grant, _, _ = tm.ResolveIdentity(provenanceID)
+				} else if provenance := childSess.AttributesSnapshot()[SessionParentAgentAttribute]; provenance != "" {
+					grant, _, _ = tm.ResolveLegacyName(provenance)
+				} else if parentSess != nil {
+					grant, _, _ = resolveActiveAgentForTeam(tm, parentSess)
 				}
 			}
-			allowed = nil
-			if grant != nil && !ancestorStopped {
-				allowed = m.r.allowedFromAgent(grant)
-			}
+
 			state := node.State
-			var childAgent *agent.Agent
-			activeName := node.Agent
-			if childSess != nil && childSess.AgentName != "" {
-				activeName = childSess.AgentName
-			}
-			candidate, resolveErr := m.r.team.Agent(activeName)
-			allowedAgent := false
-			for _, ref := range allowed {
-				if ref.Agent == node.Agent {
-					allowedAgent = true
-					break
+			var activeAgent, creationAgent *agent.Agent
+			var activeName string
+			creationOK, activeOK := false, false
+			if childSess != nil {
+				creationAgent, _, creationOK = identityForBinding(tm, childSess, SessionAgentAttribute, SessionAgentIDAttribute)
+				if !creationOK && childSess.AgentID == "" && childSess.AttributesSnapshot()[SessionAgentIDAttribute] == "" {
+					creationAgent, _, creationOK = tm.ResolveLegacyName(node.Agent)
+				}
+				activeAgent, activeName, activeOK = resolveActiveAgentForTeam(tm, childSess)
+				if !activeOK && childSess.AgentID == "" {
+					activeAgent, activeName, activeOK = tm.ResolveLegacyName(childSess.AgentName)
+				}
+				if !activeOK && childSess.AgentID == "" {
+					activeAgent, activeName, activeOK = tm.ResolveLegacyName(node.Agent)
+				}
+				if activeOK {
+					childSess.AgentName, childSess.AgentID = activeName, configuredAgentID(tm, activeName)
 				}
 			}
-			invalid := ancestorStopped || resolveErr != nil || !allowedAgent || childSess == nil
+			allowed := creationOK && m.r.allowedIdentityForTeam(tm, grant, creationAgent)
+			invalid := ancestorStopped || childSess == nil || !creationOK || !activeOK || activeAgent == nil || !allowed
 			if invalid {
 				state = subagent.NodeStopped
 			} else {
-				childAgent = candidate
 				if state != subagent.NodeFailed && state != subagent.NodeStopped {
 					state = subagent.NodeIdle
 				}
 			}
-			entry := &restoredNode{snapshot: snap, parentSessionID: parentSessionID, parentSess: parentSess, childSess: childSess, childAgent: childAgent, state: state}
+			entry := &restoredNode{snapshot: snap, parentSessionID: parentSessionID, parentSess: parentSess, childSess: childSess, childAgent: activeAgent, state: state}
+			if invalid {
+				entry.childAgent = nil
+			}
 			prepared = append(prepared, entry)
-			if err := walk(snap.Children, node.SessionID, childSess, childAgent, invalid); err != nil {
+			if err := walk(snap.Children, node.SessionID, childSess, entry.childAgent, invalid); err != nil {
 				return err
 			}
 		}
@@ -223,6 +241,7 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 	if err := walk(snapshot.Nodes[0].Children, rootSess.ID, rootSess, rootAgent, false); err != nil {
 		return nil, err
 	}
+
 	return prepared, nil
 }
 
@@ -232,6 +251,16 @@ func (m *subagentManager) preflightRestore(ctx context.Context, rootSess *sessio
 func (r *LocalRuntime) RestoreSubagentTree(ctx context.Context, sess *session.Session) (*subagent.Snapshot, error) {
 	if sess == nil {
 		return nil, &SessionError{Kind: SessionErrorInvalid, Operation: "restore_tree"}
+	}
+	var lease *TeamEnvironmentLease
+	if r.teamEnvironments != nil {
+		var err error
+		lease, err = r.teamEnvironments.AcquireCurrent()
+		if err != nil {
+			return nil, err
+		}
+		defer lease.Release(context.WithoutCancel(ctx))
+		ctx = environmentScopedContext(ctx, lease)
 	}
 	committed, err := RestoreSessionView(ctx, &localSessionRuntimeView{runtime: r}, sess.ID)
 	if err != nil {
@@ -296,9 +325,11 @@ func (m *subagentManager) canonicalSnapshotWithLimit(ctx context.Context, root *
 	if agentName == "" {
 		agentName = root.AgentName
 	}
-	if agentName == "" && m.r.team != nil {
-		if defaultAgent, err := m.r.team.DefaultAgent(); err == nil {
-			agentName = defaultAgent.Name()
+	if agentName == "" {
+		if tm := m.r.teamForSession(root); tm != nil {
+			if defaultAgent, err := tm.DefaultAgent(); err == nil {
+				agentName = defaultAgent.Name()
+			}
 		}
 	}
 	rootNode := subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: agentName, State: subagent.NodeIdle}
@@ -388,4 +419,18 @@ func (m *subagentManager) canonicalSnapshotWithLimit(ctx context.Context, root *
 		}
 	}
 	return subagent.Snapshot{Version: subagent.SnapshotVersion, Durability: m.storeDurability(), Root: rootNode.ID, Nodes: []subagent.NodeSnapshot{snap}}, records, err
+}
+
+func resolveActiveAgentForTeam(tm *team.Team, sess *session.Session) (*agent.Agent, string, bool) {
+	if sess == nil || tm == nil {
+		return nil, "", false
+	}
+	if sess.AgentID != "" {
+		return tm.ResolveIdentity(sess.AgentID)
+	}
+	name := sess.AgentName
+	if name == "" {
+		name, _ = sess.Attribute(SessionAgentAttribute)
+	}
+	return tm.ResolveLegacyName(name)
 }

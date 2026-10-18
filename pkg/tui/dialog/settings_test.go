@@ -1114,3 +1114,42 @@ func TestSettingsFooterArrowsChooseWithoutApplyingAndSpaceCancels(t *testing.T) 
 	assert.True(t, hasMsg[messages.CancelSettingsMsg](msgs))
 	assert.False(t, hasMsg[messages.ApplySettingsMsg](msgs))
 }
+
+func TestSettingsCloseTabChoiceResetAndChange(t *testing.T) {
+	t.Parallel()
+	d := NewSettingsDialog(messages.Preferences{CloseTabChoice: messages.CloseTabNo}, true).(*settingsDialog)
+	d.tab = tabBehavior
+	d.selected[tabBehavior] = rowCloseTabChoice
+	d.SetSize(100, 50)
+	assert.Contains(t, ansi.Strip(d.View()), "No (keep tab open)")
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	require.Nil(t, cmd, "behavior changes wait for Save")
+	assert.Equal(t, messages.CloseTabAsk, d.current.CloseTabChoice)
+	assert.Contains(t, ansi.Strip(d.View()), "Ask every time")
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	require.Nil(t, cmd)
+	assert.Equal(t, messages.CloseTabYes, d.current.CloseTabChoice)
+	d.setFocus(settingsActions)
+	d.FocusActions(true)
+	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	for _, msg := range collectMsgs(cmd) {
+		if apply, ok := msg.(messages.ApplySettingsMsg); ok {
+			assert.Equal(t, messages.CloseTabYes, apply.Preferences.CloseTabChoice)
+			return
+		}
+	}
+	t.Fatal("missing ApplySettingsMsg")
+}
+
+func TestSettingsGitDiffLayoutIsDiscoverableAndCycles(t *testing.T) {
+	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+	view := ansi.Strip(d.View())
+	assert.Contains(t, view, "Git diff layout")
+	assert.Contains(t, view, "Unified")
+	d.selected[tabAppearance] = rowGitDiffLayout
+	d.changeValue(1)
+	assert.Equal(t, messages.GitDiffSplit, d.current.GitDiffLayout)
+	d.changeValue(1)
+	assert.Equal(t, messages.GitDiffUnified, d.current.GitDiffLayout)
+}

@@ -21,6 +21,12 @@ const SessionAgentAttribute = "docker-agent.actor.agent"
 
 const SessionParentAgentAttribute = "docker-agent.actor.parent_agent"
 
+// SessionAgentIDAttribute preserves immutable creation-agent identity across renames.
+const SessionAgentIDAttribute = "docker-agent.actor.agent_id"
+
+// SessionParentAgentIDAttribute preserves the grantor identity for a child session.
+const SessionParentAgentIDAttribute = "docker-agent.actor.parent_agent_id"
+
 // SessionErrorKind is a stable, machine-readable session operation failure.
 type SessionErrorKind string
 
@@ -38,6 +44,7 @@ const (
 	SessionOperationAdmitChildRun         SessionOperation = "admit_child_run"
 	SessionOperationAdmitChildRunning     SessionOperation = "admit_child_running"
 	SessionOperationAttach                SessionOperation = "attach"
+	SessionOperationAwaitTurn             SessionOperation = "await_turn"
 	SessionOperationBindAgent             SessionOperation = "bind_agent"
 	SessionOperationCompact               SessionOperation = "compact"
 	SessionOperationCompactBusy           SessionOperation = "compact_busy"
@@ -47,6 +54,7 @@ const (
 	SessionOperationCreateParent          SessionOperation = "create_parent"
 	SessionOperationCreateSession         SessionOperation = "create_session"
 	SessionOperationDurableSession        SessionOperation = "durable_session"
+	SessionOperationEdit                  SessionOperation = "edit"
 	SessionOperationFork                  SessionOperation = "fork"
 	SessionOperationGate                  SessionOperation = "gate"
 	SessionOperationInspectTree           SessionOperation = "inspect_tree"
@@ -66,6 +74,7 @@ const (
 	SessionOperationReplacePinnedSession  SessionOperation = "replace_pinned_session"
 	SessionOperationResolveSession        SessionOperation = "resolve_session"
 	SessionOperationRespond               SessionOperation = "respond"
+	SessionOperationCancel                SessionOperation = "cancel"
 	SessionOperationRespondElicitation    SessionOperation = "respond_elicitation"
 	SessionOperationRespondGeneration     SessionOperation = "respond_generation"
 	SessionOperationRespondKind           SessionOperation = "respond_kind"
@@ -191,6 +200,10 @@ type SessionViewPreparer interface {
 	PrepareSessionView(ctx context.Context, sessionID string) (PreparedSessionView, error)
 }
 
+type HistoricalViewReader interface {
+	HistoricalSessionView(ctx context.Context, sessionID string) (SessionHandle, PreparedSessionViewInfo, error)
+}
+
 // PreparedSessionView owns only unpublished preparation resources. Commit runs
 // asynchronously; Abort never revokes canonical owners after publication.
 type PreparedSessionView interface {
@@ -203,10 +216,14 @@ type PreparedSessionViewInfo struct {
 	ActiveAgentName string              `json:"active_agent_name,omitempty"`
 	SessionID       string              `json:"session_id"`
 	RootSessionID   string              `json:"root_session_id"`
+	RootWorkingDir  string              `json:"root_working_dir,omitempty"`
+	RootBinding     SessionBinding      `json:"root_binding,omitempty"`
 	Session         *session.Session    `json:"session"`
 	Binding         SessionBinding      `json:"binding"`
 	WorkingDir      string              `json:"working_dir"`
 	Attach          *SubagentAttachInfo `json:"attach,omitempty"`
+	Historical      bool                `json:"historical,omitempty"`
+	HistoryReason   string              `json:"history_reason,omitempty"`
 }
 
 // CommittedSessionView is ready for use without lookup or metadata hydration.
@@ -222,6 +239,8 @@ type CommittedSessionView struct {
 type SessionViewConfirmation struct {
 	SessionID       string          `json:"session_id"`
 	RootSessionID   string          `json:"root_session_id"`
+	RootWorkingDir  string          `json:"root_working_dir,omitempty"`
+	RootBinding     SessionBinding  `json:"root_binding,omitempty"`
 	Source          string          `json:"source"`
 	WorkingDir      string          `json:"working_dir"`
 	Binding         SessionBinding  `json:"binding"`
@@ -230,7 +249,7 @@ type SessionViewConfirmation struct {
 }
 
 func (i PreparedSessionViewInfo) Confirmation() SessionViewConfirmation {
-	c := SessionViewConfirmation{SessionID: i.SessionID, RootSessionID: i.RootSessionID, WorkingDir: i.WorkingDir, Binding: i.Binding, ActiveAgentName: i.ActiveAgentName}
+	c := SessionViewConfirmation{SessionID: i.SessionID, RootSessionID: i.RootSessionID, RootWorkingDir: i.RootWorkingDir, RootBinding: i.RootBinding, WorkingDir: i.WorkingDir, Binding: i.Binding, ActiveAgentName: i.ActiveAgentName}
 	if i.Session != nil {
 		c.Source = i.Session.AttributesSnapshot()["docker-agent.actor.source"]
 	}
@@ -242,7 +261,12 @@ func (i PreparedSessionViewInfo) Confirmation() SessionViewConfirmation {
 
 // Validate checks that publication still targets the approved binding.
 func (c SessionViewConfirmation) Validate(info PreparedSessionViewInfo) error {
-	if c != info.Confirmation() {
+	expected := info.Confirmation()
+	if c.RootBinding.AgentName == "" {
+		// Root metadata is additive for clients predating metadata-first views.
+		expected.RootBinding, expected.RootWorkingDir = SessionBinding{}, ""
+	}
+	if c != expected {
 		return &SessionError{Kind: SessionErrorConflict, SessionID: info.SessionID, Operation: "open_view", Detail: "confirmed session binding changed"}
 	}
 	return nil
@@ -445,6 +469,7 @@ const (
 	SessionErrorStale        SessionErrorKind = "stale"
 	SessionErrorUnsupported  SessionErrorKind = "unsupported"
 	SessionErrorWrongSession SessionErrorKind = "wrong_session"
+	SessionErrorHistorical   SessionErrorKind = "historical_unavailable"
 )
 
 // SessionBinding pins immutable execution identity at creation.
@@ -458,6 +483,8 @@ type SessionBinding struct {
 // SessionCapabilities are read-only facts; false capabilities must return a
 // typed unsupported error rather than silently mutating shared runtime state.
 type SessionCapabilities struct {
+	Historical            bool
+	ExecutionAvailable    bool
 	PendingMessageRemoval bool
 	Snapshots             bool
 	DelegationPolicy      bool
@@ -495,12 +522,15 @@ type TurnInput struct {
 
 // SessionMetadata is immutable handle metadata.
 type SessionMetadata struct {
-	SessionID      string
-	AgentName      string
-	Model          string
-	ThinkingLevels []effort.Level
-	ThinkingLevel  effort.Level
-	Capabilities   SessionCapabilities
+	SessionID          string
+	AgentName          string
+	Historical         bool
+	ExecutionAvailable bool
+	HistoryReason      string
+	Model              string
+	ThinkingLevels     []effort.Level
+	ThinkingLevel      effort.Level
+	Capabilities       SessionCapabilities
 }
 
 type SessionError struct {

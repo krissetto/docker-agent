@@ -276,6 +276,7 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 // Thinking defaults policy:
 //   - thinking_budget: 0  →  thinking is off (nil): the model's own default
 //     applies since most providers have no real "off" switch.
+//   - Haiku 5.5+ preserves explicit 0/none to send thinking.type=disabled.
 //   - thinking_budget: none  →  normally normalised the same way (nil), EXCEPT
 //     on an OpenAI-family model that has a real API-level "none" effort
 //     (gpt-5.6+, see [modelinfo.OpenAISupportsNoneEffort]): there the explicit
@@ -285,15 +286,23 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 //     is auto-enabled for Anthropic/Bedrock-Claude.
 //   - thinking_budget NOT set:
 //   - Thinking-only models (OpenAI o-series) get "medium".
+//   - Haiku 5.5+ keeps its API default of adaptive thinking at medium effort.
 //   - All other models get no thinking.
 //
 // NOTE: max_tokens is NOT set here; see teamloader and runtime/model_switcher.
 func applyModelDefaults(cfg *latest.ModelConfig) {
 	providerType := resolveProviderType(cfg)
+	publisher, _ := cfg.ProviderOpts["publisher"].(string)
+	claudeProvider := providerType == "anthropic" || providerType == "amazon-bedrock" ||
+		providerType == "google" && strings.EqualFold(publisher, "anthropic")
+	adaptiveDefault := claudeProvider && modelinfo.UsesAdaptiveThinkingByDefault(cfg.Model)
 
 	// Explicitly disabled → normalise to nil so providers never see it,
-	// unless the model has a real "none" effort worth preserving.
+	// unless the model needs explicit disabled thinking or has a real "none" effort.
 	if cfg.ThinkingBudget.IsDisabled() {
+		if adaptiveDefault {
+			return
+		}
 		if preservesNoneEffort(cfg, providerType) {
 			slog.Debug("Preserving explicit none reasoning effort",
 				"provider", cfg.Provider, "model", cfg.Model)
@@ -307,6 +316,12 @@ func applyModelDefaults(cfg *latest.ModelConfig) {
 
 	// User already set a real thinking_budget — just apply side-effects.
 	if cfg.ThinkingBudget != nil {
+		ensureInterleavedThinking(cfg, providerType)
+		return
+	}
+
+	if adaptiveDefault {
+		cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: "medium"}
 		ensureInterleavedThinking(cfg, providerType)
 		return
 	}

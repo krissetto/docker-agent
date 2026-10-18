@@ -1,0 +1,40 @@
+{
+  "system_prompt": {
+    "tokens": 120,
+    "items": 2
+  },
+  "tool_definitions": {
+    "tokens": 240,
+    "items": 3
+  },
+  "prompt_files": {
+    "tokens": 80,
+    "items": 1
+  },
+  "messages": {
+    "tokens": 560,
+    "items": 4
+  },
+  "tool_results": {
+    "tokens": 110,
+    "items": 1
+  },
+  "compaction_summary": {
+    "tokens": 0,
+    "items": 0
+  },
+  "prompt_file_items": [
+    {
+      "path": "/workspace/demo/AGENTS.md",
+      "tokens": 80
+    }
+  ],
+  "attached_files": [
+    {
+      "path": "/workspace/demo/notes.txt",
+      "tokens": 17
+    }
+  ],
+  "context_limit": 8192,
+  "model": "demo/model"
+}

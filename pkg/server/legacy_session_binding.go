@@ -38,8 +38,9 @@ func (sm *SessionManager) legacyRunHandle(ctx context.Context, id, sourceName, a
 		return nil, err
 	}
 	resolvedName := sourceName
-	if _, ok := sm.Sources[resolvedName]; !ok {
-		for key := range sm.Sources {
+	sources := sm.sourceSnapshot()
+	if _, ok := sources[resolvedName]; !ok {
+		for key := range sources {
 			if config.StableSourceKey(key) == config.StableSourceKey(sourceName) {
 				resolvedName = key
 				break
@@ -47,7 +48,7 @@ func (sm *SessionManager) legacyRunHandle(ctx context.Context, id, sourceName, a
 		}
 	}
 	registry, canonicalSource, err := sm.sessionRegistryForCreate(resolvedName)
-	if err != nil && len(sm.sessionRegistries) == 0 {
+	if err != nil && sm.sourceRegistryCount() == 0 {
 		registry, canonicalSource, err = sm.sessionRegistryForCreate("")
 	}
 	if err != nil {

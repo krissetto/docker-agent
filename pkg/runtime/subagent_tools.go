@@ -27,8 +27,8 @@ func (r *LocalRuntime) handleSpawnSubagent(ctx context.Context, sess *session.Se
 		return tools.ResultError("task is required"), nil
 	}
 
-	a := r.resolveSessionAgent(sess)
-	allowed := r.allowedFromAgent(a)
+	a := r.resolveSessionAgentContext(ctx, sess)
+	allowed := r.allowedFromAgentForTeam(r.teamForContext(ctx, sess), a)
 	ref, ok := subagent.FindAllowed(allowed, strings.TrimSpace(args.Agent))
 	if !ok {
 		names := make([]string, len(allowed))
@@ -154,7 +154,7 @@ func (r *LocalRuntime) handleSendMessage(ctx context.Context, sess *session.Sess
 		if id, ok := r.subagents.nodeForSession(sess.ID); ok {
 			senderID = string(id)
 		}
-		msg := agentCommunication(args.Message, args.RequestID, senderID, r.resolveSessionAgent(sess).Name(), args.DeliveryMode)
+		msg := agentCommunication(args.Message, args.RequestID, senderID, r.resolveSessionAgentContext(ctx, sess).Name(), args.DeliveryMode)
 		var err error
 		receipt, err = r.subagents.postAgentCommunication(ctx, sess.ParentID, msg)
 		receipt.Target = args.To

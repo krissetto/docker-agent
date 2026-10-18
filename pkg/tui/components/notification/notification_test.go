@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -98,15 +99,67 @@ func TestNotification_Position(t *testing.T) {
 	require.Equal(t, 100-lipgloss.Width(view)-notificationPadding, col)
 }
 
-func TestNotification_GetLayer(t *testing.T) {
+func TestNotification_GetLayers(t *testing.T) {
 	t.Parallel()
 
 	n := New()
 
-	require.Nil(t, n.GetLayer())
+	require.Empty(t, n.GetLayers())
+	n.SetSize(100, 50)
 
 	updated, _ := n.Update(ShowMsg{Text: "Test"})
-	require.NotNil(t, updated.GetLayer())
+	require.NotEmpty(t, updated.GetLayers())
+}
+
+func TestNotification_MixedWidthLayersMatchHitGeometry(t *testing.T) {
+	t.Parallel()
+
+	for _, size := range [][2]int{{100, 50}, {24, 50}, {8, 4}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			n := New()
+			n.SetSize(size[0], size[1])
+			for _, text := range []string{strings.Repeat("wide 界 ", 20), "x", "another long notification"} {
+				n.Update(ShowMsg{Text: text})
+			}
+			layers, bounds := n.GetLayers(), n.itemBounds()
+			require.Len(t, layers, 3)
+			require.Less(t, bounds[1].width, bounds[0].width)
+			for i, b := range bounds {
+				layer := layers[i]
+				require.Equal(t, b.col, layer.GetX())
+				require.Equal(t, b.row, layer.GetY())
+				require.Equal(t, b.width, layer.Width())
+				require.Equal(t, b.height, layer.Height())
+				require.Equal(t, bounds[0].col+bounds[0].width, b.col+b.width)
+				if !n.onScreen(b.col, b.row) {
+					continue
+				}
+				id, text, ok := n.BodyHit(b.col, b.row)
+				require.True(t, ok)
+				require.Equal(t, b.id, id)
+				require.Equal(t, b.text, text)
+				n.HandleMouseMotion(b.col, b.row)
+				id, _, ok = n.CopyHit(b.col, b.row)
+				require.True(t, ok)
+				require.Equal(t, b.id, id)
+				x, y := closeButtonPosition(b)
+				if n.onScreen(x, y) {
+					command := n.HandleClick(x, y)
+					require.NotNil(t, command)
+					require.Equal(t, DismissMsg{ID: b.id}, command())
+				}
+			}
+			short := bounds[1]
+			for _, point := range [][2]int{{short.col - 1, short.row}, {size[0] - 1, short.row}, {size[0] - 3, bounds[2].row + bounds[2].height}} {
+				x, y := point[0], point[1]
+				_, _, hit := n.BodyHit(x, y)
+				require.False(t, hit)
+				require.Nil(t, n.HandleClick(x, y))
+				n.HandleMouseMotion(x, y)
+				require.Zero(t, n.hoveredID)
+			}
+		})
+	}
 }
 
 func TestNotification_AutoHideGeneration(t *testing.T) {
@@ -263,7 +316,7 @@ func TestNotification_StackingLayerBasics(t *testing.T) {
 	require.Contains(t, view, "old")
 	require.Contains(t, view, "new")
 	require.Less(t, stringsIndex(t, view, "old"), stringsIndex(t, view, "new"))
-	require.NotNil(t, updated.GetLayer())
+	require.NotEmpty(t, updated.GetLayers())
 	require.Len(t, updated.itemBounds(), 2)
 	bounds := updated.itemBounds()
 	require.Equal(t, 50-lipgloss.Height(updated.View())-notificationPadding, bounds[0].row)

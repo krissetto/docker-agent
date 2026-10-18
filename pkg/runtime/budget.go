@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -109,21 +110,16 @@ type agentBudgetSpend struct {
 }
 
 func (b *budgetTracker) snapshot() budgetSnapshot {
+	return b.snapshotWithLimits(latest.BudgetConfig{MaxCost: b.maxCost, MaxTokens: b.maxTokens, MaxTime: latest.Duration{Duration: b.maxTime}})
+}
+
+func (b *budgetTracker) snapshotWithLimits(limits latest.BudgetConfig) budgetSnapshot {
 	if b == nil {
 		return budgetSnapshot{}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return budgetSnapshot{
-		Cost:      b.cost,
-		MaxCost:   b.maxCost,
-		Tokens:    b.tokens,
-		MaxTokens: b.maxTokens,
-		Elapsed:   b.elapsedLocked(),
-		MaxTime:   b.maxTime,
-		Unpriced:  b.unpriced,
-		PerAgent:  b.perAgentSpendLocked(),
-	}
+	return budgetSnapshot{Cost: b.cost, MaxCost: limits.MaxCost, Tokens: b.tokens, MaxTokens: limits.MaxTokens, Elapsed: b.elapsedLocked(), MaxTime: limits.MaxTime.Duration, Unpriced: b.unpriced, PerAgent: b.perAgentSpendLocked()}
 }
 
 func (b *budgetTracker) elapsedLocked() time.Duration {
@@ -183,31 +179,47 @@ func (b *budgetTracker) exceeded() *budgetBreach {
 	if b == nil {
 		return nil
 	}
+	return b.exceededWithLimits(latest.BudgetConfig{MaxCost: b.maxCost, MaxTokens: b.maxTokens, MaxTime: latest.Duration{Duration: b.maxTime}})
+}
+
+func (b *budgetTracker) exceededWithLimits(limits latest.BudgetConfig) *budgetBreach {
+	if b == nil {
+		return nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.maxCost > 0 && b.cost >= b.maxCost {
+	if limits.MaxCost > 0 && b.cost >= limits.MaxCost {
 		return &budgetBreach{
 			Limit: budgetLimitCost,
 			Used:  formatUSD(b.cost),
-			Max:   formatUSD(b.maxCost),
+			Max:   formatUSD(limits.MaxCost),
 		}
 	}
-	if b.maxTokens > 0 && b.tokens >= b.maxTokens {
+	if limits.MaxTokens > 0 && b.tokens >= limits.MaxTokens {
 		return &budgetBreach{
 			Limit: budgetLimitTokens,
 			Used:  fmt.Sprintf("%d tokens", b.tokens),
-			Max:   fmt.Sprintf("%d tokens", b.maxTokens),
+			Max:   fmt.Sprintf("%d tokens", limits.MaxTokens),
 		}
 	}
-	if b.maxTime > 0 && b.elapsedLocked() >= b.maxTime {
+	if limits.MaxTime.Duration > 0 && b.elapsedLocked() >= limits.MaxTime.Duration {
 		return &budgetBreach{
 			Limit: budgetLimitTime,
 			Used:  b.elapsedLocked().Round(time.Second).String(),
-			Max:   b.maxTime.String(),
+			Max:   limits.MaxTime.Duration.String(),
 		}
 	}
 	return nil
+}
+
+func (b *budgetTracker) hasUnpricedSpend() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.unpriced
 }
 
 func (b *budgetTracker) unpricedSpend() bool {
@@ -234,51 +246,223 @@ func formatUSD(v float64) string {
 
 const runBudgetName = "run"
 
+type namedTracker struct {
+	Name    string
+	Tracker *budgetTracker
+}
+
 type budgetSet struct {
-	trackers     map[string]*budgetTracker
-	agentBudgets map[string][]string
-	order        []string
+	trackers     map[string]*budgetTracker // shared spend accounts; never remove pots during a root's life
+	trackerMu    sync.Mutex
+	agentBudgets map[string][]string // legacy policy only
+	order        []string            // legacy policy only
 	contextMu    sync.Mutex
-	contexts     map[*context.CancelFunc]string
+	contexts     map[*context.CancelFunc]budgetContextBinding
 	rebindings   map[*executionBudgetBinding]struct{}
 }
 
-func (s *budgetSet) budgetsFor(agentName string) []namedTracker {
-	if s == nil {
+type budgetContextBinding struct {
+	agentName string
+	policy    *budgetPolicy
+}
+type budgetPolicy struct {
+	limits       map[string]latest.BudgetConfig
+	pots         map[string]bool
+	agentBudgets map[string][]string
+	order        []string
+}
+type budgetView struct {
+	ledger *budgetSet
+	policy *budgetPolicy
+	legacy bool
+}
+
+func newBudgetPolicy(cfg BudgetPolicyConfig) *budgetPolicy {
+	policy := &budgetPolicy{limits: make(map[string]latest.BudgetConfig), pots: make(map[string]bool), agentBudgets: make(map[string][]string)}
+	if cfg.Run != nil && !cfg.Run.IsZero() {
+		policy.limits[runBudgetName] = *cfg.Run
+	}
+	for name, limit := range cfg.Named {
+		policy.pots[name] = true
+		if !limit.IsZero() {
+			policy.limits[name] = limit
+		}
+	}
+	for name, refs := range cfg.AgentBudgets {
+		policy.agentBudgets[name] = append([]string(nil), refs...)
+	}
+	seen := map[string]bool{}
+	if _, ok := policy.limits[runBudgetName]; ok {
+		policy.order = append(policy.order, runBudgetName)
+		seen[runBudgetName] = true
+	}
+	var named []string
+	for _, refs := range policy.agentBudgets {
+		for _, name := range refs {
+			if _, ok := policy.limits[name]; ok && !seen[name] {
+				seen[name] = true
+				named = append(named, name)
+			}
+		}
+	}
+	sort.Strings(named)
+	policy.order = append(policy.order, named...)
+	return policy
+}
+
+func (s *budgetSet) ensureAccount(name string) *budgetTracker {
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
+	if s.trackers == nil {
+		s.trackers = make(map[string]*budgetTracker)
+	}
+	if account := s.trackers[name]; account != nil {
+		return account
+	}
+	account := newBudgetTracker(nil)
+	if account == nil {
+		account = &budgetTracker{perAgent: make(map[string]*agentSpend)}
+	}
+	s.trackers[name] = account
+	return account
+}
+
+func (p *budgetPolicy) namesFor(agentName string) []string {
+	if p == nil {
 		return nil
 	}
-	names := s.agentBudgets[agentName]
-	if len(names) == 0 {
-		if t := s.trackers[runBudgetName]; t != nil {
-			return []namedTracker{{Name: runBudgetName, Tracker: t}}
+	names := []string{}
+	if _, ok := p.limits[runBudgetName]; ok {
+		names = append(names, runBudgetName)
+	}
+	refs := p.agentBudgets[agentName]
+	if len(refs) == 0 {
+		return names
+	}
+	for _, name := range refs {
+		if p.pots[name] {
+			names = append(names, name)
 		}
+	}
+	return names
+}
+
+func (v *budgetView) budgetNamesFor(agentName string, chargeRun bool) []string {
+	if v == nil || v.ledger == nil {
 		return nil
 	}
-	out := make([]namedTracker, 0, len(names))
-	for _, n := range names {
-		if t := s.trackers[n]; t != nil {
-			out = append(out, namedTracker{Name: n, Tracker: t})
+	if v.legacy {
+		names := v.ledger.agentBudgets[agentName]
+		if len(names) == 0 {
+			if v.ledger.trackers[runBudgetName] != nil {
+				return []string{runBudgetName}
+			}
+			return nil
 		}
+		selected := make([]string, 0, len(names)+1)
+		hasRun := slices.Contains(names, runBudgetName)
+		if !hasRun && v.ledger.trackers[runBudgetName] != nil {
+			selected = append(selected, runBudgetName)
+		}
+		for _, name := range names {
+			if v.ledger.trackers[name] != nil {
+				selected = append(selected, name)
+			}
+		}
+		return selected
+	}
+	names := v.policy.namesFor(agentName)
+	if chargeRun && !slices.Contains(names, runBudgetName) {
+		names = append([]string{runBudgetName}, names...)
+	}
+	return names
+}
+
+func namesFromTrackers(trackers []namedTracker) []string {
+	names := make([]string, 0, len(trackers))
+	for _, nt := range trackers {
+		names = append(names, nt.Name)
+	}
+	return names
+}
+
+func (v *budgetView) budgetsFor(agentName string, chargeRun bool) []namedTracker {
+	names := v.budgetNamesFor(agentName, chargeRun)
+	result := make([]namedTracker, 0, len(names))
+	for _, name := range names {
+		var tracker *budgetTracker
+		if v.legacy {
+			tracker = v.ledger.trackers[name]
+		} else {
+			tracker = v.ledger.ensureAccount(name)
+		}
+		if tracker != nil {
+			result = append(result, namedTracker{Name: name, Tracker: tracker})
+		}
+	}
+	return result
+}
+
+func (v *budgetView) exceededFor(agentName string) *budgetBreach {
+	if v == nil || v.policy == nil {
+		return nil
+	}
+	for _, name := range v.policy.namesFor(agentName) {
+		limit := v.policy.limits[name]
+		account := v.ledger.ensureAccount(name)
+		if breach := account.exceededWithLimits(limit); breach != nil {
+			breach.Budget = name
+			return breach
+		}
+	}
+	return nil
+}
+
+func (v *budgetView) snapshot() []namedBudgetSnapshot {
+	if v == nil || v.policy == nil {
+		return nil
+	}
+	out := make([]namedBudgetSnapshot, 0, len(v.policy.order))
+	for _, name := range v.policy.order {
+		limit := v.policy.limits[name]
+		account := v.ledger.ensureAccount(name)
+		out = append(out, namedBudgetSnapshot{Name: name, Snapshot: account.snapshotWithLimits(limit)})
 	}
 	return out
 }
 
+func (s *budgetSet) budgetsFor(agentName string) []namedTracker {
+	return (&budgetView{ledger: s, legacy: true}).budgetsFor(agentName, false)
+}
 func (s *budgetSet) all() []namedTracker {
 	if s == nil {
 		return nil
 	}
-	out := make([]namedTracker, 0, len(s.order))
-	for _, n := range s.order {
-		if t := s.trackers[n]; t != nil {
-			out = append(out, namedTracker{Name: n, Tracker: t})
+	names := append([]string(nil), s.order...)
+	out := make([]namedTracker, 0, len(names))
+	for _, name := range names {
+		if tracker := s.trackers[name]; tracker != nil {
+			out = append(out, namedTracker{Name: name, Tracker: tracker})
 		}
 	}
 	return out
 }
-
-type namedTracker struct {
-	Name    string
-	Tracker *budgetTracker
+func (s *budgetSet) exceededFor(agentName string) *budgetBreach {
+	for _, nt := range s.budgetsFor(agentName) {
+		if br := nt.Tracker.exceeded(); br != nil {
+			br.Budget = nt.Name
+			return br
+		}
+	}
+	return nil
+}
+func (s *budgetSet) snapshot() []namedBudgetSnapshot {
+	all := s.all()
+	out := make([]namedBudgetSnapshot, 0, len(all))
+	for _, nt := range all {
+		out = append(out, namedBudgetSnapshot{Name: nt.Name, Snapshot: nt.Tracker.snapshot()})
+	}
+	return out
 }
 
 func newBudgetSet(runBudget *latest.BudgetConfig, named map[string]latest.BudgetConfig, agentBudgets map[string][]string) *budgetSet {
@@ -317,6 +501,9 @@ func newBudgetSet(runBudget *latest.BudgetConfig, named map[string]latest.Budget
 			list = append(list, runBudgetName)
 		}
 		for _, n := range names {
+			if n == runBudgetName {
+				continue
+			}
 			if _, ok := s.trackers[n]; ok {
 				list = append(list, n)
 			}
@@ -361,10 +548,118 @@ func (r *LocalRuntime) rootBudget(sess *session.Session) *budgetSet {
 	return b
 }
 
+func (r *LocalRuntime) budgetViewForContext(ctx context.Context, sess *session.Session) *budgetView {
+	if sess == nil {
+		return nil
+	}
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		root := r.budgetRoot(sess)
+		r.budgetMu.Lock()
+		if r.rootBudgets == nil {
+			r.rootBudgets = make(map[string]*budgetSet)
+		}
+		ledger := r.rootBudgets[root]
+		if ledger == nil {
+			ledger = &budgetSet{trackers: make(map[string]*budgetTracker)}
+			r.rootBudgets[root] = ledger
+		}
+		r.budgetMu.Unlock()
+		policy := newBudgetPolicy(env.BudgetPolicy())
+		return &budgetView{ledger: ledger, policy: policy}
+	}
+	if r.teamEnvironments != nil {
+		return nil
+	}
+	ledger := r.rootBudget(sess)
+	if ledger == nil {
+		return nil
+	}
+	return &budgetView{ledger: ledger, legacy: true}
+}
+
+func (r *LocalRuntime) budgetUsageForContext(ctx context.Context, sess *session.Session, agentName string) []namedBudgetSnapshot {
+	view := r.budgetViewForContext(ctx, sess)
+	if view == nil {
+		return nil
+	}
+	if view.legacy {
+		return view.ledger.snapshot()
+	}
+	return view.snapshot()
+}
+
+func (r *LocalRuntime) enforceBudgetForContext(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) iterationDecision {
+	view := r.budgetViewForContext(ctx, sess)
+	if view == nil {
+		return iterationContinue
+	}
+	var breach *budgetBreach
+	if view.legacy {
+		breach = view.ledger.exceededFor(a.Name())
+	} else {
+		breach = view.exceededFor(a.Name())
+	}
+	if breach == nil {
+		return iterationContinue
+	}
+	slog.InfoContext(ctx, "Run budget exceeded", "agent", a.Name(), "session_id", sess.ID, "budget", breach.Budget, "limit", string(breach.Limit), "used", breach.Used, "max", breach.Max)
+	stopMsg := &chat.Message{Role: chat.MessageRoleAssistant, Content: breach.Message(), CreatedAt: r.now().Format(time.RFC3339)}
+	events.Emit(BudgetExceeded(sess.ID, a.Name(), *breach, stopMsg))
+	r.notifyBudgetExceeded(ctx, a, sess.ID, breach.Message())
+	addAgentMessage(sess, a, stopMsg, events)
+	return iterationStop
+}
+
+func (r *LocalRuntime) recordBudgetForContext(ctx context.Context, sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
+	view := r.budgetViewForContext(ctx, sess)
+	if view == nil {
+		return
+	}
+	chargeRun := !view.legacy
+	targets := view.budgetsFor(a.Name(), chargeRun)
+	if len(targets) == 0 {
+		return
+	}
+	warnUnpriced := false
+	for _, nt := range targets {
+		if nt.Tracker.hasUnpricedSpend() {
+			warnUnpriced = true
+		}
+		nt.Tracker.record(a.Name(), usage, cost, active)
+		if nt.Tracker.hasUnpricedSpend() {
+			warnUnpriced = true
+		}
+	}
+	if warnUnpriced {
+		hasCostLimit := false
+		if view.legacy {
+			hasCostLimit = true
+		} else {
+			for _, name := range view.policy.namesFor(a.Name()) {
+				if view.policy.limits[name].MaxCost > 0 {
+					hasCostLimit = true
+				}
+			}
+		}
+		if hasCostLimit {
+			events.Emit(Warning("This run has a max_cost limit, but the model reported usage the runtime cannot price, so that spend does not count against the limit. Set a model-level `cost:` block to price it.", a.Name()))
+		}
+	}
+	if view.legacy {
+		events.Emit(BudgetUsage(sess.ID, a.Name(), view.ledger.snapshot()))
+		view.ledger.cancelExceeded()
+	} else {
+		events.Emit(BudgetUsage(sess.ID, a.Name(), view.snapshot()))
+		view.ledger.cancelExceededPolicy(view.policy)
+	}
+}
+
 type executionBudgetKey struct{}
 
 type executionBudgetBinding struct {
 	wallet    *budgetSet
+	policy    *budgetPolicy
+	legacy    bool
 	agentName string
 	cancel    context.CancelFunc
 	timer     *time.Timer
@@ -373,12 +668,13 @@ type executionBudgetBinding struct {
 
 // The generation context stays stable while named-wallet membership changes.
 func (r *LocalRuntime) executionBudgetContext(ctx context.Context, sess *session.Session, a *agent.Agent) (context.Context, context.CancelFunc) {
-	wallet := r.rootBudget(sess)
-	if wallet == nil || a == nil {
+	view := r.budgetViewForContext(ctx, sess)
+	if view == nil || a == nil {
 		return context.WithCancel(ctx)
 	}
+	wallet := view.ledger
 	bounded, cancel := context.WithCancel(ctx)
-	binding := &executionBudgetBinding{wallet: wallet, cancel: cancel}
+	binding := &executionBudgetBinding{wallet: wallet, policy: view.policy, legacy: view.legacy, cancel: cancel}
 	wallet.contextMu.Lock()
 	if wallet.rebindings == nil {
 		wallet.rebindings = make(map[*executionBudgetBinding]struct{})
@@ -398,6 +694,9 @@ func (r *LocalRuntime) executionBudgetContext(ctx context.Context, sess *session
 	}
 	context.AfterFunc(bounded, cleanup)
 	wallet.cancelExceeded()
+	if !view.legacy {
+		wallet.cancelExceededPolicy(view.policy)
+	}
 	return context.WithValue(bounded, executionBudgetKey{}, binding), cleanup
 }
 
@@ -409,14 +708,19 @@ func (b *executionBudgetBinding) rebindLocked(name string) {
 	}
 	var deadline time.Time
 	now := time.Now()
-	for _, nt := range b.wallet.budgetsFor(name) {
+	view := &budgetView{ledger: b.wallet, policy: b.policy, legacy: b.legacy}
+	for _, nt := range view.budgetsFor(name, !b.legacy) {
 		t := nt.Tracker
 		t.mu.Lock()
 		if t.started.IsZero() {
 			t.started = now
 		}
-		if t.maxTime > 0 {
-			end := t.started.Add(t.maxTime)
+		maxTime := t.maxTime
+		if !b.legacy {
+			maxTime = b.policy.limits[nt.Name].MaxTime.Duration
+		}
+		if maxTime > 0 {
+			end := t.started.Add(maxTime)
 			if deadline.IsZero() || end.Before(deadline) {
 				deadline = end
 			}
@@ -433,7 +737,11 @@ func (b *executionBudgetBinding) rebindLocked(name string) {
 			}
 		})
 	}
-	if b.wallet.exceededFor(name) != nil {
+	if b.legacy {
+		if b.wallet.exceededFor(name) != nil {
+			b.cancel()
+		}
+	} else if view.exceededFor(name) != nil {
 		b.cancel()
 	}
 }
@@ -479,9 +787,9 @@ func (r *LocalRuntime) budgetContext(ctx context.Context, sess *session.Session,
 	}
 	wallet.contextMu.Lock()
 	if wallet.contexts == nil {
-		wallet.contexts = make(map[*context.CancelFunc]string)
+		wallet.contexts = make(map[*context.CancelFunc]budgetContextBinding)
 	}
-	wallet.contexts[&cancel] = a.Name()
+	wallet.contexts[&cancel] = budgetContextBinding{agentName: a.Name()}
 	wallet.contextMu.Unlock()
 	context.AfterFunc(bounded, func() {
 		wallet.contextMu.Lock()
@@ -495,13 +803,47 @@ func (r *LocalRuntime) budgetContext(ctx context.Context, sess *session.Session,
 func (s *budgetSet) cancelExceeded() {
 	s.contextMu.Lock()
 	var cancels []context.CancelFunc
-	for cancel, agentName := range s.contexts {
-		if s.exceededFor(agentName) != nil {
+	for cancel, binding := range s.contexts {
+		view := &budgetView{ledger: s, policy: binding.policy, legacy: binding.policy == nil}
+		var breach *budgetBreach
+		if view.legacy {
+			breach = s.exceededFor(binding.agentName)
+		} else {
+			breach = view.exceededFor(binding.agentName)
+		}
+		if breach != nil {
 			cancels = append(cancels, *cancel)
 		}
 	}
 	for binding := range s.rebindings {
-		if s.exceededFor(binding.agentName) != nil {
+		view := &budgetView{ledger: s, policy: binding.policy, legacy: binding.legacy}
+		var breach *budgetBreach
+		if binding.legacy {
+			breach = s.exceededFor(binding.agentName)
+		} else {
+			breach = view.exceededFor(binding.agentName)
+		}
+		if breach != nil {
+			binding.cancel()
+		}
+	}
+	s.contextMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *budgetSet) cancelExceededPolicy(_ *budgetPolicy) {
+	s.contextMu.Lock()
+	var cancels []context.CancelFunc
+	for cancel, binding := range s.contexts {
+		view := &budgetView{ledger: s, policy: binding.policy}
+		if view.exceededFor(binding.agentName) != nil {
+			cancels = append(cancels, *cancel)
+		}
+	}
+	for binding := range s.rebindings {
+		if (&budgetView{ledger: s, policy: binding.policy, legacy: binding.legacy}).exceededFor(binding.agentName) != nil {
 			binding.cancel()
 		}
 	}
@@ -548,16 +890,6 @@ func (r *LocalRuntime) enforceBudget(
 	return iterationStop
 }
 
-func (s *budgetSet) exceededFor(agentName string) *budgetBreach {
-	for _, nt := range s.budgetsFor(agentName) {
-		if br := nt.Tracker.exceeded(); br != nil {
-			br.Budget = nt.Name
-			return br
-		}
-	}
-	return nil
-}
-
 func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
 	s := r.rootBudget(sess)
 	if s == nil {
@@ -590,21 +922,6 @@ func (s *budgetSet) unpricedSpend() bool {
 		}
 	}
 	return false
-}
-
-func (s *budgetSet) snapshot() []namedBudgetSnapshot {
-	all := s.all()
-	if len(all) == 0 {
-		return nil
-	}
-	out := make([]namedBudgetSnapshot, 0, len(all))
-	for _, nt := range all {
-		out = append(out, namedBudgetSnapshot{
-			Name:     nt.Name,
-			Snapshot: nt.Tracker.snapshot(),
-		})
-	}
-	return out
 }
 
 type namedBudgetSnapshot struct {

@@ -150,7 +150,7 @@ func (r *LocalRuntime) acquireTool(ctx context.Context, sessionID, toolName stri
 		return nil, executionCapacityError(sessionID, "tool", r.maxTools)
 	}
 	switch toolName {
-	case "transfer_task", "handoff", subagent.ToolSpawnSubagent, subagent.ToolStopSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent:
+	case "transfer_task", "handoff", subagent.ToolSpawnSubagent, subagent.ToolStopSubagent, subagent.ToolSendMessage, subagent.ToolReadSubagent, subagent.ToolListAgents:
 		return func() {}, nil
 	}
 	select {

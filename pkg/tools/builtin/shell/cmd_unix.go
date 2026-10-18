@@ -13,7 +13,8 @@ type processGroup struct {
 
 func platformSpecificSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{
-		Setpgid: true,
+		// A process group alone still inherits the TUI's controlling terminal.
+		Setsid: true,
 	}
 }
 

@@ -97,6 +97,12 @@ func takeRunesThatFit(runes []rune, start, width int) int {
 // If text starts with a newline, it's considered pre-formatted and no indent is added.
 // On wrapped lines, each visible fragment of a URL is emitted inside an OSC 8
 // hyperlink to the full URL, so a URL split across lines stays clickable everywhere.
+// WrapTextWithIndent preserves the tool argument wrapping and hyperlink behavior
+// for tool renderers that build their own expanded body.
+func WrapTextWithIndent(text string, firstLineWidth, subsequentLineWidth int) string {
+	return wrapTextWithIndent(text, firstLineWidth, subsequentLineWidth)
+}
+
 func wrapTextWithIndent(text string, firstLineWidth, subsequentLineWidth int) string {
 	if firstLineWidth <= 0 || subsequentLineWidth <= 0 {
 		return text

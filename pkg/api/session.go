@@ -75,15 +75,20 @@ type SessionCreateRequest struct {
 }
 
 type SessionMetadata struct {
-	SessionID      string              `json:"session_id"`
-	AgentName      string              `json:"agent_name"`
-	Model          string              `json:"model,omitempty"`
-	ThinkingLevels []effort.Level      `json:"thinking_levels,omitempty"`
-	ThinkingLevel  effort.Level        `json:"thinking_level,omitempty"`
-	Capabilities   SessionCapabilities `json:"capabilities"`
+	SessionID          string              `json:"session_id"`
+	AgentName          string              `json:"agent_name"`
+	Historical         bool                `json:"historical,omitempty"`
+	ExecutionAvailable bool                `json:"execution_available,omitempty"`
+	HistoryReason      string              `json:"history_reason,omitempty"`
+	Model              string              `json:"model,omitempty"`
+	ThinkingLevels     []effort.Level      `json:"thinking_levels,omitempty"`
+	ThinkingLevel      effort.Level        `json:"thinking_level,omitempty"`
+	Capabilities       SessionCapabilities `json:"capabilities"`
 }
 
 type SessionCapabilities struct {
+	Historical            bool     `json:"historical,omitempty"`
+	ExecutionAvailable    bool     `json:"execution_available,omitempty"`
 	PendingMessageRemoval bool     `json:"pending_message_removal,omitempty"`
 	Snapshots             bool     `json:"snapshots,omitempty"`
 	DelegationPolicy      bool     `json:"delegation_policy,omitempty"`

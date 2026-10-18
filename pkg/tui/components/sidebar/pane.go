@@ -1,6 +1,7 @@
 package sidebar
 
 import (
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -61,6 +62,11 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = "node:" + payload
 	case ClickSubagentParent:
 		key = "parent:" + payload
+	case ClickGit:
+		line, err := strconv.Atoi(payload)
+		if err == nil && m.git.interactive(line) {
+			key = "git:" + m.git.rowID(line)
+		}
 	default:
 		region = ClickNone
 	}
@@ -68,6 +74,15 @@ func (m *model) updateRegionHover(x, y int) tea.Cmd {
 		key = m.todoHoverKey(row, x-m.layoutCfg.PaddingLeft)
 	}
 	m.hoveredRegion = region
+	gitLine := -1
+	if row, ok := m.placementRowAt(x, y); ok && row.action == ClickGit {
+		gitLine, _ = strconv.Atoi(row.payload)
+	} else if region == ClickGit {
+		gitLine, _ = strconv.Atoi(payload)
+	}
+	if m.git.setHovered(gitLine) {
+		m.invalidateHover()
+	}
 	nameKey := ""
 	if identity, ok := m.subagentIdentityColumnsAt(x, y); ok {
 		col := x - m.layoutCfg.PaddingLeft
@@ -132,6 +147,10 @@ func (m *model) addBreathingRows(lines []string, boundaries []int) []string {
 	if m.todoSummaryLine >= 0 {
 		m.todoSummaryLine = shifted[m.todoSummaryLine]
 		m.todoEnd = shiftEnd(m.todoEnd)
+	}
+	if m.gitStart >= 0 {
+		m.gitStart = shifted[m.gitStart]
+		m.gitEnd = shiftEnd(m.gitEnd)
 	}
 	m.treeSectionStart = shifted[m.treeSectionStart]
 	m.summaryLine = shifted[m.summaryLine]

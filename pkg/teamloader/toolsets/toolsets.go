@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	"github.com/docker/docker-agent/pkg/tools/builtin/tasks"
+	"github.com/docker/docker-agent/pkg/tools/builtin/teamedit"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
 	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	"github.com/docker/docker-agent/pkg/tools/builtin/userprompt"
@@ -66,6 +67,7 @@ func DefaultToolsetCreators() map[string]teamloader.ToolsetCreator {
 		"shell":             shell.Creator,
 		"tasks":             tasks.Creator,
 		"think":             teamloader.Creator(think.CreateToolSet),
+		"team_edit":         teamedit.Creator,
 		"todo":              teamloader.CreatorFromToolset(todo.CreateToolSet),
 		"user_prompt":       teamloader.Creator(userprompt.CreateToolSet),
 		"webhook":           webhook.Creator,

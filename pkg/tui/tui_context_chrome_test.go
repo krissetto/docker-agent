@@ -81,8 +81,10 @@ func TestContextEditorRenderedHalfCellContinuity(t *testing.T) {
 					root, _, _ := wallClockRoot(t, width, 30)
 					defer root.ar.Stop()
 					root.storeContextUsage("profile", "root", runtime.Usage{ContextLength: used, ContextLimit: 100})
+					root.setContextUsageReady("profile", root.sessionState.CurrentAgentName(), true)
 					root.contextBar.Cancel()
 					root.contextBar.SetContextUsageDirect(used, 100)
+					root.resizeAll()
 					root.viewCacheValid = false
 					rows := strings.Split(root.View().Content, "\n")
 					_, height := root.editor.GetSize()

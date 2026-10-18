@@ -484,6 +484,9 @@ func (m *Model) Toggle() {
 	m.expanded = !m.expanded
 	if !m.expanded {
 		for _, entry := range m.toolEntries {
+			if view, ok := entry.view.(interface{ PreserveExpansionOnParentCollapse() bool }); ok && view.PreserveExpansionOnParentCollapse() {
+				continue
+			}
 			if view, ok := entry.view.(interface{ SetExpanded(expanded bool) }); ok {
 				view.SetExpanded(false)
 			}
@@ -654,40 +657,55 @@ func (m *Model) contentWidth() int {
 
 // renderExpanded renders the full block with all content in order.
 func (m *Model) renderExpanded() string {
+	rendered, _ := m.renderExpandedWithToolRows()
+	return rendered
+}
+
+type toolRow struct {
+	view  layout.Model
+	start int
+	end   int
+}
+
+func (m *Model) renderExpandedWithToolRows() (string, []toolRow) {
 	var parts []string
+	var rows []toolRow
+	lineCount := 0
+	appendPart := func(part string) {
+		parts = append(parts, part)
+		lineCount += strings.Count(part, "\n") + 1
+	}
 
-	// Header with collapse affordance
-	header := m.renderHeader(true)
-	parts = append(parts, header)
-
-	// Render content items in order (interleaved reasoning and tools)
+	appendPart(m.renderHeader(true))
 	for i, item := range m.contentItems {
 		switch item.kind {
 		case contentItemReasoning:
 			if item.reasoning != "" {
 				if i == 0 {
-					parts = append(parts, "") // blank line after header for first item
+					appendPart("")
 				}
-				parts = append(parts, m.renderReasoningChunk(item.reasoning))
+				appendPart(m.renderReasoningChunk(item.reasoning))
 			}
 		case contentItemTool:
-			if item.toolIndex < len(m.toolEntries) {
-				// Blank line before first tool in a consecutive group
-				if i == 0 || (i > 0 && m.contentItems[i-1].kind == contentItemReasoning) {
-					parts = append(parts, "")
-				}
-				parts = append(parts, m.renderToolExpanded(m.toolEntries[item.toolIndex]))
-				// Blank line after last tool in a consecutive group (next is reasoning or end)
-				isLastItem := i == len(m.contentItems)-1
-				nextIsReasoning := !isLastItem && m.contentItems[i+1].kind == contentItemReasoning
-				if isLastItem || nextIsReasoning {
-					parts = append(parts, "")
-				}
+			if item.toolIndex >= len(m.toolEntries) {
+				continue
+			}
+			if i == 0 || m.contentItems[i-1].kind == contentItemReasoning {
+				appendPart("")
+			}
+			entry := m.toolEntries[item.toolIndex]
+			content := m.renderToolExpanded(entry)
+			start := lineCount
+			appendPart(content)
+			rows = append(rows, toolRow{view: entry.view, start: start, end: lineCount})
+			isLastItem := i == len(m.contentItems)-1
+			nextIsReasoning := !isLastItem && m.contentItems[i+1].kind == contentItemReasoning
+			if isLastItem || nextIsReasoning {
+				appendPart("")
 			}
 		}
 	}
-
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), rows
 }
 
 func (m *Model) renderToolExpanded(entry toolEntry) string {
@@ -891,23 +909,12 @@ func (m *Model) childViewAt(line int) (layout.Model, int, bool) {
 	if !m.expanded {
 		return nil, 0, false
 	}
-	rendered := m.View()
-	cursor := 0
-	for _, item := range m.contentItems {
-		if item.kind != contentItemTool || item.toolIndex >= len(m.toolEntries) {
-			continue
-		}
-		entry := m.toolEntries[item.toolIndex]
-		content := m.renderToolExpanded(entry)
-		offset := strings.Index(rendered[cursor:], content)
-		if offset < 0 {
-			continue
-		}
-		start := cursor + offset
-		local := line - strings.Count(rendered[:start], "\n")
-		cursor = start + len(content)
-		if local >= 0 && local <= strings.Count(content, "\n") {
-			return entry.view, local, true
+	_, rows := m.renderExpandedWithToolRows()
+	offset := strings.Count(m.agentBadgePrefix(), "\n")
+	for _, row := range rows {
+		start, end := row.start+offset, row.end+offset
+		if line >= start && line < end {
+			return row.view, line - start, true
 		}
 	}
 	return nil, 0, false

@@ -1,6 +1,9 @@
 package tui
 
 import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -14,6 +17,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		}
 		if original.SplitDiffView != draft.SplitDiffView {
 			latest.SplitDiffView = draft.SplitDiffView
+		}
+		if original.GitDiffLayout != draft.GitDiffLayout {
+			latest.GitDiffLayout = draft.GitDiffLayout
 		}
 		if original.ExpandThinking != draft.ExpandThinking {
 			latest.ExpandThinking = draft.ExpandThinking
@@ -63,6 +69,9 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		if original.InterruptConfirmation != draft.InterruptConfirmation {
 			latest.InterruptConfirmation = draft.InterruptConfirmation
 		}
+		if original.CloseTabChoice != draft.CloseTabChoice {
+			latest.CloseTabChoice = draft.CloseTabChoice
+		}
 		if original.Layout.SidebarPosition != draft.Layout.SidebarPosition {
 			latest.Layout.SidebarPosition = draft.Layout.SidebarPosition
 		}
@@ -101,4 +110,18 @@ func saveChangedPreferences(original, draft messages.Preferences) error {
 		}
 		return nil
 	})
+}
+
+func (m *appModel) rememberCloseTabChoice(choice messages.CloseTabChoice) tea.Cmd {
+	if err := userconfig.Update(func(cfg *userconfig.Config) error {
+		if cfg.Settings == nil {
+			cfg.Settings = &userconfig.Settings{}
+		}
+		cfg.Settings.CloseTabChoice = string(choice)
+		return nil
+	}); err != nil {
+		return notification.WarningCmd("Close tab choice could not be saved: " + err.Error())
+	}
+	m.closeTabChoice = choice
+	return nil
 }

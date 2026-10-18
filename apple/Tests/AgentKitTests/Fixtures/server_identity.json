@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "session_api_version": 2,
+  "instance_id": "fixture-instance-001",
+  "ready": true,
+  "workspace_root": "/workspace/demo",
+  "source": "demo-team",
+  "config_fingerprint": "sha256:synthetic-config",
+  "capabilities": [
+    "session_v2",
+    "session_tools",
+    "session_permissions",
+    "mcp_prompts",
+    "todo_editing",
+    "session_branching",
+    "session_explicit_ids"
+  ]
+}

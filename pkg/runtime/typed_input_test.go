@@ -197,3 +197,17 @@ func TestTypedInputBusyRuntimeSteeringUsesSafeBoundaryBeforeUserTurn(t *testing.
 		assert.Equal(t, uint64(2), d.generation, "runtime steering does not become an additional FIFO generation")
 	}()
 }
+
+func TestDeliveryClassModeMatrixIsIndependentOfOrigin(t *testing.T) {
+	origins := []session.InputOrigin{session.InputOriginUser, session.InputOriginAgent, session.InputOriginRuntime}
+	modes := []struct {
+		mode     string
+		guidance bool
+	}{{"steer", true}, {"", false}, {"turn", false}, {"followup", false}, {"legacy_followup", false}, {"unknown", false}}
+	for _, origin := range origins {
+		for _, tc := range modes {
+			msg := QueuedMessage{InputOrigin: origin, InputMode: tc.mode}
+			assert.Equal(t, tc.guidance, msg.guidance(), "origin=%s mode=%q", origin, tc.mode)
+		}
+	}
+}

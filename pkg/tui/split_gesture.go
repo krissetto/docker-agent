@@ -23,6 +23,7 @@ type panePointerTransaction struct {
 	geometry                                splitGeometry
 	active, reorder                         bool
 	focusedSource                           bool
+	fromPane                                bool
 	target                                  string
 	edge                                    splitEdge
 	preview                                 splitRect
@@ -149,6 +150,17 @@ func (m *appModel) beginPaneGesture(msg tea.MouseClickMsg) bool {
 		return true
 	}
 	if m.panesEnabled() && !m.paneGeometry.Compact {
+		for _, id := range m.paneLayout().Sessions() {
+			r := m.paneAreas(m.paneGeometry.Panes[id]).title
+			if inPane(r, msg.X, msg.Y) {
+				m.panes = m.paneLayout()
+				generation, _ := m.supervisor.RouteGeneration(id)
+				base := m.composePanes()
+				m.paneGesture = &panePointerTransaction{source: id, fromPane: true, sourceGeneration: generation, startX: msg.X, startY: msg.Y, ghostGrabOffset: max(0, msg.X-r.X), layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.paneGeometry}
+				m.cachePaneGestureBase(base)
+				return true
+			}
+		}
 		for _, d := range m.paneGeometry.Dividers {
 			if inPane(d.Rect, msg.X, msg.Y) {
 				m.paneGesture = &panePointerTransaction{layout: m.panes, order: m.paneOrder(), bounds: bounds, geometry: m.paneGeometry, divider: &d, active: true, position: dividerPosition(d)}
@@ -203,7 +215,13 @@ func (m *appModel) paneDrop(x, y int) (string, splitEdge, splitRect, bool) {
 		if !ok {
 			continue
 		}
-		next, load, ok := m.paneSplitCandidateInOrder(g.layout, g.source, id, edge, g.order)
+		var next splitLayout
+		load := g.source
+		if g.fromPane {
+			next, ok = g.layout.Insert(g.source, id, edge)
+		} else {
+			next, ok = m.workspaceSplitCandidate(g.layout, g.source, id, edge)
+		}
 		if !ok || !m.supportsPaneCandidate(next, load) {
 			return "", 0, splitRect{}, false
 		}
@@ -211,7 +229,17 @@ func (m *appModel) paneDrop(x, y int) (string, splitEdge, splitRect, bool) {
 		if geometry.Compact {
 			return "", 0, splitRect{}, false
 		}
-		return id, edge, geometry.Panes[g.source], true
+		preview := geometry.Panes[g.source]
+		if !g.fromPane {
+			owner := m.paneWorkspaces.byRoute[g.source]
+			for _, source := range m.paneWorkspaces.members(owner) {
+				r := geometry.Panes[source]
+				right, bottom := max(preview.X+preview.W, r.X+r.W), max(preview.Y+preview.H, r.Y+r.H)
+				preview.X, preview.Y = min(preview.X, r.X), min(preview.Y, r.Y)
+				preview.W, preview.H = right-preview.X, bottom-preview.Y
+			}
+		}
+		return id, edge, preview, true
 	}
 	return "", 0, splitRect{}, false
 }
@@ -248,7 +276,15 @@ func (m *appModel) movePaneGesture(msg tea.MouseMotionMsg) tea.Cmd {
 		return nil
 	}
 	m.updatePaneGhost(msg.X, msg.Y)
-	if m.hitTestRegion(msg.Y) == regionTabBar && msg.Y == g.startY {
+	if g.fromPane && m.hitTestRegion(msg.Y) == regionTabBar {
+		g.target, g.preview = "", splitRect{}
+		if _, marker, ok := m.tabBar.InsertionAt(msg.X-tabFrameOrigin(), msg.Y-m.composerLayout().tabsTop); ok {
+			g.target = "detach"
+			g.preview = splitRect{X: marker + tabFrameOrigin(), Y: m.composerLayout().tabsTop, W: 1, H: 1}
+		}
+		return nil
+	}
+	if !g.fromPane && m.hitTestRegion(msg.Y) == regionTabBar && msg.Y == g.startY {
 		var begin tea.Cmd
 		if !g.reorder {
 			begin = m.tabBar.ResumePointerPreview(g.source, g.ghostGrabOffset, msg.X-tabFrameOrigin())
@@ -307,10 +343,23 @@ func (m *appModel) releasePaneGesture(msg tea.MouseReleaseMsg) tea.Cmd {
 	}
 	if !g.active {
 		source, hit := m.tabBar.TabBodyAt(msg.X-tabFrameOrigin(), msg.Y-m.contentHeight-m.separatorHeight)
+		if g.fromPane {
+			source, hit = g.source, inPane(m.paneAreas(g.geometry.Panes[g.source]).title, msg.X, msg.Y)
+		} else {
+			source = m.workspaceTabFocus(source)
+		}
 		m.cancelPaneGesture()
-		if hit && source == g.source {
+		if hit && (g.fromPane || m.paneWorkspaces.byRoute[source] == m.paneWorkspaces.byRoute[g.source]) {
 			_, cmd := m.handleSwitchTab(source)
 			return cmd
+		}
+		return nil
+	}
+	if g.fromPane && m.hitTestRegion(msg.Y) == regionTabBar {
+		index, _, ok := m.tabBar.InsertionAt(msg.X-tabFrameOrigin(), msg.Y-m.composerLayout().tabsTop)
+		m.cancelPaneGesture()
+		if ok {
+			return m.detachPaneToWorkspace(g.source, index)
 		}
 		return nil
 	}
@@ -324,7 +373,10 @@ func (m *appModel) releasePaneGesture(msg tea.MouseReleaseMsg) tea.Cmd {
 	target, edge, _, ok := m.paneDrop(msg.X, msg.Y)
 	m.cancelPaneGesture()
 	if ok {
-		return m.splitPaneInOrder(g.source, target, edge, g.order)
+		if g.fromPane {
+			return m.splitPaneInOrder(g.source, target, edge, g.order)
+		}
+		return m.tileWorkspace(g.source, target, edge)
 	}
 	return nil
 }
@@ -393,6 +445,9 @@ func (m *appModel) updatePaneGhost(x, y int) {
 		return
 	}
 	g.ghostLabel = m.tabBar.DragTabView(g.source)
+	if g.fromPane {
+		g.ghostLabel = m.paneTitle(g.source, min(g.geometry.Panes[g.source].W, tabFrameWidth(m.width)))
+	}
 	width := min(tabFrameWidth(m.width), ansi.StringWidth(g.ghostLabel))
 	g.ghostX = tabFrameOrigin() + max(0, min(x-tabFrameOrigin()-g.ghostGrabOffset, tabFrameWidth(m.width)-width))
 	g.ghostY = max(0, min(y, m.height-1))
@@ -403,7 +458,7 @@ func (m *appModel) paneGhostLayer() *lipgloss.Layer {
 	if g == nil || !g.active || g.reorder || g.divider != nil || g.ghostLabel == "" || m.dialogMgr.Open() || m.width <= 0 || m.height <= 0 {
 		return nil
 	}
-	return lipgloss.NewLayer(ansi.Truncate(m.tabBar.DragTabView(g.source), tabFrameWidth(m.width), "")).X(g.ghostX).Y(g.ghostY)
+	return lipgloss.NewLayer(ansi.Truncate(g.ghostLabel, tabFrameWidth(m.width), "")).X(g.ghostX).Y(g.ghostY)
 }
 
 func (m *appModel) paneGestureBaseValid() bool {

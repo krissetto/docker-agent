@@ -35,12 +35,18 @@ type SpawnSessionMsg struct {
 
 // SwitchTabMsg requests switching to a different session tab.
 type SwitchTabMsg struct {
+	Workspace bool   // Strip navigation restores the workspace's remembered focus
 	SessionID string // The session to switch to
 }
 
 // CloseTabMsg requests closing a session tab.
 type CloseTabMsg struct {
 	SessionID string // The session to close
+}
+
+// CloseWorkspaceMsg requests confirmation before closing every view in a workspace.
+type CloseWorkspaceMsg struct {
+	SessionID string // The workspace anchor session
 }
 
 // OpenSubagentMsg requests attaching a tab to an async subagent's
@@ -79,6 +85,8 @@ const (
 // TabInfo contains display information for a session tab.
 type TabInfo struct {
 	SessionID      string      // Unique session identifier
+	FocusSessionID string      // Remembered focused session in a workspace tab
+	PaneCount      int         // Workspace member count, including temporarily hidden panes
 	AgentName      string      // Current active agent name for this session
 	AgentNodeID    string      // Full canonical node identity for the current agent
 	Title          string      // Display title

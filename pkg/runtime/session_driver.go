@@ -81,6 +81,7 @@ func (g *driverWorkGroup) Wait() { <-g.DoneChan() }
 // that decides whether detached input is buffered into a live run, wakes an
 // idle session, attaches a caller to an in-flight run, or cancels a
 // runtime-owned wake run.
+
 type sessionDriver struct {
 	sessionLifecycle
 
@@ -103,19 +104,26 @@ type sessionDriver struct {
 	stopWake       chan struct{}
 	retirementGate chan struct{}
 	// Stable admission topology; readable without waiting for per-session I/O.
-	resourceOwner  *tools.ResourceOwner
-	identityID     string
-	identityParent string
-	identityAsync  bool
+	resourceOwner           *tools.ResourceOwner
+	teamEnvironment         *TeamEnvironmentLease
+	runEnvironment          *TeamEnvironmentLease
+	teamEditStopPending     bool
+	teamEditAdoptOnNextTurn bool
+	identityID              string
+	identityParent          string
+	identityAsync           bool
 
 	viewDormant bool
 	stoppedView bool
 
-	completionErr      error
-	persistenceFailure error
-	reportRetry        *session.ChildReport
-	completionRunErr   string
-	completionInFlight bool
+	completionErr                 error
+	persistenceFailure            error
+	reportRetry                   *session.ChildReport
+	completionRunErr              string
+	completionInFlight            bool
+	backgroundWorks               int
+	backgroundWorkCancel          map[uint64]map[string]func()
+	backgroundWorkCancelRequested map[uint64]bool
 
 	startDone     chan struct{}
 	startCanceled bool
@@ -129,7 +137,6 @@ type sessionDriver struct {
 	consumedSteering   []string
 	recentRetries      map[string]bool
 	pending            []QueuedMessage
-	steering           []QueuedMessage
 	interruptRequested bool
 	steeringChanged    chan struct{}
 
@@ -219,15 +226,15 @@ func (d *sessionDriver) admitLocked(op SessionOperation) *SessionError {
 			err.Limit = d.pendingLimit()
 			return err
 		}
-		if (d.running() && len(d.pending) != 0) || len(d.steering) != 0 {
+		if d.running() && len(d.pending) != 0 {
 			return &SessionError{Kind: SessionErrorCapacity, SessionID: sessionID, Operation: SessionOperationCompactPending, Reason: SessionErrorReasonPending, Limit: d.pendingLimit()}
 		}
 	case SessionOperationRunSkill:
-		if d.skillOperationID != "" || d.running() || d.starting() || d.settling() || d.reclaiming || d.compactReserved || d.switchReserved || d.pauseCh != nil || len(d.pending) != 0 || len(d.steering) != 0 {
+		if d.skillOperationID != "" || d.running() || d.starting() || d.settling() || d.reclaiming || d.compactReserved || d.switchReserved || d.pauseCh != nil || len(d.pending) != 0 {
 			return busy(op)
 		}
 	case SessionOperationSwitchAgent:
-		if d.skillOperationID != "" || d.switchReserved || d.running() || d.starting() || d.settling() || d.reclaiming || d.compactReserved || d.pauseCh != nil || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 {
+		if d.skillOperationID != "" || d.switchReserved || d.running() || d.starting() || d.settling() || d.reclaiming || d.compactReserved || d.pauseCh != nil || len(d.pending) != 0 || len(d.interactions) != 0 {
 			return busy(op)
 		}
 	}
@@ -314,21 +321,18 @@ func (d *sessionDriver) PostSteer(ctx context.Context, msg QueuedMessage) bool {
 	return err == nil
 }
 
-// postSteer returns queued when an accepted steer was demoted to the pending
-// turn FIFO by an active compaction reservation or older pending input.
+// postSteer admits guidance through the shared mailbox and starts an idle driver.
 func (d *sessionDriver) postSteer(ctx context.Context, msg QueuedMessage) (bool, error) {
 	msg.InputMode = "steer"
-	return d.admitInput(ctx, msg, SessionOperationSteer, true, true)
+	return d.postWithOperation(ctx, msg, true, SessionOperationSteer)
 }
 
-// DrainSteering promotes accepted guidance through the session-owned durable
-// transition before making it visible to the provider loop. A failed durable
-// promotion and every later FIFO item remain queued for a later boundary.
-func (d *sessionDriver) DrainSteering() []QueuedMessage { return d.drainInputs(d.r.lifetime(), true) }
+// DrainSteering promotes accepted guidance before making it visible to the provider loop.
+func (d *sessionDriver) DrainSteering() []QueuedMessage { return d.drainGuidance(d.r.lifetime()) }
 
 func (d *sessionDriver) schedulePendingRetry() {
 	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error {
-		if !d.stopped && !d.viewDormant && len(d.pending) != 0 {
+		if !d.stopped && !d.viewDormant && !d.compactReserved && d.pendingWakeableLocked() {
 			d.retryRunning = true
 		}
 		return nil
@@ -336,6 +340,10 @@ func (d *sessionDriver) schedulePendingRetry() {
 	if d.r.sessionDrivers != nil {
 		d.r.sessionDrivers.signalWork()
 	}
+}
+
+func (d *sessionDriver) queuedAtAdmissionLocked(msg QueuedMessage) bool {
+	return !msg.guidance() || d.compactReserved || !d.running() || d.activeRequestID == ""
 }
 
 func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
@@ -346,7 +354,7 @@ func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
 		}
 		for _, item := range d.pending {
 			if item.RequestID == msg.RequestID {
-				queued = true
+				queued = d.queuedAtAdmissionLocked(item)
 				return nil
 			}
 		}
@@ -364,9 +372,6 @@ func (d *sessionDriver) inputQueued(msg QueuedMessage) bool {
 }
 
 func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) bool {
-	if msg.trustedSteering() {
-		return d.postTrustedInput(ctx, msg)
-	}
 	_, err := d.post(ctx, msg, wake)
 	return err == nil
 }
@@ -374,6 +379,10 @@ func (d *sessionDriver) Post(ctx context.Context, msg QueuedMessage, wake bool) 
 // post returns queued when the accepted input remains in the pending FIFO at
 // the admission commit point.
 func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) (bool, error) {
+	return d.postWithOperation(ctx, msg, wake, SessionOperationPost)
+}
+
+func (d *sessionDriver) postWithOperation(ctx context.Context, msg QueuedMessage, wake bool, operation SessionOperation) (bool, error) {
 	var idleAdmission bool
 	var before func()
 	for {
@@ -396,7 +405,7 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 			return false, ctx.Err()
 		}
 	}
-	_, err := d.admitInput(ctx, msg, SessionOperationPost, wake, false)
+	_, err := d.admitInput(ctx, msg, operation, wake)
 	if err != nil {
 		return false, err
 	}
@@ -404,12 +413,13 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 	if idleAdmission && wake && before != nil {
 		before()
 	}
-	var idle bool
-	_ = d.ownerCall(ctx, func() error {
+	var idle, canWake bool
+	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
 		idle = !d.running() && !d.starting() && !d.settling()
+		canWake = d.pendingWakeableLocked()
 		return nil
 	})
-	if idle && wake {
+	if idle && wake && canWake {
 		runCtx, generation, callbacks, startErr := d.prepareStart(d.r.lifetime(), true)
 		if startErr == nil {
 			for _, fn := range callbacks {
@@ -436,7 +446,8 @@ func (d *sessionDriver) post(ctx context.Context, msg QueuedMessage, wake bool) 
 func (d *sessionDriver) PostReliable(ctx context.Context, msg QueuedMessage) bool {
 	msg.InputOrigin = session.InputOriginRuntime
 	msg.InputMode = "steer"
-	return d.postTrustedInput(ctx, msg)
+	_, err := d.post(ctx, msg, true)
+	return err == nil
 }
 
 // WakePending attempts to start an idle driver only when retained input exists.
@@ -480,13 +491,11 @@ func (d *sessionDriver) pendingLimit() int {
 
 func (d *sessionDriver) DrainPending() []QueuedMessage {
 	var pending []QueuedMessage
-	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error { pending = d.pending; d.pending = nil; return nil })
+	_ = d.ownerCall(context.WithoutCancel(d.r.lifetime()), func() error { pending = d.pending; d.pending = nil; d.refreshSteeringLocked(); return nil })
 	return pending
 }
 
-func (d *sessionDriver) DrainRuntimeNotes() []QueuedMessage {
-	return d.drainInputs(d.r.lifetime(), false)
-}
+func (d *sessionDriver) DrainRuntimeNotes() []QueuedMessage { return d.drainGuidance(d.r.lifetime()) }
 
 func (d *sessionDriver) HasPending() bool {
 	d.mu.Lock()
@@ -681,6 +690,7 @@ func (d *sessionDriver) ModelBindingSnapshot() (uint64, string, []provider.Provi
 // accounting and the agent/team info the sidebar renders — sees the same
 // per-session override instead of the agent's YAML default.
 func (d *sessionDriver) scopeModels(ctx context.Context) context.Context {
+	ctx = d.scopeTeamEnvironment(ctx)
 	binding := d.activeBinding()
 	return agent.WithContextModels(ctx, binding.agentName, binding.models)
 }
@@ -838,7 +848,7 @@ func (d *sessionDriver) beginReclaimLocked() bool {
 		return false
 	}
 
-	if d.reclaiming || d.stopped || d.viewDormant || d.reportRetry != nil || d.running() || d.starting() || d.settling() || d.retryRunning || d.skillOperationID != "" || len(d.pending) != 0 || len(d.steering) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
+	if d.reclaiming || d.stopped || d.viewDormant || d.reportRetry != nil || d.running() || d.starting() || d.settling() || d.retryRunning || d.skillOperationID != "" || d.backgroundWorks != 0 || len(d.pending) != 0 || len(d.interactions) != 0 || d.events.HasSubscribers(d.sessionIDLocked()) {
 		return false
 	}
 	d.reclaiming = true
@@ -894,6 +904,7 @@ func (d *sessionDriver) StopAllForDelete() bool {
 
 func (d *sessionDriver) stopAll(deleting bool) bool {
 	active := d.requestStop(deleting)
+	d.cancelAllBackgroundWorks()
 	_ = d.awaitStop(context.WithoutCancel(d.r.lifetime()))
 	return active
 }
@@ -1102,6 +1113,7 @@ func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, si
 	var scratch *session.Session
 	var operationCtx context.Context
 	var cancel context.CancelFunc
+	var operationEnv *TeamEnvironmentLease
 	err := d.ownerCall(ctx, func() error {
 		if err := d.admitLocked(SessionOperationCompact); err != nil {
 			return err
@@ -1138,10 +1150,47 @@ func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, si
 	if running {
 		return nil
 	}
+	if d.r.teamEnvironments != nil {
+		d.mu.Lock()
+		pinned := d.teamEnvironment
+		d.mu.Unlock()
+		if pinned == nil {
+			_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+				d.compactReserved = false
+				d.leave(sessionStarting)
+				d.signalStartDoneLocked()
+				d.closeSettledLocked()
+				return nil
+			})
+			cancel()
+			d.wg.Done()
+			return errors.New("session environment is not pinned")
+		}
+		var acquireErr error
+		operationEnv, acquireErr = d.r.teamEnvironments.Acquire(pinned.Environment().RevisionID())
+		if acquireErr != nil {
+			_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+				d.compactReserved = false
+				d.leave(sessionStarting)
+				d.signalStartDoneLocked()
+				d.closeSettledLocked()
+				return nil
+			})
+			cancel()
+			d.wg.Done()
+			return acquireErr
+		}
+	}
 	go func() {
 		defer d.wg.Done()
 		defer cancel()
+		if operationEnv != nil {
+			defer func() { _ = operationEnv.Release(context.WithoutCancel(operationCtx)) }()
+		}
 		workerCtx := context.WithValue(operationCtx, compactionIdentityKey{}, compactionIdentity{d, operation})
+		if operationEnv != nil {
+			workerCtx = context.WithValue(workerCtx, teamEnvironmentContextKey{}, operationEnv.Environment())
+		}
 		d.r.runLiveCompactionRequest(d.scopeModels(workerCtx), scratch, liveCompactionRequest{additionalPrompt: additionalPrompt, events: sink})
 		var callbacks []func()
 		wake := false
@@ -1155,7 +1204,8 @@ func (d *sessionDriver) compact(ctx context.Context, additionalPrompt string, si
 			d.lastActive = time.Now()
 			d.signalStartDoneLocked()
 			d.closeSettledLocked()
-			wake = !d.stopped && len(d.pending) != 0
+			d.refreshSteeringLocked()
+			wake = !d.stopped && d.pendingWakeableLocked()
 			callbacks = d.settledCallbacksLocked()
 			return nil
 		})
@@ -1269,7 +1319,7 @@ func (d *sessionDriver) tryStart(ctx context.Context) (context.Context, uint64, 
 // a running generation. Promotion failure leaves the FIFO intact and no
 // provider call can begin.
 func (d *sessionDriver) prepareStart(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
-	return d.prepareStartAdmissionLocked(ctx, wake)
+	return d.prepareStartReservation(ctx, wake, false)
 }
 
 func (d *sessionDriver) prepareStartAdmissionLocked(ctx context.Context, wake bool) (context.Context, uint64, []func(), error) {
@@ -1352,6 +1402,11 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 		return nil, 0, nil, err
 	}
+	if d.r.teamEnvironments != nil && !continuation {
+		if err := d.pinCurrentTeamEnvironment(ctx); err != nil {
+			return fail(err)
+		}
+	}
 	if gate != nil {
 		if err := gate(); err != nil {
 			if d.finishCanceledStart() {
@@ -1393,6 +1448,21 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 	var runCtx context.Context
 	var generation uint64
 	var callbacks []func()
+	var runEnv *TeamEnvironmentLease
+	if d.r.teamEnvironments != nil {
+		var pinned *TeamEnvironmentLease
+		if err := d.ownerCall(ctx, func() error { pinned = d.teamEnvironment; return nil }); err != nil {
+			return fail(err)
+		}
+		if pinned == nil {
+			return fail(errors.New("session environment is not pinned"))
+		}
+		var acquireErr error
+		runEnv, acquireErr = d.r.teamEnvironments.Acquire(pinned.Environment().RevisionID())
+		if acquireErr != nil {
+			return fail(acquireErr)
+		}
+	}
 	err = d.ownerCall(ctx, func() error {
 		if d.r.subagents != nil {
 			if err := d.r.subagents.sessionAdmissionError(d.identityID); err != nil {
@@ -1414,6 +1484,7 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		}
 		d.generation++
 		generation = d.generation
+		d.runEnvironment = runEnv
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithCancel(ctx) //nolint:fatcontext // owner transfers generation cancellation to execution worker
 		stopLifetime := context.AfterFunc(d.r.lifetime(), cancel)
@@ -1425,6 +1496,9 @@ func (d *sessionDriver) prepareStartReservation(ctx context.Context, wake, conti
 		return nil
 	})
 	if err != nil {
+		if runEnv != nil {
+			_ = runEnv.Release(context.WithoutCancel(ctx))
+		}
 		if d.finishCanceledStart() {
 			return nil, 0, nil, context.Canceled
 		}
@@ -1452,7 +1526,6 @@ func (d *sessionDriver) driveToOutNoClose(ctx context.Context, generation uint64
 func (d *sessionDriver) driveToOutGeneration(ctx context.Context, generation uint64, out chan Event) (context.Context, uint64, bool) {
 	var runErr string
 	cancelled := false
-	ctx = d.scopeModels(ctx)
 	ctx, scratch, err := d.executionContext(ctx, generation)
 	if err != nil {
 		return d.finishRun(generation, err.Error())
@@ -1497,7 +1570,6 @@ func (d *sessionDriver) driveWake(ctx context.Context, generation uint64) {
 
 func (d *sessionDriver) driveWakeGeneration(ctx context.Context, generation uint64) (context.Context, uint64, bool) {
 	var runErr string
-	ctx = d.scopeModels(ctx)
 	ctx, scratch, err := d.executionContext(ctx, generation)
 	if err != nil {
 		return d.finishRun(generation, err.Error())
@@ -1534,7 +1606,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 		if generation != d.generation || generation <= d.settledGeneration || d.completionInFlight {
 			return nil
 		}
-		if runErr == "" && !d.cancelling() && !d.stopped && !d.settling() && d.hasSteeringLocked() {
+		if runErr == "" && !d.cancelling() && !d.stopped && !d.settling() && d.hasGuidanceLocked() {
 			previousCancel = d.cancel
 			continuation, d.cancel = context.WithCancel(d.r.lifetime()) //nolint:fatcontext // independently rooted successor generation
 			return nil
@@ -1583,6 +1655,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 	var firstCompletionFailure bool
 	var callbacks []func()
 	var successor bool
+	var teamEditStop bool
 	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
 		d.completionInFlight = false
 		if completionErr != nil {
@@ -1594,6 +1667,8 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 			return nil
 		}
 		completedCancel = d.cancel
+		teamEditStop = d.teamEditStopPending
+		d.teamEditStopPending = false
 		d.phase = sessionIdle
 		d.settledGeneration, d.completionErr, d.persistenceFailure, d.lastFailureKey = generation, nil, nil, ""
 		d.resolveInteractionsLocked()
@@ -1601,12 +1676,7 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 			d.events.PublishForRequest(d.identityID, turnID, &TurnSettledEvent{AgentContext: newAgentContext(d.AgentNameLocked()), Type: "turn_settled", SessionID: d.identityID, TurnID: turnID, Outcome: outcome})
 		}
 		d.completeTurnLocked(turnID)
-		if len(d.steering) != 0 {
-			d.pending = append(d.steering, d.pending...)
-			d.steering = nil
-			d.refreshSteeringLocked()
-		}
-		successor = !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0
+		successor = !teamEditStop && !d.stopped && d.r.lifetime().Err() == nil && len(d.pending) > 0
 		if successor {
 			d.phase = sessionStarting
 		}
@@ -1629,6 +1699,9 @@ func (d *sessionDriver) finishRunContext(ctx context.Context, generation uint64,
 			d.r.sessionDrivers.signalWork()
 		}
 		return nil, 0, false
+	}
+	if !successor {
+		d.releaseRunEnvironment(ctx, generation)
 	}
 	if successor {
 		nextCtx, nextGeneration, started, err := d.prepareStartReservation(d.r.lifetime(), true, true)
@@ -1693,10 +1766,10 @@ func (d *sessionDriver) replaceSession(sess *session.Session) error {
 		if d.stopped || d.ioSealed {
 			return ErrSessionStopped
 		}
-		if d.running() || d.starting() || d.settling() || len(d.pending) != 0 || len(d.steering) != 0 || d.ioReservations != 0 || d.compactReserved || d.editReserved || d.switchReserved || d.skillOperationID != "" || d.retryRunning || d.completionInFlight || len(d.interactions) != 0 || d.pauseCh != nil {
+		if d.running() || d.starting() || d.settling() || len(d.pending) != 0 || d.backgroundWorks != 0 || d.ioReservations != 0 || d.compactReserved || d.editReserved || d.switchReserved || d.skillOperationID != "" || d.retryRunning || d.completionInFlight || len(d.interactions) != 0 || d.pauseCh != nil {
 			return &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, Operation: "replace_settled_session"}
 		}
-		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName || next.AttributesSnapshot()[SessionAgentAttribute] != d.sess.AttributesSnapshot()[SessionAgentAttribute] {
+		if next.ID != d.identityID || next.ParentID != d.identityParent || next.AsyncSubagent != d.identityAsync || d.sess == nil || next.AgentName != d.sess.AgentName || next.AgentID != d.sess.AgentID || next.AttributesSnapshot()[SessionAgentAttribute] != d.sess.AttributesSnapshot()[SessionAgentAttribute] {
 			return &SessionError{Kind: SessionErrorInvalid, SessionID: d.identityID, Operation: "replace_pinned_session"}
 		}
 		if next.AgentModelOverrides[next.AgentName] != d.sess.AgentModelOverrides[d.sess.AgentName] {
@@ -1767,16 +1840,14 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 	if _, withdrawn := d.withdrawnInputs[msg.RequestID]; withdrawn {
 		return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.identityID, RequestID: msg.RequestID, Operation: "submit", Detail: "input identity was withdrawn"}
 	}
-	for lane, queue := range [][]QueuedMessage{d.pending, d.steering} {
-		for _, queued := range queue {
-			if queued.RequestID != msg.RequestID {
-				continue
-			}
-			if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || queued.ReportOutcome != msg.ReportOutcome || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
-				return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
-			}
-			return true, lane == 0, nil
+	for _, queued := range d.pending {
+		if queued.RequestID != msg.RequestID {
+			continue
 		}
+		if normalizedInputOrigin(queued.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || queued.SenderID != msg.SenderID || queued.SenderName != msg.SenderName || queued.ReportOutcome != msg.ReportOutcome || inputMode(queued.InputMode) != inputMode(msg.InputMode) || queued.Retry != msg.Retry || queued.Content != msg.Content || !reflect.DeepEqual(queued.MultiContent, msg.MultiContent) {
+			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
+		}
+		return true, d.queuedAtAdmissionLocked(queued), nil
 	}
 	if d.recentRetries[msg.RequestID] {
 		if !msg.Retry {
@@ -1801,7 +1872,7 @@ func (d *sessionDriver) existingInputLocked(msg QueuedMessage) (bool, bool, erro
 		if normalizedInputOrigin(item.Message.InputOrigin) != normalizedInputOrigin(msg.InputOrigin) || item.Message.SenderID != msg.SenderID || item.Message.SenderName != msg.SenderName || item.Message.ReportOutcome != msg.ReportOutcome || item.Message.Message.Content != msg.Content || !reflect.DeepEqual(item.Message.Message.MultiContent, msg.MultiContent) || msg.Retry {
 			return false, false, &SessionError{Kind: SessionErrorConflict, SessionID: d.sessionIDLocked(), RequestID: msg.RequestID, Operation: "submit"}
 		}
-		return true, item.Message.Pending, nil
+		return true, item.Message.Pending && d.queuedAtAdmissionLocked(msg), nil
 	}
 	return false, false, nil
 }
@@ -1835,4 +1906,48 @@ func (d *sessionDriver) publishPersistenceFailureLocked(err error) {
 		return
 	}
 	d.events.PublishForRequest(d.sessionIDLocked(), d.activeRequestID, ErrorForSession(d.sessionIDLocked(), "Session persistence failed; accepted work is retained and new turns are blocked until storage recovers: "+err.Error()))
+}
+
+// Legacy headless follow-ups alone remain dormant while idle; ordinary inputs
+// may wake the mailbox and the run still starts from its FIFO head.
+func (d *sessionDriver) pendingWakeableLocked() bool {
+	if d.compactReserved {
+		return false
+	}
+	for _, msg := range d.pending {
+		if msg.InputMode != "legacy_followup" {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *sessionDriver) stopGenerationAfterTeamEdit(ctx context.Context, generation uint64) error {
+	var cancel context.CancelFunc
+	err := d.ownerCall(ctx, func() error {
+		if d.generation != generation || d.stopped {
+			return ErrSessionStopped
+		}
+		d.teamEditStopPending = true
+		if d.cancel != nil {
+			cancel = d.cancel
+		}
+		return nil
+	})
+	if cancel != nil {
+		cancel()
+	}
+	return err
+}
+
+func (d *sessionDriver) consumeTeamEditStop(ctx context.Context) bool {
+	stop := false
+	_ = d.ownerCall(ctx, func() error {
+		if d.teamEditStopPending {
+			stop = true
+			d.teamEditStopPending = false
+		}
+		return nil
+	})
+	return stop
 }

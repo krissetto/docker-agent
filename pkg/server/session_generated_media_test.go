@@ -53,12 +53,13 @@ func TestGeneratedMediaHTTPLocalRemoteLiveReplayParity(t *testing.T) {
 	var pngData bytes.Buffer
 	require.NoError(t, png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 2, 1))))
 	store := session.NewInMemorySessionStore()
-	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(generatedHTTPProvider{data: pngData.Bytes()})))), runtime.WithSessionStore(store))
+	workspace := t.TempDir()
+	rt, err := runtime.NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "prompt", agent.WithModel(generatedHTTPProvider{data: pngData.Bytes()})))), runtime.WithSessionStore(store), runtime.WithWorkingDir(workspace))
 	require.NoError(t, err)
 	supervisor := runtime.NewSessionRuntimeSupervisor(rt)
 	t.Cleanup(func() { require.NoError(t, supervisor.Shutdown(context.WithoutCancel(t.Context()))) })
 	sess := session.New(session.WithID("media-owner"))
-	sess.WorkingDir = t.TempDir()
+	sess.WorkingDir = workspace
 	local, err := rt.CreateSession(t.Context(), sess, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	manager := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{}, WithSessionRuntime(supervisor.Runtime()))
@@ -106,7 +107,7 @@ func TestGeneratedMediaHTTPLocalRemoteLiveReplayParity(t *testing.T) {
 	defer replay.Cancel()
 	require.NotEmpty(t, replay.Primary().Session.Messages)
 	branch := session.New(session.WithID("media-branch"))
-	branch.WorkingDir = t.TempDir()
+	branch.WorkingDir = workspace
 	branch.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, MultiContent: added.GeneratedMedia}))
 	_, err = rt.CreateSession(t.Context(), branch, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
@@ -116,7 +117,7 @@ func TestGeneratedMediaHTTPLocalRemoteLiveReplayParity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, localData.Data, inherited.Data)
 	foreign := session.New(session.WithID("foreign"))
-	foreign.WorkingDir = t.TempDir()
+	foreign.WorkingDir = workspace
 	_, err = rt.CreateSession(t.Context(), foreign, runtime.SessionBinding{AgentName: "root"})
 	require.NoError(t, err)
 	foreignRemote, err := transport.SessionByID(foreign.ID)

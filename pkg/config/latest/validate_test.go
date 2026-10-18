@@ -197,6 +197,8 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "blocked_domains on non-fetch", toolset: Toolset{Type: "shell", BlockedDomains: []string{"example.com"}}, wantErr: "blocked_domains can only be used with type 'fetch'"},
 		{name: "allow_private_ips on wrong type", toolset: Toolset{Type: "shell", AllowPrivateIPs: new(true)}, wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets"},
 		{name: "sudo_askpass on non-shell", toolset: Toolset{Type: "fetch", SudoAskpass: new(true)}, wantErr: "sudo_askpass can only be used with type 'shell'"},
+		{name: "background_after on non-shell", toolset: Toolset{Type: "fetch", BackgroundAfter: new(2)}, wantErr: "background_after can only be used with type 'shell'"},
+		{name: "negative background_after", toolset: Toolset{Type: "shell", BackgroundAfter: new(-1)}, wantErr: "background_after must not be negative"},
 		{name: "recall on non-background_jobs", toolset: Toolset{Type: "shell", Recall: new(true)}, wantErr: "recall can only be used with type 'background_jobs'"},
 		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}, wantErr: "allowed_domains and blocked_domains are mutually exclusive"},
 		{name: "invalid allowed_domains pattern", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"foo.*"}}, wantErr: `allowed_domains[0] "foo.*" is invalid`},
@@ -225,6 +227,10 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if tt.wantErr == "" {
+				require.NoError(t, tt.toolset.validate())
+				return
+			}
 			require.ErrorContains(t, tt.toolset.validate(), tt.wantErr)
 		})
 	}
@@ -744,4 +750,21 @@ func TestStructuredOutputToolMode(t *testing.T) {
 	require.False(t, (&StructuredOutput{}).ToolMode())
 	require.False(t, (&StructuredOutput{Mode: StructuredOutputModeNative}).ToolMode())
 	require.True(t, (&StructuredOutput{Mode: StructuredOutputModeTool}).ToolMode())
+}
+
+func TestStableIdentityValidation(t *testing.T) {
+	t.Parallel()
+	valid := &Config{ID: "team-v1", Agents: Agents{{Name: "writer", ID: "agent-writer"}, {Name: "reviewer"}}}
+	require.NoError(t, valid.Validate())
+	for name, cfg := range map[string]*Config{
+		"duplicate IDs":        {Agents: Agents{{Name: "one", ID: "same"}, {Name: "two", ID: "same"}}},
+		"ID collides with key": {Agents: Agents{{Name: "one", ID: "two"}, {Name: "two"}}},
+		"whitespace":           {Agents: Agents{{Name: "one", ID: " has space "}}},
+		"control":              {ID: "team\nsecret", Agents: Agents{{Name: "one"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Error(t, cfg.Validate())
+		})
+	}
 }

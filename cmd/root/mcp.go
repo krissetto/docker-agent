@@ -78,6 +78,9 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"mcp"}, args...), commandErr)
 	}()
 
+	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
+		return err
+	}
 	if f.attach != "" || f.attachAddress != "" || f.attachSession != "" {
 		if len(args) != 0 {
 			return errors.New("agent file cannot be used with attachment")

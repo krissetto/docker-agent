@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	bgagent "github.com/docker/docker-agent/pkg/tools/builtin/agent"
@@ -57,6 +58,7 @@ func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[subagent.ToolSendMessage] = r.handleSendMessage
 	r.toolMap[subagent.ToolReadSubagent] = r.handleReadSubagent
 	r.toolMap[subagent.ToolStopSubagent] = r.handleStopSubagent
+	r.toolMap[subagent.ToolListAgents] = r.handleListAgents
 
 	r.toolMap[bgagent.ToolNameRunBackgroundAgent] = r.handleBackgroundRun
 	r.toolMap[bgagent.ToolNameListBackgroundAgents] = r.handleBackgroundList
@@ -93,11 +95,26 @@ func initialUserPrompt(sess *session.Session) (QueuedMessage, int, bool) {
 // user_prompt_submit hook. Steered/detached messages are handled separately by
 // drainAndEmitSteered so their hook path remains user_steering_messages_submit.
 func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) (contextMsgs []chat.Message, stop bool) {
-	prompt, position, ok := initialUserPrompt(sess)
-	if !ok {
+	prompt, ok := r.initialTurnInput(sess)
+	if !ok || prompt.Retry {
 		return nil, false
 	}
-	accepted := prompt.AcceptedPosition == position
+	position := -1
+	accepted := false
+	for i, item := range sess.ItemsSnapshot() {
+		if item.Message != nil && item.Message.TurnID == prompt.RequestID {
+			position = i
+			accepted = item.Message.Accepted
+			break
+		}
+	}
+	if position < 0 {
+		_, position, ok = initialUserPrompt(sess)
+	}
+	if !ok || position < 0 {
+		return nil, false
+	}
+	accepted = accepted || prompt.AcceptedPosition == position
 	if !accepted {
 		events.Emit(inputEventMetadata(UserMessage(prompt.Content, sess.ID, prompt.MultiContent, position), prompt))
 	}
@@ -107,9 +124,12 @@ func (r *LocalRuntime) emitInitialUserPrompt(ctx context.Context, sess *session.
 	var stopRun bool
 	var msg string
 	var ctxMsgs []chat.Message
-	if prompt.InputMode == "followup" || prompt.InputMode == "legacy_followup" {
+	switch {
+	case prompt.guidance():
+		stopRun, msg, ctxMsgs = r.executeUserSteeringMessagesSubmitHooks(ctx, sess, a, []string{prompt.Content}, events)
+	case prompt.InputMode == "followup" || prompt.InputMode == "legacy_followup":
 		stopRun, msg, ctxMsgs = r.executeUserFollowupSubmitHooks(ctx, sess, a, prompt.Content, events)
-	} else {
+	default:
 		stopRun, msg, ctxMsgs = r.executeUserPromptSubmitHooks(ctx, sess, a, prompt.Content, events)
 	}
 	if stopRun {
@@ -303,7 +323,7 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // close, not on receiving StreamStopped, as the one guaranteed terminal
 // signal.
 func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.Session, reason string, events chan Event) {
-	a := r.resolveSessionAgent(sess)
+	a := r.resolveSessionAgentContext(ctx, sess)
 
 	if ctx.Err() != nil && reason == "" {
 		reason = turnEndReasonCanceled
@@ -346,7 +366,6 @@ func (r *LocalRuntime) streamStoppedTimeout() time.Duration {
 // compatibility event stream used only by runtime internals and package tests.
 // Every local session executes through its initialized stable-ID session.
 func (r *LocalRuntime) runExecution(ctx context.Context, sess *session.Session) <-chan Event {
-	r.rootBudget(sess)
 	driver, err := r.sessionDrivers.GetInitialized(ctx, sess)
 	if err != nil {
 		out := make(chan Event, 1)
@@ -394,7 +413,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		ManagedOAuth:              r.managedOAuth,
 		UnmanagedOAuthRedirectURI: r.unmanagedOAuthRedirectURI,
 		OAuthSuccess: func() {
-			nonBlocking(sink).Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgent(sess).Name()))
+			nonBlocking(sink).Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgentContext(ctx, sess).Name()))
 		},
 	})
 	r.telemetry.RecordSessionStart(ctx, r.sessionAgentName(sess), sess.ID)
@@ -468,7 +487,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	defer r.subscribePlanChanges(sess, sink)()
 	defer r.subscribeRAGChanges(sess, sink)()
 
-	a := r.resolveSessionAgent(sess)
+	a := r.resolveSessionAgentContext(ctx, sess)
 
 	// session_start fires once per RunStream. Its AdditionalContext
 	// (typically the AddEnvironmentInfo env block) is held as transient
@@ -488,14 +507,14 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 
 	// Emit team information
-	sink.Emit(TeamInfo(r.agentDetailsFromTeam(ctx), a.Name()))
+	sink.Emit(TeamInfo(r.agentDetailsFromTeamForContext(ctx), a.Name()))
 
 	// Surface the run budget from the first frame, before any model call,
 	// so the configured ceilings are visible immediately rather than only
 	// after the first priced turn. A run that fails on its very first call
 	// (e.g. a bad API key) still shows its budget was active.
-	if b := r.rootBudget(sess); b != nil {
-		sink.Emit(BudgetUsage(sess.ID, a.Name(), b.snapshot()))
+	if usage := r.budgetUsageForContext(ctx, sess, a.Name()); len(usage) != 0 {
+		sink.Emit(BudgetUsage(sess.ID, a.Name(), usage))
 	}
 
 	r.emitAgentWarnings(a, sink)
@@ -508,7 +527,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 	agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-	agentTools = r.filterSessionDelegationTools(sess, a.FilterTools(addAsyncChildTools(sess, agentTools)))
+	agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools))))
 
 	// Record the catalogue size on the session span — answers "how
 	// many tools could this turn actually use?" without having to
@@ -572,7 +591,11 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// between the snapshot and ApplyCompaction.
 		r.runOwnerQueuedCompaction(ctx, sess)
 
-		a = r.resolveSessionAgent(sess)
+		a = r.resolveSessionAgentContext(ctx, sess)
+		if a == nil {
+			sink.Emit(ErrorForSession(sess.ID, "active agent identity is unavailable in the captured team environment"))
+			return
+		}
 		if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok {
 			if driver, found := r.sessionDrivers.Lookup(sess.ID); found && identity.driver == driver {
 				ctx = driver.scopeModels(ctx) //nolint:fatcontext // refresh the canonical binding at the handoff boundary
@@ -601,7 +624,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
-		agentTools = r.filterSessionDelegationTools(sess, a.FilterTools(addAsyncChildTools(sess, agentTools)))
+		agentTools = r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(addListAgentsTool(sess, a, addAsyncChildTools(sess, agentTools))))
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -618,7 +641,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// Check the run budget. Placed next to the iteration cap because
 		// both are "should this run keep going" questions answered at the
 		// turn boundary, before a model call is paid for.
-		if r.enforceBudget(ctx, sess, a, sink) == iterationStop {
+		if r.enforceBudgetForContext(ctx, sess, a, sink) == iterationStop {
 			streamReason = turnEndReasonBudgetExceeded
 			return
 		}
@@ -976,7 +999,7 @@ func (r *LocalRuntime) runTurn(
 	// bills or what after_llm_call reports. Sub-sessions reach the root
 	// run's tracker here, which is how delegated spend lands on the
 	// parent's budget. The turn's duration is attributed to this agent.
-	r.recordBudget(sess, a, res.Usage, msgCost, r.now().Sub(turnStart), events)
+	r.recordBudgetForContext(ctx, sess, a, res.Usage, msgCost, r.now().Sub(turnStart), events)
 
 	// after_llm_call hooks fire on success only; failed calls
 	// fire on_error above. The assistant text content is passed
@@ -1055,6 +1078,10 @@ func (r *LocalRuntime) runTurn(
 		r.subagents.updateSessionMetrics(sess, int64(len(dispatchCalls)))
 	}
 	stopRun, stopMsg := r.processToolCalls(ctx, sess, dispatchCalls, agentTools, events)
+	if driver, ok := r.sessionDrivers.Lookup(sess.ID); ok && driver.consumeTeamEditStop(ctx) {
+		ls.exitReason = turnEndReasonNormal
+		return turnExit
+	}
 
 	// post_tool_use hook signalled run termination via a deny
 	// verdict (decision="block" / continue=false / exit 2).
@@ -1746,8 +1773,17 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 		defer func() { events.Emit(MCPInitFinished(a.Name())) }()
 	}
 
-	agentTools, err := a.Tools(ctx)
+	teams := r.teamForContext(ctx, sess)
+	toolAgent := a
+	if teams != nil && teams != r.team {
+		if current, err := r.resolveSessionAgentContext(ctx, sess), error(nil); err == nil && current != nil {
+			toolAgent = current
+		}
+	}
+	toolCtx := todotool.WithBindings(ctx, r.todoBindingsForTeam(teams))
+	agentTools, err := toolAgent.Tools(toolCtx)
 	if err == nil {
+		agentTools = append(agentTools, r.teamEditDefinitions(ctx, sess, toolAgent)...)
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 		agentTools = r.skillSubSessionTools(ctx, sess, a, agentTools)
 		// Tool-mode structured output rides on the same error path: a name
@@ -1764,7 +1800,7 @@ func (r *LocalRuntime) getTools(ctx context.Context, sess *session.Session, a *a
 	}
 
 	slog.DebugContext(ctx, "Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
-	return r.filterSessionDelegationTools(sess, a.FilterTools(agentTools)), nil
+	return r.filterSessionDelegationToolsContext(ctx, sess, a.FilterTools(agentTools)), nil
 }
 
 // configureToolsetHandlers installs stable operation-scoped dispatchers.
@@ -1777,9 +1813,15 @@ func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent) {
 // subscribeRAGChanges owns progress subscriptions for the duration of this stream.
 func (r *LocalRuntime) subscribeRAGChanges(sess *session.Session, events EventSink) func() {
 	toolsets := slices.Clone(sess.ExtraToolSets)
-	for _, name := range r.team.AgentNames() {
-		if a, err := r.team.Agent(name); err == nil {
-			toolsets = append(toolsets, a.ToolSets()...)
+	teams := []*team.Team{r.teamForSession(sess)}
+	for _, tm := range teams {
+		if tm == nil {
+			continue
+		}
+		for _, name := range tm.AgentNames() {
+			if a, err := tm.Agent(name); err == nil {
+				toolsets = append(toolsets, a.ToolSets()...)
+			}
 		}
 	}
 	seen := make(map[notifierIdentity]struct{})
@@ -1836,9 +1878,15 @@ func (r *LocalRuntime) subscribePlanChanges(sess *session.Session, events EventS
 	}
 
 	toolsets := slices.Clone(sess.ExtraToolSets)
-	for _, name := range r.team.AgentNames() {
-		if a, err := r.team.Agent(name); err == nil {
-			toolsets = append(toolsets, a.ToolSets()...)
+	teams := []*team.Team{r.teamForSession(sess)}
+	for _, tm := range teams {
+		if tm == nil {
+			continue
+		}
+		for _, name := range tm.AgentNames() {
+			if a, err := tm.Agent(name); err == nil {
+				toolsets = append(toolsets, a.ToolSets()...)
+			}
 		}
 	}
 
@@ -1926,13 +1974,26 @@ func addAsyncChildTools(sess *session.Session, agentTools []tools.Tool) []tools.
 	if sess == nil || !sess.AsyncSubagent {
 		return agentTools
 	}
-	for _, tool := range agentTools {
-		if tool.Name == subagent.ToolSendMessage {
-			return agentTools
-		}
-	}
 	for _, tool := range subagent.Definitions() {
 		if tool.Name == subagent.ToolSendMessage {
+			if !slices.ContainsFunc(agentTools, func(existing tools.Tool) bool { return existing.Name == tool.Name }) {
+				agentTools = append(agentTools, tool)
+			}
+			break
+		}
+	}
+	return agentTools
+}
+
+func addListAgentsTool(sess *session.Session, a *agent.Agent, agentTools []tools.Tool) []tools.Tool {
+	if (sess == nil || !sess.AsyncSubagent) && (a == nil || !a.HasAsyncSubagents()) {
+		return agentTools
+	}
+	if slices.ContainsFunc(agentTools, func(existing tools.Tool) bool { return existing.Name == subagent.ToolListAgents }) {
+		return agentTools
+	}
+	for _, tool := range subagent.Definitions() {
+		if tool.Name == subagent.ToolListAgents {
 			return append(agentTools, tool)
 		}
 	}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 )
 
@@ -151,4 +153,72 @@ func TestRootImageMarkersRespectModalOcclusionAndTerminalEdges(t *testing.T) {
 	require.NotContains(t, frame, "cagent-image;")
 	frame = composeRootLayers([]*lipgloss.Layer{base, lipgloss.NewLayer("outside").X(14).Z(1)}, 24, 10)
 	require.Contains(t, frame, "cagent-image;", "uncovered image retains its complete horizontal extent")
+}
+
+func TestNotificationLayersPreserveUnderlyingCellsOutsideCards(t *testing.T) {
+	for _, width := range []int{100, 24, 8} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			height := 50
+			n := notification.New()
+			n.SetSize(width, height)
+			for _, text := range []string{strings.Repeat("long 界 ", 20), "x", "another long notification"} {
+				n.Update(notification.ShowMsg{Text: text})
+			}
+			cards := n.GetLayers()
+			stackHeight := 0
+			for _, card := range cards {
+				stackHeight += card.Height()
+			}
+			height = max(height, stackHeight+4)
+			n.SetSize(width, height)
+			cards = n.GetLayers()
+			require.Len(t, cards, 3)
+			require.Less(t, cards[1].Width(), cards[0].Width())
+			base := strings.TrimSuffix(strings.Repeat("\x1b[48;2;12;34;56m"+strings.Repeat("#", width)+"\x1b[m\n", height), "\n")
+			layers := append([]*lipgloss.Layer{lipgloss.NewLayer(base)}, cards...)
+			frame := strings.Split(composeRootLayers(layers, width, height), "\n")
+			background := strings.Split(base, "\n")
+			for y, line := range frame {
+				cells, underlying := chromeCells(line), chromeCells(background[y])
+				for x := range width {
+					covered := false
+					for _, card := range cards {
+						covered = covered || (x >= card.GetX() && x < card.GetX()+card.Width() && y >= card.GetY() && y < card.GetY()+card.Height())
+					}
+					if !covered {
+						require.Equal(t, underlying[x], cells[x], "background at (%d,%d)", x, y)
+					}
+				}
+			}
+			short := cards[1]
+			if short.GetX() > 0 && short.GetX() < width {
+				require.Equal(t, "#", chromeCells(frame[short.GetY()])[short.GetX()-1].glyph)
+				require.NotEqual(t, "#", chromeCells(frame[short.GetY()])[short.GetX()].glyph)
+			}
+		})
+	}
+}
+
+func TestRootNotificationCompositionUsesIndependentCards(t *testing.T) {
+	for _, lean := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lean-%t", lean), func(t *testing.T) {
+			root, _, _ := frozenClockRoot(t, 100, 40)
+			root.leanMode = lean
+			root.viewCacheValid = false
+			base := strings.Split(root.View().Content, "\n")
+			for _, text := range []string{"long notification above", "x", "long notification below"} {
+				root.Update(notification.ShowMsg{Text: text})
+			}
+			frame := strings.Split(root.View().Content, "\n")
+			cards := root.notification.GetLayers()
+			for _, card := range cards {
+				for offset, line := range strings.Split(card.GetContent(), "\n") {
+					y := card.GetY() + offset
+					actual := chromeCells(frame[y])
+					require.Equal(t, chromeCells(line), actual[card.GetX():card.GetX()+card.Width()])
+					require.Equal(t, chromeCells(base[y])[:card.GetX()], actual[:card.GetX()], "underlying UI alongside card")
+				}
+			}
+		})
+	}
 }

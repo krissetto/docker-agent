@@ -145,7 +145,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 		events, drained := correlatedSessionEvents(eventsCtx, ownedTurn)
 		defer func() {
 			cancelEvents()
-			runErr = errors.Join(runErr, <-drained)
+			runErr = errors.Join(runErr, <-drained, ctx.Err())
 		}()
 
 		if cfg.OutputJSON {
@@ -170,6 +170,10 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 					default: // maxIterStop or maxIterPrompt (no interactive prompt in JSON mode)
 						_ = handle.Respond(ctx, runtime.InteractionResponse{InteractionID: envelope.InteractionID, Kind: runtime.InteractionMaxIterations, Resume: runtime.ResumeReject("")})
 						return nil
+					}
+				case *runtime.PendingUserMessageAcceptedEvent:
+					if e.ReportOutcome == sessionpkg.ReportOutcomeFailed {
+						lastErr = fmt.Errorf("%s", e.Message)
 					}
 				case *runtime.ErrorEvent:
 					return fmt.Errorf("%s", e.Error)
@@ -251,6 +255,10 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.CommandSource
 				// reasoning / an empty response) in non-TUI runs, where they would
 				// otherwise be dropped. The TUI renders these as notifications.
 				out.PrintWarning(e.Message)
+			case *runtime.PendingUserMessageAcceptedEvent:
+				if e.ReportOutcome == sessionpkg.ReportOutcomeFailed {
+					lastErr = fmt.Errorf("%s", e.Message)
+				}
 			case *runtime.ErrorEvent:
 				lowerErr := strings.ToLower(e.Error)
 				if strings.Contains(lowerErr, "context cancel") && ctx.Err() != nil { // treat Ctrl+C cancellations as non-errors
@@ -392,7 +400,7 @@ func correlatedSessionEvents(ctx context.Context, ownedTurn *turn.Turn) (<-chan 
 	go func() {
 		defer close(drained)
 		defer close(out)
-		termination := ownedTurn.Consume(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
+		termination := ownedTurn.ConsumeWorkflow(ctx, func(_ context.Context, envelope runtime.SessionEvent) (runtimeclient.TurnDecision, error) {
 			select {
 			case out <- sessionEvent{SessionEvent: envelope}:
 				return runtimeclient.TurnContinue, nil

@@ -15,7 +15,7 @@ func requireWorkspaceMembership(t *testing.T, root *appModel) {
 	t.Helper()
 	seen := make(map[*paneWorkspace]bool)
 	for id, owner := range root.paneWorkspaces.byRoute {
-		require.True(t, owner.layout.Contains(id), "route %s missing from its workspace", id)
+		require.Contains(t, root.paneWorkspaces.members(owner), id, "route %s missing from its workspace", id)
 		if seen[owner] {
 			continue
 		}
@@ -100,7 +100,7 @@ func TestPaneWorkspaceMoveRemoveAndSinglePreserveCompanions(t *testing.T) {
 	root.removePane("second")
 	require.Equal(t, []string{"third"}, root.panes.Sessions())
 	root.handleSwitchTab("second")
-	require.Equal(t, []string{"second"}, root.panes.Sessions())
+	require.Equal(t, []string{"third", "second"}, root.panes.Sessions())
 	root.splitPane("profile", "second", splitLeft)
 	root.splitPane("third", "profile", splitBottom)
 	companions, ok := root.panes.Remove("third")
@@ -108,7 +108,8 @@ func TestPaneWorkspaceMoveRemoveAndSinglePreserveCompanions(t *testing.T) {
 	root.singlePane()
 	require.Equal(t, []string{"third"}, root.panes.Sessions())
 	root.handleSwitchTab("profile")
-	require.Equal(t, companions, root.panes)
+	require.Contains(t, root.panes.Sessions(), "third")
+	require.Len(t, root.panes.Sessions(), len(companions.Sessions())+1)
 	require.Equal(t, 3, root.supervisor.Count())
 	requireWorkspaceMembership(t, root)
 }

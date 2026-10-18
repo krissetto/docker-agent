@@ -16,6 +16,8 @@ const (
 	// CapabilityRecall indicates [Runtime.Recall] can inject messages into
 	// a running agent loop.
 	CapabilityRecall Capability = "recall"
+	// CapabilityBackgroundWork indicates the host can retain shell jobs after a tool call returns.
+	CapabilityBackgroundWork Capability = "background_work"
 )
 
 // ConfirmedRun describes an action a tool has to perform on the user's machine
@@ -64,9 +66,26 @@ type Runtime interface {
 	Supports(capability Capability) bool
 }
 
+// BackgroundWork tracks an adopted process until its completion guidance has
+// been admitted and its retained environment can be released. Close must be
+// called exactly once after Complete (or when completion is intentionally
+// suppressed during session teardown).
+type BackgroundWork interface {
+	Complete(message string) error
+	Cancel()
+	Close() error
+}
+
+// BackgroundWorkRuntime is an optional capability used by tools that hand
+// a still-running process to a host-owned background-job manager.
+type BackgroundWorkRuntime interface {
+	BeginBackgroundWork(ctx context.Context) (BackgroundWork, error)
+}
+
 // ErrRecallNotSupported is returned by [Runtime.Recall] implementations that
 // cannot steer an agent loop.
 var ErrRecallNotSupported = errors.New("recall is not supported by this host")
+var ErrBackgroundWorkNotSupported = errors.New("background work is not supported by this host")
 
 // ErrConfirmationDenied is returned by [Runtime.ConfirmAndRun] when the user,
 // a permission rule or the session's safety mode refused the action.

@@ -8,10 +8,11 @@ import (
 )
 
 func (h *sessionHandle) observationPresentation(ctx context.Context, observed driverObservation) []Event {
-	if h.runtime.team == nil {
+	tm := h.runtime.teamForSession(h.driver.session())
+	if tm == nil {
 		return nil
 	}
-	a, err := h.runtime.team.Agent(observed.status.AgentName)
+	a, err := tm.Agent(observed.status.AgentName)
 	if err != nil || a == nil {
 		return nil
 	}
@@ -35,8 +36,8 @@ func (h *sessionHandle) observationPresentation(ctx context.Context, observed dr
 	}
 	info := AgentInfo(a.Name(), label, a.Description(), a.WelcomeMessage(), limit)
 	var details []AgentDetails
-	for _, name := range h.runtime.team.AgentNames() {
-		member, err := h.runtime.team.Agent(name)
+	for _, name := range tm.AgentNames() {
+		member, err := tm.Agent(name)
 		if err != nil {
 			continue
 		}

@@ -2,7 +2,6 @@ package message
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -58,10 +57,6 @@ func PrepareRender(view Model) func() *PreparedRender {
 	// Media rendering can hold terminal image state; leave that small envelope
 	// on the owner, and hand only its immutable ANSI lines to the worker.
 	media := appendAssistantMediaLines("", msg.AssistantMedia, inner)
-	prefix := ""
-	if !mv.sameAgentAsPrevious(msg) {
-		prefix = mv.senderPrefix(msg.Sender)
-	}
 	top := actionRow(inner, mv.hovered || mv.selected, types.MessageCopyLabel)
 	renderer := markdown.NewFastRenderer(inner).FreezeStyles()
 	result := PreparedRender{
@@ -79,11 +74,11 @@ func PrepareRender(view Model) func() *PreparedRender {
 		}
 		rendered, blocks = replaceMarkdownImagePlaceholders(rendered, blocks, placeholders)
 		rendered = appendRenderedAssistantMedia(rendered, media)
-		offset := strings.Count(prefix, "\n") + 1
+		offset := 1
 		for i := range blocks {
 			blocks[i].Line += offset
 		}
-		result.output = prefix + style.Width(width).Render(top+"\n"+rendered)
+		result.output = style.Width(width).Render(top + "\n" + rendered)
 		result.blocks = blocks
 		return &result
 	}

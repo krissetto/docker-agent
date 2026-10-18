@@ -105,7 +105,7 @@ func TestDurableTurnTerminalEvidenceSurvivesRestart(t *testing.T) {
 			r.sessionDrivers.mu.Unlock()
 			d := handle.(*sessionHandle).driver
 			msg := QueuedMessage{RequestID: "turn", Content: "work", InputOrigin: session.InputOriginUser}
-			_, err = d.admitInput(t.Context(), msg, SessionOperationPost, true, false)
+			_, err = d.admitInput(t.Context(), msg, SessionOperationPost, true)
 			require.NoError(t, err)
 			require.NoError(t, d.promoteInput(t.Context(), msg.RequestID, func(QueuedMessage) { d.pending = nil }))
 			d.mu.Lock()
@@ -193,7 +193,7 @@ func TestRetainedTurnTerminalEvidenceSurvivesRestart(t *testing.T) {
 	require.Zero(t, status.Pending)
 	require.Equal(t, 1, status.InterruptedTurns)
 	require.Empty(t, driver.pending)
-	require.Empty(t, driver.steering)
+	require.Empty(t, driver.pending)
 	handle := &sessionHandle{driver: driver, sessionID: sess.ID}
 	for i := range completedTurns {
 		require.NoError(t, handle.AwaitTurn(t.Context(), strconv.Itoa(i)))

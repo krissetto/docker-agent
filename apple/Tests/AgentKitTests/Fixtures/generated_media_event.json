@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "session_id": "session-demo-001",
+  "epoch": "fixture-epoch-001",
+  "sequence": 17,
+  "transcript_position": 2,
+  "event": {
+    "agent_name": "root",
+    "timestamp": "2025-01-02T03:04:05Z",
+    "type": "message_added",
+    "session_id": "session-demo-001",
+    "generated_media": [
+      {
+        "type": "document",
+        "document": {
+          "name": "chart.png",
+          "mime_type": "image/png",
+          "source": {
+            "artifact_path": "generated/chart.png",
+            "artifact_root": "workspace",
+            "artifact_owner_session_id": "session-demo-001"
+          }
+        }
+      }
+    ],
+    "session_position": 2,
+    "message_role": "assistant"
+  }
+}

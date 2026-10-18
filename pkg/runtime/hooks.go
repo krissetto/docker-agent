@@ -76,7 +76,23 @@ func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *h
 // hooksExec returns the pre-built [hooks.Executor] for a, or nil when
 // the agent has no hooks (see [buildHooksExecutors]).
 func (r *LocalRuntime) hooksExec(a *agent.Agent) *hooks.Executor {
+	return r.hooksExecForContext(nil, a)
+}
+
+func (r *LocalRuntime) hooksExecForContext(ctx context.Context, a *agent.Agent) *hooks.Executor {
 	if a == nil {
+		return nil
+	}
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		hooksCfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{AddDate: a.AddDate(), AddEnvironmentInfo: a.AddEnvironmentInfo(), AddPromptFiles: a.AddPromptFiles(), AddPromptFilesDepth: a.AddPromptFilesDepth(), RedactSecrets: a.RedactSecrets()})
+		hooksCfg = applyAutoInjectors(hooksCfg, r.autoInjectors)
+		hooksCfg = applyCacheDefault(hooksCfg, a)
+		if hooksCfg == nil {
+			return nil
+		}
+		return hooks.NewExecutorWithRegistry(hooksCfg, r.workingDir, r.env, r.hooksRegistry)
+	}
+	if r.teamEnvironments != nil {
 		return nil
 	}
 	return r.hooksExecByAgent[a.Name()]
@@ -101,7 +117,7 @@ func (r *LocalRuntime) dispatchHook(
 	input *hooks.Input,
 	events EventSink,
 ) *hooks.Result {
-	exec := r.hooksExec(a)
+	exec := r.hooksExecForContext(ctx, a)
 	if exec == nil || !exec.Has(event) {
 		return nil
 	}
@@ -418,7 +434,7 @@ const (
 // every agent switch (matches the cheap-when-unused property of the
 // other hook callsites).
 func (r *LocalRuntime) executeOnAgentSwitchHooks(ctx context.Context, a *agent.Agent, sessionID, fromAgent, toAgent, kind string) {
-	exec := r.hooksExec(a)
+	exec := r.hooksExecForContext(ctx, a)
 	if exec == nil || !exec.Has(hooks.EventOnAgentSwitch) {
 		return
 	}
@@ -427,7 +443,7 @@ func (r *LocalRuntime) executeOnAgentSwitchHooks(ctx context.Context, a *agent.A
 		FromAgent:       fromAgent,
 		ToAgent:         toAgent,
 		AgentSwitchKind: kind,
-		FromAgentModels: r.fromAgentModels(fromAgent),
+		FromAgentModels: r.fromAgentModels(ctx, fromAgent),
 	}, nil)
 }
 
@@ -439,11 +455,15 @@ func (r *LocalRuntime) executeOnAgentSwitchHooks(ctx context.Context, a *agent.A
 //
 // Returns nil when there is no previous agent or the lookup fails so
 // the JSON wire payload omits the field via `omitempty`.
-func (r *LocalRuntime) fromAgentModels(fromAgent string) []hooks.ModelEndpoint {
+func (r *LocalRuntime) fromAgentModels(ctx context.Context, fromAgent string) []hooks.ModelEndpoint {
 	if fromAgent == "" {
 		return nil
 	}
-	from, err := r.team.Agent(fromAgent)
+	tm := r.teamForContext(ctx, nil)
+	if tm == nil {
+		return nil
+	}
+	from, err := tm.Agent(fromAgent)
 	if err != nil {
 		slog.Debug("on_agent_switch: from-agent lookup failed",
 			"agent", fromAgent, "error", err)
@@ -554,7 +574,7 @@ func (r *LocalRuntime) executeBeforeLLMCallHooks(
 	iteration int,
 	messages []chat.Message,
 ) (stop bool, message string, rewritten []chat.Message) {
-	exec := r.hooksExec(a)
+	exec := r.hooksExecForContext(ctx, a)
 	if exec == nil || !exec.Has(hooks.EventBeforeLLMCall) {
 		return false, "", nil
 	}

@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync/atomic"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -19,8 +22,9 @@ type sessionOwnerCommand struct {
 }
 
 type executionIdentity struct {
-	driver     *sessionDriver
-	generation uint64
+	driver      *sessionDriver
+	generation  uint64
+	environment *TeamEnvironmentLease
 }
 
 type executionIdentityKey struct{}
@@ -112,8 +116,26 @@ func (d *sessionDriver) ownerSnapshot(ctx context.Context) (*session.Session, er
 }
 
 func (d *sessionDriver) executionContext(ctx context.Context, generation uint64) (context.Context, *session.Session, error) {
-	snapshot, err := d.ownerSnapshot(ctx)
-	return context.WithValue(tools.WithResourceOwner(ctx, d.resourceOwner), executionIdentityKey{}, executionIdentity{d, generation}), snapshot, err
+	var snapshot *session.Session
+	var environment *TeamEnvironmentLease
+	err := d.ownerCall(ctx, func() error {
+		if d.sess == nil {
+			return ErrSessionClosed
+		}
+		if d.generation != generation {
+			return ErrSessionStopped
+		}
+		snapshot = d.sess.Clone()
+		environment = d.runEnvironment
+		return nil
+	})
+	identity := executionIdentity{driver: d, generation: generation, environment: environment}
+	ctx = context.WithValue(tools.WithResourceOwner(ctx, d.resourceOwner), executionIdentityKey{}, identity)
+	if environment != nil {
+		ctx = context.WithValue(ctx, teamEnvironmentContextKey{}, environment.Environment())
+		ctx = agent.WithContextModels(ctx, snapshot.AgentName, identity.driver.activeBinding().models)
+	}
+	return ctx, snapshot, err
 }
 
 // commitExecutionEvent applies only the event's typed delta; concurrent accepted
@@ -221,6 +243,10 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 		return ErrSessionClosed
 	}
 	d := identity.driver
+	tm := r.teamForContext(ctx, scratch)
+	if tm == nil {
+		return ErrSessionClosed
+	}
 	var nextBinding *session.Session
 	var binding activeSessionBinding
 	if err := d.ownerCall(ctx, func() error {
@@ -229,12 +255,17 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 		}
 		nextBinding = d.sess.OwnSnapshot()
 		nextBinding.AgentName = name
+		nextBinding.AgentID = configuredAgentID(tm, name)
 		binding = activeSessionBinding{version: d.bindingVersion, agentName: d.AgentNameLocked()}
 		return nil
 	}); err != nil {
 		return err
 	}
-	ref, models, err := r.resolveSessionModelBinding(ctx, nextBinding, "")
+	modelRef := ""
+	if nextBinding.AgentModelOverrides != nil {
+		modelRef = nextBinding.AgentModelOverrides[name]
+	}
+	ref, models, err := r.resolveSessionModelBinding(ctx, nextBinding, modelRef)
 	if err != nil {
 		return err
 	}
@@ -247,6 +278,7 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 		}
 		next := d.sess.OwnSnapshot()
 		next.AgentName = name
+		next.AgentID = configuredAgentID(tm, name)
 		return sessionIOReservation{
 			write: func(ctx context.Context) error {
 				if r.sessionStore != nil {
@@ -265,6 +297,7 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 					return err
 				}
 				d.sess.AgentName = name
+				d.sess.AgentID = configuredAgentID(tm, name)
 				d.modelProviders = models
 				d.modelRef = ref
 				d.bindingVersion++
@@ -275,6 +308,7 @@ func (r *LocalRuntime) commitActiveAgent(ctx context.Context, scratch *session.S
 	})
 	if err == nil {
 		scratch.AgentName = name
+		scratch.AgentID = configuredAgentID(tm, name)
 	}
 	return err
 }
@@ -447,6 +481,16 @@ func (r *LocalRuntime) commitSessionAttribute(ctx context.Context, scratch *sess
 func (d *sessionDriver) closeOwner() {
 	d.ownerClose.Do(func() { close(d.ownerStop) })
 	<-d.ownerDone
+	d.mu.Lock()
+	pinned, running := d.teamEnvironment, d.runEnvironment
+	d.teamEnvironment, d.runEnvironment = nil, nil
+	d.mu.Unlock()
+	if running != nil {
+		_ = running.Release(context.WithoutCancel(d.r.lifetime()))
+	}
+	if pinned != nil && pinned != running {
+		_ = pinned.Release(context.WithoutCancel(d.r.lifetime()))
+	}
 }
 
 func (d *sessionDriver) abandonElicitation(id string, waiter *elicitationWaiter) {
@@ -491,6 +535,7 @@ func (r *LocalRuntime) runOwnerQueuedCompaction(ctx context.Context, scratch *se
 	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
 		if d.compactOperation == operation {
 			d.compactReserved = false
+			d.refreshSteeringLocked()
 		}
 		return nil
 	})
@@ -702,13 +747,27 @@ func (d *sessionDriver) cleanupResources(ctx context.Context) error {
 			defer d.wg.Done()
 			defer cancel()
 			var errs []error
-			if d.r != nil && d.r.team != nil {
-				for _, name := range d.r.team.AgentNames() {
-					a, err := d.r.team.Agent(name)
-					if err != nil {
+			if d.r != nil {
+				teams := []*team.Team{}
+				if environment := d.teamEnvironmentSnapshot(); environment != nil {
+					teams = append(teams, environment.Team())
+				} else if d.r.teamEnvironments == nil && d.r.team != nil {
+					teams = append(teams, d.r.team)
+				}
+				if d.r.teamEnvironments != nil {
+					for _, env := range d.r.teamEnvironments.SnapshotEnvironments() {
+						teams = append(teams, env.Team())
+					}
+				}
+				for _, tm := range teams {
+					if tm == nil {
 						continue
 					}
-					toolsets = append(toolsets, a.ToolSets()...)
+					for _, name := range tm.AgentNames() {
+						if a, err := tm.Agent(name); err == nil {
+							toolsets = append(toolsets, a.ToolSets()...)
+						}
+					}
 				}
 			}
 			errs = append(errs, tools.StopResourceOwners(cleanupCtx, toolsets...))
@@ -725,4 +784,294 @@ func (d *sessionDriver) cleanupResources(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// teamForSession returns the team revision pinned to the owning session. A
+// driver retains that lease until it atomically adopts a later revision at a
+// turn boundary, so callers never observe a disposed environment.
+func (r *LocalRuntime) teamForSession(sess *session.Session) *team.Team {
+	if sess != nil && r.sessionDrivers != nil {
+		if driver, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+			if env := driver.teamEnvironmentSnapshot(); env != nil {
+				return env.Team()
+			}
+		}
+	}
+	if r.teamEnvironments != nil {
+		return nil
+	}
+	return r.team
+}
+
+func (d *sessionDriver) teamEnvironmentSnapshot() *TeamEnvironment {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.teamEnvironment == nil {
+		return nil
+	}
+	return d.teamEnvironment.Environment()
+}
+
+func (r *LocalRuntime) envFromContext(ctx context.Context) *TeamEnvironment {
+	if ctx == nil {
+		return nil
+	}
+	if id, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok && id.environment != nil {
+		return id.environment.Environment()
+	}
+	return nil
+}
+
+func (r *LocalRuntime) teamForContext(ctx context.Context, sess *session.Session) *team.Team {
+	if r.teamEnvironments != nil {
+		if env := teamEnvironmentFromContext(ctx); env != nil {
+			return env.Team()
+		}
+		if env := r.envFromContext(ctx); env != nil {
+			return env.Team()
+		}
+		if sess != nil && r.sessionDrivers != nil {
+			if d, ok := r.sessionDrivers.Lookup(sess.ID); ok {
+				if env := d.teamEnvironmentSnapshot(); env != nil {
+					return env.Team()
+				}
+			}
+		}
+		return nil
+	}
+	return r.teamForSession(sess)
+}
+
+func (d *sessionDriver) pinCurrentTeamEnvironment(ctx context.Context) error {
+	if d.r.teamEnvironments == nil {
+		return nil
+	}
+	lease, err := d.r.teamEnvironments.AcquireCurrent()
+	if err != nil {
+		return err
+	}
+	next := d.session()
+	if next == nil {
+		_ = lease.Release(context.WithoutCancel(ctx))
+		return ErrSessionClosed
+	}
+	tm := lease.Environment().Team()
+	if creation, _ := next.Attribute(SessionAgentIDAttribute); creation != "" {
+		if _, _, exists := tm.ResolveIdentity(creation); !exists {
+			_ = lease.Release(context.WithoutCancel(ctx))
+			return &SessionError{Kind: SessionErrorNotFound, SessionID: next.ID, Operation: "resolve_creation_agent_id"}
+		}
+	} else if creation, _ := next.Attribute(SessionAgentAttribute); creation != "" {
+		if _, _, exists := tm.ResolveLegacyName(creation); !exists {
+			_ = lease.Release(context.WithoutCancel(ctx))
+			return &SessionError{Kind: SessionErrorNotFound, SessionID: next.ID, Operation: "resolve_creation_agent_name"}
+		}
+	}
+	var active *agent.Agent
+	var activeName string
+	var ok bool
+	if next.AgentID != "" {
+		active, activeName, ok = tm.ResolveIdentity(next.AgentID)
+	} else if next.AgentName != "" {
+		active, activeName, ok = tm.ResolveLegacyName(next.AgentName)
+	} else {
+		active, err = tm.DefaultAgent()
+		if err == nil {
+			activeName, ok = active.Name(), true
+		}
+	}
+	if !ok || active == nil {
+		_ = lease.Release(context.WithoutCancel(ctx))
+		return &SessionError{Kind: SessionErrorNotFound, SessionID: next.ID, Operation: "resolve_active_agent_id"}
+	}
+	next.AgentName, next.AgentID, next.MaxIterations = activeName, configuredAgentID(tm, activeName), active.MaxIterations()
+	envCtx := context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+	modelRef, models, err := d.r.resolveSessionModelBinding(envCtx, next, "")
+	if err != nil {
+		_ = lease.Release(context.WithoutCancel(ctx))
+		return err
+	}
+	var old *TeamEnvironmentLease
+	err = d.ownerCall(ctx, func() error {
+		if d.stopped || d.sess == nil {
+			return ErrSessionStopped
+		}
+		if d.teamEnvironment != nil && d.teamEnvironment.Environment() == lease.Environment() {
+			return nil
+		}
+		old, d.teamEnvironment = d.teamEnvironment, lease
+		d.sess.AgentName, d.sess.AgentID, d.sess.MaxIterations = next.AgentName, next.AgentID, next.MaxIterations
+		d.modelRef, d.modelProviders = modelRef, slices.Clone(models)
+		d.bindingVersion++
+		return nil
+	})
+	if err != nil {
+		_ = lease.Release(context.WithoutCancel(ctx))
+		return err
+	}
+	d.mu.Lock()
+	installed := d.teamEnvironment == lease
+	d.mu.Unlock()
+	if !installed {
+		_ = lease.Release(context.WithoutCancel(ctx))
+		return nil
+	}
+	if old != nil {
+		_ = old.Release(context.WithoutCancel(ctx))
+	}
+	return nil
+}
+
+func (d *sessionDriver) acquireRunEnvironment(ctx context.Context, generation uint64, continuation bool) error {
+	if d.r.teamEnvironments == nil {
+		return nil
+	}
+	if !continuation {
+		if err := d.pinCurrentTeamEnvironment(ctx); err != nil {
+			return err
+		}
+	}
+	var lease *TeamEnvironmentLease
+	err := d.ownerCall(ctx, func() error {
+		if d.generation != generation || d.stopped {
+			return ErrSessionStopped
+		}
+		if d.teamEnvironment == nil {
+			return errors.New("session has no pinned team environment")
+		}
+		lease = d.teamEnvironment
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	runLease, err := d.r.teamEnvironments.Acquire(lease.Environment().RevisionID())
+	if err != nil {
+		return err
+	}
+	var previous *TeamEnvironmentLease
+	err = d.ownerCall(ctx, func() error {
+		if d.generation != generation || d.stopped {
+			return ErrSessionStopped
+		}
+		previous, d.runEnvironment = d.runEnvironment, runLease
+		return nil
+	})
+	if err != nil {
+		_ = runLease.Release(context.WithoutCancel(ctx))
+		return err
+	}
+	if previous != nil {
+		_ = previous.Release(context.WithoutCancel(ctx))
+	}
+	return nil
+}
+
+func (d *sessionDriver) releaseRunEnvironment(ctx context.Context, generation uint64) {
+	if d.r.teamEnvironments == nil {
+		return
+	}
+	var lease *TeamEnvironmentLease
+	_ = d.ownerCall(context.WithoutCancel(ctx), func() error {
+		if generation == d.generation {
+			lease, d.runEnvironment = d.runEnvironment, nil
+		}
+		return nil
+	})
+	if lease != nil {
+		_ = lease.Release(context.WithoutCancel(ctx))
+	}
+}
+
+type teamEnvironmentContextKey struct{}
+
+func (d *sessionDriver) scopeTeamEnvironment(ctx context.Context) context.Context {
+	var lease *TeamEnvironmentLease
+	d.mu.Lock()
+	lease = d.runEnvironment
+	d.mu.Unlock()
+	if lease == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+}
+
+func teamEnvironmentFromContext(ctx context.Context) *TeamEnvironment {
+	if ctx == nil {
+		return nil
+	}
+	environment, _ := ctx.Value(teamEnvironmentContextKey{}).(*TeamEnvironment)
+	return environment
+}
+
+func environmentScopedContext(ctx context.Context, lease *TeamEnvironmentLease) context.Context {
+	if lease == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+}
+
+func (d *sessionDriver) acquireOperationEnvironment(ctx context.Context) (context.Context, func(), error) {
+	if d.r.teamEnvironments == nil {
+		return ctx, func() {}, nil
+	}
+	var pinned *TeamEnvironmentLease
+	if err := d.ownerCall(ctx, func() error { pinned = d.teamEnvironment; return nil }); err != nil {
+		return nil, nil, err
+	}
+	if pinned == nil {
+		return nil, nil, errors.New("session has no pinned team environment")
+	}
+	lease, err := d.r.teamEnvironments.Acquire(pinned.Environment().RevisionID())
+	if err != nil {
+		return nil, nil, err
+	}
+	scoped := context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+	return scoped, func() { _ = lease.Release(context.WithoutCancel(ctx)) }, nil
+}
+
+// captureEnvironmentForOperation pins the selected session revision for a
+// standalone operation that can outlive its call stack (title, skill, compaction,
+// reports). In edit-enabled runtimes, missing session ownership is an error,
+// never a fallback to the constructor Team.
+func (r *LocalRuntime) captureEnvironmentForOperation(ctx context.Context, sess *session.Session) (context.Context, func(), error) {
+	if r.teamEnvironments == nil {
+		return ctx, func() {}, nil
+	}
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		lease, err := r.teamEnvironments.Acquire(env.RevisionID())
+		if err != nil {
+			return nil, nil, err
+		}
+		scoped := context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+		return scoped, func() { _ = lease.Release(context.WithoutCancel(ctx)) }, nil
+	}
+	if identity, ok := ctx.Value(executionIdentityKey{}).(executionIdentity); ok && identity.environment != nil {
+		lease, err := r.teamEnvironments.Acquire(identity.environment.Environment().RevisionID())
+		if err != nil {
+			return nil, nil, err
+		}
+		scoped := context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+		return scoped, func() { _ = lease.Release(context.WithoutCancel(ctx)) }, nil
+	}
+	if sess == nil || r.sessionDrivers == nil {
+		return nil, nil, errors.New("operation has no pinned team environment")
+	}
+	driver, ok := r.sessionDrivers.Lookup(sess.ID)
+	if !ok {
+		return nil, nil, errors.New("operation session has no environment owner")
+	}
+	var pinned *TeamEnvironmentLease
+	if err := driver.ownerCall(ctx, func() error { pinned = driver.teamEnvironment; return nil }); err != nil {
+		return nil, nil, err
+	}
+	if pinned == nil {
+		return nil, nil, errors.New("operation session has no pinned team environment")
+	}
+	lease, err := r.teamEnvironments.Acquire(pinned.Environment().RevisionID())
+	if err != nil {
+		return nil, nil, err
+	}
+	scoped := context.WithValue(ctx, teamEnvironmentContextKey{}, lease.Environment())
+	return scoped, func() { _ = lease.Release(context.WithoutCancel(ctx)) }, nil
 }

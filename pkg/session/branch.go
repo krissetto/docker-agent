@@ -124,6 +124,7 @@ func (s *Session) clone(referencesOnly bool) *Session {
 		ExtraToolSets:           slices.Clone(s.ExtraToolSets),
 		DisableStructuredOutput: s.DisableStructuredOutput,
 		AgentName:               s.AgentName,
+		AgentID:                 s.AgentID,
 		ParentID:                s.ParentID,
 		DelegationLineage:       cloneStringSlice(s.DelegationLineage),
 		InstructionContext:      cloneInstructionContext(s.InstructionContext),

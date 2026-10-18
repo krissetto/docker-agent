@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -309,18 +310,32 @@ func (c *Client) interleavedThinkingEnabled() bool {
 	return b
 }
 
+func (c *Client) thinkingBudget() *latest.ThinkingBudget {
+	budget := c.ModelConfig.ThinkingBudget
+	if modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+		if c.ModelOptions.NoThinking() {
+			return &latest.ThinkingBudget{Effort: "none"}
+		}
+		if budget == nil {
+			return &latest.ThinkingBudget{Effort: "adaptive/medium"}
+		}
+	}
+	return budget
+}
+
 // isThinkingEnabled returns true if a valid thinking budget is configured.
 // It mirrors the validation in buildAdditionalModelRequestFields but without
 // side effects (no logging), so it can safely be used to gate inference config.
 func (c *Client) isThinkingEnabled() bool {
-	if c.ModelConfig.ThinkingBudget == nil {
+	budget := c.thinkingBudget()
+	if budget == nil {
 		return false
 	}
 	if _, ok := c.adaptiveThinkingEffort(); ok {
 		return true
 	}
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
-	if t, ok := c.ModelConfig.ThinkingBudget.EffortTokens(); ok {
+	tokens := budget.Tokens
+	if t, ok := budget.EffortTokens(); ok {
 		tokens = t
 	}
 	if tokens < 1024 {
@@ -342,7 +357,7 @@ func (c *Client) isThinkingEnabled() bool {
 // It has no side effects so it can be shared by isThinkingEnabled and
 // buildAdditionalModelRequestFields.
 func (c *Client) adaptiveThinkingEffort() (string, bool) {
-	budget := c.ModelConfig.ThinkingBudget
+	budget := c.thinkingBudget()
 	if budget == nil || budget.IsDisabled() {
 		return "", false
 	}
@@ -381,8 +396,10 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	}
 
 	// Configure thinking budget if present and valid
-	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
-		if effortStr, ok := c.adaptiveThinkingEffort(); ok {
+	if budget := c.thinkingBudget(); budget != nil {
+		if budget.IsDisabled() && modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+			fields["thinking"] = map[string]any{"type": "disabled"}
+		} else if effortStr, ok := c.adaptiveThinkingEffort(); ok {
 			switch {
 			case budget.Tokens > 0:
 				slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking",
@@ -400,6 +417,13 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 			}
 			slog.Debug("Bedrock request using adaptive thinking", "effort", effortStr)
 			fields["thinking"] = map[string]any{"type": "adaptive"}
+			if modelinfo.UsesAdaptiveThinkingByDefault(c.ModelConfig.Model) {
+				display := "summarized"
+				if configured, ok := c.ModelConfig.ProviderOpts["thinking_display"].(string); ok && strings.EqualFold(strings.TrimSpace(configured), "omitted") {
+					display = "omitted"
+				}
+				fields["thinking"] = map[string]any{"type": "adaptive", "display": display}
+			}
 			fields["output_config"] = map[string]any{"effort": effortStr}
 		} else {
 			tokens := budget.Tokens

@@ -7,4 +7,5 @@ agents:
       that should continue running while you work. Use `shell` for short commands.
     toolsets:
       - type: shell
+        background_after: 2
       - type: background_jobs

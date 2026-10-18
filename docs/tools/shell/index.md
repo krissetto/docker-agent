@@ -11,9 +11,11 @@ _Execute arbitrary shell commands in the user's environment._
 
 ## Overview
 
-The shell tool allows agents to execute arbitrary shell commands synchronously. This is one of the most powerful tools — it lets agents run builds, install dependencies, query APIs, and interact with the system. Each call runs in a fresh, isolated shell session — no state persists between calls.
+The shell tool lets agents run commands in the user's environment. Each call starts one shell process; commands that finish quickly return normally. If a command is still running after the default two-second foreground window, the same process continues as an owned background job and the tool returns its job ID. Its output is bounded and available through the shell's background-job inspection tools. A command is never rerun to background it.
 
-Commands have a default 30-second timeout and require user confirmation unless `--yolo` is used. For servers, watchers, and other long-running commands, add the [`background_jobs`](../background-jobs/index.md) toolset alongside `shell`.
+Commands have a default 30-second total timeout and require user confirmation unless the safety policy allows them. Longer commands may continue in the background, but the configured shell timeout still applies. For manually managed servers, watchers, or parallel jobs, add the [`background_jobs`](../background-jobs/index.md) toolset.
+
+Automatically retained shell jobs capture up to 10 MiB each, with at most 8 active jobs per session owner and 8 active jobs per shared job manager. Up to 8 shell-job records are retained per manager; the oldest completed record is evicted first. Explicit `background_jobs` jobs are separate. Stopping a shell job or explicitly canceling its originating active turn/session stops the process group; on Unix, children that detach into another session/process group are outside that cleanup boundary. Sudo commands and hosts without the optional safe process-exit observer stay foreground. A completion message is queued to the issuing session when admission is available; a stopped/canceled job does not send one.
 
 ### Shell interpreter detection
 
@@ -36,6 +38,7 @@ If a command still fails with a known shell-dialect error (for example PowerShel
 ```yaml
 toolsets:
   - type: shell
+    background_after: 2 # seconds before an active command moves to the background
 ```
 
 ### Options
@@ -43,6 +46,7 @@ toolsets:
 | Property       | Type    | Description                                                                                          |
 | -------------- | ------- | --------------------------------------------------------------------------------------------------- |
 | `env`          | object  | Environment variables to set for all shell commands                                                 |
+| `background_after` | integer | Seconds to wait before retaining a still-running command as a background job. Default `2`; set to `0` to keep all commands foreground until completion or timeout. Windows and hosts without the optional background-work runtime capability keep commands foreground. |
 | `sudo_askpass` | boolean | Opt in to prompting for a `sudo` password (see [Sudo support](#sudo-support)). Default `false`.     |
 
 ### Custom Environment Variables
@@ -100,7 +104,9 @@ Notes and limitations:
 
 ## Available Tools
 
-The shell toolset exposes one tool:
+The shell toolset exposes `shell` and, when hosted by a runtime that supports background work, `list_background_jobs`, `view_background_job`, `wait_background_job`, and `stop_background_job` for automatically retained commands. Automatic shell backgrounding adds only inspector tools; it does not add another `run_background_job` start tool.
+
+The shell toolset exposes one command-running tool:
 
 | Tool Name | Description                                                                  |
 | --------- | ---------------------------------------------------------------------------- |
@@ -112,7 +118,7 @@ The shell toolset exposes one tool:
 | --------- | ------- | -------- | ------------------------------------------------------------------------- |
 | `cmd`     | string  | ✓        | The shell command to execute.                                             |
 | `cwd`     | string  | ✗        | Working directory to run the command in (default: `.`).                   |
-| `timeout` | integer | ✗        | Per-call execution timeout in seconds (default: `30`).                    |
+| `timeout` | integer | ✗        | Total execution timeout in seconds (default: `30`), including time after automatic backgrounding. |
 
 > [!WARNING]
 > **Safety**

@@ -2,34 +2,41 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/subagent"
+	"github.com/docker/docker-agent/pkg/teamdef"
 )
 
 // preparedSessionView owns detached reservations, never canonical execution.
 // The terminal mutex is private to this one confirmed preparation.
 type preparedSessionView struct {
-	mu           sync.Mutex
-	batchMu      sync.Mutex // protects cancellation registration, never storage I/O
-	cancelBatch  context.CancelFunc
-	r            *LocalRuntime
-	ctx          func() context.Context // immutable confirmed preparation lifetime
-	cancel       context.CancelFunc
-	info         PreparedSessionViewInfo
-	root         *session.Session
-	snapshot     subagent.Snapshot
-	records      []session.ChildRecord
-	nodes        []*restoredNode
-	reservations []*restoreDriverReservation
-	existing     map[string]*sessionDriver
-	terminal     bool
-	committed    *CommittedSessionView
+	mu               sync.Mutex
+	batchMu          sync.Mutex // protects cancellation registration, never storage I/O
+	cancelBatch      context.CancelFunc
+	r                *LocalRuntime
+	ctx              func() context.Context // immutable confirmed preparation lifetime
+	cancel           context.CancelFunc
+	info             PreparedSessionViewInfo
+	root             *session.Session
+	snapshot         subagent.Snapshot
+	records          []session.ChildRecord
+	nodes            []*restoredNode
+	reservations     []*restoreDriverReservation
+	existing         map[string]*sessionDriver
+	terminal         bool
+	committed        *CommittedSessionView
+	resident         bool
+	historical       bool
+	historicalHandle *historicalSessionHandle
+	environmentLease *TeamEnvironmentLease
 }
 
 func cloneSessionViewInfo(info PreparedSessionViewInfo) PreparedSessionViewInfo {
@@ -57,6 +64,10 @@ func (p *preparedSessionView) discard() {
 		reservation.Discard()
 	}
 	p.reservations = nil
+	if p.environmentLease != nil {
+		_ = p.environmentLease.Release(context.Background())
+		p.environmentLease = nil
+	}
 	p.cancel()
 }
 
@@ -97,18 +108,41 @@ func (v *localSessionRuntimeView) ConfirmedSessionViewInfo(ctx context.Context, 
 }
 
 func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string) (*preparedSessionView, error) {
+	if p, err := v.readResidentSessionView(ctx, id); p != nil || err != nil {
+		return p, err
+	}
+	return v.readColdSessionView(ctx, id)
+}
+
+func (v *localSessionRuntimeView) readColdSessionView(ctx context.Context, id string) (_ *preparedSessionView, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	r := v.runtime
+	var environmentLease *TeamEnvironmentLease
+	tm := r.team
+	if r.teamEnvironments != nil {
+		var err error
+		environmentLease, err = r.teamEnvironments.AcquireCurrent()
+		if err != nil {
+			return nil, err
+		}
+		tm = environmentLease.Environment().Team()
+		ctx = environmentScopedContext(ctx, environmentLease)
+		defer func() {
+			if environmentLease != nil {
+				_ = environmentLease.Release(context.Background())
+			}
+		}()
+	}
 	if id == "" || r.sessionStore == nil {
 		return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: id, Operation: "prepare_view"}
 	}
-	selected, err := r.sessionStore.GetSession(ctx, id)
+	selectedMeta, err := session.ReadSessionMetadata(ctx, r.sessionStore, id)
 	if err != nil {
 		return nil, err
 	}
-	root := selected
+	root := selectedMeta
 	seen := map[string]bool{id: true}
 	// Hydration work is separate from resident-driver and spawn admission: it
 	// also counts archived/stopped ancestry and topology nodes. Reuse finite
@@ -125,7 +159,7 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 		if len(seen) >= hydrationLimit {
 			return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: "restore_ancestry", Reason: SessionErrorReasonLimit, Limit: hydrationLimit}
 		}
-		parent, err := r.sessionStore.GetSession(ctx, root.ParentID)
+		parent, err := session.ReadSessionMetadata(ctx, r.sessionStore, root.ParentID)
 		if err != nil {
 			return nil, err
 		}
@@ -146,18 +180,95 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 		return nil, &SessionError{Kind: SessionErrorCapacity, SessionID: id, Operation: "restore_tree", Reason: SessionErrorReasonLimit, Limit: hydrationLimit}
 	}
 	bound := root.AttributesSnapshot()[SessionAgentAttribute]
-	if bound == "" {
-		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_binding"}
+	rootAgent, _, rootIdentityOK := identityForBinding(tm, root, SessionAgentAttribute, SessionAgentIDAttribute)
+	if bound == "" || !rootIdentityOK {
+		// Legacy unbound rows and stale identities are viewable only as historical transcripts.
+		return v.prepareHistoricalSessionView(ctx, selectedMeta)
 	}
-	if _, err := r.team.Agent(bound); err != nil {
+	selectedAgent := selectedMeta.AttributesSnapshot()[SessionAgentAttribute]
+	_, _, selectedIdentityOK := identityForBinding(tm, selectedMeta, SessionAgentAttribute, SessionAgentIDAttribute)
+	if selectedAgent == "" || !selectedIdentityOK {
+		return v.prepareHistoricalSessionView(ctx, selectedMeta)
+	}
+	selectedActive := selectedMeta.AgentName
+	if selectedMeta.AgentID != "" {
+		_, currentName, ok := tm.ResolveIdentity(selectedMeta.AgentID)
+		if !ok {
+			return v.prepareHistoricalSessionView(ctx, selectedMeta)
+		}
+		selectedActive = currentName
+	} else if selectedActive == "" {
+		selectedActive = selectedAgent
+	}
+	_, _, activeOK := resolveAgentIdentity(tm, selectedMeta.AgentID, selectedActive)
+	if !activeOK {
+		return v.prepareHistoricalSessionView(ctx, selectedMeta)
+	}
+	rootCreationName := rootAgent.Name()
+	root, err = session.ReadSessionMetadata(ctx, r.sessionStore, root.ID)
+	if err != nil {
 		return nil, err
 	}
-	if root.AgentName == "" {
-		root.AgentName = bound
-	}
-	if _, err := r.team.Agent(root.AgentName); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	rootActive, rootActiveName, rootActiveOK := resolveActiveAgentForTeam(tm, root)
+	if !rootActiveOK || rootActive == nil {
+		return v.prepareHistoricalSessionView(ctx, selectedMeta)
+	}
+	root.AgentName, root.AgentID = rootActiveName, configuredAgentID(tm, rootActiveName)
+	var selected *session.Session
+	if root.ID == id {
+		// A root restore owns its embedded-child projection and accepted FIFO;
+		// retain the established full-session compatibility contract here.
+		selected, err = r.sessionStore.GetSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		root = selected
+	} else if reader, ok := r.sessionStore.(session.OwnHistoryStore); ok {
+		selected, err = reader.GetSessionOwnHistory(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	} else {
+		// Legacy executable restore stores may expose only GetSession. Historical
+		// transcript views deliberately remain stricter and never recurse here.
+		selected, err = r.sessionStore.GetSession(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	// Ordinary restoration needs the complete root transcript and topology; only
+	// this validated current-team path pays for recursive history hydration.
+	if root.ID != selected.ID {
+		root, err = r.sessionStore.GetSession(ctx, root.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if root.ID != selected.ID {
+		rootActive, rootActiveName, rootActiveOK = resolveActiveAgentForTeam(tm, root)
+		if !rootActiveOK || rootActive == nil {
+			return v.prepareHistoricalSessionView(ctx, selectedMeta)
+		}
+		root.AgentName, root.AgentID = rootActiveName, configuredAgentID(tm, rootActiveName)
+	}
+	_ = rootCreationName
+	selected.AgentName = selectedActive
+	selected.AgentID = configuredAgentID(tm, selectedActive)
 	p := &preparedSessionView{r: r, root: root, existing: make(map[string]*sessionDriver)}
 	var legacy subagent.Snapshot
 	if r.subagentStore != nil {
@@ -179,22 +290,13 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 		return nil, err
 	}
 	if len(canonical.Nodes) != 0 {
-		p.nodes, err = r.subagents.preflightRestore(ctx, root, p.snapshot)
+		p.nodes, err = r.subagents.preflightRestoreForTeam(ctx, root, p.snapshot, tm)
 		if err != nil {
 			return nil, err
 		}
 	}
-	selectedAgent := selected.AttributesSnapshot()[SessionAgentAttribute]
-	if selectedAgent == "" {
-		return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_binding"}
-	}
-	if selected.AgentName == "" {
-		selected.AgentName = selectedAgent
-	}
-	if _, err := r.team.Agent(selected.AgentName); err != nil {
-		return nil, err
-	}
-	p.info = PreparedSessionViewInfo{ActiveAgentName: selected.AgentName, SessionID: id, RootSessionID: root.ID, Session: selected, Binding: SessionBinding{AgentName: selectedAgent, Model: selected.AgentModelOverrides[selectedAgent], ParentSessionID: selected.ParentID, Durability: r.sessionDurability()}, WorkingDir: selected.WorkingDir}
+	selected.AgentName = selectedActive
+	p.info = PreparedSessionViewInfo{ActiveAgentName: selectedActive, SessionID: id, RootSessionID: root.ID, RootWorkingDir: root.WorkingDir, RootBinding: SessionBinding{AgentName: bound}, Session: selected, Binding: SessionBinding{AgentName: selectedAgent, Model: selected.AgentModelOverrides[selectedActive], ParentSessionID: selected.ParentID, Durability: r.sessionDurability()}, WorkingDir: selected.WorkingDir}
 	if selected.ParentID != "" {
 		for _, entry := range p.nodes {
 			if entry.snapshot.Node.SessionID != id {
@@ -203,14 +305,144 @@ func (v *localSessionRuntimeView) readSessionView(ctx context.Context, id string
 			if entry.childSess == nil || entry.childAgent == nil || entry.parentSessionID != selected.ParentID || entry.snapshot.Node.Agent != selectedAgent {
 				return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
 			}
-			p.info.Attach = &SubagentAttachInfo{NodeID: entry.snapshot.Node.ID, Agent: selected.AgentName, Name: entry.snapshot.Node.DisplayName(), Session: selected.Clone(), ParentSessionID: entry.parentSessionID, ParentAgent: entry.parentSess.AgentName}
+			p.info.Attach = &SubagentAttachInfo{NodeID: entry.snapshot.Node.ID, Agent: selectedActive, Name: entry.snapshot.Node.DisplayName(), Session: selected.Clone(), ParentSessionID: entry.parentSessionID, ParentAgent: entry.parentSess.AgentName}
 			break
 		}
 		if p.info.Attach == nil {
 			return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: id, Operation: "restore_tree_membership"}
 		}
 	}
+	p.environmentLease = environmentLease
+	environmentLease = nil
 	return p, nil
+}
+
+// HistoricalSessionView returns a transcript-only handle without publishing a
+// session driver, restoring a tree, or loading sibling transcripts.
+func (v *localSessionRuntimeView) HistoricalSessionView(ctx context.Context, id string) (SessionHandle, PreparedSessionViewInfo, error) {
+	if v.runtime.sessionStore == nil {
+		return nil, PreparedSessionViewInfo{}, &SessionError{Kind: SessionErrorNotFound, SessionID: id, Operation: "historical_view"}
+	}
+	meta, err := session.ReadSessionMetadata(ctx, v.runtime.sessionStore, id)
+	if err != nil {
+		return nil, PreparedSessionViewInfo{}, err
+	}
+	prepared, err := v.prepareHistoricalSessionView(ctx, meta)
+	if err != nil {
+		return nil, PreparedSessionViewInfo{}, err
+	}
+	return prepared.historicalHandle, prepared.Info(), nil
+}
+
+func (v *localSessionRuntimeView) prepareHistoricalSessionView(ctx context.Context, selectedMeta *session.Session) (*preparedSessionView, error) {
+	if selectedMeta == nil {
+		return nil, session.ErrNotFound
+	}
+	root, err := session.ReadSessionMetadata(ctx, v.runtime.sessionStore, selectedMeta.ID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{root.ID: true}
+	for depth := 0; root.ParentID != ""; depth++ {
+		if depth >= 32 || seen[root.ParentID] {
+			return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selectedMeta.ID, Operation: "restore_ancestry"}
+		}
+		parent, err := session.ReadSessionMetadata(ctx, v.runtime.sessionStore, root.ParentID)
+		if err != nil {
+			return nil, err
+		}
+		if a, b := root.AttributesSnapshot(), parent.AttributesSnapshot(); a["docker-agent.actor.source"] != "" && a["docker-agent.actor.source"] != b["docker-agent.actor.source"] {
+			return nil, &SessionError{Kind: SessionErrorWrongSession, SessionID: selectedMeta.ID, Operation: "restore_source"}
+		}
+		seen[parent.ID] = true
+		root = parent
+	}
+	selected, err := session.ReadSessionOwnHistory(ctx, v.runtime.sessionStore, selectedMeta.ID)
+	if err != nil {
+		return nil, err
+	}
+	attrs := selectedMeta.AttributesSnapshot()
+	recorded := attrs[SessionAgentAttribute]
+	if recorded == "" {
+		recorded = selectedMeta.AgentName
+	}
+	if selected.AgentName == "" {
+		selected.AgentName = recorded
+	}
+	reason := historicalDefinitionMissing
+	var definition *teamdef.AgentDefinition
+	if recorded != "" {
+		if revisions, ok := v.runtime.sessionStore.(session.TeamRevisionStore); ok {
+			revision, revErr := revisions.LatestTeamRevision(ctx, selected.ID)
+			if revErr == nil {
+				entry, entryErr := revisions.TeamAgentDefinition(ctx, revision.AgentDigest)
+				if entryErr == nil {
+					var saved teamdef.AgentDefinition
+					if err := json.Unmarshal(entry.Payload, &saved); err != nil {
+						return nil, fmt.Errorf("decode historical agent definition: %w", err)
+					}
+					if saved.FormatVersion != teamdef.DefinitionFormatVersion || saved.TeamID != revision.TeamID || saved.AgentID != revision.AgentID || saved.AgentKey != revision.AgentKey || saved.Name != revision.AgentName {
+						return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selected.ID, Operation: "historical_definition"}
+					}
+					definition = &saved
+					reason = historicalAgentUnavailable
+					if len(saved.Unavailable) > 0 {
+						reason = "partial_definition: " + strings.Join(saved.Unavailable, ",")
+					}
+				} else if !errors.Is(entryErr, session.ErrTeamDefinitionNotFound) {
+					return nil, entryErr
+				}
+			} else if !errors.Is(revErr, session.ErrTeamDefinitionNotFound) {
+				return nil, revErr
+			}
+		}
+	}
+	var attach *SubagentAttachInfo
+	var topology *subagent.Snapshot
+	if v.runtime.subagentStore != nil {
+		storedTree, err := v.runtime.subagentStore.LoadTree(ctx, root.ID)
+		if err != nil {
+			return nil, err
+		}
+		if storedTree != nil {
+			if storedTree.Root != subagent.SessionRootID(root.ID) || len(storedTree.Nodes) != 1 || storedTree.Nodes[0].Node.ID != storedTree.Root {
+				return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selected.ID, Operation: "historical_tree"}
+			}
+			topology = storedTree
+		}
+	}
+	if selected.ParentID != "" {
+		reader, ok := v.runtime.sessionStore.(session.ChildRecordReader)
+		if !ok {
+			return nil, &SessionError{Kind: SessionErrorNotFound, SessionID: selected.ID, Operation: "restore_tree_membership"}
+		}
+		record, err := reader.LoadChild(ctx, selected.ID)
+		if err != nil {
+			return nil, err
+		}
+		if record.RootSessionID != root.ID || record.ParentSessionID != selected.ParentID || record.Node.SessionID != selected.ID || recorded != "" && record.Node.Agent != recorded {
+			return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selected.ID, Operation: "restore_tree_membership"}
+		}
+		if topology == nil {
+			rootNode := subagent.Node{ID: subagent.SessionRootID(root.ID), Agent: root.AttributesSnapshot()[SessionAgentAttribute], State: subagent.NodeIdle}
+			topology = &subagent.Snapshot{Version: subagent.SnapshotVersion, Root: rootNode.ID, Nodes: []subagent.NodeSnapshot{{Node: rootNode, Children: []subagent.NodeSnapshot{{Node: record.Node}}}}}
+		}
+		node, found := subtreeForSession(*topology, selected.ID)
+		if !found || node.Node.ID != record.Node.ID || node.Node.Parent != record.Node.Parent || node.Node.Agent != record.Node.Agent {
+			return nil, &SessionError{Kind: SessionErrorInvalid, SessionID: selected.ID, Operation: "restore_tree_membership"}
+		}
+		parent, err := session.ReadSessionMetadata(ctx, v.runtime.sessionStore, selected.ParentID)
+		if err != nil {
+			return nil, err
+		}
+		attach = &SubagentAttachInfo{NodeID: record.Node.ID, Name: record.Node.DisplayName(), Agent: record.Node.Agent, Session: selected.Clone(), ParentSessionID: selected.ParentID, ParentAgent: parent.AgentName}
+		topology = &subagent.Snapshot{Version: topology.Version, Durability: topology.Durability, Root: node.Node.ID, Nodes: []subagent.NodeSnapshot{node}}
+	}
+	selected.SetSubagentTree(topology)
+	info := PreparedSessionViewInfo{ActiveAgentName: recorded, SessionID: selected.ID, RootSessionID: root.ID, RootWorkingDir: root.WorkingDir, RootBinding: SessionBinding{AgentName: root.AttributesSnapshot()[SessionAgentAttribute]}, Session: selected, WorkingDir: selected.WorkingDir, Binding: SessionBinding{AgentName: recorded, ParentSessionID: selected.ParentID, Durability: v.runtime.sessionDurability()}, Attach: attach, Historical: true, HistoryReason: reason}
+	metadata := SessionMetadata{SessionID: selected.ID, AgentName: recorded, Historical: true, ExecutionAvailable: false, HistoryReason: reason, Capabilities: SessionCapabilities{Historical: true, ExecutionAvailable: false}}
+	handle := newHistoricalSessionHandle(selected.ID, selected, metadata, definition)
+	return &preparedSessionView{r: v.runtime, info: info, root: root, historical: true, historicalHandle: handle, existing: map[string]*sessionDriver{}}, nil
 }
 
 // sameWorkspace compares physical workspace identity without rewriting stored
@@ -234,16 +466,27 @@ func (v *localSessionRuntimeView) PrepareSessionView(ctx context.Context, id str
 		return nil, err
 	}
 	preparationCtx, cancel := context.WithCancel(ctx)
+	if p.environmentLease != nil {
+		preparationCtx = environmentScopedContext(preparationCtx, p.environmentLease)
+	}
 	p.ctx, p.cancel = func() context.Context { return preparationCtx }, cancel
 	if _, live := p.r.sessionDrivers.Lookup(id); !live {
 		for _, cwd := range []string{p.root.WorkingDir, p.info.WorkingDir} {
 			if cwd != "" && !sameWorkspace(cwd, p.r.workingDir) {
-				p.cancel()
+				p.abortLocked()
 				return nil, &SessionError{Kind: SessionErrorWrongSession, SessionID: id, Operation: "view_workspace", Detail: "session view requires its workspace-bound runtime"}
 			}
 		}
 	}
 	m, g := p.r.subagents, p.r.sessionDrivers
+	if p.resident {
+		context.AfterFunc(preparationCtx, func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.abortLocked()
+		})
+		return p, nil
+	}
 	restore := m.transition("restore:" + p.root.ID)
 	restore.Lock()
 	defer restore.Unlock()
@@ -356,6 +599,14 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	}
 	if err := p.ctx().Err(); err != nil {
 		return CommittedSessionView{}, err
+	}
+	if p.historical {
+		result := CommittedSessionView{SessionHandle: p.historicalHandle, Info: cloneSessionViewInfo(p.info), Metadata: p.historicalHandle.Metadata(), Status: SessionStatus{SessionID: p.info.SessionID, AgentName: p.info.ActiveAgentName, State: SessionStateSettled}}
+		p.committed = &result
+		return cloneCommittedSessionView(result), nil
+	}
+	if p.resident {
+		return p.commitResident(ctx)
 	}
 	m, g := p.r.subagents, p.r.sessionDrivers
 	restore := m.transition("restore:" + p.root.ID)
@@ -572,8 +823,10 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	_, modelRef, _ := driver.ModelBindingSnapshot()
 	status := driver.Status()
 	g.mu.Lock()
-	if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok && info.SessionID == p.root.ID {
-		info.Session.SetSubagentTree(&tree)
+	if info.SessionID == p.root.ID {
+		if tree, ok := snapshotForRoot(p.r.subagents.tree.Snapshot(), subagent.SessionRootID(p.root.ID)); ok {
+			info.Session.SetSubagentTree(&tree)
+		}
 	}
 	info.ActiveAgentName = info.Session.AgentName
 	info.Binding.Model = modelRef
@@ -591,6 +844,11 @@ func (p *preparedSessionView) Commit(ctx context.Context) (CommittedSessionView,
 	transition.Unlock()
 	restore.Unlock()
 	publicationLocked = false
+	for _, reservation := range p.reservations {
+		if reservation != nil {
+			reservation.driver.WakePending()
+		}
+	}
 	metadata := handle.Metadata()
 	result := CommittedSessionView{SessionHandle: handle, Info: info, Metadata: metadata, Status: status}
 	p.committed = &result

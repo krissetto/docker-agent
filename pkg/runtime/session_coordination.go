@@ -168,9 +168,13 @@ func (m *subagentManager) completeSessionTurnContext(ctx context.Context, d *ses
 	if parent, ok := m.r.sessionDrivers.Lookup(parentID); ok {
 		parentSession = parent.session()
 	}
-	if parentSession != nil && m.r.team != nil {
-		a, _ := m.r.team.Agent(parentAgent)
-		m.r.executeSubagentStopHooks(m.r.lifetime(), parentSession, sess, a, sess.AgentName, result)
+	if parentSession != nil {
+		stopCtx, releaseEnv, captureErr := m.r.captureEnvironmentForOperation(m.r.lifetime(), parentSession)
+		if captureErr == nil {
+			a, _ := m.r.teamForContext(stopCtx, parentSession).Agent(parentAgent)
+			m.r.executeSubagentStopHooks(stopCtx, parentSession, sess, a, sess.AgentName, result)
+			releaseEnv()
+		}
 	}
 	m.mu.Lock()
 	if current := m.children[id]; current == rec {
@@ -270,7 +274,7 @@ func (d *sessionDriver) acceptReport(ctx context.Context, report session.ChildRe
 						break
 					}
 				}
-				for _, queued := range append(slices.Clone(d.pending), d.steering...) {
+				for _, queued := range d.pending {
 					if queued.RequestID == message.TurnID {
 						return nil
 					}

@@ -383,27 +383,44 @@ func TestOpenAISupportsNoneEffort(t *testing.T) {
 	}
 }
 
-// TestOpenAISupportsNoneEffort_GPT6Excluded is the regression test for the
-// divergence documented on [OpenAISupportsNoneEffort]: gpt-6 accepts the
-// full gpt-5.6+ effort ladder except "none" itself (verified live against
-// api.openai.com), so this predicate must stay gpt-5.x-scoped even though
-// [openAIDropsMinimalEffort] and [openAITopEfforts] widen to "gpt-5.6 or
-// later" including gpt-6+.
-func TestOpenAISupportsNoneEffort_GPT6Excluded(t *testing.T) {
+func TestOpenAISupportsNoneEffort_GPT6Variants(t *testing.T) {
 	t.Parallel()
 
-	for _, modelID := range []string{"gpt-6-astra", "gpt-6", "gpt-6.1-foo", "gpt-7"} {
-		t.Run(modelID, func(t *testing.T) {
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{"gpt-6-sol", true},
+		{"gpt-6-luna", true},
+		{"gpt-6-sol-2026-09-22", true},
+		{"gpt-6-luna-2026-09-22", true},
+		{"openai/gpt-6-sol", true},
+		{"vercel/openai/gpt-6-luna-2026-09-22", true},
+		{" GPT-6-LUNA ", true},
+		{"gpt-6-astra", false},
+		{"openai/gpt-6-astra-2026-09-04", false},
+		{"gpt-6", false},
+		{"gpt-6-terra", false},
+		{"gpt-6.1-sol", false},
+		{"gpt-7-luna", false},
+		{"gpt-6-solar", false},
+		{"gpt-6-lunatic", false},
+		{"gpt-6-sol-pro", false},
+		{"gpt-6-luna-", false},
+		{"gpt-6-sol-2026-99-22", false},
+		{"gpt-6-sol-2026-02-30", false},
+		{"gpt-6-luna-2026-9-22", false},
+		{"gpt-6-luna-2026-09-22-extra", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
 			t.Parallel()
-			assert.False(t, OpenAISupportsNoneEffort(modelID))
+			assert.Equal(t, tt.want, OpenAISupportsNoneEffort(tt.modelID))
+			assert.Equal(t, tt.want, OpenAISupportsChatToolsWithNoneEffort(tt.modelID))
 		})
 	}
 }
 
-// TestOpenAIDropsMinimalEffort exercises the gpt-5.6-or-later gate that,
-// unlike [OpenAISupportsNoneEffort], DOES widen to gpt-6 and later
-// generations: they all reject reasoning.effort "minimal" even though only
-// the gpt-5.x line also rejects "none".
 func TestOpenAIDropsMinimalEffort(t *testing.T) {
 	t.Parallel()
 

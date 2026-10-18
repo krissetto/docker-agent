@@ -160,15 +160,15 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Applies to Claude Opus 4.6, 4.7, 4.8, 5, and their dated variants (e.g.
-// claude-opus-4-7-20251101, claude-opus-5-20260724). Bedrock-style identifiers
+// Applies to Claude Haiku 5.5+ and Claude Opus 4.6, 4.7, 4.8, 5,
+// and their dated variants (e.g. claude-opus-4-7-20251101). Bedrock-style identifiers
 // such as "global.anthropic.claude-opus-5" are recognised too.
 // For these models the agent transparently switches a token-based budget to
 // adaptive thinking.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
-	return isAdaptiveOnlyOpus(modelID)
+	return isAdaptiveOnlyOpus(modelID) || UsesAdaptiveThinkingByDefault(modelID)
 }
 
 // SupportsAdaptiveThinking reports whether an Anthropic Claude model accepts
@@ -181,15 +181,18 @@ func RejectsTokenThinking(modelID string) bool {
 // and must use token-based extended thinking (`thinking.type=enabled`) instead.
 //
 // Supported: Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
-// [RejectsTokenThinking]), Sonnet 4.6, the Claude 5 families (e.g. Sonnet 5,
-// Opus 5), and the codenamed frontier models (Fable, Mythos). Bedrock-style
-// identifiers such as "global.anthropic.claude-sonnet-4-6" are recognised too.
+// [RejectsTokenThinking]), Sonnet 4.6+, Opus/Sonnet 5+, Haiku 5.5+, and the
+// codenamed frontier models (Fable, Mythos). Bedrock-style identifiers such as
+// "global.anthropic.claude-sonnet-4-6" are recognised too.
 //
 // The set is a superset of [RejectsTokenThinking]: a model that rejects token
 // budgets must accept adaptive thinking.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func SupportsAdaptiveThinking(modelID string) bool {
+	if UsesAdaptiveThinkingByDefault(modelID) {
+		return true
+	}
 	m := normalize(modelID)
 	if bare, ok := bedrockClaudeModelName(m); ok {
 		m = bare
@@ -198,8 +201,8 @@ func SupportsAdaptiveThinking(modelID string) bool {
 	if strings.Contains(m, "fable") || strings.Contains(m, "mythos") {
 		return true
 	}
-	// Only Opus and Sonnet gained adaptive thinking; Haiku, Claude 3.x, and
-	// non-Claude models do not parse and fall through to false.
+	// Haiku has a separate 5.5 threshold; Claude 3.x and non-Claude models
+	// do not parse and fall through to false.
 	major, minor, ok := claudeOpusSonnetVersion(m)
 	if !ok {
 		return false
@@ -209,11 +212,27 @@ func SupportsAdaptiveThinking(modelID string) bool {
 	return major >= 5 || (major == 4 && minor >= 6)
 }
 
+// UsesAdaptiveThinkingByDefault reports whether a Claude model defaults to
+// adaptive thinking at medium effort and requires explicit disabled thinking
+// to turn it off. Haiku 5.5 introduced this behavior; older Haiku is unchanged.
+// https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide#configure-thinking
+func UsesAdaptiveThinkingByDefault(modelID string) bool {
+	m := normalize(modelID)
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
+	}
+	if !strings.HasPrefix(m, "claude-haiku-") {
+		return false
+	}
+	major, minor, ok := claudeFamilyVersion(m, "haiku")
+	return ok && (major > 5 || major == 5 && minor >= 5)
+}
+
 // SupportsFullThinkingDisplay reports whether an Anthropic Claude model
 // accepts `thinking.display: "display"` (full thinking blocks).
 //
 // The restriction arrived with the adaptive-thinking generation: models from
-// Claude 4.6 onward (Opus/Sonnet 4.6+, the Claude 5 families, Fable, Mythos)
+// Claude 4.6 onward (Opus/Sonnet 4.6+, Haiku 5.5+, Fable, Mythos)
 // only accept "summarized" and "omitted" and reject "display" with a 400.
 // Older token-thinking models (Sonnet 4.5, Haiku 4.5, ...) still accept it.
 func SupportsFullThinkingDisplay(modelID string) bool {
@@ -230,7 +249,11 @@ func SupportsFullThinkingDisplay(modelID string) bool {
 // ("claude-3-opus-..."). A minor after '-' or '.' is likewise capped at two
 // digits so date-stamped 4.0 ids ("claude-opus-4-20250514") yield minor 0.
 func claudeOpusSonnetVersion(m string) (major, minor int, ok bool) {
-	for _, fam := range []string{"opus", "sonnet"} {
+	return claudeFamilyVersion(m, "opus", "sonnet")
+}
+
+func claudeFamilyVersion(m string, families ...string) (major, minor int, ok bool) {
+	for _, fam := range families {
 		_, rest, found := strings.Cut(m, fam+"-")
 		if !found {
 			continue
@@ -243,7 +266,11 @@ func claudeOpusSonnetVersion(m string) (major, minor int, ok bool) {
 		if rest != "" && (rest[0] == '-' || rest[0] == '.') {
 			if n, mw := leadingInt(rest[1:]); mw > 0 && mw <= 2 {
 				minor = n
+				rest = rest[1+mw:]
 			}
+		}
+		if fam == "haiku" && rest != "" && !strings.ContainsRune("-@:", rune(rest[0])) {
+			return 0, 0, false
 		}
 		return maj, minor, true
 	}
@@ -683,9 +710,9 @@ func warnCapsLookupMiss(ctx context.Context, id modelsdev.ID, cause error) {
 // model ID using the provided store.
 //
 // When the store is nil or the model is not found, LoadCaps returns a
-// conservative capability set that only allows text MIME types. A models.dev
-// miss is logged once per model via [warnCapsLookupMiss] so the degraded
-// behaviour is diagnosable rather than silent.
+// conservative capability set that only allows text MIME types. On a direct
+// catalogue miss, [AliasedCatalogCaps] may supply scoped input capabilities.
+// An unresolved models.dev miss is logged once per model via [warnCapsLookupMiss].
 //
 // The supplied ctx is wrapped with loadCapsTimeout so the lookup stays
 // cancellable with the caller and the underlying models.dev load is bounded.
@@ -701,6 +728,9 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 
 	model, err := store.GetModel(ctx, id)
 	if err != nil {
+		if caps, ok := AliasedCatalogCaps(ctx, store, id); ok {
+			return caps
+		}
 		if ctx.Err() != nil {
 			slog.WarnContext(ctx, "modelinfo: models.dev lookup timed out, using conservative caps",
 				"model", id.String(), "timeout", loadCapsTimeout)

@@ -1,0 +1,297 @@
+{
+  "description": "Synthetic, credential-free fixtures for the native Pebble AppMessage smoke harness. These are injected into the watch process and are not app defaults.",
+  "scenarios": [
+    {
+      "name": "runtimes",
+      "frames": [
+        {
+          "frame": 1,
+          "index": 0,
+          "total": 5,
+          "status": "runtimes"
+        },
+        {
+          "frame": 2,
+          "index": 1,
+          "total": 5,
+          "runtime_id": "lab-a",
+          "runtime_name": "Lab Runtime",
+          "source": "workspace-source.yaml",
+          "alert_mode": 0
+        },
+        {
+          "frame": 3,
+          "index": 2,
+          "total": 5,
+          "row_index": 0,
+          "row_kind": 3,
+          "row_id": "lab-a",
+          "row_role": "private_no_auth",
+          "row_owner": "",
+          "row_text": "Lab Runtime",
+          "row_meta": "workspace-source.yaml",
+          "row_truncated": false
+        },
+        {
+          "frame": 3,
+          "index": 3,
+          "total": 5,
+          "row_index": 1,
+          "row_kind": 3,
+          "row_id": "lab-b",
+          "row_role": "bearer",
+          "row_owner": "",
+          "row_text": "Backup Runtime",
+          "row_meta": "prod-source.yaml",
+          "row_truncated": false
+        },
+        {
+          "frame": 4,
+          "index": 4,
+          "total": 5
+        }
+      ],
+      "request_id": 2001
+    },
+    {
+      "name": "agents",
+      "frames": [
+        {
+          "frame": 1,
+          "index": 0,
+          "total": 5,
+          "status": "agents"
+        },
+        {
+          "frame": 2,
+          "index": 1,
+          "total": 5,
+          "agent_name": "orchestrator",
+          "runtime_id": "lab-a",
+          "source": "workspace-source.yaml"
+        },
+        {
+          "frame": 3,
+          "index": 2,
+          "total": 5,
+          "row_index": 0,
+          "row_kind": 2,
+          "row_id": "orchestrator",
+          "row_role": "root",
+          "row_owner": "",
+          "row_text": "orchestrator",
+          "row_truncated": false,
+          "row_meta": "workspace-source.yaml"
+        },
+        {
+          "frame": 3,
+          "index": 3,
+          "total": 5,
+          "row_index": 1,
+          "row_kind": 2,
+          "row_id": "reviewer",
+          "row_role": "root",
+          "row_owner": "",
+          "row_text": "reviewer",
+          "row_truncated": false,
+          "row_meta": "workspace-source.yaml"
+        },
+        {
+          "frame": 4,
+          "index": 4,
+          "total": 5
+        }
+      ],
+      "request_id": 2002
+    },
+    {
+      "name": "sessions",
+      "frames": [
+        {
+          "frame": 1,
+          "index": 0,
+          "total": 6,
+          "status": "sessions"
+        },
+        {
+          "frame": 2,
+          "index": 1,
+          "total": 6,
+          "agent_name": "orchestrator",
+          "runtime_id": "lab-a",
+          "source": "workspace-source.yaml",
+          "runtime_name": "Lab Runtime",
+          "session_count": 3
+        },
+        {
+          "frame": 3,
+          "index": 2,
+          "total": 6,
+          "row_index": 0,
+          "row_kind": 1,
+          "row_id": "session-7a",
+          "row_role": "running",
+          "row_owner": "orchestrator",
+          "row_text": "Fix Pebble protocol",
+          "row_truncated": false,
+          "row_meta": ""
+        },
+        {
+          "frame": 3,
+          "index": 3,
+          "total": 6,
+          "row_index": 1,
+          "row_kind": 1,
+          "row_id": "session-7b",
+          "row_role": "settled",
+          "row_owner": "orchestrator",
+          "row_text": "Review AppMessage parser",
+          "row_truncated": false,
+          "row_meta": ""
+        },
+        {
+          "frame": 3,
+          "index": 4,
+          "total": 6,
+          "row_index": 2,
+          "row_kind": 1,
+          "row_id": "session-7c",
+          "row_role": "queued",
+          "row_owner": "orchestrator",
+          "row_text": "Prepare test fixture",
+          "row_truncated": false,
+          "row_meta": ""
+        },
+        {
+          "frame": 4,
+          "index": 5,
+          "total": 6,
+          "row_meta": ""
+        }
+      ],
+      "request_id": 2003
+    },
+    {
+      "name": "chat",
+      "request_id": 2004,
+      "frames": [
+        {
+          "frame": 1,
+          "index": 0,
+          "total": 8,
+          "status": "chat"
+        },
+        {
+          "frame": 2,
+          "index": 1,
+          "total": 8,
+          "runtime_id": "lab-a",
+          "runtime_name": "Lab Runtime",
+          "source": "workspace-source.yaml",
+          "agent_name": "orchestrator",
+          "session_id": "session-7a",
+          "session_title": "Fix Pebble protocol",
+          "root_session_id": "session-7a",
+          "state": "running",
+          "runtime_status": "resident",
+          "execution_available": true,
+          "pending": 2,
+          "attention_known": true,
+          "approval_count": 1,
+          "elicitation_count": 1,
+          "alert": 0,
+          "alert_mode": 0,
+          "truncated_before": true,
+          "before_cursor": "older-0001"
+        },
+        {
+          "frame": 3,
+          "index": 2,
+          "total": 8,
+          "row_index": 0,
+          "row_kind": 0,
+          "row_id": "9007199254740993",
+          "row_role": "user",
+          "row_owner": "",
+          "row_text": "Please test frame ordering and source selection.",
+          "row_meta": "",
+          "row_truncated": false
+        },
+        {
+          "frame": 3,
+          "index": 3,
+          "total": 8,
+          "row_index": 1,
+          "row_kind": 0,
+          "row_id": "10000000000000002",
+          "row_role": "assistant",
+          "row_owner": "orchestrator",
+          "row_text": "Frames are staged until the terminal end packet.",
+          "row_meta": "",
+          "row_truncated": false
+        },
+        {
+          "frame": 3,
+          "index": 4,
+          "total": 8,
+          "row_index": 2,
+          "row_kind": 0,
+          "row_id": "10000000000000003",
+          "row_role": "tool",
+          "row_owner": "reviewer",
+          "row_text": "protocol check",
+          "row_meta": "completed",
+          "row_truncated": false
+        },
+        {
+          "frame": 3,
+          "index": 5,
+          "total": 8,
+          "row_index": 3,
+          "row_kind": 0,
+          "row_id": "10000000000000004",
+          "row_role": "assistant",
+          "row_owner": "orchestrator",
+          "row_text": "The review result is ready.",
+          "row_meta": "review complete",
+          "row_truncated": false
+        },
+        {
+          "frame": 3,
+          "index": 6,
+          "total": 8,
+          "row_index": 4,
+          "row_kind": 0,
+          "row_id": "10000000000000005",
+          "row_role": "assistant",
+          "row_owner": "orchestrator",
+          "row_text": "One approval and one question need attention.",
+          "row_meta": "attention",
+          "row_truncated": false
+        },
+        {
+          "frame": 4,
+          "index": 7,
+          "total": 8
+        }
+      ]
+    },
+    {
+      "name": "invalid-order",
+      "frames": [
+        {
+          "frame": 1,
+          "index": 0,
+          "total": 4,
+          "status": "agents"
+        },
+        {
+          "frame": 4,
+          "index": 3,
+          "total": 4
+        }
+      ],
+      "request_id": 2005
+    }
+  ]
+}

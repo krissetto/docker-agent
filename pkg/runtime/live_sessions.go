@@ -151,7 +151,7 @@ func (r *LocalRuntime) liveSessionRow(ctx context.Context, sess *session.Session
 		OutputTokens: output,
 		Current:      current,
 	}
-	if a, err := r.team.Agent(agentName); err == nil && a != nil && !a.HasHarness() {
+	if a, err := r.teamForContext(ctx, sess).Agent(agentName); err == nil && a != nil && !a.HasHarness() {
 		modelID := r.getEffectiveModelID(ctx, a)
 		row.ContextLimit = r.contextLimitForAgentModel(ctx, a, modelID)
 		if a.CompactionModel() != nil {

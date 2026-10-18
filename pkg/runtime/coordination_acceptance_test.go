@@ -369,7 +369,6 @@ func TestCoordinationQueuedChildRestoresOwnRowAndRequestIdentity(t *testing.T) {
 	require.NoError(t, restored.Runtime().(TreeRestorer).RestoreSessionTree(t.Context(), root))
 	resumed, err := restored.Runtime().SessionByID(child.ID())
 	require.NoError(t, err)
-	coordinationAwait(t, resumed, queued.TurnID)
 	again, err := resumed.Submit(t.Context(), TurnInput{Content: "queued durable", RequestID: "queued"})
 	require.NoError(t, err)
 	assert.Equal(t, queued.TurnID, again.TurnID)

@@ -532,6 +532,20 @@ func TestAgentReturnRespectsNarrowWidths(t *testing.T) {
 	}
 }
 
+func TestOrdinaryAssistantResponseOmitsAgentBadge(t *testing.T) {
+	view := New(animation.NewRuntime(), types.Agent(types.MessageTypeAssistant, "root", "The answer is 42."), nil)
+
+	plain := stripANSI(view.Render(80))
+	assert.Contains(t, plain, "The answer is 42.")
+	assert.NotContains(t, plain, "root")
+
+	segments, ok := view.RenderedSegments(80)
+	require.True(t, ok)
+	segmented := strings.Join(append(append(append([]string{}, segments.Header...), segments.Stable...), segments.Tail...), "\n")
+	assert.Contains(t, stripANSI(segmented), "The answer is 42.")
+	assert.NotContains(t, stripANSI(segmented), "root")
+}
+
 func TestAssistantRenderedSegmentsRebuildHeaderOnWidthChange(t *testing.T) {
 	msg := types.Agent(types.MessageTypeAssistant, "root", "streamed response")
 	m := New(animation.NewRuntime(), msg, nil)

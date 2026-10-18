@@ -170,3 +170,30 @@ func TestMessageAddedEventJSONHasNoPayload(t *testing.T) {
 	assert.NotContains(t, decoded, "message")
 	assert.NotContains(t, string(data), "in-process only")
 }
+
+func TestSessionUsageOwnCostWireSeparatesEmbeddedAggregate(t *testing.T) {
+	t.Parallel()
+	root := session.New()
+	root.Messages = append(root.Messages, costItem("root", 1))
+	child := session.New()
+	child.Messages = append(child.Messages, costItem("worker", 2))
+	root.AddSubSession(child)
+	usage := SessionUsage(root, 100)
+	require.NotNil(t, usage.OwnCost)
+	assert.Equal(t, 1.0, *usage.OwnCost)
+	assert.Equal(t, 3.0, usage.Cost, "existing aggregate accounting stays unchanged")
+	encoded, err := json.Marshal(usage)
+	require.NoError(t, err)
+	var decoded Usage
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.NotNil(t, decoded.OwnCost)
+	assert.Equal(t, 1.0, *decoded.OwnCost)
+	zero := SessionUsage(session.New(), 100)
+	encoded, err = json.Marshal(zero)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"own_cost":0`)
+	// Decode a legacy record into a fresh value, like the transport does.
+	var legacy Usage
+	require.NoError(t, json.Unmarshal([]byte(`{"cost":3}`), &legacy))
+	assert.Nil(t, legacy.OwnCost)
+}

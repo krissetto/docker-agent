@@ -119,12 +119,12 @@ func (s *Server) sessionCatalog(c echo.Context) error {
 		return c.JSON(http.StatusOK, api.SessionSummaryCatalog[runtime.SessionSummaryEntry]{Version: api.SessionAPIVersion, View: view, Sessions: rows, NextCursor: next})
 	}
 	catalog := sessionCatalogDTO{Version: api.SessionAPIVersion, NextCursor: next, Sessions: make([]sessionResourceDTO, 0, len(rows))}
-	if len(s.sm.sessionRegistries) == 0 {
+	if s.sm.sourceRegistryCount() == 0 {
 		if s.sm.sessionRegistry != nil {
 			catalog.Sources = append(catalog.Sources, sessionCatalogSourceDTO{CanCreate: true})
 		}
 	} else {
-		for source := range s.sm.sessionRegistries {
+		for _, source := range s.sm.sourceNames() {
 			catalog.Sources = append(catalog.Sources, sessionCatalogSourceDTO{Name: source, CanCreate: true})
 		}
 		sort.Slice(catalog.Sources, func(i, j int) bool { return catalog.Sources[i].Name < catalog.Sources[j].Name })

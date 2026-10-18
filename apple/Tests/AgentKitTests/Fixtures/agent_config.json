@@ -1,0 +1,70 @@
+{
+  "session_id": "session-demo-001",
+  "source": "demo-team",
+  "agent_name": "planner",
+  "info": {
+    "SubAgents": [
+      "worker"
+    ],
+    "Handoffs": [
+      "worker"
+    ],
+    "Fallbacks": [
+      "demo/fallback"
+    ],
+    "Skills": [
+      "review"
+    ],
+    "MaxIterations": 8,
+    "NumHistoryItems": 6,
+    "MaxConsecutiveToolCalls": 5,
+    "Options": [
+      "add-date"
+    ],
+    "Toolsets": [
+      {
+        "Name": "filesystem",
+        "Kind": "filesystem",
+        "State": "started",
+        "Tools": [
+          "read_file",
+          "list_files"
+        ]
+      }
+    ],
+    "IsCurrent": true
+  },
+  "agent_id": "planner-id",
+  "agent_key": "planner",
+  "definition_known": true,
+  "definition": {
+    "format_version": 1,
+    "team_id": "demo-team",
+    "agent_id": "planner-id",
+    "agent_key": "planner",
+    "name": "Planner",
+    "description": "Planning agent",
+    "welcome_message": "Ready",
+    "instruction": "Provide a plan.",
+    "model": "demo/model",
+    "safety": "balanced",
+    "readonly": true,
+    "max_iterations": 8,
+    "toolsets": [
+      {
+        "type": "filesystem",
+        "name": "filesystem",
+        "tools": [
+          "read_file"
+        ],
+        "readonly": true
+      }
+    ],
+    "sub_agents": [
+      "worker"
+    ],
+    "handoffs": [
+      "worker"
+    ]
+  }
+}

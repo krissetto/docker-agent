@@ -17,12 +17,25 @@ import (
 
 // Exercise the managed backend's hosted-view route, not direct preparation.
 func TestManagedRemoteHostedChildView(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "metadata-first"
+		if legacy {
+			name = "legacy-server"
+		}
+		t.Run(name, func(t *testing.T) { testManagedRemoteHostedChildView(t, legacy) })
+	}
+}
+
+func testManagedRemoteHostedChildView(t *testing.T, legacy bool) {
 	const source = "team.yaml"
 	root := session.New(session.WithID("root"), session.WithAgentName("director"), session.WithWorkingDir("/server/workspace"), session.WithAttributes(map[string]string{sessionActorSourceAttribute: source}))
 	child := session.New(session.WithID("child"), session.WithAgentName("worker"), session.WithWorkingDir(root.WorkingDir), session.WithAttributes(map[string]string{sessionActorSourceAttribute: source}))
 	child.ParentID = root.ID
 	child.AddMessage(session.UserMessage("server-owned history"))
-	info := runtime.PreparedSessionViewInfo{ActiveAgentName: "active-worker", SessionID: child.ID, RootSessionID: root.ID, Session: child, WorkingDir: child.WorkingDir, Binding: runtime.SessionBinding{AgentName: "worker", ParentSessionID: root.ID}, Attach: &runtime.SubagentAttachInfo{NodeID: "child-node", Agent: "active-worker", ParentSessionID: root.ID, ParentAgent: "director", Session: child.Clone()}}
+	info := runtime.PreparedSessionViewInfo{ActiveAgentName: "active-worker", SessionID: child.ID, RootSessionID: root.ID, RootWorkingDir: root.WorkingDir, RootBinding: runtime.SessionBinding{AgentName: "director"}, Session: child, WorkingDir: child.WorkingDir, Binding: runtime.SessionBinding{AgentName: "worker", ParentSessionID: root.ID}, Attach: &runtime.SubagentAttachInfo{NodeID: "child-node", Agent: "active-worker", ParentSessionID: root.ID, ParentAgent: "director", Session: child.Clone()}}
+	if legacy {
+		info.RootWorkingDir, info.RootBinding = "", runtime.SessionBinding{}
+	}
 	rootInfo := runtime.PreparedSessionViewInfo{ActiveAgentName: "active-director", SessionID: root.ID, RootSessionID: root.ID, Session: root, WorkingDir: root.WorkingDir, Binding: runtime.SessionBinding{AgentName: "director"}}
 	var mu sync.Mutex
 	var requests []string
@@ -67,6 +80,9 @@ func TestManagedRemoteHostedChildView(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, flags.configureSessionViewHost(t.Context(), backend, services, transport, initial, nil, cleanup))
 	defer flags.sessionViewHost.Shutdown()
+	mu.Lock()
+	requests = nil
+	mu.Unlock()
 	prepared, err := flags.sessionViewHost.AcquireSessionView(t.Context(), child.ID)
 	require.NoError(t, err)
 	defer prepared.Abort()
@@ -75,6 +91,14 @@ func TestManagedRemoteHostedChildView(t *testing.T) {
 	mu.Unlock()
 	committed, err := prepared.Commit(t.Context())
 	require.NoError(t, err)
+	mu.Lock()
+	expected := []string{"GET " + api.SessionAPIPath + "/child?view=prepare-info"}
+	if legacy {
+		expected = append(expected, "GET "+api.SessionAPIPath+"/root?view=prepare-info")
+	}
+	expected = append(expected, "PATCH "+api.SessionAPIPath+"/child?view=open-view")
+	assert.Equal(t, expected, requests)
+	mu.Unlock()
 	view, err := prepared.NewApp(t.Context(), committed)
 	require.NoError(t, err)
 	assert.Same(t, transport, view.SessionRuntime())

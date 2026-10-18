@@ -238,7 +238,9 @@ func TestEmptyCoordinationDoesNotHideUnansweredInput(t *testing.T) {
 						target = child
 						require.True(t, rt.subagents.deliverAgent(child.ID(), "Please do work", parent.ID(), "root"))
 					case "runtime note":
-						require.True(t, parent.(*sessionHandle).driver.postTrustedInput(t.Context(), QueuedMessage{Content: "Unrelated runtime note", InputOrigin: session.InputOriginRuntime, SenderID: child.ID(), InputMode: "steer"}))
+						queued, err := parent.(*sessionHandle).driver.post(t.Context(), QueuedMessage{Content: "Unrelated runtime note", InputOrigin: session.InputOriginRuntime, SenderID: child.ID(), InputMode: "steer"}, true)
+						require.NoError(t, err)
+						require.True(t, queued)
 					default:
 						_, err := parent.Submit(t.Context(), TurnInput{Content: "Answer my question", RequestID: "question"})
 						require.NoError(t, err)

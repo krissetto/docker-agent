@@ -18,6 +18,7 @@ func runCommand(ctx context.Context, logLabel, name string, args ...string) (str
 	var stdout, stderr bytes.Buffer
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = secretCommandSysProcAttr()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

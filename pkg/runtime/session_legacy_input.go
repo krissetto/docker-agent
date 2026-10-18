@@ -40,7 +40,14 @@ func (h *sessionHandle) LegacyQueueStatus(ctx context.Context) (LegacyQueueStatu
 	var result LegacyQueueStatus
 	err := h.driver.ownerCall(ctx, func() error {
 		d := h.driver
-		result = LegacyQueueStatus{SteerDepth: len(d.steering), SteerCapacity: d.pendingLimit(), FollowUpDepth: len(d.pending), FollowUpCapacity: d.pendingLimit()}
+		for _, input := range d.pending {
+			if input.guidance() {
+				result.SteerDepth++
+			} else {
+				result.FollowUpDepth++
+			}
+		}
+		result.SteerCapacity, result.FollowUpCapacity = d.pendingLimit(), d.pendingLimit()
 		return nil
 	})
 	return result, err
@@ -63,6 +70,12 @@ func (h *sessionHandle) RunLegacyCommandTurn(ctx context.Context, messages []Leg
 }
 
 func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, commands []LegacyCommandMessage, modelRef, requestID string) (Submission, error) {
+	opCtx, releaseEnv, envErr := h.driver.acquireOperationEnvironment(ctx)
+	if envErr != nil {
+		return Submission{}, envErr
+	}
+	defer releaseEnv()
+	ctx = opCtx
 	id, err := sessionInputID(h.sessionID, requestID)
 	if err != nil {
 		return Submission{}, err
@@ -93,7 +106,7 @@ func (h *sessionHandle) runLegacyTurn(ctx context.Context, inputs []TurnInput, c
 			if !ok || cmd.Agent == "" {
 				continue
 			}
-			if _, err := h.runtime.team.Agent(cmd.Agent); err != nil {
+			if _, err := h.runtime.teamForContext(ctx, snapshot).Agent(cmd.Agent); err != nil {
 				return err
 			}
 			activeAgent = cmd.Agent
@@ -282,15 +295,4 @@ func (d *sessionDriver) legacyBatch(ctx context.Context, key string, identity []
 		return false, err
 	}
 	return duplicate, nil
-}
-
-// Legacy headless follow-ups stay dormant while idle. Explicit user submission
-// or a running generation's normal successor handoff may consume the same FIFO.
-func (d *sessionDriver) pendingWakeableLocked() bool {
-	for _, msg := range d.pending {
-		if msg.InputMode != "legacy_followup" {
-			return true
-		}
-	}
-	return false
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,7 +105,7 @@ func TestPromotionDoesNotBlockIndependentAdmission(t *testing.T) {
 		require.NoError(t, store.AddSession(t.Context(), sess))
 		d := r.sessionDrivers.Get(sess)
 		msg := QueuedMessage{RequestID: id, Content: id}
-		_, err := d.admitInput(t.Context(), msg, SessionOperationPost, true, false)
+		_, err := d.admitInput(t.Context(), msg, SessionOperationPost, true)
 		require.NoError(t, err)
 		ds = append(ds, d)
 	}
@@ -484,4 +485,36 @@ func TestSchedulerReportWorkerDrainOwnsStoreUntilExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRestorePendingInputUsesPersistedDeliveryMode(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	r := newDriverTestRuntime(t)
+	r.sessionStore = store
+	sess := session.New(session.WithID("restore-delivery-class"))
+	require.NoError(t, store.AddSession(t.Context(), sess))
+	for _, input := range []QueuedMessage{
+		{Content: "first turn", RequestID: "first", InputOrigin: session.InputOriginUser, InputMode: "turn"},
+		{Content: "guidance", RequestID: "guidance", InputOrigin: session.InputOriginAgent, SenderID: "child", InputMode: "steer"},
+		{Content: "runtime turn", RequestID: "runtime-turn", InputOrigin: session.InputOriginRuntime, InputMode: "unknown"},
+	} {
+		message := input.sessionMessage()
+		message.Pending, message.Accepted, message.TurnID = true, true, input.RequestID
+		_, err := store.AddMessage(t.Context(), sess.ID, message)
+		require.NoError(t, err)
+		sess.AddMessage(message)
+	}
+	loaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	d := newSessionDriver(r, loaded)
+	defer d.closeOwner()
+	require.Equal(t, []string{"turn", "steer", "unknown"}, []string{d.pending[0].InputMode, d.pending[1].InputMode, d.pending[2].InputMode})
+	_, _, _, err = d.prepareStart(t.Context(), true)
+	require.NoError(t, err)
+	batch := d.DrainSteering()
+	require.Len(t, batch, 1)
+	assert.Equal(t, "guidance", batch[0].RequestID)
+	require.Len(t, d.pending, 1)
+	assert.Equal(t, "runtime-turn", d.pending[0].RequestID, "runtime provenance does not upgrade an unknown persisted mode")
+	d.stopAll(true)
 }

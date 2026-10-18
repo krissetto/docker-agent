@@ -98,7 +98,7 @@ func managedSessionIDs(ctx context.Context, base, root string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), d.Source, workspace)
+	return remoteSessionIDs(ctx, d.Address, filepath.Join(dir, "token"), "", workspace)
 }
 
 func remoteSessionIDs(ctx context.Context, address, tokenFile, source, workspace string) ([]string, error) {

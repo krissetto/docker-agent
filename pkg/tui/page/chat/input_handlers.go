@@ -242,6 +242,13 @@ func (p *chatPage) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cm
 			return p, p.routeMouseEvent(msg, msg.Y)
 		}
 
+	case TargetSidebarGit:
+		if msg.Button == tea.MouseLeft {
+			if g, ok := p.gitSidebar(); ok {
+				return p, g.ActivateGitLine(hit.GitLine)
+			}
+		}
+
 	case TargetSidebarParent:
 		if msg.Button == tea.MouseLeft {
 			hoverCmd := p.sidebar.ClearSubagentHover()

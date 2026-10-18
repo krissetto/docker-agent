@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -133,7 +134,11 @@ func (r *LocalRuntime) cacheResponseBuiltin(ctx context.Context, in *hooks.Input
 		strings.TrimSpace(in.StopResponse) == "" {
 		return nil, nil
 	}
-	a, err := r.team.Agent(in.AgentName)
+	tm := r.teamForContext(ctx, nil)
+	if tm == nil {
+		return nil, errors.New("cache response has no captured team environment")
+	}
+	a, err := tm.Agent(in.AgentName)
 	if err != nil || a == nil {
 		slog.DebugContext(ctx, "cache_response: agent lookup failed",
 			"agent", in.AgentName, "error", err)

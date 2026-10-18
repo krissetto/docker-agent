@@ -62,6 +62,9 @@ func (f *a2aFlags) runA2ACommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"a2a"}, args...), commandErr)
 	}()
 
+	if err := f.runConfig.ValidateTeamEditGrant(); err != nil {
+		return err
+	}
 	if err := validateSafetyFlag(f.safety); err != nil {
 		return err
 	}

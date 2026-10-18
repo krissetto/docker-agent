@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -24,55 +25,68 @@ const gatewayModelsTTL = 5 * time.Minute
 // network fetch itself runs outside the lock, coalesced by the
 // singleflight group so concurrent callers share one in-flight request
 // instead of stalling on each other.
-type gatewayModelsCache struct {
-	mu        sync.Mutex
-	sf        singleflight.Group
+type gatewayModelsEntry struct {
 	ids       []string
 	err       error
 	fetchedAt time.Time
 }
 
+type gatewayModelsCache struct {
+	mu      sync.Mutex
+	sf      singleflight.Group
+	entries map[string]gatewayModelsEntry
+}
+
 // listGatewayModels returns the model IDs served by the configured models
 // gateway, using the runtime's cache when fresh.
 func (r *LocalRuntime) listGatewayModels(ctx context.Context) ([]string, error) {
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.listGatewayModelsForConfig(ctx, config)
+}
+
+func (r *LocalRuntime) listGatewayModelsForConfig(ctx context.Context, config *ModelSwitcherConfig) ([]string, error) {
+	if config == nil {
+		return nil, nil
+	}
 	now := time.Now
 	if r.now != nil {
 		now = r.now
 	}
-
+	key := "legacy"
+	if env := teamEnvironmentFromContext(ctx); env != nil {
+		key = env.SourceID() + "\x00" + env.RevisionID()
+	}
 	c := &r.gatewayModels
-
 	readFresh := func() (ids []string, ok bool, err error) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if !c.fetchedAt.IsZero() && now().Sub(c.fetchedAt) < gatewayModelsTTL {
-			return c.ids, true, c.err
+		entry, exists := c.entries[key]
+		if exists && !entry.fetchedAt.IsZero() && now().Sub(entry.fetchedAt) < gatewayModelsTTL {
+			return slices.Clone(entry.ids), true, entry.err
 		}
 		return nil, false, nil
 	}
-
 	if ids, ok, err := readFresh(); ok {
-		slog.DebugContext(ctx, "Gateway model discovery cache hit", "models", len(ids), "error", err)
 		return ids, err
 	}
-
 	start := time.Now()
-	v, err, _ := c.sf.Do("models", func() (any, error) {
-		// Double-check the cache now that we hold the in-flight slot: a
-		// caller that read a stale cache right before a concurrent
-		// singleflight completed would otherwise trigger a redundant
-		// fetch immediately after the cache was populated.
+	v, err, _ := c.sf.Do(key, func() (any, error) {
 		if ids, ok, err := readFresh(); ok {
 			return ids, err
 		}
-
-		ids, err := modelsgateway.ListModels(ctx, r.modelSwitcherCfg.ModelsGateway, r.modelSwitcherCfg.EnvProvider)
+		ids, err := modelsgateway.ListModels(ctx, config.ModelsGateway, config.EnvProvider)
 		if err != nil && ctx.Err() != nil {
 			return ids, err
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.ids, c.err, c.fetchedAt = ids, err, now()
+		if c.entries == nil {
+			c.entries = make(map[string]gatewayModelsEntry)
+		}
+		c.entries[key] = gatewayModelsEntry{ids: slices.Clone(ids), err: err, fetchedAt: now()}
 		return ids, err
 	})
 	if err != nil {
@@ -81,7 +95,7 @@ func (r *LocalRuntime) listGatewayModels(ctx context.Context) ([]string, error) 
 	}
 	ids := v.([]string)
 	slog.DebugContext(ctx, "Gateway model discovery fetch completed", "duration", time.Since(start), "models", len(ids))
-	return ids, nil
+	return slices.Clone(ids), nil
 }
 
 // buildGatewayChoices builds ModelChoice entries from the models served by
@@ -91,7 +105,15 @@ func (r *LocalRuntime) listGatewayModels(ctx context.Context) ([]string, error) 
 // list that gives no usable signal) callers should fall back to the
 // models.dev catalog.
 func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, bool) {
-	ids, err := r.listGatewayModels(ctx)
+	config, err := r.modelSwitcherConfigForContext(ctx)
+	if err != nil {
+		return nil, false
+	}
+	return r.buildGatewayChoicesForConfig(ctx, config)
+}
+
+func (r *LocalRuntime) buildGatewayChoicesForConfig(ctx context.Context, config *ModelSwitcherConfig) ([]ModelChoice, bool) {
+	ids, err := r.listGatewayModelsForConfig(ctx, config)
 	if err != nil {
 		slog.DebugContext(ctx, "Gateway model discovery failed, falling back to catalog", "error", err)
 		return nil, false
@@ -101,8 +123,8 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 		return nil, false
 	}
 
-	existingRefs := make(map[string]bool, len(r.modelSwitcherCfg.Models)*2)
-	for name, cfg := range r.modelSwitcherCfg.Models {
+	existingRefs := make(map[string]bool, len(config.Models)*2)
+	for name, cfg := range config.Models {
 		existingRefs[name] = true
 		if cfg.Provider != "" && cfg.Model != "" {
 			existingRefs[cfg.Provider+"/"+cfg.Model] = true
@@ -114,10 +136,10 @@ func (r *LocalRuntime) buildGatewayChoices(ctx context.Context) ([]ModelChoice, 
 	// performed for its embedding/modality filters.
 	metas := make(map[string]*modelsdev.Model)
 	lookup := func(ctx context.Context, prov, model string) (modelsgateway.Metadata, bool) {
-		if r.modelsStore == nil {
+		if r.modelsStoreForConfig(config) == nil {
 			return modelsgateway.Metadata{}, false
 		}
-		m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(prov, model))
+		m, err := r.modelsStoreForConfig(config).GetModel(ctx, modelsdev.NewID(prov, model))
 		if err != nil {
 			return modelsgateway.Metadata{}, false
 		}
