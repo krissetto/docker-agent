@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/muesli/cancelreader"
+
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/app/lifecycle"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
@@ -140,7 +142,10 @@ func runWithTerminalFactory(ctx context.Context, cfg Config, factory func(*os.Fi
 		}()
 	}
 	startKeyReader()
-	defer func() { close(keyReaderStop) }()
+	defer func() {
+		close(keyReaderStop)
+		<-keyReaderDone
+	}()
 	m.runExternal = func(command *exec.Cmd) error {
 		close(keyReaderStop)
 		term.Reader().Cancel()
@@ -231,18 +236,54 @@ func runWithTerminalFactory(ctx context.Context, cfg Config, factory func(*os.Fi
 }
 
 func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	reads := make(chan readResult)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			buf := make([]byte, 8192)
+			n, err := r.Read(buf)
+			select {
+			case reads <- readResult{buf[:n], err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		select {
+		case <-readerDone:
+			return
+		default:
+		}
+		// Some terminals cannot interrupt Read; do not hang shutdown in that case.
+		if reader, ok := r.(cancelreader.CancelReader); ok && reader.Cancel() {
+			<-readerDone
+		}
+	}()
 	p := &ui.InputParser{}
-	buf := make([]byte, 8192)
 	for {
-		n, err := r.Read(buf)
-		for _, k := range p.Feed(buf[:n]) {
+		var res readResult
+		select {
+		case res = <-reads:
+		case <-done:
+			return
+		}
+		for _, k := range p.Feed(res.data) {
 			select {
 			case keys <- k:
 			case <-done:
 				return
 			}
 		}
-		if err != nil {
+		if res.err != nil {
 			return
 		}
 	}
