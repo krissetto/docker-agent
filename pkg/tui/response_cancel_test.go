@@ -86,6 +86,36 @@ func responseTestRoot(t *testing.T) (*appModel, *responseHandle) {
 	return root, handle
 }
 
+// editorValueQuery asks the program goroutine for the editor text. The editor is
+// written by Update on that goroutine, so tests must not read it from elsewhere.
+type editorValueQuery struct{ reply chan string }
+
+// editorQueryProgram answers editorValueQuery in Update and otherwise delegates to the
+// sidebar-hover recorder, which keeps owning frame capture.
+type editorQueryProgram struct{ *sidebarHoverProgram }
+
+func (m *editorQueryProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if query, ok := msg.(editorValueQuery); ok {
+		query.reply <- m.root.editor.Value()
+		return m, nil
+	}
+	_, cmd := m.sidebarHoverProgram.Update(msg)
+	return m, cmd
+}
+
+// programEditorValue returns "" when the program does not answer in time, so the
+// caller's Eventually predicate simply stays false.
+func programEditorValue(program *tea.Program) string {
+	reply := make(chan string, 1)
+	program.Send(editorValueQuery{reply: reply})
+	select {
+	case value := <-reply:
+		return value
+	case <-time.After(time.Second):
+		return ""
+	}
+}
+
 func waitForResponseAnimation(t *testing.T, model *sidebarHoverProgram) {
 	t.Helper()
 	require.Eventually(t, func() bool { frames := model.snapshot(); return len(frames) > 0 && frames[len(frames)-1].ticks > 0 }, time.Second, time.Millisecond, "StreamStarted must propagate its original shared-clock command before Escape")
@@ -344,10 +374,10 @@ func TestActualProgramResponseCancellationDoesNotBlockUpdates(t *testing.T) {
 	handle.cancelStarted, handle.cancelRelease = started, release
 	root.focusedPanel = PanelEditor
 	_ = root.editor.Focus()
-	model := &sidebarHoverProgram{root: root}
+	model := &editorQueryProgram{sidebarHoverProgram: &sidebarHoverProgram{root: root}}
 	program := startTestProgram(t, root, model, tea.WithOutput(&cacheProgramWriter{}))
 	program.Send(runtime.StreamStarted("response-confirm-session", "root"))
-	waitForResponseAnimation(t, model)
+	waitForResponseAnimation(t, model.sidebarHoverProgram)
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.Eventually(t, func() bool {
 		frames := model.snapshot()
@@ -362,7 +392,7 @@ func TestActualProgramResponseCancellationDoesNotBlockUpdates(t *testing.T) {
 
 	program.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	program.Send(tea.KeyPressMsg{Code: 'x', Text: "x"})
-	require.Eventually(t, func() bool { return root.editor.Value() == "x" }, time.Second, time.Millisecond,
+	require.Eventually(t, func() bool { return programEditorValue(program) == "x" }, time.Second, time.Millisecond,
 		"the event loop must process ordinary input while canonical cancellation waits")
 	require.Zero(t, handle.cancels.Load(), "the blocking owner call has not returned yet")
 	require.Equal(t, int32(1), handle.cancelStarts.Load(), "a repeated Escape cannot queue another owner call")
