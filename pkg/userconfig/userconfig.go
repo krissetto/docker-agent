@@ -153,8 +153,9 @@ type Settings struct {
 	// Panel customizes the independent bottom panel. Unset uses defaults;
 	// an explicitly empty elements list disables the panel.
 	Panel *PanelSettings `yaml:"panel,omitempty"`
-	// BusySendMode is retained for config compatibility. TUI send routing is
-	// now explicit: Enter queues while busy and Alt+Enter steers.
+	// BusySendMode is what Enter does while the agent is busy: "steer"
+	// (default) injects into the active turn, "queue" holds until it ends.
+	// Alt+Enter always queues.
 	BusySendMode string `yaml:"busy_send_mode,omitempty"`
 	// InterruptConfirmation controls how Esc interrupts a running stream:
 	// "always" (default) shows a confirmation dialog, "double-tap" requires
@@ -223,8 +224,7 @@ func (s *Settings) GetLayout() LayoutSettings {
 	return *s.Layout
 }
 
-// GetBusySendMode returns the legacy raw busy-send mode ("steer", "queue",
-// or "" when unset). It no longer controls TUI send routing.
+// GetBusySendMode returns the raw busy-send mode ("steer", "queue", or "" when unset).
 func (s *Settings) GetBusySendMode() string {
 	if s == nil {
 		return ""

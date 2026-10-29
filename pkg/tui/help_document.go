@@ -270,8 +270,8 @@ func composerEarlyInputHelp() help.Section {
 func composerHelp(enhanced, history bool) help.Section {
 	k := core.GetKeys()
 	entries := []help.Entry{
-		bindingHelp("composer.send", k.EditorSend, "Send message; queue for the next turn while working"),
-		helpEntry("composer.steer", []string{"alt+enter"}, "While working, steer into the active turn; sends normally while idle"),
+		bindingHelp("composer.send", k.EditorSend, "Send message; while working, steer into the active turn (busy_send_mode queue holds it instead)"),
+		helpEntry("composer.queue", []string{"alt+enter"}, "While working, queue for the next turn; sends normally while idle"),
 		helpEntry("composer.newline", core.EditorNewlineKeys(enhanced), "Insert newline"),
 		{ID: "completion.commands", Keys: []string{"/"}, Description: "Open command completion", Condition: "Empty composer"},
 		helpEntry("completion.files", []string{"@"}, "Open file completion"),

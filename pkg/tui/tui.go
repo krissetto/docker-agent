@@ -432,7 +432,9 @@ type appModel struct {
 	// interruptMode is how Esc interrupts a running stream (confirmation
 	// dialog, double-tap, or immediate). Shared by every tab and managed
 	// via /settings.
-	interruptMode  messages.InterruptMode
+	interruptMode messages.InterruptMode
+	// sendMode is what a plain send does while the agent is working.
+	sendMode       messages.SendMode
 	closeTabChoice messages.CloseTabChoice
 
 	// showBanner displays the ASCII-art startup banner on an empty
@@ -717,6 +719,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		dimInactivePanes:              userSettings.GetDimInactivePanes(),
 		transparentBackground:         userSettings.GetTransparentBackground(),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
+		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		closeTabChoice:                messages.ParseCloseTabChoice(userSettings.CloseTabChoice),
 		gitDiffSplit:                  messages.ParseGitDiffLayout(userSettings.GetGitDiffLayout()) == messages.GitDiffSplit,
 		showBanner:                    userSettings.GetShowBanner(),
@@ -874,6 +877,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 		chat.WithLayoutSettings(m.layoutSettings),
 		chat.WithInterruptMode(m.interruptMode),
+		chat.WithSendMode(m.sendMode),
 		chat.WithShowBanner(m.showBanner),
 		chat.WithCompactWorkLog(m.compactWorkLog),
 		chat.WithAgentContextReadings(m.agentContextReadings),
@@ -3532,7 +3536,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	if gestureCmd, handled := m.handlePaneGestureKey(msg); handled {
 		return m, gestureCmd
 	}
-	if msg.String() != "esc" {
+	if !key.Matches(msg, core.UIKeys.Cancel) {
 		defer func() { cmd = tea.Batch(cmd, m.clearResponsePrompt()) }()
 	}
 	if m.dialogMgr.Closing() {
@@ -3540,13 +3544,13 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	}
 	// Check if we should stop transcription on Enter or Escape
 	if m.transcriber.IsRunning() && m.reviewCommentInput == nil && m.reviewModel() == nil {
-		switch msg.String() {
-		case "enter":
+		switch {
+		case key.Matches(msg, core.UIKeys.Confirm):
 			model, cmd := m.handleStopSpeak()
 			sendCmd := m.stampEditorSend(m.editor.SendContent())
 			return model, tea.Batch(cmd, sendCmd)
 
-		case "esc":
+		case key.Matches(msg, core.UIKeys.Cancel):
 			return m.handleStopSpeak()
 		}
 	}
@@ -3598,7 +3602,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	if handled, cmd := m.handleReviewKey(msg); handled {
 		return m, cmd
 	}
-	if msg.String() == "enter" && m.focusedPanel == PanelEditor && m.reviewModel() != nil && !m.editor.IsContextBarFocused() && m.reviewCommentInput == nil {
+	if key.Matches(msg, core.UIKeys.Confirm) && m.focusedPanel == PanelEditor && m.reviewModel() != nil && !m.editor.IsContextBarFocused() && m.reviewCommentInput == nil {
 		return m, m.sendReviewFromComposer()
 	}
 	if handled, cmd := m.handleGitSidebarKey(msg); handled {
@@ -3609,19 +3613,19 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m, cmd
 	}
 	if m.messageBar != nil && m.messageBar.Focused() {
-		switch msg.String() {
-		case "tab", "esc":
+		switch {
+		case key.Matches(msg, core.UIKeys.NextField, core.UIKeys.Cancel):
 			m.messageBar.SetFocused(false)
-			if msg.String() == "tab" && m.focusPanel() {
+			if key.Matches(msg, core.UIKeys.NextField) && m.focusPanel() {
 				return m, nil
 			}
 			m.focusedPanel = PanelEditor
 			return m, m.focusReviewComposer()
-		case "shift+tab":
+		case key.Matches(msg, core.UIKeys.PrevField):
 			m.messageBar.SetFocused(false)
 			m.focusedPanel = PanelContent
 			return m, m.focusContent()
-		case "left", "right", "enter", "space":
+		case key.Matches(msg, core.UIKeys.Left, core.UIKeys.Right, core.UIKeys.Confirm, core.UIKeys.Toggle):
 			return m, m.messageBar.Update(msg)
 		}
 	}
@@ -3632,7 +3636,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	// standard "delete word" shortcut works while typing.
 	if !m.leanMode && !m.editor.IsHistorySearchActive() {
 		m.tabBar.SetCloseTabEnabled(m.focusedPanel != PanelEditor)
-		if m.focusedPanel != PanelEditor && m.supervisor != nil && m.supervisor.Count() == 1 && msg.String() == "ctrl+w" {
+		if m.focusedPanel != PanelEditor && m.supervisor != nil && m.supervisor.Count() == 1 && key.Matches(msg, keys.CloseTab) {
 			return m.handleCloseTab(m.supervisor.ActiveID())
 		}
 		if cmd := m.tabBar.Update(msg); cmd != nil {
@@ -3642,8 +3646,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 
 	// Completion popup gets priority when open
 	if m.completions.Open() {
-		switch msg.String() {
-		case "up", "down", "enter", "tab", "esc":
+		if key.Matches(msg, core.UIKeys.Up, core.UIKeys.Down, core.UIKeys.Confirm, core.UIKeys.NextField, core.UIKeys.Cancel) {
 			return m.forwardCompletions(msg)
 		}
 		// For all other keys (typing), send to both completion (for filtering) and editor
@@ -3676,12 +3679,12 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 	}
 
 	if m.editor.IsContextBarFocused() {
-		switch msg.String() {
-		case "enter", "space":
+		switch {
+		case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 			m.editor.ToggleContextBar()
 			cmd := m.resizeAll()
 			return m, cmd
-		case "tab":
+		case key.Matches(msg, core.UIKeys.NextField):
 			m.editor.SetContextBarFocused(false)
 			m.focusedPanel = PanelContent
 			return m, m.focusContent()
@@ -3733,7 +3736,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (model tea.Model, cmd tea
 		return m.switchFocus()
 
 	// Esc: cancel stream (works regardless of focus)
-	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+	case key.Matches(msg, core.UIKeys.Cancel):
 		if m.chatPage.IsInlineEditing() {
 			return m.forwardChat(msg)
 		}

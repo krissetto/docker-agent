@@ -40,7 +40,7 @@ func TestConfigureNewlineKeybinding(t *testing.T) {
 	assert.Subset(t, got, want, "configured newline keys must remain available")
 }
 
-func TestAltEnterSubmitsSteeringMessage(t *testing.T) {
+func TestAltEnterSubmitsQueuedMessage(t *testing.T) {
 	t.Parallel()
 	h, err := history.New(t.TempDir())
 	require.NoError(t, err)
@@ -53,24 +53,26 @@ func TestAltEnterSubmitsSteeringMessage(t *testing.T) {
 	msg, ok := cmd().(messages.SendMsg)
 	require.True(t, ok)
 	assert.Equal(t, "do this next", msg.Content)
-	assert.True(t, msg.Steer)
-	assert.False(t, msg.Queue)
+	assert.True(t, msg.Queue)
+	assert.False(t, msg.Steer)
+	assert.False(t, msg.Composer)
 	assert.Empty(t, e.textarea.Value())
 }
 
-func TestEnterQueuesAndNewlineKeysKeepMultilineDraft(t *testing.T) {
+func TestEnterLeavesDeliveryToBusySendModeAndNewlineKeysKeepMultilineDraft(t *testing.T) {
 	t.Parallel()
 	h, err := history.New(t.TempDir())
 	require.NoError(t, err)
 	e := New(h).(*editor)
 	e.Focus()
-	e.SetValue("queue this")
+	e.SetValue("send this")
 	_, cmd := e.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.NotNil(t, cmd)
 	msg, ok := cmd().(messages.SendMsg)
 	require.True(t, ok)
-	assert.True(t, msg.Queue)
+	assert.False(t, msg.Queue, "plain Enter defers to busy_send_mode")
 	assert.False(t, msg.Steer)
+	assert.True(t, msg.Composer, "plain Enter is a composer send")
 	assert.Empty(t, e.Value())
 
 	e.SetValue("first")

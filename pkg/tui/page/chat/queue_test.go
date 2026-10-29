@@ -526,22 +526,32 @@ func TestIdleAltEnterStartsANormalTurn(t *testing.T) {
 	assert.True(t, p.working, "normal processing owns the new turn")
 }
 
-func TestQueueFlow_ExplicitBusySendKeysSelectTheDeliveryMode(t *testing.T) {
+func TestBusySendRoutingFollowsKeysAndBusySendMode(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
-		steer     bool
+		mode      messages.SendMode
+		msg       messages.SendMsg
 		wantSteer bool
 	}{
-		{name: "Enter queues"},
-		{name: "Alt+Enter steers", steer: true, wantSteer: true},
+		{name: "composer Enter steers by default", msg: messages.SendMsg{Content: "for now", Composer: true}, wantSteer: true},
+		{name: "composer Enter steers with busy_send_mode steer", mode: messages.SendModeSteer, msg: messages.SendMsg{Content: "for now", Composer: true}, wantSteer: true},
+		{name: "composer Enter queues with busy_send_mode queue", mode: messages.SendModeQueue, msg: messages.SendMsg{Content: "for later", Composer: true}},
+		{name: "flagless non-composer send queues", msg: messages.SendMsg{Content: "handoff"}},
+		{name: "flagless non-composer send queues with busy_send_mode steer", mode: messages.SendModeSteer, msg: messages.SendMsg{Content: "handoff"}},
+		{name: "bypass-queue skill queues by default", msg: messages.SendMsg{Content: "/skill arg", BypassQueue: true}},
+		{name: "bypass-queue skill queues with busy_send_mode steer", mode: messages.SendModeSteer, msg: messages.SendMsg{Content: "/skill arg", BypassQueue: true}},
+		{name: "bypass-queue with explicit steer steers", msg: messages.SendMsg{Content: "now", BypassQueue: true, Steer: true}, wantSteer: true},
+		{name: "Alt+Enter queues by default", msg: messages.SendMsg{Content: "for later", Queue: true}},
+		{name: "Alt+Enter queues even with busy_send_mode steer", mode: messages.SendModeSteer, msg: messages.SendMsg{Content: "for later", Queue: true}},
+		{name: "explicit steer always steers", mode: messages.SendModeQueue, msg: messages.SendMsg{Content: "now", Steer: true}, wantSteer: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := session.New()
 			a, handle := newSessionTestApp(t, sess, nil, &sessionTestSession{id: sess.ID, state: runtime.SessionStateRunning})
-			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess)).(*chatPage)
+			p := New(animation.NewRuntime(), t.Context(), a, service.NewSessionState(sess), WithSendMode(tc.mode)).(*chatPage)
 			p.working = true
-			_, cmd := p.handleSendMsg(messages.SendMsg{Content: "for later", Queue: !tc.steer, Steer: tc.steer})
+			_, cmd := p.handleSendMsg(tc.msg)
 			require.NotNil(t, cmd)
 			if tc.wantSteer {
 				assert.IsType(t, steerSentMsg{}, cmd())

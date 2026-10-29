@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
@@ -416,10 +417,8 @@ func (m *appModel) paneGestureLayer() *lipgloss.Layer {
 // Keyboard resize owns only its own keys; everything else (ctrl+c, tab, ...)
 // falls through to the normal routing so the user is never trapped.
 var (
-	paneResizeCancel = key.NewBinding(key.WithKeys("esc"))
-	paneResizeCommit = key.NewBinding(key.WithKeys("enter"))
-	paneResizeShrink = key.NewBinding(key.WithKeys("left", "up"))
-	paneResizeGrow   = key.NewBinding(key.WithKeys("right", "down"))
+	paneResizeCancel = core.UIKeys.Cancel
+	paneResizeCommit = core.UIKeys.Confirm
 )
 
 func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
@@ -441,9 +440,9 @@ func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch {
 	case key.Matches(msg, paneResizeCommit):
 		return m.commitPaneDivider(g.position), true
-	case key.Matches(msg, paneResizeShrink):
+	case key.Matches(msg, core.UIKeys.Left, core.UIKeys.Up):
 		m.previewPaneDivider(g.position - 1)
-	case key.Matches(msg, paneResizeGrow):
+	case key.Matches(msg, core.UIKeys.Right, core.UIKeys.Down):
 		m.previewPaneDivider(g.position + 1)
 	default:
 		return nil, false

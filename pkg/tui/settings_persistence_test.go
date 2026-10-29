@@ -95,11 +95,11 @@ func TestSaveSettingsToUserConfig_DefaultsClearEntry(t *testing.T) {
 
 	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarTop,
-	}, messages.SendModeSteer))
+	}, messages.SendModeQueue))
 	require.NoError(t, saveTestSettings(messages.LayoutSettings{
 		SidebarPosition: messages.SidebarRight,
 		SectionSpacing:  messages.SpacingNormal,
-	}, messages.SendModeQueue))
+	}, messages.SendModeSteer))
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
@@ -196,7 +196,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 	}))
 	require.NoError(t, savePreferences(messages.Preferences{
 		Layout:            messages.LayoutSettings{SidebarPosition: messages.SidebarRight, SectionSpacing: messages.SpacingNormal},
-		SendMode:          messages.SendModeQueue,
+		SendMode:          messages.SendModeSteer,
 		SplitDiffView:     true,
 		ShowBanner:        true,
 		TabTitleMaxLength: userconfig.DefaultTabTitleMaxLength,
@@ -326,11 +326,11 @@ func TestBusySendModeConfigDefaultsAndRoundTrip(t *testing.T) {
 		want   messages.SendMode
 		stored string
 	}{
-		{name: "new user", want: messages.SendModeQueue},
-		{name: "unset", want: messages.SendModeQueue},
-		{name: "unknown", raw: "bogus", want: messages.SendModeQueue},
-		{name: "explicit steer", raw: "steer", want: messages.SendModeSteer, stored: "steer"},
-		{name: "explicit queue", raw: "queue", want: messages.SendModeQueue},
+		{name: "new user", want: messages.SendModeSteer},
+		{name: "unset", want: messages.SendModeSteer},
+		{name: "unknown", raw: "bogus", want: messages.SendModeSteer},
+		{name: "explicit steer", raw: "steer", want: messages.SendModeSteer},
+		{name: "explicit queue", raw: "queue", want: messages.SendModeQueue, stored: "queue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupSettingsConfigTest(t)

@@ -15,10 +15,18 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
+)
+
+// Keys that abandon a pending session opening; the key then reaches normal routing.
+var (
+	sessionOpeningQuitKeys = key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"))
+	sessionOpeningTabKeys  = key.NewBinding(key.WithKeys("ctrl+n", "ctrl+p", "ctrl+tab", "ctrl+shift+tab", "alt+left", "alt+right"))
 )
 
 type sessionOpening struct {
@@ -244,14 +252,11 @@ func (m *appModel) openingInput(msg tea.Msg) (bool, tea.Cmd) {
 	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "ctrl+w", "esc":
+		switch {
+		case key.Matches(msg, core.GetKeys().CloseTab, core.UIKeys.Cancel):
 			m.cancelSessionOpening()
 			return true, m.editor.Focus()
-		case "ctrl+c", "ctrl+q":
-			m.cancelSessionOpening()
-			return false, nil
-		case "ctrl+n", "ctrl+p", "ctrl+tab", "ctrl+shift+tab", "alt+left", "alt+right":
+		case key.Matches(msg, sessionOpeningQuitKeys, sessionOpeningTabKeys):
 			m.cancelSessionOpening()
 			return false, nil
 		default:

@@ -59,7 +59,7 @@ settings:
 
 Omit `lean` or set it to `false` to keep the full TUI as the default. You can still use `--lean` for a single run, or `--lean=false` to use the full TUI when `settings.lean` is enabled. See [User Settings](../../configuration/user-settings/index.md) for the full precedence rules between flags and user config.
 
-The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to steer the active turn. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on. Press <kbd>Alt</kbd>+<kbd>Up</kbd> to withdraw every still-pending steer/follow-up (and any locally queued message) back into the editor, concatenated in the order they were sent, so you can edit and resend them; messages the agent has already picked up are left alone.
+The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to steer the message into the active turn (or queue it when `busy_send_mode` is `queue`), or <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue it as a separate turn after the current one finishes. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on. Press <kbd>Alt</kbd>+<kbd>Up</kbd> to withdraw every still-pending steer/follow-up (and any locally queued message) back into the editor, concatenated in the order they were sent, so you can edit and resend them; messages the agent has already picked up are left alone.
 
 The lean TUI supports a focused set of slash commands: `/new`, `/sessions [session-id]`, `/load <session-id>`, `/delete <session-id>`, `/star [session-id] [off]`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. `/sessions` fuzzy-browses past sessions from the current working directory, while the ID-oriented commands use session/server-owned catalog and mutation paths so remote sessions remain supported. Type `/model` (or `/model <provider/model>`) to open a fuzzy-searchable model list or switch inline. Type `/copy` to copy the last assistant response to the clipboard.
 
@@ -102,7 +102,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/speak`           | Voice input via system speech-to-text (macOS only)                                   |
 | `/exit`            | Exit the application (aliases: `/quit`, `/q`)                                        |
 
-Slash commands (both built-in and named) execute immediately when entered. While the agent is working, <kbd>Enter</kbd> queues a regular chat message for the next turn; <kbd>Alt</kbd>+<kbd>Enter</kbd> steers it into the active turn, where it appears in the transcript when the agent picks it up. Slash commands still execute immediately.
+Slash commands (both built-in and named) execute immediately when entered. While the agent is working, <kbd>Enter</kbd> steers a regular chat message into the active turn, where it appears in the transcript when the agent picks it up (or queues it for the next turn when `busy_send_mode` is `queue`); <kbd>Alt</kbd>+<kbd>Enter</kbd> queues it for the next turn. Slash commands still execute immediately.
 
 Selecting another top-level agent creates a fresh session identity bound to that agent and clones the current conversation into it. The original session and history remain available, and observers attached to it are not retargeted. Switching is rejected while the source session is active and from an attached sub-agent view.
 
@@ -524,8 +524,8 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Ctrl+O     | Toggle hide tool results                        |
 | Ctrl+Z     | Suspend TUI to background (resume with `fg`)    |
 | Escape     | Cancel current operation                        |
-| Enter      | Send message; queue it for the next turn while the agent is running |
-| Alt+Enter  | Steer into the active turn while the agent is running |
+| Enter      | Send message; steer it into the active turn while the agent is running (queues instead when `busy_send_mode` is `queue`) |
+| Alt+Enter  | Queue it for the next turn while the agent is running |
 | Alt+Up     | Recall all pending (steered/follow-up/queued) messages back into the editor for editing |
 | Shift+Enter | Insert a newline |
 | Up/Down    | Navigate message history                        |
@@ -542,7 +542,7 @@ This is the recommended way to replace the `Ctrl+J` newline fallback, which conf
 settings:
   keybindings:
     # Replace the Ctrl+J newline fallback. Shift+Enter still works automatically
-    # on terminals that report it. Alt+Enter is reserved for steering.
+    # on terminals that report it. Alt+Enter is reserved for queueing.
     - action: "editor_newline"
       keys: ["alt+j"]
     # Allow several keys for one action.
@@ -570,6 +570,8 @@ settings:
 | `toggle_sidebar`           | `ctrl+b`     | Toggle the sidebar                     |
 | `edit_external`            | `ctrl+g`     | Edit input in an external editor       |
 | `history_search`           | `ctrl+r`     | Incremental history search             |
+
+`ctrl+w` is reserved for `close_tab`: other actions can't bind it, so it keeps deleting a word in the editor.
 
 `Shift+Enter` for newline is detected from your terminal's capabilities and is always available where supported, independent of `editor_newline`.
 
@@ -601,7 +603,7 @@ The **Appearance** tab selects the theme and customizes the layout. Layout chang
 
 Appearance also controls **Compact work log**, **Visible replies**, split-diff rendering, expanded thinking, whether tool results are hidden by default, and **Show startup banner** — the ASCII-art banner drawn on an empty conversation (persisted as `settings.show_banner: false` when turned off, and honored by the lean TUI too). Select **Theme** to open the theme picker.
 
-The **Behavior** tab shows the busy-message keys (Enter queues; Alt+Enter steers) and controls the auto-approve default, tab restoration, automatic snapshots, lean UI, and the maximum tab-title length. Restore-tabs and lean-UI changes take effect on the next launch. Enabling auto-approve requires confirmation.
+The **Behavior** tab shows the busy-message keys (Enter steers; Alt+Enter queues) and controls the auto-approve default, tab restoration, automatic snapshots, lean UI, and the maximum tab-title length. Restore-tabs and lean-UI changes take effect on the next launch. Enabling auto-approve requires confirmation.
 
 The **Notifications** tab enables completion sounds and sets the minimum task duration before a sound plays.
 

@@ -53,8 +53,8 @@ func TestHelpDocumentEffectiveContextsAndAliases(t *testing.T) {
 	root, _, _ := wallClockRoot(t, 120, 40)
 	root.focusedPanel = PanelEditor
 	doc := root.helpDocument()
-	require.Equal(t, "Send message; queue for the next turn while working", helpDescription(doc.Current, "composer.send"))
-	require.Equal(t, "While working, steer into the active turn; sends normally while idle", helpDescription(doc.Current, "composer.steer"))
+	require.Equal(t, "Send message; while working, steer into the active turn (busy_send_mode queue holds it instead)", helpDescription(doc.Current, "composer.send"))
+	require.Equal(t, "While working, queue for the next turn; sends normally while idle", helpDescription(doc.Current, "composer.queue"))
 	require.Contains(t, helpKeys(doc.Current, "input.composer.DeleteWordBackward"), "ctrl+w")
 	require.NotContains(t, helpKeys(doc.Current, "input.composer.CharacterBackward"), "ctrl+b", "disabled sidebar still consumes its binding")
 	require.NotContains(t, helpKeys(doc.Current, "input.composer.DeleteCharacterBackward"), "ctrl+h")

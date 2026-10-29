@@ -28,6 +28,7 @@ type KeyMap struct {
 	ToggleSidebar         key.Binding
 	EditExternal          key.Binding
 	HistorySearch         key.Binding
+	CloseTab              key.Binding
 
 	// EditorSend submits the editor content. EditorNewline inserts a line
 	// break. These are the input bindings referenced by issue #1626. The
@@ -69,13 +70,17 @@ var namedKeys = map[string]bool{
 // table makes an override onto one of them rejected-with-warning rather than
 // silently shadowed by the built-in handler.
 var reservedKeys = []string{
-	"ctrl+t", "ctrl+w", "ctrl+p", "ctrl+n", // tab bar
+	"ctrl+t", "ctrl+p", "ctrl+n", // tab bar
 	"shift+tab", // cycle thinking level
-	"alt+enter", // explicit steer while working
+	"alt+enter", // explicit queue while working
 	"esc",       // cancel / dismiss
 	"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5",
 	"ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9", // agent quick-switch
 }
+
+// editorOwnedKeys are edit keys the editor needs for delete-word. Only the named
+// action may claim them, so Ctrl+W keeps deleting words while the editor is focused.
+var editorOwnedKeys = map[string]string{"ctrl+w": "close_tab"}
 
 // DefaultKeyMap returns the built-in keybindings used when the user has not
 // overridden them. Newline defaults to ctrl+j only; shift+enter is layered on
@@ -94,6 +99,7 @@ func DefaultKeyMap() KeyMap {
 		ToggleSidebar:         key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("Ctrl+b", "toggle sidebar")),
 		EditExternal:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("Ctrl+g", "edit in external editor")),
 		HistorySearch:         key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("Ctrl+r", "history search")),
+		CloseTab:              key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("Ctrl+w", "close tab")),
 		EditorSend:            key.NewBinding(key.WithKeys("enter"), key.WithHelp("Enter", "send message")),
 		EditorNewline:         key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("Ctrl+j", "insert newline")),
 	}
@@ -124,6 +130,7 @@ func actionMapFor(keys *KeyMap) []actionEntry {
 		{"toggle_sidebar", &keys.ToggleSidebar, "toggle sidebar"},
 		{"edit_external", &keys.EditExternal, "edit in external editor"},
 		{"history_search", &keys.HistorySearch, "history search"},
+		{"close_tab", &keys.CloseTab, "close tab"},
 		{"editor_send", &keys.EditorSend, "send message"},
 		{"editor_newline", &keys.EditorNewline, "insert newline"},
 	}
@@ -243,6 +250,10 @@ func applyUserKeybindings(bindings []userconfig.Keybinding, entries []actionEntr
 			k := strings.TrimSpace(raw)
 			if !validateKey(k) {
 				slog.Warn("Ignoring malformed key", "action", b.Action, "key", raw)
+				continue
+			}
+			if owner, ok := editorOwnedKeys[k]; ok && owner != b.Action {
+				slog.Warn("Ignoring key reserved for editor delete-word", "key", k, "action", b.Action, "reserved_for", owner)
 				continue
 			}
 			if owner, exists := boundKeys[k]; exists && owner != b.Action {

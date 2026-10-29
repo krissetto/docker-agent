@@ -163,6 +163,8 @@ type Page interface {
 	SetLayoutSettings(settings msgtypes.LayoutSettings) tea.Cmd
 	// SetInterruptMode sets how Esc interrupts a running stream.
 	SetInterruptMode(mode msgtypes.InterruptMode)
+	// SetSendMode sets what a plain send does while the agent is working.
+	SetSendMode(mode msgtypes.SendMode)
 	// SetShowBanner controls whether the ASCII-art startup banner is drawn
 	// on an empty conversation.
 	SetShowBanner(show bool)
@@ -300,6 +302,8 @@ type chatPage struct {
 
 	// interruptMode controls how Esc interrupts a running stream.
 	interruptMode msgtypes.InterruptMode
+	// sendMode is what a plain send does while busy (steer unless queue).
+	sendMode msgtypes.SendMode
 
 	ctx func() context.Context
 
@@ -560,6 +564,13 @@ func WithLayoutSettings(settings msgtypes.LayoutSettings) PageOption {
 func WithInterruptMode(mode msgtypes.InterruptMode) PageOption {
 	return func(p *chatPage) {
 		p.interruptMode = mode
+	}
+}
+
+// WithSendMode sets what a plain send does while the agent is working.
+func WithSendMode(mode msgtypes.SendMode) PageOption {
+	return func(p *chatPage) {
+		p.sendMode = mode
 	}
 }
 
@@ -1317,8 +1328,8 @@ type skillAdmissionMsg struct {
 }
 
 // state they are processed immediately, steered into the ongoing stream, or
-// queued until the current turn ends. Enter requests queueing; Alt+Enter
-// explicitly requests steering. Legacy FollowUp sends remain queued.
+// queued until the current turn ends. Enter follows busy_send_mode (steer by
+// default); Alt+Enter explicitly queues. Legacy FollowUp sends remain queued.
 func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// Handle "exit", "quit", and ":q" as special keywords to quit the session
 	// immediately, equivalent to the /exit slash command.
@@ -1365,20 +1376,20 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// While working, explicit Enter sends and legacy follow-ups enter the
-	// session-owned end-of-turn queue. Alt+Enter explicitly steers into the
-	// active turn; old busy_send_mode preferences never override these keys.
-	if msg.Queue || msg.FollowUp {
-		cmd := p.followUpResolved(classified)
-		return p, cmd
+	// Alt+Enter and legacy follow-ups queue; explicit Steer injects into the
+	// active turn. Plain composer Enter follows busy_send_mode (steer unless
+	// queue). Every other busy send (skills, commands, handoffs) queues.
+	var cmd tea.Cmd
+	switch {
+	case msg.Queue || msg.FollowUp:
+		cmd = p.followUpResolved(classified)
+	case msg.Steer:
+		cmd = p.steerResolved(classified)
+	case msg.Composer && p.sendMode != msgtypes.SendModeQueue:
+		cmd = p.steerResolved(classified)
+	default:
+		cmd = p.followUpResolved(classified)
 	}
-	if msg.Steer {
-		cmd := p.steerResolved(classified)
-		return p, cmd
-	}
-
-	// Non-composer callers retain the safe, queue-by-default behavior.
-	cmd := p.followUpResolved(classified)
 	return p, cmd
 }
 
@@ -1757,6 +1768,10 @@ func (p *chatPage) SetLayoutSettings(settings msgtypes.LayoutSettings) tea.Cmd {
 
 func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 	p.interruptMode = mode
+}
+
+func (p *chatPage) SetSendMode(mode msgtypes.SendMode) {
+	p.sendMode = mode
 }
 
 func (p *chatPage) SetShowBanner(show bool) {

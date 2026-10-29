@@ -494,6 +494,7 @@ func (a *App) InitialEventCommands() []EventCommand {
 		commands = append(commands, func() any {
 			return messages.SendMsg{
 				Content: msg,
+				Queue:   true,
 			}
 		})
 	}

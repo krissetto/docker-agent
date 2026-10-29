@@ -138,6 +138,14 @@ type historySearchState struct {
 }
 
 // editor implements [Editor]
+// Editor-local keys that are not remappable KeyMap actions.
+var (
+	// queueKey submits while busy into the end-of-turn queue (Alt+Enter).
+	queueKey = key.NewBinding(key.WithKeys("alt+enter"))
+	// historySearchCancelKeys leave history search without accepting a match.
+	historySearchCancelKeys = key.NewBinding(key.WithKeys("esc", "ctrl+g"))
+)
+
 type editor struct {
 	themeGeneration               uint64
 	rendering                     editorRendering
@@ -541,7 +549,9 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 	return e.resetAndSendMode(content, false)
 }
 
-func (e *editor) resetAndSendMode(content string, steer bool) tea.Cmd {
+// resetAndSendMode queues explicitly when queue is set (Alt+Enter); otherwise
+// the session's busy_send_mode decides while the agent is working.
+func (e *editor) resetAndSendMode(content string, queue bool) tea.Cmd {
 	e.tryAddFileRef(e.pendingFileRef)
 	e.pendingFileRef = ""
 	attachments := e.collectAttachments(content)
@@ -570,7 +580,7 @@ func (e *editor) resetAndSendMode(content string, steer bool) tea.Cmd {
 	e.textarea.Reset()
 	e.userTyped = false
 	e.clearSuggestion()
-	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments, Queue: !steer, Steer: steer})
+	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments, Queue: queue, Composer: !queue})
 }
 
 // configureNewlineKeybinding sets up the newline keybinding from the
@@ -591,7 +601,7 @@ func (e *editor) updateCommentInput(msg tea.Msg) tea.Cmd {
 		_, cmd := e.textarea.Update(msg)
 		return cmd
 	case tea.KeyPressMsg:
-		if msg.String() == "alt+enter" || key.Matches(msg, e.textarea.PasteBinding()) {
+		if key.Matches(msg, queueKey, e.textarea.PasteBinding()) {
 			return nil
 		}
 		if key.Matches(msg, e.textarea.NewlineBinding()) {
@@ -799,10 +809,10 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return e.handleGraphemeBackspace()
 		}
 
-		// Alt+Enter explicitly steers into the active turn. It is handled
-		// before the configurable newline binding so it remains a distinct
-		// delivery key; while idle it still sends as a normal first message.
-		if msg.String() == "alt+enter" {
+		// Alt+Enter explicitly queues for the end of the active turn. It is
+		// handled before the configurable newline binding so it remains a
+		// distinct delivery key; while idle it still sends as a normal message.
+		if key.Matches(msg, queueKey) {
 			if !e.textarea.Focused() {
 				return e, nil
 			}
@@ -859,8 +869,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		// Handle other special keys
-		switch msg.String() {
-		case "up":
+		switch {
+		case key.Matches(msg, core.UIKeys.Up):
 			// Only navigate history if the user hasn't manually typed content
 			if !e.userTyped {
 				e.textarea.SetValue(e.hist.Previous())
@@ -869,7 +879,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return e, nil
 			}
 			// Otherwise, let the textarea handle cursor navigation
-		case "down":
+		case key.Matches(msg, core.UIKeys.Down):
 			// Only navigate history if the user hasn't manually typed content
 			if !e.userTyped {
 				e.textarea.SetValue(e.hist.Next())
@@ -898,7 +908,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// If the value changed due to user input (not history navigation), mark as user typed
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		// Check if content changed and it wasn't a history navigation key
-		if e.textarea.Value() != prevValue && keyMsg.String() != "up" && keyMsg.String() != "down" {
+		if e.textarea.Value() != prevValue && !key.Matches(keyMsg, core.UIKeys.Up, core.UIKeys.Down) {
 			e.userTyped = true
 		}
 
@@ -923,7 +933,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.pendingFileRef = currentWord
 		}
 
-		if keyMsg.String() == "space" {
+		if key.Matches(keyMsg, core.UIKeys.Toggle) {
 			e.currentCompletion = nil
 		}
 
@@ -1909,7 +1919,7 @@ func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.
 		e.cycleMatch(e.hist.FindNextContains, -1)
 		return e, nil
 
-	case msg.String() == "enter":
+	case key.Matches(msg, core.UIKeys.Confirm):
 		value := e.textarea.Value()
 		matchIdx := e.historySearch.matchIndex
 		cmd := e.exitHistorySearch()
@@ -1924,7 +1934,7 @@ func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
 
-	case msg.String() == "esc" || msg.String() == "ctrl+g":
+	case key.Matches(msg, historySearchCancelKeys):
 		cmd := e.exitHistorySearch()
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))

@@ -193,7 +193,28 @@ func TestValidActions(t *testing.T) {
 	assert.Contains(t, actions, "editor_send")
 	assert.Contains(t, actions, "editor_newline")
 	assert.Contains(t, actions, "quit")
-	assert.Len(t, actions, 14)
+	assert.Len(t, actions, 15)
+}
+
+// close_tab stays remappable; ctrl+w is reserved for it because the editor needs it for delete-word.
+func TestCloseTabRemappableAndCtrlWReservedForIt(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, []string{"ctrl+w"}, buildKeys(nil).CloseTab.Keys())
+	keys := buildKeys(&userconfig.Settings{
+		Keybindings: []userconfig.Keybinding{
+			{Action: "close_tab", Keys: []string{"ctrl+q"}},
+			{Action: "editor_newline", Keys: []string{"ctrl+w"}},
+			{Action: "commands", Keys: []string{"ctrl+w"}},
+		},
+	})
+	assert.Equal(t, []string{"ctrl+q"}, keys.CloseTab.Keys())
+	assert.Equal(t, []string{"ctrl+j"}, keys.EditorNewline.Keys(), "ctrl+w rejected for non-close_tab actions")
+	assert.Equal(t, []string{"ctrl+k"}, keys.Commands.Keys(), "ctrl+w rejected for non-close_tab actions")
+
+	keys = buildKeys(&userconfig.Settings{
+		Keybindings: []userconfig.Keybinding{{Action: "close_tab", Keys: []string{"ctrl+w", "ctrl+q"}}},
+	})
+	assert.Equal(t, []string{"ctrl+w", "ctrl+q"}, keys.CloseTab.Keys(), "close_tab may keep ctrl+w")
 }
 
 func TestBuildKeysHelpFallbackAndReservedSteeringKey(t *testing.T) {

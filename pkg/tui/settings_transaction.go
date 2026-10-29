@@ -210,6 +210,12 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 			page.SetInterruptMode(p.InterruptConfirmation)
 		}
 	}
+	if p.SendMode != tx.original.SendMode || m.sendMode != p.SendMode {
+		m.sendMode = p.SendMode
+		for _, page := range m.chatPages {
+			page.SetSendMode(p.SendMode)
+		}
+	}
 	var titleCmd tea.Cmd
 	if p.TabTitleMaxLength != tx.original.TabTitleMaxLength && m.tabBar != nil {
 		titleCmd = m.tabBar.SetMaxTitleLength(p.TabTitleMaxLength)

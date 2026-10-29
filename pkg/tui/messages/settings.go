@@ -149,25 +149,25 @@ type LayoutSettings struct {
 	AlignInputWithMessages bool
 }
 
-// SendMode is the legacy persisted preference retained for compatibility.
-// TUI composer key routing is explicit and does not depend on this value.
+// SendMode is the busy_send_mode preference: what a plain send does while the
+// agent is working. Alt+Enter always queues regardless of this value.
 type SendMode string
 
 const (
-	// SendModeSteer is the legacy mode value for compatibility.
+	// SendModeSteer injects busy sends into the ongoing stream (default).
 	SendModeSteer SendMode = "steer"
-	// SendModeQueue is the legacy default mode value for compatibility.
+	// SendModeQueue holds busy sends until the current turn ends.
 	SendModeQueue SendMode = "queue"
 )
 
-// ParseSendMode normalizes a raw send mode string, falling back to
-// SendModeQueue for empty or unknown values so persisted configs can never
+// ParseSendMode normalizes a raw busy_send_mode value, falling back to
+// SendModeSteer for empty or unknown values so persisted configs can never
 // break message sending.
 func ParseSendMode(raw string) SendMode {
-	if SendMode(raw) == SendModeSteer {
-		return SendModeSteer
+	if SendMode(raw) == SendModeQueue {
+		return SendModeQueue
 	}
-	return SendModeQueue
+	return SendModeSteer
 }
 
 // InterruptMode identifies how Esc interrupts a running stream.

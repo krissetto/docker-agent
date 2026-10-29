@@ -1054,8 +1054,8 @@ func writePreferences(cfg *userconfig.Config, p messages.Preferences) error {
 		cfg.Settings = &userconfig.Settings{}
 	}
 	s := cfg.Settings
-	if p.SendMode == messages.SendModeSteer {
-		s.BusySendMode = string(messages.SendModeSteer)
+	if p.SendMode == messages.SendModeQueue {
+		s.BusySendMode = string(messages.SendModeQueue)
 	} else {
 		s.BusySendMode = ""
 	}

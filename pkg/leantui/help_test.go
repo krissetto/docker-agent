@@ -317,7 +317,7 @@ func TestLeanHelpBusySendAliases(t *testing.T) {
 		sequence string
 		steer    bool
 	}{
-		{"\r", false}, {"\n", false}, {"\x1b\r", true}, {"\x1b[13;3u", true},
+		{"\r", true}, {"\n", true}, {"\x1b\r", false}, {"\x1b[13;3u", false},
 	} {
 		m, handle := sessionModel(t)
 		m.lifecycle.Status = runtime.SessionStateRunning

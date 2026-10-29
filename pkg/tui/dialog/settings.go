@@ -860,7 +860,7 @@ func (d *settingsDialog) reorderPanel(delta int) tea.Cmd {
 
 func (d *settingsDialog) renderBehaviorTab(body *settingsBody) {
 	body.section("Interaction")
-	body.add(styles.MutedStyle.Render("While working: Enter queues; Alt+Enter steers into the active turn."))
+	body.add(styles.MutedStyle.Render("While working: Enter steers into the active turn; Alt+Enter queues for the next turn."))
 	d.addControl(body, rowInterruptConfirmation, "Interrupt confirmation", interruptConfirmationLabels[d.current.InterruptConfirmation], false, false)
 	body.section("Automation")
 	d.addToggle(body, rowYOLO, "Auto-approve tools by default", d.current.YOLO)

@@ -116,6 +116,7 @@ type (
 		Queue       bool         // Queue until the current turn ends when the agent is working.
 		Steer       bool         // Inject into the current turn when the agent is working.
 		FollowUp    bool         // Legacy alias for Queue; enqueue as a runtime follow-up.
+		Composer    bool         // Plain composer Enter: busy_send_mode decides steer or queue while working.
 	}
 
 	// SendAttachmentMsg is a message for the first message with an attachment.

@@ -72,7 +72,7 @@ func (m *model) handleKey(ctx context.Context, k ui.Key) {
 	case ui.KeyShiftEnter:
 		m.screen.Editor.Insert([]rune{'\n'})
 	case ui.KeyAltEnter:
-		m.submitEditorMode(ctx, m.screen.Editor.Text(), busySubmitSteer)
+		m.submitEditorMode(ctx, m.screen.Editor.Text(), busySubmitQueue)
 	case ui.KeyAltUp:
 		m.cancelPendingMessages(ctx)
 	case ui.KeyTab:
@@ -320,8 +320,13 @@ type submitOptions struct {
 	busyMode   busySubmitMode
 }
 
+// submitEditor sends Enter: while busy it steers unless busy_send_mode is queue.
 func (m *model) submitEditor(ctx context.Context, text string) {
-	m.submitEditorMode(ctx, text, busySubmitQueue)
+	mode := busySubmitSteer
+	if m.busyEnterQueue {
+		mode = busySubmitQueue
+	}
+	m.submitEditorMode(ctx, text, mode)
 }
 
 func (m *model) submitEditorMode(ctx context.Context, text string, mode busySubmitMode) {
@@ -1189,10 +1194,10 @@ func (m *model) commitHelp() {
 		entry("/clear only redraws here; in the full TUI it starts a new session.")
 
 		heading("Composer and sending")
-		entry("Enter: send input; while busy, queue for the next turn.")
+		entry("Enter: send input; while busy, steer into the active turn (busy_send_mode queue queues instead).")
 		entry("LF / Ctrl+J and CR / Ctrl+M decode as Enter here, not newline or model selection.")
 		entry("Shift+Enter: insert newline (requires terminal keyboard support).")
-		entry("Alt+Enter: send input; while busy, steer into the active turn.")
+		entry("Alt+Enter: send input; while busy, queue for the next turn.")
 		entry("Typing / bracketed paste: insert text; pasted CR characters are stripped.")
 		entry("! prefix: run a shell command instead of sending (not in read-only sessions).")
 

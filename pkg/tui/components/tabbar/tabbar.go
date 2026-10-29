@@ -264,10 +264,7 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+p"),
 			key.WithHelp("Ctrl+p", "prev tab"),
 		),
-		CloseTab: key.NewBinding(
-			key.WithKeys("ctrl+w"),
-			key.WithHelp("Ctrl+W", "close tab"),
-		),
+		CloseTab: core.GetKeys().CloseTab,
 	}
 }
 

@@ -65,6 +65,8 @@ func (m *mockChatPage) SetSidebarSettings(chat.SidebarSettings)  {}
 func (m *mockChatPage) SetLayoutSettings(messages.LayoutSettings) tea.Cmd {
 	return nil
 }
+func (m *mockChatPage) SetSendMode(messages.SendMode) {}
+
 func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
 	m.interruptMode = mode
 }

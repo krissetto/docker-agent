@@ -40,7 +40,7 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 		Layout:   messages.LayoutSettings{SidebarInfoMode: messages.SidebarInfoMode("bogus")},
 	}, true).(*settingsDialog)
 	require.True(t, ok)
-	assert.Equal(t, messages.SendModeQueue, raw.current.SendMode, "unknown send mode normalizes to queue")
+	assert.Equal(t, messages.SendModeSteer, raw.current.SendMode, "unknown send mode normalizes to steer")
 	assert.Equal(t, messages.InfoModeCompact, raw.current.Layout.SidebarInfoMode,
 		"unknown info mode normalizes to compact")
 }
@@ -449,7 +449,7 @@ func TestSettingsDialogViewShowsBehaviorRows(t *testing.T) {
 	d.prepareBody()
 	view := ansi.Strip(d.View())
 
-	assert.Contains(t, view, "Enter queues; Alt+Enter steers")
+	assert.Contains(t, view, "Enter steers into the active turn; Alt+Enter queues")
 	assert.NotContains(t, view, "While agent is working")
 	assert.NotContains(t, view, "‹ Steer ›")
 	assert.NotContains(t, view, "Sidebar position", "behavior tab must not render visuals rows")
@@ -739,7 +739,7 @@ func TestSettingsStructuralLeadingGapOwnedOnlyBySharedHeader(t *testing.T) {
 	}
 }
 
-func TestSettingsDialogDefaultsToQueue(t *testing.T) {
+func TestSettingsDialogDefaultsToSteer(t *testing.T) {
 	t.Parallel()
 
 	d := NewSettingsDialog(messages.Preferences{}, true).(*settingsDialog)
@@ -747,8 +747,8 @@ func TestSettingsDialogDefaultsToQueue(t *testing.T) {
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
 	d.selectTab(tabBehavior)
 	d.prepareBody()
-	require.Equal(t, messages.SendModeQueue, d.current.SendMode)
-	assert.Contains(t, ansi.Strip(d.View()), "Enter queues; Alt+Enter steers")
+	require.Equal(t, messages.SendModeSteer, d.current.SendMode)
+	assert.Contains(t, ansi.Strip(d.View()), "Enter steers into the active turn; Alt+Enter queues")
 	assert.NotContains(t, ansi.Strip(d.View()), "‹ Queue ›")
 	assert.NotContains(t, ansi.Strip(d.View()), "○")
 }

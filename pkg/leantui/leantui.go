@@ -346,6 +346,7 @@ type model struct {
 	themeApply              func(*styles.Theme)
 	settingsSave            func(func(*userconfig.Config) error) error
 	interruptMode           string
+	busyEnterQueue          bool // busy_send_mode=queue: Enter queues instead of steering
 	interruptPending        bool
 	interruptCancel         func() runtime.CancelOutcome
 	interruptApp            *app.App
@@ -388,6 +389,11 @@ type model struct {
 	renderImages     bool
 	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
 	hideBanner bool
+}
+
+// enterQueuesWhenBusy maps busy_send_mode to Enter's busy delivery; steer is the default.
+func enterQueuesWhenBusy(settings *userconfig.Settings) bool {
+	return messages.ParseSendMode(settings.GetBusySendMode()) == messages.SendModeQueue
 }
 
 // busy is presentation derived from the canonical lifecycle projection. A
@@ -434,6 +440,7 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		spawnSession:     cfg.SpawnSession,
 		transcriber:      cfg.Transcriber,
 		interruptMode:    interruptMode,
+		busyEnterQueue:   enterQueuesWhenBusy(settings),
 		settingsSave:     userconfig.Update,
 		soundEnabled:     settings.GetSound(),
 		soundThreshold:   time.Duration(settings.GetSoundThreshold()) * time.Second,

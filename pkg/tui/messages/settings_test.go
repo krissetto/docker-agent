@@ -25,3 +25,15 @@ func TestParseVisibleReplies(t *testing.T) {
 		})
 	}
 }
+
+func TestParseSendMode(t *testing.T) {
+	t.Parallel()
+	for raw, want := range map[string]SendMode{
+		"":        SendModeSteer,
+		"steer":   SendModeSteer,
+		"queue":   SendModeQueue,
+		"unknown": SendModeSteer,
+	} {
+		assert.Equal(t, want, ParseSendMode(raw), "busy_send_mode %q", raw)
+	}
+}
