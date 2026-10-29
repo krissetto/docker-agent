@@ -200,6 +200,11 @@ func TestSidebarHoverThemeRebasesAndHiddenPageReleasesOnlyHover(t *testing.T) {
 }
 
 func TestActualProgramInitialTeamInfoColorsTabWithoutInput(t *testing.T) {
+	// The palette is process-global: a leftover theme can make the bound agent's
+	// fallback accent equal its first identity color, so pin the theme this test measures.
+	original := styles.CurrentTheme()
+	styles.ApplyTheme(styles.DefaultTheme())
+	t.Cleanup(func() { styles.ApplyTheme(original) })
 	styles.SetAgentOrder(nil)
 	t.Cleanup(func() { styles.SetAgentOrder(nil) })
 	root, _, _ := wallClockRoot(t, 120, 40)
