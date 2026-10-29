@@ -30,9 +30,18 @@ type responseHandle struct {
 	cancelStarted chan struct{}
 	cancelStarts  atomic.Int32
 	cancelRelease <-chan struct{}
+	observeGate   <-chan struct{}
 }
 
 func (h *responseHandle) Observe(ctx context.Context, options runtime.ObserveOptions) (runtime.Observation, error) {
+	// Tests hold a canonical seed until the owner has been explicitly released.
+	if h.observeGate != nil && !options.Tree {
+		select {
+		case <-h.observeGate:
+		case <-ctx.Done():
+			return runtime.Observation{}, ctx.Err()
+		}
+	}
 	observation, err := h.lifecycleHandle.Observe(ctx, options)
 	if err == nil && !options.Tree {
 		// The program harness injects stream animation separately; only seed the
@@ -224,12 +233,19 @@ func TestResponsePromptCannotCancelAnotherSession(t *testing.T) {
 	root, first := responseTestRoot(t)
 	_, _ = root.Update(runtime.StreamStarted("response-confirm-session", "root"))
 	secondSess := session.New(session.WithID("response-second-session"), session.WithAgentName("root"))
-	second := &responseHandle{lifecycleHandle: &lifecycleHandle{id: secondSess.ID}}
+	// Keep the second owner's projection pending until this test releases it.
+	seedGate := make(chan struct{})
+	second := &responseHandle{lifecycleHandle: &lifecycleHandle{id: secondSess.ID}, observeGate: seedGate}
 	secondApp := app.New(t.Context(), &responseSessions{openSubagentSessions: &openSubagentSessions{}, handle: second}, secondSess, runtime.SessionBinding{}, app.WithRuntimeServices(stubRuntime{}))
 	_, err := secondApp.FollowUpMessage(t.Context(), "second active turn", nil)
 	require.NoError(t, err)
 	_, err = root.supervisor.AddSession(t.Context(), secondApp, secondSess, "", nil)
 	require.NoError(t, err)
+	close(seedGate)
+	require.Eventually(t, func() bool {
+		projection := secondApp.Presentation()
+		return projection != nil && projection.Status.TurnID == "accepted"
+	}, time.Second, time.Millisecond, "second owner projection must exist before arming on its tab")
 	_, _ = root.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.True(t, root.responsePrompt.armed)
 	root.handleSwitchTab(secondSess.ID)
