@@ -22,6 +22,10 @@ import (
 
 func TestForegroundManagedAPIAndAttach(t *testing.T) {
 	home := isolateSessionsList(t)
+	// A Kit sandbox shell binds its state dir at creation; inherited bindings would
+	// make the attach guard reject this test's explicit state base before it runs.
+	t.Setenv("WORKSPACE_DIR", "")
+	t.Setenv("ASYNC_AGENT_KIT_STATE_DIR", "")
 	workspace, err := managedWorkspace(filepath.Join(home))
 	require.NoError(t, err)
 	base := filepath.Join(t.TempDir(), "private")
