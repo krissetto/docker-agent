@@ -1134,6 +1134,14 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 	return m, nil
 }
 
+var messageKeys = struct {
+	Copy, FirstAttachment, Edit key.Binding
+}{
+	key.NewBinding(key.WithKeys("c")),
+	key.NewBinding(key.WithKeys("p")),
+	key.NewBinding(key.WithKeys("e")),
+}
+
 func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	m.cancelImageClick()
 	// Handle inline editing keys first
@@ -1171,11 +1179,11 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		}
 	}
 
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, core.UIKeys.Cancel):
 		m.clearSelection()
 		return m, nil
-	case "up", "k":
+	case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp):
 		if m.focused {
 			m.selectPreviousMessage()
 			return m, nil
@@ -1183,7 +1191,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			m.scrollUp()
 		}
 		return m, nil
-	case "down", "j":
+	case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown):
 		if m.focused {
 			m.selectNextMessage()
 			return m, nil
@@ -1191,7 +1199,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			cmd := m.scrollDown()
 			return m, cmd
 		}
-	case "c":
+	case key.Matches(msg, messageKeys.Copy):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			if block := m.workHeaderBySource[m.selectedMessageIndex]; block != nil {
 				cmd := m.copyWorkBlock(m.selectedMessageIndex)
@@ -1201,7 +1209,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
-	case "enter", "space":
+	case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			if block := m.workHeaderBySource[m.selectedMessageIndex]; block != nil {
 				block.Toggle()
@@ -1215,9 +1223,9 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "p":
+	case key.Matches(msg, messageKeys.FirstAttachment):
 		return m.openSelectedUserAttachment(0)
-	case "e":
+	case key.Matches(msg, messageKeys.Edit):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			msg := m.messages[m.selectedMessageIndex]
 			if msg.Type == types.MessageTypeUser && msg.SessionPosition != nil {
@@ -1231,16 +1239,16 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "pgup":
+	case key.Matches(msg, core.UIKeys.PageUp):
 		m.scrollPageUp()
 		return m, nil
-	case "pgdown":
+	case key.Matches(msg, core.UIKeys.PageDown):
 		cmd := m.scrollPageDown()
 		return m, cmd
-	case "home", "g":
+	case key.Matches(msg, core.UIKeys.Home, core.UIKeys.VimTop):
 		m.scrollToTop()
 		return m, nil
-	case "end", "G":
+	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
 		cmd := m.scrollToBottom()
 		return m, cmd
 	}

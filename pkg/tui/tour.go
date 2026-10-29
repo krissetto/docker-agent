@@ -8,7 +8,9 @@ import (
 
 	tourstate "github.com/docker/docker-agent/pkg/tour"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // handleStartTour starts (or restarts) the getting-started tour and records
@@ -59,10 +61,10 @@ func (m *appModel) handleTourKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if !m.tour.Active() {
 		return nil, false
 	}
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, core.UIKeys.Cancel):
 		return m.tour.Quit(), true
-	case "enter":
+	case key.Matches(msg, core.UIKeys.Confirm):
 		if m.focusedPanel == PanelEditor && strings.TrimSpace(m.editor.Value()) == "" {
 			return m.tour.Advance(), true
 		}

@@ -10,7 +10,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 type Action struct {
@@ -201,14 +203,14 @@ func (m *Model) Update(msg tea.Msg) tea.Cmd {
 		if !m.focused || !m.HasActions() {
 			return nil
 		}
-		switch msg.String() {
-		case "enter", "space":
+		switch {
+		case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 			return m.message.Actions[m.selected].Command
-		case "esc":
+		case key.Matches(msg, core.UIKeys.Cancel):
 			m.SetFocused(false)
-		case "left", "shift+tab", "right", "tab":
+		case key.Matches(msg, core.UIKeys.Left, core.UIKeys.PrevField, core.UIKeys.Right, core.UIKeys.NextField):
 			delta := 1
-			if msg.String() == "left" || msg.String() == "shift+tab" {
+			if key.Matches(msg, core.UIKeys.Left, core.UIKeys.PrevField) {
 				delta = -1
 			}
 			for i, bounds := range m.bounds {

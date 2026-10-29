@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 // The Bubble Tea Update contract returns a tea.Model interface, which forces
@@ -57,8 +58,8 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
 	before := m.editor.Value()
 	historyNavigation := false
-	if key, ok := msg.(tea.KeyPressMsg); ok {
-		historyNavigation = (key.String() == "up" || key.String() == "down") && m.editor.HistoryNavigationActive() && !m.editor.IsHistorySearchActive()
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		historyNavigation = key.Matches(keyMsg, core.UIKeys.Up, core.UIKeys.Down) && m.editor.HistoryNavigationActive() && !m.editor.IsHistorySearchActive()
 	}
 	updated, cmd := m.editor.Update(msg)
 	cmd = m.stampEditorSend(cmd)

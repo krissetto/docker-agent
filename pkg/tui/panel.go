@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 type panelSessionData struct {
@@ -403,18 +404,18 @@ func (m *appModel) panelKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	if m.focusedPanel != PanelStatus {
 		return false, nil
 	}
-	switch msg.String() {
-	case "tab", "esc":
+	switch {
+	case key.Matches(msg, core.UIKeys.NextField, core.UIKeys.Cancel):
 		m.panelFocused = ""
 		m.focusedPanel = PanelEditor
 		return true, m.focusReviewComposer()
-	case "shift+tab":
+	case key.Matches(msg, core.UIKeys.PrevField):
 		m.panelFocused = ""
 		m.focusedPanel = PanelContent
 		return true, m.chatPage.FocusMessages()
-	case "enter", "space":
+	case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 		return true, m.openPanelElement(m.panelFocused)
-	case "left", "right":
+	case key.Matches(msg, core.UIKeys.Left, core.UIKeys.Right):
 		zones := m.panelFrame().Zones
 		if len(zones) == 0 {
 			return true, nil
@@ -425,7 +426,7 @@ func (m *appModel) panelKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 				index = i
 			}
 		}
-		if msg.String() == "left" {
+		if key.Matches(msg, core.UIKeys.Left) {
 			index = (index + len(zones) - 1) % len(zones)
 		} else {
 			index = (index + 1) % len(zones)

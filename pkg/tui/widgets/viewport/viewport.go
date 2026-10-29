@@ -8,7 +8,22 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
+
+var pagerKeys = struct {
+	Down, Up, PageDown, PageUp, HalfDown, HalfUp, Right, Left key.Binding
+}{
+	key.NewBinding(key.WithKeys("down", "j")),
+	key.NewBinding(key.WithKeys("up", "k")),
+	key.NewBinding(key.WithKeys("pgdown", "space", "f")),
+	key.NewBinding(key.WithKeys("pgup", "b")),
+	key.NewBinding(key.WithKeys("d", "ctrl+d")),
+	key.NewBinding(key.WithKeys("u", "ctrl+u")),
+	key.NewBinding(key.WithKeys("right", "l")),
+	key.NewBinding(key.WithKeys("left", "h")),
+}
 
 const (
 	wheelStep      = 3
@@ -87,22 +102,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	var rows, cols int
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "down", "j":
+		switch {
+		case key.Matches(msg, pagerKeys.Down):
 			rows = 1
-		case "up", "k":
+		case key.Matches(msg, pagerKeys.Up):
 			rows = -1
-		case "pgdown", "space", "f":
+		case key.Matches(msg, pagerKeys.PageDown):
 			rows = m.height
-		case "pgup", "b":
+		case key.Matches(msg, pagerKeys.PageUp):
 			rows = -m.height
-		case "d", "ctrl+d":
+		case key.Matches(msg, pagerKeys.HalfDown):
 			rows = m.height / 2
-		case "u", "ctrl+u":
+		case key.Matches(msg, pagerKeys.HalfUp):
 			rows = -m.height / 2
-		case "right", "l":
+		case key.Matches(msg, pagerKeys.Right):
 			cols = horizontalStep
-		case "left", "h":
+		case key.Matches(msg, pagerKeys.Left):
 			cols = -horizontalStep
 		}
 	case tea.MouseWheelMsg:
