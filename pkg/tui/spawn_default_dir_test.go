@@ -57,10 +57,22 @@ func newSpawnTestModel(t *testing.T, spy *spySpawner, opts ...Option) *appModel 
 	return m
 }
 
+// isolateSandboxEnv clears the Docker sandbox markers for the test. A shell
+// running inside a sandbox exports SANDBOX_VM_ID, which makes
+// WithDefaultWorkingDir a no-op (environment.InSandbox), so the default-dir
+// tests must not inherit it. t.Setenv restores the original values afterwards
+// and forbids t.Parallel, which is why these tests run serially.
+func isolateSandboxEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"SANDBOX_VM_ID", "SANDBOX_NAME", "SANDBOX_ID"} {
+		t.Setenv(key, "")
+	}
+}
+
 // A generic spawn request (no directory) must reuse the configured default
 // working directory instead of opening the picker (#4039).
 func TestHandleSpawnSession_EmptyDirUsesConfiguredDefault(t *testing.T) {
-	t.Parallel()
+	isolateSandboxEnv(t)
 
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir("/work/dir"))
@@ -91,7 +103,7 @@ func TestHandleSpawnSession_EmptyDirWithoutDefaultOpensPicker(t *testing.T) {
 // A concrete directory in the request (picker selection, explicit
 // SpawnSessionMsg) wins over the configured default.
 func TestHandleSpawnSession_ExplicitDirOverridesDefault(t *testing.T) {
-	t.Parallel()
+	isolateSandboxEnv(t)
 
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir("/default/dir"))
@@ -105,7 +117,7 @@ func TestHandleSpawnSession_ExplicitDirOverridesDefault(t *testing.T) {
 // The /new command routes through the same handler: with a configured
 // default it must spawn there instead of opening the picker.
 func TestNewSessionMsg_UsesConfiguredDefaultDir(t *testing.T) {
-	t.Parallel()
+	isolateSandboxEnv(t)
 
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir("/work/dir"))
@@ -121,7 +133,7 @@ func TestNewSessionMsg_UsesConfiguredDefaultDir(t *testing.T) {
 // /new <dir> must win over the configured default (#4046). Before the fix
 // the /new command dropped its argument, so the default always won.
 func TestNewSessionMsg_ExplicitDirOverridesDefault(t *testing.T) {
-	t.Parallel()
+	isolateSandboxEnv(t)
 
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir("/default/dir"))
@@ -179,7 +191,7 @@ func TestNewSessionMsg_ExpandsTildeAndEnv(t *testing.T) {
 // A /new directory that does not exist must not reach the spawner; the user
 // gets an error notification instead.
 func TestNewSessionMsg_MissingDirErrorsWithoutSpawning(t *testing.T) {
-	t.Parallel()
+	isolateSandboxEnv(t)
 
 	spy := &spySpawner{}
 	m := newSpawnTestModel(t, spy, WithDefaultWorkingDir("/default/dir"))
