@@ -570,6 +570,7 @@ settings:
 | `toggle_sidebar`           | `ctrl+b`     | Toggle the sidebar                     |
 | `edit_external`            | `ctrl+g`     | Edit input in an external editor       |
 | `history_search`           | `ctrl+r`     | Incremental history search             |
+| `close_tab`                | `ctrl+w`    | Close the current tab (disabled while the editor is focused, so Ctrl+W deletes a word)|
 
 `ctrl+w` is reserved for `close_tab`: other actions can't bind it, so it keeps deleting a word in the editor.
 

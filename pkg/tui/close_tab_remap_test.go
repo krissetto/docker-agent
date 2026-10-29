@@ -24,3 +24,23 @@ func TestCloseTabRemapReachesTabBar(t *testing.T) {
 	assert.Equal(t, []string{"ctrl+q"}, core.GetKeys().CloseTab.Keys())
 	assert.Equal(t, []string{"ctrl+q"}, tabbar.DefaultKeyMap().CloseTab.Keys())
 }
+
+// The help catalog and tab bar must advertise the remapped close-tab key.
+func TestCloseTabRemapShownInHelpAndTabBar(t *testing.T) {
+	setupSettingsConfigTest(t)
+	require.NoError(t, userconfig.Update(func(cfg *userconfig.Config) error {
+		cfg.Settings = &userconfig.Settings{Keybindings: []userconfig.Keybinding{{Action: "close_tab", Keys: []string{"ctrl+q"}}}}
+		return nil
+	}))
+	core.ResetKeys()
+	t.Cleanup(core.ResetKeys)
+
+	root, _, _ := wallClockRoot(t, 120, 40)
+	root.focusedPanel = PanelContent
+	doc := root.helpDocument()
+	require.Equal(t, []string{"ctrl+q"}, helpKeys(doc.Current, "tab.close"))
+
+	closeTab := tabbar.DefaultKeyMap().CloseTab
+	assert.Equal(t, []string{"ctrl+q"}, closeTab.Keys())
+	assert.Equal(t, "Ctrl+q", closeTab.Help().Key)
+}

@@ -26,6 +26,7 @@ var cops = []cop.Cop{
 	ConfigLatestTagConsistency,
 	ConfigVersionsRegistered,
 	TUIViewPurity,
+	TUIKeyBindings,
 	RuntimeEventRegistry,
 	RuntimeSessionScoped,
 	HookConfigSync,
