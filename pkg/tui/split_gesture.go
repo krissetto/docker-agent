@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 type panePointerTransaction struct {
@@ -412,8 +413,17 @@ func (m *appModel) paneGestureLayer() *lipgloss.Layer {
 	return lipgloss.NewLayer(styles.MutedStyle.Render(strings.Join(rows, "\n"))).X(r.X).Y(r.Y)
 }
 
+// Keyboard resize owns only its own keys; everything else (ctrl+c, tab, ...)
+// falls through to the normal routing so the user is never trapped.
+var (
+	paneResizeCancel = key.NewBinding(key.WithKeys("esc"))
+	paneResizeCommit = key.NewBinding(key.WithKeys("enter"))
+	paneResizeShrink = key.NewBinding(key.WithKeys("left", "up"))
+	paneResizeGrow   = key.NewBinding(key.WithKeys("right", "down"))
+)
+
 func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
-	if (m.paneHydration != nil || m.paneSource != nil || m.paneCatalogRequest != nil || m.hostedLoad != nil) && msg.String() == "esc" {
+	if (m.paneHydration != nil || m.paneSource != nil || m.paneCatalogRequest != nil || m.hostedLoad != nil) && key.Matches(msg, paneResizeCancel) {
 		m.cancelPaneGesture()
 		return nil, true
 	}
@@ -421,20 +431,22 @@ func (m *appModel) handlePaneGestureKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	if g == nil {
 		return nil, false
 	}
-	if msg.String() == "esc" {
+	if key.Matches(msg, paneResizeCancel) {
 		m.cancelPaneGesture()
 		return nil, true
 	}
 	if !g.keyboard {
 		return nil, false
 	}
-	switch msg.String() {
-	case "enter":
+	switch {
+	case key.Matches(msg, paneResizeCommit):
 		return m.commitPaneDivider(g.position), true
-	case "left", "up":
+	case key.Matches(msg, paneResizeShrink):
 		m.previewPaneDivider(g.position - 1)
-	case "right", "down":
+	case key.Matches(msg, paneResizeGrow):
 		m.previewPaneDivider(g.position + 1)
+	default:
+		return nil, false
 	}
 	return nil, true
 }

@@ -103,6 +103,34 @@ func TestPaneSlashDedicatedChooserAndResizeCancel(t *testing.T) {
 	require.Same(t, before, root.panes.root)
 }
 
+func TestKeyboardResizeKeepsOnlyResizeKeysAndReleasesOthers(t *testing.T) {
+	root := splitTestRoot(t)
+	root.executePaneArguments("right second")
+	root.executePaneArguments("resize 1")
+	require.NotNil(t, root.paneGesture)
+	require.True(t, root.paneGesture.keyboard)
+
+	_, handled := root.handlePaneGestureKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.False(t, handled, "tab reaches normal focus routing during keyboard resize")
+	require.NotNil(t, root.paneGesture)
+
+	_, handled = root.handlePaneGestureKey(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	require.False(t, handled, "ordinary keys are not swallowed during keyboard resize")
+
+	_, cmd := root.handleKeyPress(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	_, ok := firstOfType[dialog.OpenDialogMsg](collectMsgs(cmd))
+	require.True(t, ok, "ctrl+c reaches quit handling during keyboard resize")
+
+	before := root.paneGesture.position
+	root.handlePaneGestureKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	require.Equal(t, before+1, root.paneGesture.position, "right arrow still resizes")
+	root.handlePaneGestureKey(tea.KeyPressMsg{Code: tea.KeyLeft})
+	require.Equal(t, before, root.paneGesture.position, "left arrow still resizes")
+
+	root.handlePaneGestureKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Nil(t, root.paneGesture, "esc still ends keyboard resize")
+}
+
 func TestPaneSlashColdSourceHydratesOnlyAfterExplicitCommand(t *testing.T) {
 	root, store := coldPaneRoot(t)
 	root.executePaneArguments("right")
