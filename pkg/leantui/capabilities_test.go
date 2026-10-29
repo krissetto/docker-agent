@@ -186,10 +186,20 @@ func TestInterruptModesDoubleTapAndNone(t *testing.T) {
 	assert.Zero(t, handle.stops, "expired first press must rearm")
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Equal(t, 1, handle.stops)
+	// The app forwards a cancel only while it still projects the turn as active,
+	// and the first cancel settles that turn asynchronously. Wait for the
+	// settlement, then cancel a fresh active turn so the "none" press is not racing it.
+	require.NoError(t, handle.AwaitTurn(t.Context(), handle.turnID))
+	require.Eventually(t, func() bool { return m.app.Presentation().Status.TurnID == "" }, time.Second, time.Millisecond)
+	accepted, err := handle.Submit(t.Context(), runtime.TurnInput{Content: "second active fake provider"})
+	require.NoError(t, err)
+	handle.turnID = accepted.TurnID
+	require.Eventually(t, func() bool { return m.app.Presentation().Status.TurnID == accepted.TurnID }, time.Second, time.Millisecond)
 	m.interruptMode = "none"
 	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyEsc})
 	assert.Equal(t, 2, handle.stops)
 	assert.Equal(t, handle.turnID, handle.cancelledTurn)
+	require.NoError(t, handle.AwaitTurn(t.Context(), handle.turnID))
 }
 
 func TestInteractiveShellUsesHandoffAndKeepsDraftOnFailure(t *testing.T) {
