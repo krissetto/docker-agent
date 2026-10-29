@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 const (
@@ -97,22 +98,22 @@ func (d *effortPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (d *effortPickerDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc", "q":
+	switch {
+	case key.Matches(msg, core.UIKeys.Cancel, core.UIKeys.Quit):
 		return closeDialogCmd()
-	case "up", "k", "ctrl+k":
+	case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp, core.UIKeys.ListUp):
 		if d.selected > 0 {
 			d.selected--
 		}
-	case "down", "j", "ctrl+j":
+	case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown, core.UIKeys.ListDown):
 		if d.selected < len(d.levels)-1 {
 			d.selected++
 		}
-	case "home", "g":
+	case key.Matches(msg, core.UIKeys.Home, core.UIKeys.VimTop):
 		d.selected = 0
-	case "end", "G":
+	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
 		d.selected = max(0, len(d.levels)-1)
-	case "enter":
+	case key.Matches(msg, core.UIKeys.Confirm):
 		return d.handleSelection()
 	}
 	return nil

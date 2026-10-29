@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 const (
@@ -406,17 +407,26 @@ func (d *settingsDialog) moveSelection(delta int) {
 	}
 }
 
+var settingsOwnKeys = struct {
+	ReorderUp, ReorderDown, Swallow key.Binding
+}{
+	key.NewBinding(key.WithKeys("ctrl+up")),
+	key.NewBinding(key.WithKeys("ctrl+down")),
+	// ctrl+s is the global cycle-agent key; swallow it so it never reaches row handling.
+	key.NewBinding(key.WithKeys("ctrl+s")),
+}
+
 func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	if d.disposed || d.saving || msg.String() == "ctrl+s" {
+	if d.disposed || d.saving || key.Matches(msg, settingsOwnKeys.Swallow) {
 		return nil
 	}
 	if msg.Code == settingsSaveKey {
 		return d.apply()
 	}
-	switch msg.String() {
-	case "esc", "q", "ctrl+c":
+	switch {
+	case key.Matches(msg, core.UIKeys.Cancel, core.UIKeys.Quit, core.GetKeys().Quit):
 		return d.cancel()
-	case "tab", "shift+tab":
+	case key.Matches(msg, core.UIKeys.NextField, core.UIKeys.PrevField):
 		delta := 1
 		if msg.Mod&tea.ModShift != 0 {
 			delta = -1
@@ -438,32 +448,32 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 	if d.focus == settingsCategories {
-		switch msg.String() {
-		case "left", "h":
+		switch {
+		case key.Matches(msg, core.UIKeys.Left, core.UIKeys.VimLeft):
 			d.selectTab(d.tab - 1)
-		case "right", "l":
+		case key.Matches(msg, core.UIKeys.Right, core.UIKeys.VimRight):
 			d.selectTab(d.tab + 1)
-		case "enter", "space":
+		case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 			d.setFocus(settingsControls)
 		}
 		return nil
 	}
-	switch msg.String() {
-	case "ctrl+up":
+	switch {
+	case key.Matches(msg, settingsOwnKeys.ReorderUp):
 		d.revealSelected = true
 		return d.reorderPanel(-1)
-	case "ctrl+down":
+	case key.Matches(msg, settingsOwnKeys.ReorderDown):
 		d.revealSelected = true
 		return d.reorderPanel(1)
-	case "up", "k", "ctrl+k":
+	case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp, core.UIKeys.ListUp):
 		d.confirmYOLO = false
 		d.moveSelection(-1)
 		d.revealSelected = true
-	case "down", "j", "ctrl+j":
+	case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown, core.UIKeys.ListDown):
 		d.confirmYOLO = false
 		d.moveSelection(1)
 		d.revealSelected = true
-	case "home", "g":
+	case key.Matches(msg, core.UIKeys.Home, core.UIKeys.VimTop):
 		d.setFocus(settingsControls)
 		d.confirmYOLO = false
 		d.selected[d.tab] = 0
@@ -471,7 +481,7 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			d.moveSelection(1)
 		}
 		d.revealSelected = true
-	case "end", "G":
+	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
 		d.setFocus(settingsControls)
 		d.confirmYOLO = false
 		d.selected[d.tab] = d.rowCount() - 1
@@ -479,15 +489,15 @@ func (d *settingsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			d.moveSelection(-1)
 		}
 		d.revealSelected = true
-	case "left", "h", "right", "l":
+	case key.Matches(msg, core.UIKeys.Left, core.UIKeys.VimLeft, core.UIKeys.Right, core.UIKeys.VimRight):
 		if d.adjustable(d.selected[d.tab]) {
 			delta := 1
-			if msg.String() == "left" || msg.String() == "h" {
+			if key.Matches(msg, core.UIKeys.Left, core.UIKeys.VimLeft) {
 				delta = -1
 			}
 			return d.changeValue(delta)
 		}
-	case "enter", "space":
+	case key.Matches(msg, core.UIKeys.Confirm, core.UIKeys.Toggle):
 		return d.changeValue(1)
 	}
 	return nil

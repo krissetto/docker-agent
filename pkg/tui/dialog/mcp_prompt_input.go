@@ -110,7 +110,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	}
 
 	var cmds []tea.Cmd
-	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || key.Matches(keyMsg, core.UIKeys.PageUp, core.UIKeys.PageDown) {
 		if handled, cmd := d.UpdateBodyScroll(msg); handled {
 			return d, cmd
 		}
@@ -141,8 +141,8 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, nil
 
 	case tea.KeyPressMsg:
-		backward := msg.String() == "shift+tab"
-		boundary := (msg.String() == "tab" && d.currentInput >= len(d.inputs)-1) || (backward && d.currentInput == 0)
+		backward := key.Matches(msg, core.UIKeys.PrevField)
+		boundary := (key.Matches(msg, d.keyMap.Tab) && d.currentInput >= len(d.inputs)-1) || (backward && d.currentInput == 0)
 		if d.ActionsFocused() || boundary {
 			wasFocused := d.ActionsFocused()
 			if action, handled := d.HandleActionKey(msg); handled {

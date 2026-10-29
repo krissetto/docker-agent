@@ -14,7 +14,17 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/subagentview"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
+
+var subagentsOwnKeys = struct {
+	Yes, No, Stop, ToggleSubagents key.Binding
+}{
+	key.NewBinding(key.WithKeys("y")),
+	key.NewBinding(key.WithKeys("n")),
+	key.NewBinding(key.WithKeys("s")),
+	key.NewBinding(key.WithKeys("u")),
+}
 
 // SubagentsPolicyMsg updates only the delegation policy shown, never the tree
 // or selection. SessionTree marks the canonical per-tree policy (otherwise the
@@ -143,7 +153,7 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 		if preparesDialogBody(msg) {
 			d.renderBody(true)
 		}
-		if _, key := msg.(tea.KeyPressMsg); key {
+		if _, isKey := msg.(tea.KeyPressMsg); isKey {
 			d.ensureSelectedVisible()
 		}
 		cmd = tea.Batch(cmd, d.syncHover())
@@ -156,14 +166,14 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 	}
 	if k, ok := msg.(tea.KeyPressMsg); ok && d.stopTarget != "" {
 		target := d.stopTarget
-		switch k.String() {
-		case "y":
+		switch {
+		case key.Matches(k, subagentsOwnKeys.Yes):
 			d.stopTarget = ""
 			// A refresh may remove the original target; never retarget confirmation.
 			if _, ok := subagentview.Find(d.nodes, target); ok {
 				return d, core.CmdHandler(messages.StopSubagentSubtreeMsg{NodeID: string(target)})
 			}
-		case "n", "esc", "q", "ctrl+c":
+		case key.Matches(k, subagentsOwnKeys.No, core.UIKeys.Cancel, core.UIKeys.Quit, core.GetKeys().Quit):
 			d.stopTarget = ""
 		}
 		d.renderBody(true)
@@ -221,40 +231,40 @@ func (d *subagentsDialog) Update(msg tea.Msg) (model layout.Model, cmd tea.Cmd) 
 		return d, d.SetSize(msg.Width, msg.Height)
 	case tea.KeyPressMsg:
 		d.lastClickIndex = -1
-		switch msg.String() {
-		case "esc", "q", "ctrl+c":
+		switch {
+		case key.Matches(msg, core.UIKeys.Cancel, core.UIKeys.Quit, core.GetKeys().Quit):
 			return d, closeDialogCmd()
-		case "up", "k":
+		case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp):
 			d.move(-1)
-		case "down", "j":
+		case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown):
 			d.move(1)
-		case "home":
+		case key.Matches(msg, core.UIKeys.Home):
 			d.navigate(-d.selected, len(d.rows), d.selectedLine)
-		case "end":
+		case key.Matches(msg, core.UIKeys.End):
 			d.navigate(len(d.rows)-1-d.selected, len(d.rows), d.selectedLine)
-		case "pgup":
+		case key.Matches(msg, core.UIKeys.PageUp):
 			d.page(-1)
-		case "pgdown":
+		case key.Matches(msg, core.UIKeys.PageDown):
 			d.page(1)
-		case "left", "h":
+		case key.Matches(msg, core.UIKeys.Left, core.UIKeys.VimLeft):
 			d.branch(false)
-		case "right", "l":
+		case key.Matches(msg, core.UIKeys.Right, core.UIKeys.VimRight):
 			d.branch(true)
-		case "space":
+		case key.Matches(msg, core.UIKeys.Toggle):
 			if len(d.rows) > 0 && d.rows[d.selected].Branch {
 				d.branch(d.collapsed[d.selectedID()])
 			}
-		case "s":
+		case key.Matches(msg, subagentsOwnKeys.Stop):
 			if d.canStop() {
 				d.stopTarget = d.selectedID()
 				d.stopIdentity = cleanDetail(d.rows[d.selected].Node.DisplayName()) + " (" + cleanDetail(string(d.stopTarget)) + ")"
 			}
-		case "u":
+		case key.Matches(msg, subagentsOwnKeys.ToggleSubagents):
 			if d.policyUnavailable || d.policyPending {
 				return d, nil
 			}
 			return d, core.CmdHandler(messages.SetUseSubagentsMsg{Enabled: !d.useSubagents})
-		case "enter":
+		case key.Matches(msg, core.UIKeys.Confirm):
 			return d, d.attach()
 		}
 	case tea.MouseClickMsg:

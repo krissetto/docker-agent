@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/widgets/key"
@@ -185,7 +186,7 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	// Let the scrollview consume mouse wheel/scrollbar drag and the
 	// PgUp/PgDn keys before falling through to dialog handling.
-	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || key.Matches(keyMsg, core.UIKeys.PageUp, core.UIKeys.PageDown) {
 		if handled, cmd := d.UpdateBodyScroll(msg); handled {
 			return d, cmd
 		}
@@ -226,8 +227,8 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 }
 
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
-	backward := msg.String() == "shift+tab"
-	boundary := (msg.String() == "tab" && (d.hasFreeFormInput() || d.currentField == len(d.fields)-1)) || (backward && (d.hasFreeFormInput() || d.currentField == 0))
+	backward := key.Matches(msg, d.keyMap.ShiftTab)
+	boundary := (key.Matches(msg, d.keyMap.Tab) && (d.hasFreeFormInput() || d.currentField == len(d.fields)-1)) || (backward && (d.hasFreeFormInput() || d.currentField == 0))
 	if d.ActionsFocused() || boundary {
 		wasFocused := d.ActionsFocused()
 		if action, handled := d.HandleActionKey(msg); handled {

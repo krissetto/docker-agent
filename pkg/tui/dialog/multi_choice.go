@@ -110,20 +110,26 @@ type multiChoiceDialog struct {
 }
 
 type multiChoiceKeyMap struct {
-	Enter  key.Binding
-	Escape key.Binding
-	Up     key.Binding
-	Down   key.Binding
-	Tab    key.Binding
+	Enter           key.Binding
+	Escape          key.Binding
+	Up              key.Binding
+	Down            key.Binding
+	Tab             key.Binding
+	SubmitPrimary   key.Binding
+	SubmitSecondary key.Binding
+	Erase           key.Binding
 }
 
 func defaultMultiChoiceKeyMap() multiChoiceKeyMap {
 	return multiChoiceKeyMap{
-		Enter:  key.NewBinding(key.WithKeys("enter")),
-		Escape: key.NewBinding(key.WithKeys("esc")),
-		Up:     key.NewBinding(key.WithKeys("up")),
-		Down:   key.NewBinding(key.WithKeys("down")),
-		Tab:    key.NewBinding(key.WithKeys("tab")),
+		Enter:           key.NewBinding(key.WithKeys("enter")),
+		Escape:          key.NewBinding(key.WithKeys("esc")),
+		Up:              key.NewBinding(key.WithKeys("up")),
+		Down:            key.NewBinding(key.WithKeys("down")),
+		Tab:             key.NewBinding(key.WithKeys("tab")),
+		SubmitPrimary:   key.NewBinding(key.WithKeys("ctrl+enter")),
+		SubmitSecondary: key.NewBinding(key.WithKeys("ctrl+s")),
+		Erase:           key.NewBinding(key.WithKeys("backspace", "delete")),
 	}
 }
 
@@ -258,7 +264,7 @@ func (d *multiChoiceDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		defer d.prepareLayout()
 	}
 
-	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || keyMsg.String() == "pgup" || keyMsg.String() == "pgdown" {
+	if keyMsg, isKey := msg.(tea.KeyPressMsg); !isKey || key.Matches(keyMsg, core.UIKeys.PageUp, core.UIKeys.PageDown) {
 		if handled, cmd := d.UpdateBodyScroll(msg); handled {
 			return d, cmd
 		}
@@ -314,7 +320,7 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 		wasFocused := d.ActionsFocused()
 		if action, handled := d.HandleActionKey(msg); handled {
 			if wasFocused && !d.ActionsFocused() && action.Code == 0 {
-				if msg.String() == "shift+tab" && d.config.AllowCustom {
+				if key.Matches(msg, core.UIKeys.PrevField) && d.config.AllowCustom {
 					d.selected = selectionCustom
 				} else if len(d.config.Options) > 0 {
 					d.selected = 0
@@ -327,8 +333,8 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 			msg = action
 		}
 	}
-	if msg.String() == "tab" || msg.String() == "shift+tab" {
-		backward := msg.String() == "shift+tab"
+	if key.Matches(msg, core.UIKeys.NextField, core.UIKeys.PrevField) {
+		backward := key.Matches(msg, core.UIKeys.PrevField)
 		atStart := d.selected == selectionNone || d.selected == 0 || (len(d.config.Options) == 0 && d.selected == selectionCustom)
 		atEnd := d.selected == selectionCustom || (!d.config.AllowCustom && int(d.selected) == len(d.config.Options)-1) || (len(d.config.Options) == 0 && !d.config.AllowCustom)
 		switch {
@@ -345,10 +351,10 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 	}
 
 	keyStr := msg.String()
-	if keyStr == "ctrl+enter" {
+	if key.Matches(msg, d.keyMap.SubmitPrimary) {
 		return d.submitPrimary()
 	}
-	if keyStr == "ctrl+s" {
+	if key.Matches(msg, d.keyMap.SubmitSecondary) {
 		return d.submitSecondary()
 	}
 
@@ -416,7 +422,7 @@ func (d *multiChoiceDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 	default:
 		// If custom is allowed and user types, auto-select custom
 		if d.config.AllowCustom && !d.ActionsFocused() {
-			if len(keyStr) == 1 || keyStr == "backspace" || keyStr == "delete" {
+			if len(keyStr) == 1 || key.Matches(msg, d.keyMap.Erase) {
 				d.selected = selectionCustom
 				d.customInput.Focus()
 				var cmd tea.Cmd

@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
 
 const (
@@ -88,23 +89,25 @@ func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
+var snapshotRefreshKey = key.NewBinding(key.WithKeys("r"))
+
 func (d *snapshotsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc", "q":
+	switch {
+	case key.Matches(msg, core.UIKeys.Cancel, core.UIKeys.Quit):
 		return core.CmdHandler(CloseDialogMsg{})
-	case "up", "k":
+	case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp):
 		if d.selected > 0 {
 			d.selected--
 		}
-	case "down", "j":
+	case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown):
 		if d.selected < len(d.fileCounts) {
 			d.selected++
 		}
-	case "home", "g":
+	case key.Matches(msg, core.UIKeys.Home, core.UIKeys.VimTop):
 		d.selected = 0
-	case "end", "G":
+	case key.Matches(msg, core.UIKeys.End, core.UIKeys.VimBottom):
 		d.selected = len(d.fileCounts)
-	case "r":
+	case key.Matches(msg, snapshotRefreshKey):
 		if len(d.fileCounts) == 0 {
 			return nil
 		}

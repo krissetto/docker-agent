@@ -14,7 +14,18 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
+
+var todosOwnKeys = struct {
+	Pending, InProgress, Completed, Edit, Delete key.Binding
+}{
+	key.NewBinding(key.WithKeys("p", "1")),
+	key.NewBinding(key.WithKeys("i", "2")),
+	key.NewBinding(key.WithKeys("c", "3")),
+	key.NewBinding(key.WithKeys("e")),
+	key.NewBinding(key.WithKeys("delete", "backspace", "d")),
+}
 
 type todosDialog struct {
 	readOnly bool
@@ -115,36 +126,34 @@ func (d *todosDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		return d, d.SetSize(msg.Width, msg.Height)
 	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "esc":
+		switch {
+		case key.Matches(msg, core.UIKeys.Cancel, core.UIKeys.Quit, core.GetKeys().Quit):
 			return d, closeDialogCmd()
-		case "q", "ctrl+c":
-			return d, closeDialogCmd()
-		case "up", "k":
+		case key.Matches(msg, core.UIKeys.Up, core.UIKeys.VimUp):
 			d.navigate(-1, len(d.todos), d.selectedLine)
-		case "down", "j":
+		case key.Matches(msg, core.UIKeys.Down, core.UIKeys.VimDown):
 			d.navigate(1, len(d.todos), d.selectedLine)
-		case "home":
+		case key.Matches(msg, core.UIKeys.Home):
 			d.navigate(-d.selected, len(d.todos), d.selectedLine)
-		case "end":
+		case key.Matches(msg, core.UIKeys.End):
 			d.navigate(len(d.todos)-1-d.selected, len(d.todos), d.selectedLine)
-		case "pgup":
+		case key.Matches(msg, core.UIKeys.PageUp):
 			d.scrollview.ScrollBy(-d.scrollview.VisibleHeight())
-		case "pgdown":
+		case key.Matches(msg, core.UIKeys.PageDown):
 			d.scrollview.ScrollBy(d.scrollview.VisibleHeight())
-		case "p", "1":
+		case key.Matches(msg, todosOwnKeys.Pending):
 			return d, d.edit("pending", false)
-		case "i", "2":
+		case key.Matches(msg, todosOwnKeys.InProgress):
 			return d, d.edit("in-progress", false)
-		case "c", "3":
+		case key.Matches(msg, todosOwnKeys.Completed):
 			return d, d.edit("completed", false)
-		case "enter", "e":
+		case key.Matches(msg, core.UIKeys.Confirm, todosOwnKeys.Edit):
 			return d, d.openEditor()
-		case "space":
+		case key.Matches(msg, core.UIKeys.Toggle):
 			if len(d.todos) > 0 {
 				return d, d.edit(todotool.NextStatus(d.todos[d.selected].Status), false)
 			}
-		case "delete", "backspace", "d":
+		case key.Matches(msg, todosOwnKeys.Delete):
 			return d, d.edit("", true)
 		}
 	case tea.MouseClickMsg:

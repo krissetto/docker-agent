@@ -11,7 +11,11 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 )
+
+// todoEditReloadKey is local: ctrl+r is the core HistorySearch key elsewhere.
+var todoEditReloadKey = key.NewBinding(key.WithKeys("ctrl+r"))
 
 type todoEditDialog struct {
 	BaseDialog
@@ -121,7 +125,7 @@ func (d *todoEditDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return d, nil
 	case tea.KeyPressMsg:
-		if msg.String() == "ctrl+r" && !d.saving {
+		if key.Matches(msg, todoEditReloadKey) && !d.saving {
 			d.expected = d.latest
 			d.saveError = "Reloaded current description for retry; your draft is unchanged."
 			d.prepareLayout()

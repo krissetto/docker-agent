@@ -111,3 +111,35 @@ func TestEffortPickerViewChangesOnNavigation(t *testing.T) {
 
 	require.NotEqual(t, view1, view2, "view should change after navigation")
 }
+
+func TestEffortPickerKeyBindings(t *testing.T) {
+	t.Parallel()
+
+	levels := []effort.Level{effort.None, effort.Low, effort.Medium}
+	tests := []struct {
+		name  string
+		key   tea.KeyPressMsg
+		start int
+		want  int
+	}{
+		{name: "down", key: tea.KeyPressMsg{Code: tea.KeyDown}, start: 0, want: 1},
+		{name: "j", key: tea.KeyPressMsg{Code: 'j', Text: "j"}, start: 0, want: 1},
+		{name: "ctrl+j", key: tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl}, start: 0, want: 1},
+		{name: "up", key: tea.KeyPressMsg{Code: tea.KeyUp}, start: 2, want: 1},
+		{name: "k", key: tea.KeyPressMsg{Code: 'k', Text: "k"}, start: 2, want: 1},
+		{name: "ctrl+k", key: tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl}, start: 2, want: 1},
+		{name: "end", key: tea.KeyPressMsg{Code: tea.KeyEnd}, start: 0, want: 2},
+		{name: "G", key: tea.KeyPressMsg{Code: 'G', Text: "G"}, start: 0, want: 2},
+		{name: "home", key: tea.KeyPressMsg{Code: tea.KeyHome}, start: 2, want: 0},
+		{name: "g", key: tea.KeyPressMsg{Code: 'g', Text: "g"}, start: 2, want: 0},
+		{name: "unbound", key: tea.KeyPressMsg{Code: 'x', Text: "x"}, start: 1, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := newTestEffortPicker(t, levels, levels[tt.start])
+			d.Update(tt.key)
+			require.Equal(t, tt.want, d.selected)
+		})
+	}
+}

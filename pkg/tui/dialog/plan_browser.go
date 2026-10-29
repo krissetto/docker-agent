@@ -702,10 +702,10 @@ func (d *planStatusDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-		switch msg.String() {
-		case "esc":
+		switch {
+		case key.Matches(msg, core.UIKeys.Cancel):
 			return d, core.CmdHandler(CloseDialogMsg{})
-		case "enter":
+		case key.Matches(msg, core.UIKeys.Confirm):
 			status := strings.TrimSpace(d.input.Value())
 			if status == "" {
 				return d, notification.ErrorCmd("Status must not be empty.")
@@ -902,10 +902,10 @@ func (d *planNameDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-		switch msg.String() {
-		case "esc":
+		switch {
+		case key.Matches(msg, core.UIKeys.Cancel):
 			return d, core.CmdHandler(CloseDialogMsg{})
-		case "enter":
+		case key.Matches(msg, core.UIKeys.Confirm):
 			name := strings.TrimSpace(d.input.Value())
 			if name == "" {
 				return d, notification.ErrorCmd("Plan name must not be empty.")

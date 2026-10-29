@@ -1,6 +1,8 @@
 package dialog
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -1147,4 +1150,24 @@ func TestSettingsGitDiffLayoutIsDiscoverableAndCycles(t *testing.T) {
 	assert.Equal(t, messages.GitDiffSplit, d.current.GitDiffLayout)
 	d.changeValue(1)
 	assert.Equal(t, messages.GitDiffUnified, d.current.GitDiffLayout)
+}
+
+// Quit is remappable: the dialog cancels on the configured quit key, not ctrl+c.
+func TestSettingsCancelFollowsRemappedQuit(t *testing.T) {
+	dir := t.TempDir()
+	config := "settings:\n  keybindings:\n    - action: \"quit\"\n      keys: [\"ctrl+q\"]\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(config), 0o600))
+	paths.SetConfigDir(dir)
+	core.ResetKeys()
+	t.Cleanup(func() {
+		paths.SetConfigDir("")
+		core.ResetKeys()
+	})
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	_, cmd := d.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	assert.False(t, hasMsg[messages.CancelSettingsMsg](collectMsgs(cmd)), "ctrl+c must not cancel once quit is remapped")
+
+	_, cmd = d.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	assert.True(t, hasMsg[messages.CancelSettingsMsg](collectMsgs(cmd)), "remapped quit must cancel settings")
 }

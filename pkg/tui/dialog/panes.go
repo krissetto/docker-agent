@@ -7,8 +7,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/widgets/key"
 	"github.com/docker/docker-agent/pkg/tui/widgets/textinput"
 )
 
@@ -90,8 +92,8 @@ func (d *panesDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, cmd
 		}
 	}
-	if key, ok := msg.(tea.KeyPressMsg); ok {
-		switch key.Code {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		switch keyMsg.Code {
 		case tea.KeyEscape:
 			cmd := d.CancelDialogCmd()
 			return d, cmd
@@ -105,7 +107,7 @@ func (d *panesDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			cmd := d.executeSelected()
 			return d, cmd
 		}
-		if key.String() == "ctrl+c" {
+		if key.Matches(keyMsg, core.GetKeys().Quit) {
 			cmd := d.CancelDialogCmd()
 			return d, cmd
 		}
