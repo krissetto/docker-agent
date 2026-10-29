@@ -20,6 +20,9 @@ func leanHelpKey(t *testing.T, sequence string) ui.Key {
 	t.Helper()
 	var parser ui.InputParser
 	keys := parser.Feed([]byte(sequence))
+	if len(keys) == 0 {
+		keys = parser.Expire()
+	}
 	require.Len(t, keys, 1)
 	return keys[0]
 }

@@ -91,7 +91,9 @@ func TestParseKittyKeyboardSequences(t *testing.T) {
 
 func TestParseLoneEscape(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, KeyEsc, singleKey(t, "\x1b").Typ)
+	p := &InputParser{}
+	assert.Empty(t, p.Feed([]byte("\x1b")))
+	assert.Equal(t, []Key{{Typ: KeyEsc}}, p.Expire())
 }
 
 func TestParseBracketedPaste(t *testing.T) {

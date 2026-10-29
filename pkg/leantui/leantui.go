@@ -235,7 +235,14 @@ func runWithTerminalFactory(ctx context.Context, cfg Config, factory func(*os.Fi
 	return nil
 }
 
+// escapeTimeout bounds how long a partial escape sequence waits for its rest.
+const escapeTimeout = 30 * time.Millisecond
+
 func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
+	readKeysWithin(r, keys, done, escapeTimeout)
+}
+
+func readKeysWithin(r io.Reader, keys chan<- ui.Key, done <-chan struct{}, timeout time.Duration) {
 	type readResult struct {
 		data []byte
 		err  error
@@ -269,21 +276,43 @@ func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 		}
 	}()
 	p := &ui.InputParser{}
-	for {
-		var res readResult
-		select {
-		case res = <-reads:
-		case <-done:
-			return
-		}
-		for _, k := range p.Feed(res.data) {
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var expire <-chan time.Time
+	send := func(events []ui.Key) bool {
+		for _, k := range events {
 			select {
 			case keys <- k:
 			case <-done:
-				return
+				return false
 			}
 		}
-		if res.err != nil {
+		return true
+	}
+	for {
+		select {
+		case res := <-reads:
+			if !send(p.Feed(res.data)) {
+				return
+			}
+			if res.err != nil {
+				send(p.Expire())
+				return
+			}
+			if p.Waiting() {
+				timer.Reset(timeout)
+				expire = timer.C
+			} else {
+				timer.Stop()
+				expire = nil
+			}
+		case <-expire:
+			if !send(p.Expire()) {
+				return
+			}
+			expire = nil
+		case <-done:
 			return
 		}
 	}

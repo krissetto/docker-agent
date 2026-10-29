@@ -60,11 +60,134 @@ type InputParser struct {
 	paste   []rune
 }
 
+// Feed decodes b. A trailing partial sequence is held until its remainder
+// arrives, so sequences split across reads decode as if they were atomic.
 func (p *InputParser) Feed(b []byte) []Key {
 	if len(p.control) > 0 {
 		b = append(p.control, b...)
 		p.control = nil
 	}
+	cut := p.partialTail(b)
+	out := p.feed(b[:cut])
+	p.control = append(p.control, b[cut:]...)
+	return out
+}
+
+// maxHeldSequence bounds how much an unterminated CSI may hold back.
+const maxHeldSequence = 64
+
+// partialTail returns the index where an incomplete trailing sequence starts,
+// or len(b) when nothing needs holding. A lone trailing ESC is not held: it is
+// reported as the Escape key immediately.
+func (p *InputParser) partialTail(b []byte) int {
+	if p.inPaste {
+		for k := min(len(pasteEnd)-1, len(b)); k > 0; k-- {
+			if bytes.HasSuffix(b, pasteEnd[:k]) {
+				return len(b) - k
+			}
+		}
+		return len(b)
+	}
+	for i := 0; i < len(b); {
+		if b[i] != 0x1b {
+			i++
+			continue
+		}
+		if i == len(b)-1 {
+			return i
+		}
+		switch b[i+1] {
+		case '[':
+			n, state := csiScan(b[i:])
+			if state == csiIncomplete {
+				if len(b)-i > maxHeldSequence {
+					return len(b)
+				}
+				return i
+			}
+			i += n
+		case ']':
+			n := oscLength(b[i:])
+			if n == 0 {
+				return len(b)
+			}
+			i += n
+		case 'O':
+			if len(b)-i < 3 {
+				return i
+			}
+			n, _ := parseEscape(b[i:])
+			i += n
+		default:
+			n, _ := parseEscape(b[i:])
+			i += n
+		}
+	}
+	return len(b)
+}
+
+// Waiting reports held bytes that begin an escape sequence Expire may resolve.
+// Bracketed paste and OSC replies are not waiting; they complete on their own.
+func (p *InputParser) Waiting() bool {
+	if p.inPaste || len(p.control) == 0 || p.control[0] != 0x1b {
+		return false
+	}
+	return len(p.control) == 1 || p.control[1] != ']'
+}
+
+// Expire gives up on held bytes that never completed. A lone ESC is the Escape
+// key; any other incomplete sequence is dropped.
+func (p *InputParser) Expire() []Key {
+	if !p.Waiting() {
+		return nil
+	}
+	held := p.control
+	p.control = nil
+	if len(held) == 1 {
+		return []Key{{Typ: KeyEsc}}
+	}
+	return nil
+}
+
+type csiState int
+
+const (
+	csiFinal csiState = iota
+	csiIncomplete
+	csiAborted
+)
+
+// csiScan measures the CSI at the start of b. A control or non-ASCII byte
+// aborts it, so the caller resumes at that byte instead of swallowing it.
+func csiScan(b []byte) (int, csiState) {
+	j := 2
+	for j < len(b) && b[j] >= 0x20 && b[j] <= 0x3f {
+		j++
+	}
+	switch {
+	case j == len(b):
+		return len(b), csiIncomplete
+	case b[j] < 0x40 || b[j] > 0x7e:
+		return j, csiAborted
+	default:
+		return j + 1, csiFinal
+	}
+}
+
+// oscLength returns the length of the OSC sequence at the start of b, or 0 if unterminated.
+func oscLength(b []byte) int {
+	for i := 2; i < len(b); i++ {
+		if b[i] == 7 {
+			return i + 1
+		}
+		if b[i] == 27 && i+1 < len(b) && b[i+1] == '\\' {
+			return i + 2
+		}
+	}
+	return 0
+}
+
+func (p *InputParser) feed(b []byte) []Key {
 	var out []Key
 	for len(b) > 0 {
 		if !p.inPaste {
@@ -233,16 +356,13 @@ func parseEscape(b []byte) (int, Key) {
 }
 
 func parseCSI(b []byte) (int, Key) {
-	j := 2
-	for j < len(b) && (b[j] < 0x40 || b[j] > 0x7e) {
-		j++
+	consumed, state := csiScan(b)
+	if state != csiFinal {
+		return consumed, Key{Typ: KeyNone}
 	}
-	if j >= len(b) {
-		return len(b), Key{Typ: KeyNone} // incomplete sequence
-	}
+	j := consumed - 1
 	final := b[j]
 	params := string(b[2:j])
-	consumed := j + 1
 
 	modifier := func() string {
 		parts := strings.Split(params, ";")
