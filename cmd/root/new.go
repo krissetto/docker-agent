@@ -164,8 +164,9 @@ func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.Sessio
 		wd, _ = os.Getwd()
 	}
 	imageWriter := tuiimage.NewWriter(os.Stdout)
-	imageWriter.SetSupported(tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout))
-	imageWriter.SetEnabled(userconfig.Get().GetRenderImages())
+	configureImageWriter(imageWriter, userconfig.Get().GetRenderImages(), func() bool {
+		return tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout)
+	})
 	tuiimage.SetRenderingEnabled(imageWriter.RenderingEnabled())
 	if err := resetInheritedTerminalStyle(imageWriter, isatty.IsTerminal(os.Stdout.Fd())); err != nil {
 		return err
@@ -186,6 +187,13 @@ func runTUIWrapped(ctx context.Context, rt app.Services, sessions runtime.Sessio
 	_, err := p.Run()
 	resetLightDarkReports()
 	return err
+}
+
+// configureImageWriter applies the display preference before probing, so a
+// disabled setting never queries terminal input.
+func configureImageWriter(w *tuiimage.Writer, enabled bool, probe func() bool) {
+	w.SetEnabled(enabled)
+	w.SetSupported(w.Enabled() && probe())
 }
 
 // Reset synchronously before Bubble Tea's first erase; its renderer starts
